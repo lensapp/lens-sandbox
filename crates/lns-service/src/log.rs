@@ -31,15 +31,13 @@ pub fn attach_to_run_span(tx: Sender<WireFrame>) {
 }
 
 pub fn init() {
-    let color = detect_color(
-        std::env::var_os("NO_COLOR").is_some(),
-        std::io::stderr().is_terminal(),
-    );
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    let color = detect_color(std::env::var_os("NO_COLOR").is_some(), stderr_is_tty);
 
     let log = tsfmt::layer()
         .event_format(LogFormat { color })
         .with_writer(std::io::stderr)
-        .with_filter(local_log_filter());
+        .with_filter(local_log_filter(stderr_is_tty));
 
     let trace = tsfmt::layer()
         .with_writer(std::io::stderr)
@@ -60,15 +58,21 @@ fn detect_color(no_color_set: bool, stderr_is_terminal: bool) -> bool {
     !no_color_set && stderr_is_terminal
 }
 
-fn local_log_layer_accepts(target: &str, in_run_scope: bool) -> bool {
-    target == TARGET && !in_run_scope
+fn local_log_layer_accepts(target: &str, in_run_scope: bool, stderr_is_tty: bool) -> bool {
+    target == TARGET && (!in_run_scope || !stderr_is_tty)
 }
 
-fn local_log_filter<S>() -> LocalLogFilter<S> {
-    LocalLogFilter(std::marker::PhantomData)
+fn local_log_filter<S>(stderr_is_tty: bool) -> LocalLogFilter<S> {
+    LocalLogFilter {
+        stderr_is_tty,
+        _marker: std::marker::PhantomData,
+    }
 }
 
-struct LocalLogFilter<S>(std::marker::PhantomData<fn(S)>);
+struct LocalLogFilter<S> {
+    stderr_is_tty: bool,
+    _marker: std::marker::PhantomData<fn(S)>,
+}
 
 impl<S> tracing_subscriber::layer::Filter<S> for LocalLogFilter<S>
 where
@@ -87,7 +91,11 @@ where
         event: &Event<'_>,
         cx: &tracing_subscriber::layer::Context<'_, S>,
     ) -> bool {
-        local_log_layer_accepts(event.metadata().target(), event_in_run_scope(event, cx))
+        local_log_layer_accepts(
+            event.metadata().target(),
+            event_in_run_scope(event, cx),
+            self.stderr_is_tty,
+        )
     }
 }
 
@@ -395,36 +403,48 @@ mod tests {
     #[test]
     fn local_log_layer_accepts_truth_table() {
         assert!(
-            local_log_layer_accepts(TARGET, false),
+            local_log_layer_accepts(TARGET, false, true),
             "non-run service log renders to the service's own stderr/log",
         );
         assert!(
-            !local_log_layer_accepts(TARGET, true),
-            "run-scoped events are forwarded to the CLI, not echoed locally",
+            !local_log_layer_accepts(TARGET, true, true),
+            "on a shared tty, run-scoped events are forwarded to the CLI, not echoed locally",
         );
         assert!(
-            !local_log_layer_accepts("other::module", false),
+            local_log_layer_accepts(TARGET, true, false),
+            "off a tty (service.log), run-scoped events must still render so the log stays complete",
+        );
+        assert!(
+            local_log_layer_accepts(TARGET, false, false),
+            "non-run service log still renders to service.log when stderr is not a tty",
+        );
+        assert!(
+            !local_log_layer_accepts("other::module", false, true),
             "non-TARGET events are handled by the trace layer, not the human log layer",
         );
-        assert!(!local_log_layer_accepts("other::module", true));
+        assert!(!local_log_layer_accepts("other::module", true, true));
+        assert!(!local_log_layer_accepts("other::module", true, false));
     }
 
-    fn local_filter_subscriber(buf: &TestBuf) -> impl Subscriber + for<'a> LookupSpan<'a> {
+    fn local_filter_subscriber(
+        buf: &TestBuf,
+        stderr_is_tty: bool,
+    ) -> impl Subscriber + for<'a> LookupSpan<'a> {
         let local = tsfmt::layer()
             .event_format(LogFormat { color: false })
             .with_writer(buf.clone())
-            .with_filter(local_log_filter());
+            .with_filter(local_log_filter(stderr_is_tty));
         tracing_subscriber::registry()
             .with(local)
             .with(FrameForwardLayer)
     }
 
     #[tokio::test]
-    async fn run_scoped_event_forwards_a_frame_but_emits_no_local_bytes() {
+    async fn run_scoped_event_forwards_a_frame_but_emits_no_local_bytes_on_a_shared_tty() {
         use tokio::sync::mpsc;
 
         let buf = TestBuf::new();
-        let subscriber = local_filter_subscriber(&buf);
+        let subscriber = local_filter_subscriber(&buf, true);
         let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
         with_default(subscriber, || {
             let span = tracing::info_span!("run", run_id = 1u32);
@@ -439,8 +459,32 @@ mod tests {
         let local_bytes = buf.contents();
         assert!(
             local_bytes.is_empty(),
-            "run-scoped event leaked to the local human layer: {:?}",
+            "run-scoped event leaked to the shared controlling terminal: {:?}",
             String::from_utf8_lossy(&local_bytes),
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scoped_event_still_renders_to_service_log_when_stderr_is_not_a_tty() {
+        use tokio::sync::mpsc;
+
+        let buf = TestBuf::new();
+        let subscriber = local_filter_subscriber(&buf, false);
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run", run_id = 1u32);
+            attach_tx_to_span(&span, tx);
+            let _g = span.enter();
+            tracing::info!(target: TARGET, verb = "Booted", "microVM");
+        });
+        assert!(
+            rx.try_recv().is_ok(),
+            "run-scoped event must still be forwarded as a frame to the CLI",
+        );
+        assert!(
+            buf.text().contains("Booted  microVM"),
+            "detached service.log must keep run-scoped lines: {:?}",
+            buf.text(),
         );
     }
 
@@ -450,7 +494,7 @@ mod tests {
         let local = tsfmt::layer()
             .event_format(LogFormat { color: false })
             .with_writer(buf.clone())
-            .with_filter(local_log_filter());
+            .with_filter(local_log_filter(true));
         let subscriber = tracing_subscriber::registry().with(local);
         with_default(subscriber, || {
             let span = tracing::info_span!("housekeeping");
@@ -470,7 +514,7 @@ mod tests {
         let local = tsfmt::layer()
             .event_format(LogFormat { color: false })
             .with_writer(buf.clone())
-            .with_filter(local_log_filter());
+            .with_filter(local_log_filter(true));
         let subscriber = tracing_subscriber::registry().with(local);
         with_default(subscriber, || {
             tracing::info!(target: TARGET, verb = "Starting", "lns-service");

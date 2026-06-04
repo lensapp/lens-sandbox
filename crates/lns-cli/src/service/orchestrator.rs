@@ -105,13 +105,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         return Ok(code);
     }
 
-    render_status_line(
-        LogLevel::Info,
-        Some("Started"),
-        &format!("run #{run_id}"),
-        &mut std::io::stderr(),
-    )
-    .ok();
+    render_started_run(run_id, &mut std::io::stderr()).ok();
 
     if detached {
         println!("run #{run_id}");
@@ -350,7 +344,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     if matches!(level, LogLevel::Debug) {
-        render_run_log(level, verb, message);
+        crate::log::debug!("{message}");
         return Ok(());
     }
     let mut line = Vec::<u8>::new();
@@ -597,16 +591,6 @@ async fn send_one_shot(socket: &Path, request: &Request) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::cognitive_complexity)] // each log-level arm expands the tracing macro, inflating the score past 25
-fn render_run_log(level: LogLevel, verb: Option<&str>, message: &str) {
-    match level {
-        LogLevel::Error => crate::log::error!("{message}"),
-        LogLevel::Warn => crate::log::warn!("{message}"),
-        LogLevel::Info => crate::log::info!(verb.unwrap_or(""), "{message}"),
-        LogLevel::Debug => crate::log::debug!("{message}"),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrePhaseOutcome {
     SessionReady,
@@ -670,10 +654,10 @@ pub fn render_status_line(
     message: &str,
     writer: &mut impl std::io::Write,
 ) -> std::io::Result<()> {
-    let marker = if matches!(level, LogLevel::Error) {
-        '✗'
-    } else {
-        '✓'
+    let marker = match level {
+        LogLevel::Error => '✗',
+        LogLevel::Warn => '⚠',
+        _ => '✓',
     };
     let phrase = phrase_for_verb(verb.unwrap_or(""));
     if message.is_empty() {
@@ -681,6 +665,15 @@ pub fn render_status_line(
     } else {
         writeln!(writer, "{marker} {phrase} {message}")
     }
+}
+
+pub fn render_started_run(run_id: u32, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    render_status_line(
+        LogLevel::Info,
+        Some("Started"),
+        &format!("run #{run_id}"),
+        writer,
+    )
 }
 
 fn phrase_for_verb(verb: &str) -> String {
@@ -871,60 +864,6 @@ mod tests {
         );
     }
 
-    fn capture_run_logs(emit: impl FnOnce()) -> Vec<(tracing::Level, Option<String>, String)> {
-        use std::sync::{Arc, Mutex, Once};
-        use tracing::field::{Field, Visit};
-        use tracing::{Event, Subscriber};
-        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-
-        static OPEN_GATE: Once = Once::new();
-        OPEN_GATE.call_once(|| {
-            let gate = tracing_subscriber::fmt()
-                .with_writer(std::io::sink)
-                .with_max_level(tracing::Level::TRACE)
-                .finish();
-            tracing::subscriber::set_global_default(gate).ok();
-        });
-
-        type Sink = Arc<Mutex<Vec<(tracing::Level, Option<String>, String)>>>;
-        struct CapturingLayer(Sink);
-        impl<S: Subscriber> Layer<S> for CapturingLayer {
-            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-                #[derive(Default)]
-                struct Fields {
-                    verb: Option<String>,
-                    message: String,
-                }
-                let mut fields = Fields::default();
-                struct V<'a>(&'a mut Fields);
-                impl Visit for V<'_> {
-                    fn record_str(&mut self, field: &Field, value: &str) {
-                        if field.name() == "verb" {
-                            self.0.verb = Some(value.to_string());
-                        }
-                    }
-                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                        if field.name() == "message" {
-                            self.0.message = format!("{value:?}");
-                        }
-                    }
-                }
-                event.record(&mut V(&mut fields));
-                self.0.lock().unwrap().push((
-                    *event.metadata().level(),
-                    fields.verb,
-                    fields.message,
-                ));
-            }
-        }
-
-        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
-        tracing::subscriber::with_default(subscriber, emit);
-        let captured = sink.lock().unwrap();
-        captured.clone()
-    }
-
     #[test]
     fn render_status_line_renders_started_run_in_check_cadence_not_right_aligned() {
         let mut buf = Vec::<u8>::new();
@@ -935,6 +874,13 @@ mod tests {
             !s.contains("     Started"),
             "right-aligned padding leaked: {s:?}"
         );
+    }
+
+    #[test]
+    fn render_started_run_routes_run_id_through_the_check_renderer() {
+        let mut buf = Vec::<u8>::new();
+        render_started_run(7, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "✓ started run #7\n");
     }
 
     #[test]
@@ -957,6 +903,27 @@ mod tests {
         .unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✗ resolve registry timeout\n");
+    }
+
+    fn render_marker(level: LogLevel) -> char {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(level, Some("Verb"), "msg", &mut buf).unwrap();
+        String::from_utf8(buf)
+            .unwrap()
+            .chars()
+            .next()
+            .expect("status line has a leading marker")
+    }
+
+    #[test]
+    fn render_status_line_marker_truth_table_distinguishes_each_level() {
+        assert_eq!(render_marker(LogLevel::Info), '✓');
+        assert_eq!(
+            render_marker(LogLevel::Warn),
+            '⚠',
+            "a warning must not wear the success check",
+        );
+        assert_eq!(render_marker(LogLevel::Error), '✗');
     }
 
     #[test]
@@ -1091,37 +1058,6 @@ mod tests {
             !s.contains("     Finished"),
             "right-aligned padding leaked: {s:?}"
         );
-    }
-
-    #[test]
-    fn render_run_log_routes_info_with_its_verb() {
-        let events = capture_run_logs(|| {
-            render_run_log(LogLevel::Info, Some("Resolved"), "ubuntu:latest");
-        });
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, tracing::Level::INFO);
-        assert_eq!(events[0].1.as_deref(), Some("Resolved"));
-        assert_eq!(events[0].2, "ubuntu:latest");
-    }
-
-    #[test]
-    fn render_run_log_routes_each_level_to_its_macro() {
-        let events = capture_run_logs(|| {
-            render_run_log(LogLevel::Error, None, "boom");
-            render_run_log(LogLevel::Warn, None, "careful");
-            render_run_log(LogLevel::Debug, None, "tracing");
-        });
-        let levels: Vec<_> = events.iter().map(|e| e.0).collect();
-        assert_eq!(
-            levels,
-            vec![
-                tracing::Level::ERROR,
-                tracing::Level::WARN,
-                tracing::Level::DEBUG
-            ]
-        );
-        assert_eq!(events[0].2, "boom");
-        assert!(events.iter().all(|e| e.1.is_none()));
     }
 
     #[test]
