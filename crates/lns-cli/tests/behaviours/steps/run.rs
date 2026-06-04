@@ -4,7 +4,7 @@ use cucumber::{given, then, when};
 use lns_cli::cli::{Cli, Command};
 use lns_cli::run::summary::print_run_summary;
 use lns_cli::service::{
-    PrePhaseStep, drive_attached_session_with_writers, pre_phase_step, render_status_line,
+    PrePhaseStep, drive_attached_session_with_writers, pre_phase_step, render_started_run,
 };
 use lns_ipc::{LogLevel, Response, WireFrame, encode_frame, encode_wire_frame};
 use lns_policy::{Policy, RouteRule, Transport, Verdict};
@@ -42,13 +42,7 @@ fn run_log(verb: &str, message: &str) -> Response {
 }
 
 fn emit_started_run_42(world: &mut BehaviourWorld) {
-    render_status_line(
-        LogLevel::Info,
-        Some("Started"),
-        "run #42",
-        &mut world.phase_output,
-    )
-    .expect("render Started");
+    render_started_run(42, &mut world.phase_output).expect("render Started");
     if world.detached {
         writeln!(world.detached_stdout, "run #42").expect("write run id");
     }
@@ -607,11 +601,16 @@ fn each_phase_once(world: &mut BehaviourWorld) -> Result<(), String> {
 fn no_right_aligned_line(world: &mut BehaviourWorld) -> Result<(), String> {
     let combined = combined_run_output(world);
     for line in combined.lines() {
-        if line.starts_with("     ") && line.contains(char::is_alphabetic) {
+        if line_is_right_aligned_verb(line) {
             return Err(format!("right-aligned developer line leaked: {line:?}"));
         }
     }
     Ok(())
+}
+
+fn line_is_right_aligned_verb(line: &str) -> bool {
+    let leading_spaces = line.len() - line.trim_start_matches(' ').len();
+    leading_spaces >= 2 && line.trim_start().starts_with(char::is_alphabetic)
 }
 
 #[then(regex = r"^no raw enum verb like `[^`]+` appears verbatim$")]
