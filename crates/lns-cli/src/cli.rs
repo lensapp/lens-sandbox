@@ -331,6 +331,12 @@ pub enum ServiceCommand {
     Stop,
     #[command(about = "Show status of the Lens Sandbox background service.")]
     Status,
+    #[command(
+        about = "Register a per-user login agent and start the service now and on every login."
+    )]
+    Enable,
+    #[command(about = "Stop the service and unregister the per-user login agent.")]
+    Disable,
 }
 
 #[derive(clap::Args)]
