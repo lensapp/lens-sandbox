@@ -3,8 +3,10 @@ use clap::Parser;
 use cucumber::{given, then, when};
 use lns_cli::cli::{Cli, Command};
 use lns_cli::run::summary::print_run_summary;
-use lns_cli::service::{PrePhaseStep, pre_phase_step};
-use lns_ipc::{LogLevel, Response, encode_frame};
+use lns_cli::service::{
+    PrePhaseStep, drive_attached_session_with_writers, pre_phase_step, render_status_line,
+};
+use lns_ipc::{LogLevel, Response, WireFrame, encode_frame, encode_wire_frame};
 use lns_policy::{Policy, RouteRule, Transport, Verdict};
 use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
@@ -40,7 +42,13 @@ fn run_log(verb: &str, message: &str) -> Response {
 }
 
 fn emit_started_run_42(world: &mut BehaviourWorld) {
-    writeln!(world.phase_output, "Started  run #42").expect("write Started");
+    render_status_line(
+        LogLevel::Info,
+        Some("Started"),
+        "run #42",
+        &mut world.phase_output,
+    )
+    .expect("render Started");
     if world.detached {
         writeln!(world.detached_stdout, "run #42").expect("write run id");
     }
@@ -335,7 +343,7 @@ fn boot_and_session_ready_follow(world: &mut BehaviourWorld) -> Result<(), Strin
     if !s.contains("✓ booted") {
         return Err(format!("missing booted line:\n{s}"));
     }
-    if !s.contains("Started  run #") {
+    if !s.contains("✓ started run #") {
         return Err(format!("missing Started line:\n{s}"));
     }
     Ok(())
@@ -387,8 +395,8 @@ fn process_exits_zero_without_attaching(world: &mut BehaviourWorld) -> Result<()
     }
 }
 
-#[then(regex = r#"^phase lines \(`[^`]+`, `[^`]+`\) are emitted only before `([^`]+)`$"#)]
-fn phase_lines_emitted_only_before(
+#[then(regex = r#"^phase lines \(`[^`]+`, `[^`]+`\) lead up to `([^`]+)`$"#)]
+fn phase_lines_lead_up_to(
     world: &mut BehaviourWorld,
     started_marker: String,
 ) -> Result<(), String> {
@@ -397,13 +405,11 @@ fn phase_lines_emitted_only_before(
     let started_pos = s
         .find(&needle)
         .ok_or_else(|| format!("Started marker {needle:?} missing in:\n{s}"))?;
-    let phase_chars = ['✓', '✗'];
-    if let Some(stray) = s[started_pos..].chars().find(|c| phase_chars.contains(c)) {
-        Err(format!(
-            "phase marker {stray:?} appears after Started in:\n{s}"
-        ))
-    } else {
+    let leading = &s[..started_pos];
+    if leading.contains('✓') {
         Ok(())
+    } else {
+        Err(format!("expected ✓ phase lines before {needle:?} in:\n{s}"))
     }
 }
 
@@ -526,6 +532,134 @@ fn each_phase_line_complete(world: &mut BehaviourWorld) -> Result<(), String> {
     regex = r"^the attached session takes over the terminal cleanly with no leftover phase output$"
 )]
 fn attached_session_clean(_world: &mut BehaviourWorld) {}
+
+async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>) {
+    let (client, mut server) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        for frame in frames {
+            server
+                .write_all(&frame)
+                .await
+                .expect("write attached frame");
+        }
+    });
+    let mut stdout = std::mem::take(&mut world.attached_stdout);
+    let mut status = std::mem::take(&mut world.attached_status);
+    drive_attached_session_with_writers(
+        client,
+        None,
+        42,
+        false,
+        Vec::new(),
+        &mut stdout,
+        &mut status,
+    )
+    .await
+    .expect("drive_attached_session_with_writers");
+    world.attached_stdout = stdout;
+    world.attached_status = status;
+}
+
+fn stdout_frame(bytes: &[u8]) -> Vec<u8> {
+    encode_wire_frame(&WireFrame::Stdout(bytes.to_vec())).expect("encode stdout frame")
+}
+
+fn combined_run_output(world: &BehaviourWorld) -> String {
+    let mut out = String::new();
+    out.push_str(&String::from_utf8_lossy(&world.phase_output));
+    out.push_str(&String::from_utf8_lossy(&world.attached_status));
+    out
+}
+
+#[when(regex = r"^the cold-cache run plays through resolve, boot, session, and finish$")]
+async fn cold_cache_full_run(world: &mut BehaviourWorld) {
+    world.canned_sequence = CannedSequence::ColdCache;
+    drive_canned_sequence(world).await;
+    let frames = vec![
+        stdout_frame(b"hello from inside a microVM"),
+        encode_frame(&run_log("Finished", "in 2.53s")).expect("encode finished"),
+        encode_frame(&Response::RunExit { code: 0 }).expect("encode exit"),
+    ];
+    drive_attached_frames(world, frames).await;
+}
+
+#[then(regex = r"^each run-status phase appears exactly once$")]
+fn each_phase_once(world: &mut BehaviourWorld) -> Result<(), String> {
+    let combined = combined_run_output(world);
+    for phrase in [
+        "✓ resolved",
+        "✓ booted",
+        "✓ session ready",
+        "✓ started run #42",
+        "✓ finished in 2.53s",
+    ] {
+        let count = combined.matches(phrase).count();
+        if count != 1 {
+            return Err(format!(
+                "{phrase:?} appears {count}× (want 1) in:\n{combined}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[then(regex = r"^no right-aligned developer-format line reaches the user$")]
+fn no_right_aligned_line(world: &mut BehaviourWorld) -> Result<(), String> {
+    let combined = combined_run_output(world);
+    for line in combined.lines() {
+        if line.starts_with("     ") && line.contains(char::is_alphabetic) {
+            return Err(format!("right-aligned developer line leaked: {line:?}"));
+        }
+    }
+    Ok(())
+}
+
+#[then(regex = r"^no raw enum verb like `[^`]+` appears verbatim$")]
+fn no_raw_enum_verb(world: &mut BehaviourWorld) -> Result<(), String> {
+    let combined = combined_run_output(world);
+    if combined.contains("SessionReady") {
+        Err(format!("raw enum verb leaked in:\n{combined}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[then(regex = r"^`Started  run #N` and `Finished  in …` never appear right-aligned$")]
+fn started_finished_not_right_aligned(world: &mut BehaviourWorld) -> Result<(), String> {
+    let combined = combined_run_output(world);
+    if combined.contains("Started  run") || combined.contains("Finished  in") {
+        Err(format!(
+            "right-aligned Started/Finished leaked in:\n{combined}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then(regex = r"^the final byte of the run output is a newline$")]
+fn final_byte_is_newline(world: &mut BehaviourWorld) -> Result<(), String> {
+    match world.attached_stdout.last() {
+        Some(b'\n') => Ok(()),
+        other => Err(format!("expected final byte newline, got {other:?}")),
+    }
+}
+
+#[when(regex = r"^the workload prints without a trailing newline and then exits$")]
+async fn workload_prints_without_newline(world: &mut BehaviourWorld) {
+    let frames = vec![
+        stdout_frame(b"no trailing newline here"),
+        encode_frame(&Response::RunExit { code: 0 }).expect("encode exit"),
+    ];
+    drive_attached_frames(world, frames).await;
+}
+
+#[then(regex = r"^the final byte emitted to the user's terminal is a newline$")]
+fn final_terminal_byte_newline(world: &mut BehaviourWorld) -> Result<(), String> {
+    match world.attached_stdout.last() {
+        Some(b'\n') => Ok(()),
+        other => Err(format!("expected final byte newline, got {other:?}")),
+    }
+}
 
 fn line_present(buf: &[u8], expected: &str) -> Result<(), String> {
     let s = String::from_utf8_lossy(buf);

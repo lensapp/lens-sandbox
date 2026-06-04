@@ -39,7 +39,7 @@ pub fn init() {
     let log = tsfmt::layer()
         .event_format(LogFormat { color })
         .with_writer(std::io::stderr)
-        .with_filter(filter_fn(|m| m.target() == TARGET));
+        .with_filter(local_log_filter());
 
     let trace = tsfmt::layer()
         .with_writer(std::io::stderr)
@@ -58,6 +58,49 @@ pub use ::tracing::debug;
 
 fn detect_color(no_color_set: bool, stderr_is_terminal: bool) -> bool {
     !no_color_set && stderr_is_terminal
+}
+
+fn local_log_layer_accepts(target: &str, in_run_scope: bool) -> bool {
+    target == TARGET && !in_run_scope
+}
+
+fn local_log_filter<S>() -> LocalLogFilter<S> {
+    LocalLogFilter(std::marker::PhantomData)
+}
+
+struct LocalLogFilter<S>(std::marker::PhantomData<fn(S)>);
+
+impl<S> tracing_subscriber::layer::Filter<S> for LocalLogFilter<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn enabled(
+        &self,
+        meta: &tracing::Metadata<'_>,
+        _cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        meta.is_span() || meta.target() == TARGET
+    }
+
+    fn event_enabled(
+        &self,
+        event: &Event<'_>,
+        cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        local_log_layer_accepts(event.metadata().target(), event_in_run_scope(event, cx))
+    }
+}
+
+fn event_in_run_scope<S>(event: &Event<'_>, cx: &tracing_subscriber::layer::Context<'_, S>) -> bool
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let Some(scope) = cx.event_scope(event) else {
+        return false;
+    };
+    scope
+        .from_root()
+        .any(|span| span.extensions().get::<RunFrameTx>().is_some())
 }
 
 #[macro_export]
@@ -225,7 +268,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct TestBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl TestBuf {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+        fn contents(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+        fn text(&self) -> String {
+            String::from_utf8(self.contents()).unwrap()
+        }
+    }
+
+    impl std::io::Write for TestBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for TestBuf {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     #[test]
     fn event_visitor_captures_str_extras_in_record_order() {
@@ -316,6 +393,101 @@ mod tests {
     }
 
     #[test]
+    fn local_log_layer_accepts_truth_table() {
+        assert!(
+            local_log_layer_accepts(TARGET, false),
+            "non-run service log renders to the service's own stderr/log",
+        );
+        assert!(
+            !local_log_layer_accepts(TARGET, true),
+            "run-scoped events are forwarded to the CLI, not echoed locally",
+        );
+        assert!(
+            !local_log_layer_accepts("other::module", false),
+            "non-TARGET events are handled by the trace layer, not the human log layer",
+        );
+        assert!(!local_log_layer_accepts("other::module", true));
+    }
+
+    fn local_filter_subscriber(buf: &TestBuf) -> impl Subscriber + for<'a> LookupSpan<'a> {
+        let local = tsfmt::layer()
+            .event_format(LogFormat { color: false })
+            .with_writer(buf.clone())
+            .with_filter(local_log_filter());
+        tracing_subscriber::registry()
+            .with(local)
+            .with(FrameForwardLayer)
+    }
+
+    #[tokio::test]
+    async fn run_scoped_event_forwards_a_frame_but_emits_no_local_bytes() {
+        use tokio::sync::mpsc;
+
+        let buf = TestBuf::new();
+        let subscriber = local_filter_subscriber(&buf);
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run", run_id = 1u32);
+            attach_tx_to_span(&span, tx);
+            let _g = span.enter();
+            tracing::info!(target: TARGET, verb = "Booted", "microVM");
+        });
+        assert!(
+            rx.try_recv().is_ok(),
+            "run-scoped event must produce a RunLog frame to the CLI",
+        );
+        let local_bytes = buf.contents();
+        assert!(
+            local_bytes.is_empty(),
+            "run-scoped event leaked to the local human layer: {:?}",
+            String::from_utf8_lossy(&local_bytes),
+        );
+    }
+
+    #[test]
+    fn event_in_a_non_run_span_still_renders_locally() {
+        let buf = TestBuf::new();
+        let local = tsfmt::layer()
+            .event_format(LogFormat { color: false })
+            .with_writer(buf.clone())
+            .with_filter(local_log_filter());
+        let subscriber = tracing_subscriber::registry().with(local);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("housekeeping");
+            let _g = span.enter();
+            tracing::info!(target: TARGET, verb = "Pruned", "old caches");
+        });
+        assert!(
+            buf.text().contains("Pruned  old caches"),
+            "a span without a RunFrameTx must not suppress the local render: {:?}",
+            buf.text(),
+        );
+    }
+
+    #[test]
+    fn non_run_event_renders_to_the_local_human_layer() {
+        let buf = TestBuf::new();
+        let local = tsfmt::layer()
+            .event_format(LogFormat { color: false })
+            .with_writer(buf.clone())
+            .with_filter(local_log_filter());
+        let subscriber = tracing_subscriber::registry().with(local);
+        with_default(subscriber, || {
+            tracing::info!(target: TARGET, verb = "Starting", "lns-service");
+            tracing::info!(target: "other::module", "trace-only noise");
+        });
+        let rendered = buf.text();
+        assert!(
+            rendered.contains("Starting  lns-service"),
+            "non-run service log must still render locally: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("trace-only noise"),
+            "non-TARGET events must not reach the human log layer: {rendered:?}",
+        );
+    }
+
+    #[test]
     fn detect_color_truth_table() {
         assert!(!detect_color(true, true), "NO_COLOR set wins over TTY");
         assert!(
@@ -344,28 +516,7 @@ mod tests {
     }
 
     fn render_with_log_format(emit: impl FnOnce()) -> String {
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        #[derive(Clone)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buf {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let buf = TestBuf::new();
         std::io::Write::flush(&mut buf.clone()).unwrap();
         let layer = tsfmt::layer()
             .event_format(LogFormat { color: false })
@@ -373,7 +524,7 @@ mod tests {
             .with_filter(filter_fn(|m| m.target() == TARGET));
         let subscriber = tracing_subscriber::registry().with(layer);
         with_default(subscriber, emit);
-        String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+        buf.text()
     }
 
     #[test]
