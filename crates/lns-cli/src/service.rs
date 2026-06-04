@@ -5,6 +5,7 @@ use anyhow::Result;
 use lns_ipc::{RunStatus, RunSummary, SignalKind, StatusInfo};
 
 pub mod client;
+mod login_agent;
 pub(crate) mod real;
 
 pub use client::ServiceClient;
@@ -80,6 +81,63 @@ pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
     println!("  Uptime:  {uptime_secs}s");
     println!("  Version: {version}");
     Ok(())
+}
+
+pub(super) async fn cmd_enable(client: &impl ServiceClient) -> Result<()> {
+    enable_with_outcome(client, login_agent::enable().await).await
+}
+
+pub(super) async fn cmd_disable(client: &impl ServiceClient) -> Result<()> {
+    disable_with_outcome(client, login_agent::disable().await).await
+}
+
+async fn enable_with_outcome(
+    client: &impl ServiceClient,
+    outcome: login_agent::EnableOutcome,
+) -> Result<()> {
+    report_enable_outcome(outcome);
+    if let Err(e) = cmd_start(client).await {
+        crate::log::warn!(
+            "the service did not start for this session ({e}); it will start on the next login"
+        );
+    }
+    Ok(())
+}
+
+async fn disable_with_outcome(
+    client: &impl ServiceClient,
+    outcome: login_agent::DisableOutcome,
+) -> Result<()> {
+    cmd_stop(client).await?;
+    report_disable_outcome(outcome);
+    Ok(())
+}
+
+fn report_enable_outcome(outcome: login_agent::EnableOutcome) {
+    match outcome {
+        login_agent::EnableOutcome::Registered => {
+            println!("Login auto-start enabled. Lens Sandbox will start on every login.");
+        }
+        login_agent::EnableOutcome::AlreadyRegistered => {
+            println!("Login auto-start is already enabled.");
+        }
+        login_agent::EnableOutcome::Degraded(reason) => {
+            crate::log::warn!(
+                "could not register login auto-start ({reason}); the service is started for this session only. Re-run `lns service enable` from a graphical login session."
+            );
+        }
+    }
+}
+
+fn report_disable_outcome(outcome: login_agent::DisableOutcome) {
+    match outcome {
+        login_agent::DisableOutcome::Unregistered => {
+            println!("Login auto-start disabled. Lens Sandbox will not start on the next login.");
+        }
+        login_agent::DisableOutcome::WasNotRegistered => {
+            println!("Login auto-start was not enabled.");
+        }
+    }
 }
 
 pub(crate) fn socket_path() -> Result<PathBuf> {
@@ -577,5 +635,163 @@ exit 0
         let client = std::sync::Arc::new(FakeClient::default());
         client.cancel_run(7).await;
         assert_eq!(client.calls(), vec!["cancel_run"]);
+    }
+
+    use login_agent::{DisableOutcome, EnableOutcome};
+
+    #[test]
+    fn report_enable_outcome_covers_registered_and_already_arms() {
+        report_enable_outcome(EnableOutcome::Registered);
+        report_enable_outcome(EnableOutcome::AlreadyRegistered);
+    }
+
+    fn capture_warn(emit: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex, Once};
+        use tracing::field::{Field, Visit};
+        use tracing::{Event, Subscriber};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        static OPEN_GATE: Once = Once::new();
+        OPEN_GATE.call_once(|| {
+            let gate = tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(gate).ok();
+        });
+
+        type Sink = Arc<Mutex<Vec<String>>>;
+        struct CapturingLayer(Sink);
+        impl<S: Subscriber> Layer<S> for CapturingLayer {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                struct V<'a>(&'a mut String);
+                impl Visit for V<'_> {
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        if field.name() == "message" {
+                            *self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = String::new();
+                event.record(&mut V(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+        }
+
+        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        let captured = sink.lock().unwrap();
+        captured.clone()
+    }
+
+    #[test]
+    fn report_enable_outcome_degraded_emits_actionable_warn() {
+        let events = capture_warn(|| {
+            report_enable_outcome(EnableOutcome::Degraded("no GUI session".to_string()));
+        });
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("no GUI session"), "{:?}", events[0]);
+        assert!(events[0].contains("lns service enable"), "{:?}", events[0]);
+    }
+
+    #[test]
+    fn report_disable_outcome_covers_both_arms() {
+        report_disable_outcome(DisableOutcome::Unregistered);
+        report_disable_outcome(DisableOutcome::WasNotRegistered);
+    }
+
+    #[tokio::test]
+    async fn enable_with_outcome_chains_start_after_reporting() {
+        let client = FakeClient::default();
+        client.ping_responses.lock().unwrap().push_back(false);
+        *client.start_response.lock().unwrap() = Some(Ok(true));
+
+        enable_with_outcome(&client, EnableOutcome::Registered)
+            .await
+            .expect("enable should succeed");
+
+        assert_eq!(client.calls(), vec!["ping", "start_and_wait_for_ready"]);
+    }
+
+    #[test]
+    fn enable_with_outcome_warns_but_succeeds_when_start_fails() {
+        let client = FakeClient::default();
+        client.ping_responses.lock().unwrap().push_back(false);
+        *client.start_response.lock().unwrap() = Some(Ok(false));
+
+        let events = capture_warn(|| {
+            futures_block_on(enable_with_outcome(
+                &client,
+                EnableOutcome::Degraded("headless".to_string()),
+            ))
+            .expect("enable must not fail the install even when start fails");
+        });
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("did not start for this session")),
+            "expected start-failure warn: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.contains("headless")),
+            "expected degraded warn: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_with_outcome_stops_then_reports_unregistered() {
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(Some(()));
+        *client.wait_for_stopped_response.lock().unwrap() = Some(true);
+
+        disable_with_outcome(&client, DisableOutcome::Unregistered)
+            .await
+            .expect("disable should succeed");
+
+        assert_eq!(client.calls(), vec!["shutdown", "wait_for_stopped"]);
+    }
+
+    #[tokio::test]
+    async fn disable_with_outcome_propagates_stop_timeout_error() {
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(Some(()));
+        *client.wait_for_stopped_response.lock().unwrap() = Some(false);
+
+        let err = disable_with_outcome(&client, DisableOutcome::WasNotRegistered)
+            .await
+            .expect_err("a stop timeout must surface");
+        assert!(err.to_string().contains("did not exit within"), "{err}");
+    }
+
+    fn futures_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn cmd_enable_degrades_to_session_start_when_home_unset() {
+        let _g = crate::test_env::EnvScope::unset("HOME");
+        let client = FakeClient::default();
+        client.ping_responses.lock().unwrap().push_back(true);
+
+        cmd_enable(&client).await.expect("enable must not fail");
+
+        assert_eq!(client.calls(), vec!["ping"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn cmd_disable_stops_when_home_unset() {
+        let _g = crate::test_env::EnvScope::unset("HOME");
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(None);
+
+        cmd_disable(&client).await.expect("disable must succeed");
+
+        assert_eq!(client.calls(), vec!["shutdown"]);
     }
 }

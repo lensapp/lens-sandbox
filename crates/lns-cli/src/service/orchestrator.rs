@@ -25,6 +25,8 @@ pub async fn dispatch(cmd: &crate::cli::ServiceCommand) -> Result<()> {
         crate::cli::ServiceCommand::Start => super::cmd_start(&client).await,
         crate::cli::ServiceCommand::Stop => super::cmd_stop(&client).await,
         crate::cli::ServiceCommand::Status => super::cmd_status(&client).await,
+        crate::cli::ServiceCommand::Enable => super::cmd_enable(&client).await,
+        crate::cli::ServiceCommand::Disable => super::cmd_disable(&client).await,
     }
 }
 

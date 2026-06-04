@@ -4,9 +4,10 @@
 #   curl -fsSL https://get.lns.run | bash
 #   curl -fsSL https://get.lns.run | VERSION=0.1.0 bash
 #
-# INSTALL_DIR  target directory (default: ~/.local/bin)
-# VERSION      specific release (default: latest)
-# CDN_BASE     override CDN origin (default: https://get.lns.run)
+# INSTALL_DIR     target directory (default: ~/.local/bin)
+# VERSION         specific release (default: latest)
+# CDN_BASE        override CDN origin (default: https://get.lns.run)
+# LNS_NO_SERVICE  set to 1 to skip starting + enabling the login auto-start service
 
 set -euo pipefail
 
@@ -33,6 +34,16 @@ fi
 info()  { printf "%s[info]%s  %s\n" "$GREEN" "$RESET" "$1"; }
 warn()  { printf "%s[warn]%s  %s\n" "$YELLOW" "$RESET" "$1" >&2; }
 error() { printf "%s[error]%s %s\n" "$RED" "$RESET" "$1" >&2; exit 1; }
+
+# Service auto-start is on by default. LNS_NO_SERVICE=1 is the primary opt-out
+# (the published path is curl|bash, which has no argv); --no-service works when
+# args are passed. Under `set -u`, "$@" with zero args expands to nothing.
+NO_SERVICE="${LNS_NO_SERVICE:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --no-service) NO_SERVICE=1 ;;
+  esac
+done
 
 download() {
   local url="$1" dest="$2"
@@ -237,8 +248,28 @@ if [ "$OS" = "linux" ] && [ "$HAS_SERVICE" = true ] && command -v ldconfig >/dev
   fi
 fi
 
+if [ "$HAS_SERVICE" = true ] && [ -z "$NO_SERVICE" ]; then
+  info "Starting the Lens Sandbox service and enabling login auto-start..."
+  # Never let enable fail the install: `lns service enable` exits 0 even when it
+  # degrades to start-for-session on a headless/no-bus host. The `if` guard keeps
+  # `set -e` from aborting if the binary itself is unrunnable.
+  if "${INSTALL_DIR}/${BINARY_NAME}" service enable; then
+    SERVICE_ENABLED=true
+  else
+    SERVICE_ENABLED=false
+    warn "Could not enable the background service automatically. Start it yourself with: ${BINARY_NAME} service enable"
+  fi
+else
+  SERVICE_ENABLED=false
+fi
+
 "${INSTALL_DIR}/${BINARY_NAME}" --version
 
 echo ""
+if [ "$SERVICE_ENABLED" = true ]; then
+  echo "${BOLD}▸ Service:${RESET}  running now and on every login (stop: ${BINARY_NAME} service stop · remove auto-start: ${BINARY_NAME} service disable)"
+elif [ "$HAS_SERVICE" = true ] && [ -n "$NO_SERVICE" ]; then
+  echo "${BOLD}▸ Service:${RESET}  skipped (LNS_NO_SERVICE/--no-service). Start it with: ${BINARY_NAME} service enable"
+fi
 echo "${BOLD}▸ Try it:${RESET}   ${BINARY_NAME} run -- echo hello from inside a microVM"
 echo "${BOLD}▸ Help:${RESET}     ${BINARY_NAME} --help"
