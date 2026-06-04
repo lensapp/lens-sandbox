@@ -105,7 +105,13 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         return Ok(code);
     }
 
-    crate::log::info!("Started", "run #{run_id}");
+    render_status_line(
+        LogLevel::Info,
+        Some("Started"),
+        &format!("run #{run_id}"),
+        &mut std::io::stderr(),
+    )
+    .ok();
 
     if detached {
         println!("run #{run_id}");
@@ -209,7 +215,7 @@ pub async fn ls() -> Result<()> {
 }
 
 pub(crate) async fn drive_attached_session<S>(
-    mut stream: S,
+    stream: S,
     aux_socket: Option<PathBuf>,
     run_id: u32,
     tty: bool,
@@ -217,6 +223,34 @@ pub(crate) async fn drive_attached_session<S>(
 ) -> Result<i32>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    drive_attached_session_with_writers(
+        stream,
+        aux_socket,
+        run_id,
+        tty,
+        detach_chord,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await
+}
+
+pub async fn drive_attached_session_with_writers<S, O, E>(
+    mut stream: S,
+    aux_socket: Option<PathBuf>,
+    run_id: u32,
+    tty: bool,
+    detach_chord: Vec<u8>,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<i32>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
 {
     let _raw_guard = if tty {
         crate::raw_mode::RawModeGuard::enable_if_tty()
@@ -251,20 +285,20 @@ where
         None => (None, None, None),
     };
 
-    let mut stdout = tokio::io::stdout();
-    let mut stderr = tokio::io::stderr();
+    let mut last_stdout_byte: Option<u8> = None;
 
     let exit_code = loop {
         tokio::select! {
             biased;
             _ = early_exit_rx.recv() => {
-                break drain_after_chord(&mut stream, &mut stdout, &mut stderr).await;
+                break drain_after_chord(&mut stream, stdout, stderr, &mut last_stdout_byte).await;
             }
             res = read_frame_bytes_async(&mut stream) => {
                 let bytes = res.context("reading run-response frame")?;
                 let wire = decode_wire_frame_from_bytes(&bytes).context("decoding run-response")?;
                 match wire {
                     WireFrame::Stdout(b) => {
+                        last_stdout_byte = b.last().copied().or(last_stdout_byte);
                         stdout.write_all(&b).await?;
                         stdout.flush().await.ok();
                     }
@@ -273,7 +307,7 @@ where
                         stderr.flush().await.ok();
                     }
                     WireFrame::Json(Response::RunLog { level, verb, message }) => {
-                        render_run_log(level, verb.as_deref(), &message);
+                        render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
                     }
                     WireFrame::Json(Response::RunExit { code }) => break code,
                     WireFrame::Json(Response::Error { message }) => {
@@ -284,6 +318,11 @@ where
             }
         }
     };
+
+    if !tty && needs_final_newline(last_stdout_byte) {
+        stdout.write_all(b"\n").await.ok();
+        stdout.flush().await.ok();
+    }
 
     if let Some(t) = stdin_task {
         t.abort();
@@ -297,17 +336,44 @@ where
     Ok(exit_code)
 }
 
-async fn drain_after_chord<S>(
+fn needs_final_newline(last_byte: Option<u8>) -> bool {
+    !matches!(last_byte, Some(b'\n'))
+}
+
+async fn render_attached_run_log<E>(
+    level: LogLevel,
+    verb: Option<&str>,
+    message: &str,
+    stderr: &mut E,
+) -> Result<()>
+where
+    E: AsyncWriteExt + Unpin,
+{
+    if matches!(level, LogLevel::Debug) {
+        render_run_log(level, verb, message);
+        return Ok(());
+    }
+    let mut line = Vec::<u8>::new();
+    render_status_line(level, verb, message, &mut line)?;
+    stderr.write_all(&line).await?;
+    stderr.flush().await.ok();
+    Ok(())
+}
+
+async fn drain_after_chord<S, O, E>(
     stream: &mut S,
-    stdout: &mut tokio::io::Stdout,
-    stderr: &mut tokio::io::Stderr,
+    stdout: &mut O,
+    stderr: &mut E,
+    last_stdout_byte: &mut Option<u8>,
 ) -> i32
 where
     S: AsyncReadExt + Unpin,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
 {
     match timeout(
         Duration::from_secs(5),
-        drain_to_exit(stream, stdout, stderr),
+        drain_to_exit(stream, stdout, stderr, last_stdout_byte),
     )
     .await
     {
@@ -323,13 +389,16 @@ where
     }
 }
 
-async fn drain_to_exit<S>(
+async fn drain_to_exit<S, O, E>(
     stream: &mut S,
-    stdout: &mut tokio::io::Stdout,
-    stderr: &mut tokio::io::Stderr,
+    stdout: &mut O,
+    stderr: &mut E,
+    last_stdout_byte: &mut Option<u8>,
 ) -> Result<i32>
 where
     S: AsyncReadExt + Unpin,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
 {
     loop {
         let bytes = match read_frame_bytes_async(stream).await {
@@ -339,6 +408,7 @@ where
         let wire = decode_wire_frame_from_bytes(&bytes).context("decoding drain-frame")?;
         match wire {
             WireFrame::Stdout(b) => {
+                *last_stdout_byte = b.last().copied().or(*last_stdout_byte);
                 let _ = stdout.write_all(&b).await;
             }
             WireFrame::Stderr(b) => {
@@ -349,7 +419,7 @@ where
                 verb,
                 message,
             }) => {
-                render_run_log(level, verb.as_deref(), &message);
+                render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
             }
             WireFrame::Json(Response::RunExit { code }) => return Ok(code),
             WireFrame::Json(Response::Error { message }) => {
@@ -565,7 +635,7 @@ where
             verb,
             message,
         }) => {
-            render_pre_phase_log(level, verb.as_deref(), &message, writer)?;
+            render_status_line(level, verb.as_deref(), &message, writer)?;
             if verb.as_deref() == Some("SessionReady") {
                 Ok(PrePhaseStep::SessionReady)
             } else {
@@ -594,7 +664,7 @@ where
     }
 }
 
-fn render_pre_phase_log(
+pub fn render_status_line(
     level: LogLevel,
     verb: Option<&str>,
     message: &str,
@@ -650,7 +720,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_emits_check_marker_and_lowercased_verb() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, Some("Resolved"), "ubuntu:latest", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("Resolved"), "ubuntu:latest", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ resolved ubuntu:latest\n");
     }
@@ -658,7 +728,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_uses_cross_marker_for_error_level() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(
+        render_status_line(
             LogLevel::Error,
             Some("Resolve"),
             "registry timeout",
@@ -672,7 +742,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_special_cases_session_ready_phrase() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ session ready\n");
     }
@@ -680,7 +750,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_special_cases_image_cached_phrase() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, Some("ImageCached"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("ImageCached"), "", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ image cached\n");
     }
@@ -688,7 +758,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_omits_trailing_space_when_message_empty() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, Some("Booted"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("Booted"), "", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ booted\n");
     }
@@ -696,7 +766,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_emits_no_ansi_escape_sequences() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, Some("Booted"), "microVM (1.1s)", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("Booted"), "microVM (1.1s)", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\x1b'), "ANSI escape leaked: {s:?}");
     }
@@ -704,7 +774,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_falls_back_to_lowercased_verb_for_unknown_verbs() {
         let mut buf = Vec::<u8>::new();
-        render_pre_phase_log(LogLevel::Info, None, "unverbed", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, None, "unverbed", &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓  unverbed\n");
     }
@@ -853,6 +923,174 @@ mod tests {
         tracing::subscriber::with_default(subscriber, emit);
         let captured = sink.lock().unwrap();
         captured.clone()
+    }
+
+    #[test]
+    fn render_status_line_renders_started_run_in_check_cadence_not_right_aligned() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(LogLevel::Info, Some("Started"), "run #42", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ started run #42\n");
+        assert!(
+            !s.contains("     Started"),
+            "right-aligned padding leaked: {s:?}"
+        );
+    }
+
+    #[test]
+    fn render_status_line_renders_finished_in_check_cadence() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(LogLevel::Info, Some("Finished"), "in 2.53s", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ finished in 2.53s\n");
+    }
+
+    #[test]
+    fn render_status_line_uses_cross_marker_for_error_level() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(
+            LogLevel::Error,
+            Some("Resolve"),
+            "registry timeout",
+            &mut buf,
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✗ resolve registry timeout\n");
+    }
+
+    #[test]
+    fn render_status_line_phrases_session_ready() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ session ready\n");
+        assert!(!s.contains("SessionReady"), "raw verb leaked: {s:?}");
+    }
+
+    #[tokio::test]
+    async fn render_attached_run_log_keeps_debug_frames_off_the_user_writer() {
+        let mut stderr = Vec::<u8>::new();
+        render_attached_run_log(LogLevel::Debug, None, "broker handshake", &mut stderr)
+            .await
+            .expect("render debug");
+        assert!(
+            stderr.is_empty(),
+            "debug run-log must not reach the user's status writer: {stderr:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn render_attached_run_log_writes_info_status_to_the_writer() {
+        let mut stderr = Vec::<u8>::new();
+        render_attached_run_log(LogLevel::Info, Some("Finished"), "in 1.10s", &mut stderr)
+            .await
+            .expect("render info");
+        assert_eq!(stderr, b"\xe2\x9c\x93 finished in 1.10s\n");
+    }
+
+    #[test]
+    fn needs_final_newline_truth_table() {
+        assert!(needs_final_newline(None), "no output yet needs a newline");
+        assert!(
+            needs_final_newline(Some(b'o')),
+            "non-newline last byte needs a newline"
+        );
+        assert!(
+            !needs_final_newline(Some(b'\n')),
+            "newline-terminated output does not need another",
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_appends_trailing_newline_when_workload_omits_one() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let out = lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"hello".to_vec()))
+                .expect("encode stdout");
+            server.write_all(&out).await.expect("write stdout");
+            let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode exit");
+            server.write_all(&exit).await.expect("write exit");
+        });
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let code = drive_attached_session_with_writers(
+            client,
+            None,
+            1,
+            false,
+            Vec::new(),
+            &mut captured,
+            &mut status,
+        )
+        .await
+        .expect("drive");
+        assert_eq!(code, 0);
+        assert_eq!(
+            captured, b"hello\n",
+            "expected exactly one appended newline"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_does_not_double_newline_when_workload_ends_with_one() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let out = lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"hello\n".to_vec()))
+                .expect("encode stdout");
+            server.write_all(&out).await.expect("write stdout");
+            let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode exit");
+            server.write_all(&exit).await.expect("write exit");
+        });
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let code = drive_attached_session_with_writers(
+            client,
+            None,
+            1,
+            false,
+            Vec::new(),
+            &mut captured,
+            &mut status,
+        )
+        .await
+        .expect("drive");
+        assert_eq!(code, 0);
+        assert_eq!(captured, b"hello\n", "must not add a second newline");
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_renders_post_session_runlog_in_check_form() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let frame = encode_frame(&run_log("Finished", "in 2.53s")).expect("encode finished");
+            server.write_all(&frame).await.expect("write finished");
+            let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode exit");
+            server.write_all(&exit).await.expect("write exit");
+        });
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let code = drive_attached_session_with_writers(
+            client,
+            None,
+            1,
+            false,
+            Vec::new(),
+            &mut captured,
+            &mut status,
+        )
+        .await
+        .expect("drive");
+        assert_eq!(code, 0);
+        let s = String::from_utf8(status).unwrap();
+        assert!(
+            s.contains("✓ finished in 2.53s"),
+            "missing check form: {s:?}"
+        );
+        assert!(
+            !s.contains("     Finished"),
+            "right-aligned padding leaked: {s:?}"
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Then `✓ booted microVM   (Xs)` is printed
     When the session is ready
     Then `✓ session ready` is printed
-    And finally `Started  run #N` is printed before the attached session takes over
+    And finally `✓ started run #N` is printed before the attached session takes over
 
   Scenario: Warm image cache collapses the resolve+pull phases
     Given the image is already cached locally
@@ -79,6 +79,20 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
 
   Scenario: The pre-start phase stream is distinct from in-run logs
     Given a run is starting
-    Then phase lines (`✓ …`, `✗ …`) are emitted only before `Started  run #N`
+    Then phase lines (`✓ …`, `✗ …`) lead up to `✓ started run #N`
     And `RunLog` frames from the workload are rendered exactly as they are today
     And the attached session takes over the terminal cleanly with no leftover phase output
+
+  Scenario: Every run-status line appears exactly once in check form
+    Given the image is not in the local cache
+    When the cold-cache run plays through resolve, boot, session, and finish
+    Then each run-status phase appears exactly once
+    And no right-aligned developer-format line reaches the user
+    And no raw enum verb like `SessionReady` appears verbatim
+    And `Started  run #N` and `Finished  in …` never appear right-aligned
+    And the final byte of the run output is a newline
+
+  Scenario: Workload output without a trailing newline still leaves the prompt on a fresh line
+    Given the image is not in the local cache
+    When the workload prints without a trailing newline and then exits
+    Then the final byte emitted to the user's terminal is a newline

@@ -18,6 +18,8 @@ pub struct BehaviourWorld {
     pub detached: bool,
     pub canned_sequence: CannedSequence,
     pub early_exit_code: Option<i32>,
+    pub attached_stdout: Vec<u8>,
+    pub attached_status: Vec<u8>,
     pub uc: UpdateCheckRig,
 }
 
