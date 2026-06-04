@@ -1,0 +1,65 @@
+[package]
+name = "lns-cli"
+version = "0.6.0"
+edition = "2024"
+description = "Lens Sandbox — thin CLI that drives the lns-service daemon"
+repository = "https://github.com/lensapp/lens-sandbox"
+
+# Binary + library split. The library hosts the orchestration
+# (lns_cli::dispatch + the cli/audit/log/service modules) so Layer 2
+# cucumber tests in tests/behaviours/ can drive subcommands
+# in-process. The binary is a thin shim that parses argv via clap
+# and propagates the library's exit code via process::exit.
+[lib]
+name = "lns_cli"
+path = "src/lib.rs"
+
+# Binary name is `lns` — the crate package is `lns-cli` but the
+# operator-facing CLI is plain `lns`.
+[[bin]]
+name = "lns"
+path = "src/main.rs"
+
+[dependencies]
+clap       = { version = "4", features = ["derive"] }
+lns-ipc    = { path = "../lns-ipc" }
+lns-policy = { path = "../lns-policy" }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "signal", "time", "sync"] }
+anyhow     = "1"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.10"
+libc       = "0.2"
+tracing            = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
+anstyle = "1"
+# `lns update` machinery — mirrors lns-service's kernel resolver
+# shape (reqwest with rustls + stream features, tar+flate2 for the
+# release tarball, sha2 for the manifest-pinned checksum).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+flate2  = "1"
+tar     = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+cucumber = "0.23"
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# `#[serial]` for tests that mutate process-wide env state (LNS_LOG /
+# RUST_LOG env_filter coverage).
+serial_test = "3"
+# Used by tests/no_dead_steps.rs to compile each step attribute's
+# pattern and assert it matches at least one .feature phrase.
+regex = "1"
+# Local HTTP mock server for the `lns update` test suite — every
+# orchestration test points reqwest at this instead of the real CDN.
+# default-features=false drops `cookies`/`headers` which we don't use.
+httpmock = { version = "0.8", default-features = false }
+
+# Layer 2 (behavioural unit) cucumber harness. Drives `lns_cli::cli::Cli`
+# in-process — no subprocess spawns, no real FS, no real sockets.
+# Features live alongside the harness in tests/behaviours/*.feature.
+# harness = false lets cucumber's main() run; libtest would otherwise
+# hijack it and report 0 tests.
+[[test]]
+name    = "behaviours"
+harness = false

@@ -1,0 +1,23 @@
+[package]
+name = "lns-supervisor"
+version = "0.1.0"
+edition = "2024"
+description = "In-guest sandbox supervisor: enforces network policy via an embedded HTTPS proxy + nftables, drops privileges, and supervises the agent workload. Built on lens-sandbox-core."
+repository = "https://github.com/lensapp/lens-sandbox"
+
+[[bin]]
+name = "lns-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+lens-sandbox-core = { git = "https://github.com/lensapp/lens-sandbox-core", rev = "5d66e85d8a8e881c957fac3f29e657a4d088194a" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+serial_test = "3"

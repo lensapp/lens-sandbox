@@ -1,0 +1,36 @@
+[package]
+name = "coverage-strip-ast"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# AST-aware post-processor for `cargo-llvm-cov` lcov output. LLVM
+# source-based instrumentation emits DA entries on lines that aren't
+# executable Rust (doc comments attached to items, trait headers,
+# blank-line-adjacent declarations, the closing `);` of multi-line
+# macro calls). Those lines never get hits, so they appear as
+# uncovered even though the code on them is type-level or syntactic.
+#
+# This tool parses each `SF:` source with `syn`, collects the set of
+# line numbers that contain executable AST content (statements,
+# expressions, function signatures, match arms), and drops `DA:`
+# entries on every line outside that set. Honours the same
+# `// coverage:ignore-line` / `coverage:ignore-start/end` markers the
+# old shell script supported, so existing escape hatches keep working
+# while we phase them out.
+
+[lib]
+name = "coverage_strip_ast"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coverage-strip-ast"
+path = "src/main.rs"
+
+[dependencies]
+syn         = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+anyhow      = "1"
+
+[dev-dependencies]
+tempfile = "3"

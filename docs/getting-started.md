@@ -1,0 +1,113 @@
+# Getting started
+
+This guide takes you from nothing installed to a workload running inside a
+sandbox.
+
+## Prerequisites
+
+Lens Sandbox runs on **macOS on Apple Silicon** (M-series). It boots a real
+microVM using Apple's Virtualization framework, which ships with macOS — there's
+nothing extra to install. Intel Macs cannot host the guest VM and are rejected by
+the installer.
+
+## Platform support
+
+macOS on Apple Silicon is the supported platform today. Linux and Windows support
+are on the roadmap and not yet available.
+
+## Install
+
+```bash
+curl -fsSL https://get.lns.run | bash
+```
+
+This installs two binaries — the `lns` CLI and the `lns-service` background
+service — into `~/.local/bin` by default. Set `INSTALL_DIR` to choose another
+location:
+
+```bash
+curl -fsSL https://get.lns.run | INSTALL_DIR=/usr/local/bin bash
+```
+
+Make sure the install directory is on your `PATH`, then confirm:
+
+```bash
+lns --version
+```
+
+## Start the background service
+
+`lns run` talks to the `lns-service` background process over a local socket. Start
+it once per login session:
+
+```bash
+lns service start
+```
+
+This launches the tray-resident service (you'll see its menu-bar / system-tray
+icon) and waits until it's ready. Check on it any time:
+
+```bash
+lns service status
+```
+
+The service keeps running across sandbox runs — it owns the microVM lifecycle, the
+image cache, the approval window, and the audit log. Stop it from the tray's
+**Quit** menu or with `lns service stop`. See [the background
+service](service.md) for details.
+
+## Your first run
+
+Change into your project directory, then run an OCI image:
+
+```bash
+cd ~/dev/my-app
+lns run alpine:3.20
+```
+
+Before the workload starts, `lns` prints a summary of what it's about to do and
+which policy applies:
+
+```text
+lns run
+  Image:     alpine:3.20 (resolving…)
+  Resources: 1 vCPU · 512 MiB
+  Flags:     -i -t
+  Ports:     (none)
+  Policy:
+    file: /Users/you/dev/my-app/lns-policy.yaml
+    default verdict: ask
+    rules: none defined; anything else asks
+    source: auto-created (no policy in this directory)
+```
+
+You run Lens Sandbox from a project directory — that's where it looks for
+`lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
+make host files available to the workload, attach a volume (see
+[Running workloads](running-workloads.md)). The workload's own working directory
+comes from the image.
+
+## What happens on an unknown request
+
+With the default `ask` verdict, the workload runs normally until it tries to reach
+the network. When it opens a connection that no rule covers, the request pauses and
+an approval window appears from the background service showing the host and the
+action (for example `CONNECT api.github.com:443`). You choose:
+
+- **Allow once** / **Deny once** — applies to this request only.
+- **Allow always** / **Deny always** — also writes a matching rule to
+  `lns-policy.yaml`, so the same question isn't asked again.
+
+A denied request fails at the boundary the way a real network failure would — a
+refused connection or a failed DNS lookup — never a silent success.
+
+If no one answers, the request times out and is denied.
+
+## Where to go next
+
+- Tune resources, mount volumes, publish ports, and run commands directly:
+  [Running workloads](running-workloads.md).
+- Pre-author rules instead of approving them interactively:
+  [Policy and approvals](policy.md).
+- Give the workload credential-shaped placeholders while real secrets stay
+  outside it: [Credentials](credentials.md).

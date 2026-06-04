@@ -1,0 +1,114 @@
+#!/usr/bin/expect -f
+# Smoke test for `lns run -it` interactive shell behaviors.
+#
+# Locks in three user-facing contracts that any change touching the
+# interactive-shell transport (stdio pumps, chord detector, lns-init
+# PTY plumbing, future session broker) must preserve:
+#
+#   1. The shell prompt appears and accepts input — `echo hi` echoes
+#      `hi` on its own line.
+#   2. Ctrl+C inside the shell does NOT detach. The guest kernel's
+#      TTY line discipline echoes `^C` and the shell reprompts.
+#   3. The Docker-style chord (`Ctrl+P` `Ctrl+Q`) exits cleanly.
+#      `lns` reports the workload's real exit code — which for
+#      `sh` killed by SIGHUP is 129 (128 + SIGHUP). Earlier
+#      revisions hardcoded 0 from `emit_completion`'s Ok path
+#      regardless of the workload's real exit; that masked the
+#      bug fixed in `fix(lns-service): forward workload exit code
+#      to CLI instead of always reporting 0`.
+#
+# Run with `expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`
+# from the workspace root. Requires `/usr/bin/expect` (pre-installed
+# on macOS) and a working Vz host. NOT in the pre-merge gate — it
+# needs a live microVM, which regular `cargo test` cannot provide.
+
+set timeout 120
+log_user 1
+
+# Resolve repo root from this script's location: $repo/crates/lns-cli/tests/smoke/.
+set script_dir [file dirname [file normalize $argv0]]
+set repo_root  [file normalize "$script_dir/../../../.."]
+set wrapper    "$repo_root/scripts/lns-cli.sh"
+
+if {![file executable $wrapper]} {
+    puts "FAIL: $wrapper missing or not executable"
+    exit 1
+}
+
+spawn $wrapper run alpine:latest -- sh
+
+# --- (1) shell comes up and echoes a command ------------------------------
+
+expect {
+    timeout {
+        puts "\nFAIL: timed out waiting for initial shell prompt"
+        exit 1
+    }
+    "~ # "
+}
+
+set timeout 15
+send "echo hi\r"
+expect {
+    timeout {
+        puts "\nFAIL: `echo hi` produced no output on its own line"
+        exit 1
+    }
+    -re "\nhi\r"
+}
+expect {
+    timeout {
+        puts "\nFAIL: no prompt after `echo hi`"
+        exit 1
+    }
+    "~ # "
+}
+
+# --- (2) Ctrl+C must reprompt, NOT detach --------------------------------
+
+send "\x03"
+expect {
+    timeout {
+        puts "\nFAIL: Ctrl+C did not produce `^C` echo from the guest TTY"
+        exit 1
+    }
+    -exact "^C"
+}
+expect {
+    timeout {
+        puts "\nFAIL: shell did not reprompt after Ctrl+C — chord may have absorbed it"
+        exit 1
+    }
+    "~ # "
+}
+
+# --- (3) Ctrl+P Ctrl+Q must exit cleanly ---------------------------------
+
+send "\x10\x11"
+set timeout 30
+expect {
+    timeout {
+        puts "\nFAIL: chord did not exit within 30s — guest shell froze (most likely SIGHUP wasn't delivered)"
+        exit 1
+    }
+    eof
+}
+catch wait result
+set os_error_flag [lindex $result 2]
+set value         [lindex $result 3]
+if {$os_error_flag != 0} {
+    puts "\nFAIL: OS error after chord, errno $value"
+    exit 1
+}
+# Chord → broker delivers SIGHUP to the workload's foreground
+# process group → `sh` exits with `128 + 1 = 129`. Any other code
+# would mean either the chord didn't fire (workload ended for some
+# other reason) or the exit-code propagation regressed back to
+# always-0.
+if {$value != 129} {
+    puts "\nFAIL: expected exit 129 (128 + SIGHUP) after chord, got $value"
+    exit 1
+}
+
+puts "\nPASS: interactive shell behaviors all green (chord-exit 129 confirmed)"
+exit 0

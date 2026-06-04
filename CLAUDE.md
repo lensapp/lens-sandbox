@@ -1,0 +1,201 @@
+## Product Vision
+
+Lens Sandbox is a local desktop app for running AI agents, commands, OCI images, and other untrusted workloads inside a microVM. Tagline: "The sandbox you'll actually leave running." One-liner: "Run AI agents, commands, and OCI images locally. Control access into and out of the sandbox."
+
+- **Start here:** `docs/README.md` — the first-party user documentation index.
+- **Product language:** the Product Vision above and `docs/` are the source of truth for terminology and framing; keep naming consistent with them. `docs/` is user-facing documentation only — no internal sales/marketing material lives in this repo.
+- **Concepts:** approvals drive policy authoring; a per-directory `lns-policy.yaml` (auto-created with `defaultVerdict: ask`) holds network rules and custom credential-provider declarations, while per-machine credential value decisions are stored separately so secrets aren't committed; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload via credential-shaped placeholders.
+- **Sibling product:** Lens Agents is the centrally managed counterpart for IT teams. Same policy model.
+
+Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **ephemeral by default**, **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **one directory = one project**, **real secrets stay outside the workload**. A small user-launched background service (the tray-resident `lns-service`, started by `lns service start` and stoppable via the tray Quit menu or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
+
+## Project Overview
+
+Monorepo. Eight Rust crates and one shell-script package today; built to grow.
+
+| Package | Purpose |
+|---------|---------|
+| `crates/lns-cli` | The `lns` developer CLI — thin clap-driven IPC client that drives the daemon. The shipping artifact. |
+| `crates/lns-service` | Tray-resident background service. Owns the microVM lifecycle, OCI ingest, content / layer caches, supervisor relay, and audit-chain writer; exposes a local Unix-socket IPC. |
+| `crates/lns-ipc` | Shared `Request`/`Response` types and wire-format codec for the lns-cli ↔ lns-service contract. |
+| `crates/lns-init` | Static-musl PID-1 for the guest microVM. Mounts composefs/overlay then `fexecve`'s `lns-session-broker`. |
+| `crates/lns-session` | Wire-protocol types (postcard) for the host ↔ guest session channel. Shared by `lns-service` and `lns-session-broker`. |
+| `crates/lns-session-broker` | Static-musl guest-side session host. `lns-init` execs into it; it owns PTY allocation, per-session workload forks, and vsock framing. |
+| `crates/lns-supervisor` | Static-musl in-guest supervisor built on `lens-sandbox-core`. Embedded into `lns-service` and run inside the microVM; owns the agent process lifecycle, nftables network lockdown, privilege drop, and the vsock relay client. |
+| `crates/bump-kernel` | Operator tooling for managing the kernel pin (`crates/lns-service/kernels.toml`). |
+| `scripts/lns-install` | Installer shell script published to `get.lns.run`. |
+
+## Conventions
+
+- **Git**: Conventional commits (`feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `ci:`). No Co-Authored-By trailer. No "Generated with Claude Code" footer in PR descriptions.
+- **Comments**: A comment is a code smell, not a feature — comments rot, code keeps moving, and stale comments are worse than none. Default is zero. Before adding any comment, first try to make the code carry the meaning: rename the binding, split the function, encode the invariant in a type, replace a literal with a named constant. Only when no refactor can convey the WHY does a comment go in, and then it is **one sentence, single line, no paragraph**. If it doesn't fit one sentence, the code is wrong, not the comment. The only categorical exceptions are `// SAFETY: <why this unsafe is sound>` on every `unsafe` block (clippy enforces) and `// no-op: <one-line reason>` above intentionally-empty Cucumber step defs. No "what is this" doc comments anywhere — `///` on internal items follows the same one-sentence-max bar; `pub` items on cross-crate API surfaces (`lns-ipc`, `lns-session`, exported traits) may carry one-sentence contract docs where the signature alone can't. No section-divider banners (`// =====`, `// ─────`). No `# Arguments` / `# Returns` boilerplate. No step-by-step narration inside function bodies — if a body needs a story, extract named helpers.
+- **No prototype shortcuts**: avoid `unwrap()` outside tests, `unsafe` blocks without justification, suppressed lints, or papered-over errors. Fix things, don't paper over them.
+- **Logging**: always go through `crate::log` — never call `tracing::*!` macros directly. The five entry points are `log::error!`, `log::warn!`, `log::info!(verb, msg)`, `log::debug!`, and (re-exported on demand) `log::trace!`. error/warn/info render with cargo styling; debug/trace land on the developer trace stream. `log::TARGET` is the only target string our code emits.
+
+## Workflow
+
+1. Identify which layer the new behavior belongs to (see [Test layers](#test-layers)):
+   - User-visible behavior of a crate → **Layer 2** Gherkin (`crates/<prod>/tests/behaviours/*.feature` — mocks for cross-crate deps, no real I/O).
+   - Internal corner case / invariant not expressible as Gherkin → **Layer 3** (`#[cfg(test)] mod tests` inline; injected ports for FS / process / clock / network).
+   - End-to-end wiring confirmation across crates through real binaries → **Layer 1** (`crates/e2e-tests/`; not measured for coverage).
+2. Write the failing test in the right layer's location. For Layer 2, that's a `.feature` file plus a step definition in the crate's `tests/behaviours/steps/`. For Layer 3, a `#[test]` next to the module under test.
+3. Watch it fail.
+4. Implement the minimum production code to make it pass. If Layer 2 needs to mock a dep that doesn't have a `pub` trait surface yet, extract the seam first (see [Extracting library seams](#extracting-library-seams)).
+5. From the workspace root, run the full verification gate (below) before considering work done.
+
+## Verification gate
+
+The **local pre-push gate** is `make lint && make complexity && make coverage` — three targets defined in the top-level Makefile, run serially by `scripts/hooks/pre-push`. The **CI required suite** runs the same three as parallel jobs (with `CARGO_LOCKED=--locked` for `lint` / `test`) plus `make test`, `make e2e`, the kernel pin drift check, and a path-gated `check-release-build` (real cross-builds + codesign). The Makefile is the single source of truth for both.
+
+- `make lint` — `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. Also the gate's compile signal (clippy is a strict superset of `cargo check`).
+- `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity` (per-crate because workspace feature unification disagrees with per-crate runs). For genuinely-branchy functions, use `#[allow(clippy::cognitive_complexity)]` with a one-line reason.
+- `make coverage` — compiles and runs all tests **instrumented** in `target-cov/`, then enforces every file at 100% line coverage unless listed in `scripts/coverage-floor.sh`'s IGNORES table. Test failures surface here. See [Per-file coverage gate](#per-file-coverage-gate) below.
+
+`make install-hooks` wires the gate into pre-push. Bypass: `git push --no-verify`.
+
+Outside the gate: `make build` (shipping artifacts), `make test` (uninstrumented — coverage already runs the same tests instrumented), `make e2e` (real binaries — runs in CI's test job, manual locally). The live-microVM interactive-shell smoke test (`crates/lns-cli/tests/smoke/interactive-shell.exp`) is run manually via `expect -f` when touching `lns run -it` plumbing — no Makefile wrapper.
+
+## Test layers
+
+The codebase follows a three-layer test pyramid. The layers are distinct in **what** they prove, **where they live**, and **whether they count for coverage**.
+
+| Layer | What it proves | Location | Side effects | Counts for coverage? |
+|-------|----------------|----------|--------------|----------------------|
+| **1. E2E** | The system actually works end-to-end through real binaries and real I/O. | `crates/e2e-tests/` — a dedicated workspace member. Gherkin features live next to the production crates they describe (`crates/lns-cli/e2e/*.feature`, `crates/lns-service/e2e/*.feature`); the cucumber glue lives in `crates/e2e-tests/` and globs them in. | **Allowed.** Spawns real `lns` / `lns-service` subprocesses, writes real files, runs real daemons. | **No.** E2E confirms wiring; coverage is measured at the lower layers. |
+| **2. Behavioural unit (Gherkin)** | A crate's user-visible behavior, from the outside, with cross-crate dependencies mocked. | `crates/<prod>/tests/*.rs` (Rust integration-test convention) with `.feature` files under `crates/<prod>/tests/behaviours/`. Each production crate's behavioural tests can only see its own `pub` API. | **Forbidden.** No FS writes, no subprocesses, no real network, no real clock. Every cross-crate dep mocked through its `pub` trait surface. | **Yes.** This is the primary coverage-bearing layer — push as much behavior here as is feasible. |
+| **3. Technical unit** | Corner cases and internal invariants that don't fit a Gherkin scenario (parser edge cases, deterministic error paths, internal type invariants). | `#[cfg(test)] mod tests` blocks inline in `src/**`. Has access to `pub(crate)` items by design. | **Forbidden** — same rule as Layer 2. Mocks for cross-crate deps; injected ports for FS / network / process / clock. | **Yes.** |
+
+Two design implications fall out of this split:
+
+- **Each production crate exposes a stable `pub` interface (trait or type) that other crates depend on.** Layer 2 tests of one crate mock the public surface of the crates it talks to. This is dependency-inversion as a first-class architectural rule, not just a testing tactic.
+- **Layer 1 is the only place subprocess spawns / real daemons / real network are allowed.** When Layer 2 needs to assert "lns-cli correctly invokes the service to start a run", it does so through a mocked `ServiceClient` trait — not by `tokio::process::Command`-ing the real binary.
+
+The 2 ↔ 3 balance is intentionally weighted toward Layer 2: the more behavior we can pin via Gherkin scenarios against a public API, the better. Layer 3 fills the gaps that aren't expressible as user-facing behaviors (e.g. "if `tokio::fs::rename` fails partway through atomic install, no half-written file remains" — a property, not a behavior).
+
+> **Migration status (2026-05).** The pyramid is operational:
+>
+> - Layer 1 lives in `crates/e2e-tests/` and spawns the real `lns` / `lns-service` binaries against real Unix sockets and tempdir homes. Its profraw is excluded from the coverage gate.
+> - Layer 2 lives in `crates/lns-cli/tests/behaviours/` (in-process via `lns_cli::cli::Cli`) and `crates/lns-service/tests/behaviours/` (in-process via `lns_service::ipc::handle_request`). Cross-crate deps are mocked at the public trait boundary (`ServiceClient` in lns-cli today; Handler-style extraction for lns-service streaming dispatch remains follow-up work).
+> - Layer 3 exists as `#[cfg(test)] mod tests` blocks. Newer modules (kernel.rs, oci_layer_cache::install) use injected ports (`Fetcher`, `Fs`, `WritableFile`) with in-memory fakes; the still-tempfile-based modules are tracked in IGNORES under "needs ${X} port".
+>
+> Do not extend the cross-crate subprocess-spawning pattern. New behaviour goes in Layer 2 / Layer 3 with mocked cross-crate deps; only true end-to-end wiring confirmations belong in Layer 1.
+
+### Extracting library seams
+
+Extract a library entry point (a port / trait) when **either** of the following is true: (1) a Layer 2 test needs to assert internal state or mock a dependency the binary can't fake from outside, or (2) a module owns logic whose error paths or platform-specific branches can only be exercised by injecting a fake side-effect (filesystem, process runner, clock, network, FFI). Otherwise, don't extract — the cost of premature abstraction still applies. The litmus test for case (2): "is this an error path that real I/O can't deterministically trigger, or a branch that only fires under another OS / kernel version / network condition?" If yes, a small injected port + in-memory fake is justified.
+
+### Out of scope (any layer)
+
+Scenarios that require booting a real microVM (`lns run <image>`). They need Vz/KVM and (for OCI-image variants) network, which neither local `cargo test` nor regular CI has. When a dedicated runner with virt is provisioned, add them under `crates/e2e-tests/specs/microvm/` with a `@microvm` cucumber tag and filter in/out via `--tags`. Until then, microVM behavior is covered by Layer 3 unit tests in `src/vm/`.
+
+### Feature file conventions
+
+- One feature per file; one concern per feature.
+- Keep `help` and `version` (and any other distinct behaviors) in separate features.
+- Scenarios stay focused — each scenario is one user story.
+- Layer 2 features live under `crates/<prod>/tests/behaviours/`; Layer 1 features live under `crates/<prod>/e2e/` and are picked up by the `crates/e2e-tests/` harness.
+- Adding a new `.feature` to an existing layer doesn't require a new test bin — the layer's cucumber harness recursively globs its features dir. If a step phrasing doesn't exist yet, add it to the layer's `steps/` module alongside the existing ones.
+
+## Commands
+
+Run from the workspace root. For crate-scoped iteration, use cargo directly: `cd crates/foo && cargo test` (or `cargo test -p foo` from anywhere).
+
+```
+make dev             cargo build -p lns-cli -p lns-service (debug, skips cross-builds — inner loop)
+make build           build + macOS-codesign + copy bin/lns and bin/lns-service (shipping artifacts)
+make build-lns       just bin/lns
+make build-lns-service  just bin/lns-service
+make lint            cargo fmt --all -- --check + cargo clippy --workspace --all-targets -- -D warnings
+make test            cargo test --workspace --exclude e2e-tests --all-targets
+make complexity      per-crate cargo clippy -- -D clippy::cognitive_complexity (feature-unification)
+make fmt             cargo fmt --all
+make coverage          full workspace coverage gate (all crates, 100% floor)
+make coverage-affected coverage gate narrowed to crates touched since origin/main
+make coverage-lcov     re-emit the last coverage run as target/llvm-cov/lcov.info (no rerun)
+make e2e             Layer 1 cucumber harness against real lns + lns-service binaries
+make clean           rm -rf bin/ target/ target-cov/
+
+# CI invokes the same gate targets with strictness toggled on:
+CARGO_LOCKED=--locked make lint
+CARGO_LOCKED=--locked make test
+```
+
+Adding a new crate that needs the per-crate `complexity` gate step: add it to `GATE_CRATES` in the root Makefile. If it also produces a shipping artifact, add a `build-<crate>` recipe and wire it into `build`.
+
+## Toolchain
+
+Rust toolchain is pinned via `rust-toolchain.toml` (currently `1.95.0`). One-time setup:
+
+```
+cargo install cargo-llvm-cov   # for `make coverage` / `make coverage-lcov`
+```
+
+`cargo-llvm-cov` measures **Layer 2 + Layer 3 only** (see [Test layers](#test-layers)). It wraps `cargo` with LLVM source-based instrumentation. Layer 1 (E2E) tests are deliberately excluded from coverage scoring — their value is wiring confidence, not line attribution. Vendored upstream code (`composefs/vendor/`), the build script, and the thin production-wiring adapters (`kernel/real.rs`, `kernel/traits.rs`, `service/real.rs`) all flow through the same IGNORES table in `scripts/coverage-floor.sh` — one mechanism, one place to look.
+
+The Layer 1 cucumber crate (`crates/e2e-tests`) is excluded from `cargo test --workspace --exclude e2e-tests` in `coverage-data`, so its subprocess spawns do not contribute to any crate's coverage data — `make e2e` runs it separately for wiring confirmation only.
+
+### Per-file coverage gate
+
+The gate decomposes into two layers:
+
+- `make coverage-data` (workspace one-shot) builds the AST-stripped `lcov.info` from `cargo test --workspace --exclude e2e-tests --all-targets`. The single-pass approach is a deliberate simplification — now that Layer 2 is in-process and Layer 1 is excluded entirely, a per-crate `cargo llvm-cov test -p <crate>` rotation would produce equivalent data; the workspace pass keeps the Makefile small.
+- `make coverage` runs `coverage-data` and then iterates every `crates/*/` directory, invoking `scripts/coverage-floor.sh <lcov> <crate-prefix>/` once per crate. Each crate reports its own OK/SKIP/FAIL block. The lcov is shared; the per-file gate is per-crate.
+
+For crate-scoped coverage inspection during development, run `scripts/coverage-floor.sh target-cov/llvm-cov/lcov.info crates/<crate>/` directly (assumes `make coverage-data` has already built the lcov).
+
+**Every file in the (post-strip) lcov must be at 100% UNLESS it's listed in IGNORES**. The IGNORES table lives at the top of `scripts/coverage-floor.sh`. Each entry is `<path-suffix>  <reason>`; the reason is mandatory — reviewers should reject ignore entries without one. **The table is the tracker.** There's no parallel Jira/issue list; the entry's reason names the design move that gets the file to 100%, and the entry leaving the table is the completion signal. Reasons fall in three buckets:
+
+1. **Platform-only** — the file only compiles or only meaningfully runs on a target the dev/CI host can't be (Linux microVM, macOS Virtualization.framework, etc.). Permanent unless the host story changes.
+2. **Top-level binary main** — the `lns` / `lns-service` bootstraps are intentionally exercised only by Layer 1 (E2E) tests; Layer 2/3 don't drive them. Gate the rest of the crate at 100%; accept the bootstrap as covered by E2E (which is not measured by design).
+3. **Pending refactor** — file needs port extraction or a similar design change before it can be deterministically tested. The reason names the port (Fs, Process, Signal, …); drop the entry when the file reaches 100%.
+
+Rules:
+
+- **No per-line "exempt this" escape hatch.** See [Reaching 100%](#reaching-100) for the design moves that make every line testable.
+- **Ratchet upward only.** A file leaves the IGNORES list when it reaches 100% and stays out. Re-adding it needs a justification in the PR description.
+- **New source files are gated automatically.** When `crates/foo/src/bar.rs` shows up in the lcov, the gate enforces 100% on it. Add to IGNORES with a reason if it's intentionally exempt — but that should be the rare case.
+- **New side-effect-isolated modules go in at 100% from day one.** A module that uses injected ports (filesystem, process runner, clock, network) with in-memory fakes has every error path reachable from a unit test, so it never needs IGNORES.
+
+The coverage gate is wired into `pre-push` via the in-tree hook at `scripts/hooks/pre-push`. One-time setup per checkout:
+
+```
+make install-hooks
+```
+
+That points `core.hooksPath` at the in-tree hooks dir so `make verify` + `make coverage-affected` run before every push. The hook refreshes `origin/main` before computing the affected set. Override to full workspace: `LNS_PREPUSH_FULL_COVERAGE=1 git push`. Bypass entirely (rare, intentional): `git push --no-verify`.
+
+### Affected-crates coverage (CI + pre-push)
+
+`scripts/affected-crates.sh <base-ref>` determines which workspace crates need coverage based on the diff between `HEAD` and the merge-base of the given ref. It emits one of three outcomes:
+
+- **`__FULL__`** — run full workspace coverage. Fires when the diff touches anything that could change coverage semantics globally: `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `Makefile`, `crates/*/Makefile`, `scripts/coverage-floor.sh`, `scripts/affected-crates.sh`, `crates/coverage-strip-ast/*`, `crates/e2e-tests/*`. Also fires as a safe fallback when the base ref is unresolvable or `jq` is missing.
+- **`__NONE__`** — skip coverage entirely (exit green). Fires when every changed path is docs, CI config, editor tooling, or JS linting infrastructure (`.md`, `docs/`, `.github/`, `package.json`, `.vscode/`, etc.).
+- **Crate list** — newline-separated bare crate names (e.g. `lns-cli`). The script computes the reverse-dependency closure of directly-touched crates using `cargo metadata` path-dep edges, so changing `lns-ipc` also gates `lns-cli` and `lns-service`. Infra crates (`e2e-tests`, `coverage-strip-ast`) are excluded from the list — they trigger `__FULL__` on direct touch instead.
+
+The root `Makefile` exposes `make coverage-affected` (defaults `BASE_REF=origin/main`), which dispatches on the script's output: skips on `__NONE__`, delegates to `make coverage` on `__FULL__`, or passes `COVERAGE_CRATES="<list>"` to `make coverage` to narrow both the test run and the per-file gate to just the affected crates.
+
+**Local pre-push** runs `make coverage-affected` by default. This keeps the feedback loop fast on branches that only touch one or two crates. Two escape hatches:
+
+- `LNS_PREPUSH_FULL_COVERAGE=1 git push` — force full workspace coverage (useful before a release tag or to reproduce a CI `push: main` run locally).
+- `git push --no-verify` — skip the hook entirely.
+
+**CI** uses the same script on `pull_request` events so local and CI stay in sync — a green pre-push predicts a green PR check. On `push: main` (post-merge), CI runs full workspace coverage unconditionally to maintain the authoritative baseline.
+
+### Reaching 100%
+
+Coverage is a downstream signal of test quality, not a target. Every test must justify a piece of production code — TDD-style. Each unit test's name and body should answer "what behavior am I pinning, and why does it matter?" If the only answer is "covers line N", either the production code shouldn't exist, or the behavior belongs in a different layer.
+
+With that framing: a line that's "uncoverable" means the surrounding code is under-designed for testability, but the test that ends up covering it still has to pin a real behavior — never just touch the line. Layer 2 (behavioural Gherkin) carries the "why" for user-visible behavior; Layer 3 (technical units) fills the gaps Layer 2 can't isolate (deterministic error paths, parser edge cases, internal invariants, etc.). The common "uncoverable" excuses and the actual fix:
+
+- **Tracing macros (`log::debug!`, `log::warn!`, etc.).** Both arms of the macro's `if subscriber_enabled { dispatch } else { drop }` are reachable. The pinned behavior is "this codepath emits the right structured event with the right fields" — assert on captured events, not just that the line ran. Use `tracing::subscriber::with_default(enabled_layer, || ...)` to install a capturing subscriber for the test; run a sibling with a disabled layer when both arms are real production states (debug-off shipping config and debug-on developer config).
+- **Platform-only branches under `#[cfg(target_os = ...)]`.** Factor the platform call behind a port and ship a host fake. The `#[cfg]` block becomes a one-line delegation, and the pinned behavior is "the orchestration around the platform call is correct" — tested via the fake — rather than the syscall itself.
+- **Production wiring adapters** (e.g. `pub fn ensure() { Resolver::production().resolve() }`). Construction has no I/O, so `Resolver::production()` gets a pure-assertion test that pins "the wired-up defaults match the manifest" (cache path, CDN base, pinned sha, etc.). The adapter itself gets a `serial_test`-serialized test that pins "the override env var short-circuits before any network" using a benign `LNS_KERNEL_PATH=<tempfile>`.
+- **Network I/O.** Inject a `Fetcher` port + `RealFetcher` + fake. The pinned behaviors are the real failure modes — "registry returns 500 → bail with context", "received bytes hash to wrong sha → bail before atomic_write so a tampered artifact never lands" — not "we called fetch once".
+- **Filesystem error paths.** Inject an `Fs` port. Tempfile-based tests are tolerated for legacy modules, but new code uses a port so each test pins a real failure mode: "mkdir denied surfaces a useful error", "fsync failure aborts the install and leaves no half-written file", "rename collision is the cached-already case and is benign".
+- **Defensive `unreachable!()` / `panic!()`.** If the branch is truly impossible, prove it with the type system and delete the panic. If it's "shouldn't happen, but…", construct the pathological input and pin the assertion message — that's a real safety property, not coverage padding.
+
+**LLVM source-mapping artifacts (doc comments attached to items, trait/impl block headers, blank lines between items, multi-line macro `);` closures, closer-only lines that include `?` such as `)?;` from `fn(\n    arg,\n)?;`) are not a coverage hole.** `make coverage` runs `coverage-strip-ast` (`crates/coverage-strip-ast`), an `syn`-based post-processor that walks the AST of every `SF:` source in the lcov and drops `DA:` entries on lines outside any executable position (function signatures, statement starts, expression spans, function-body braces). What llvm-cov over-includes, the strip step removes — automatically and uniformly, no per-line annotations.
+
+A consequence worth being explicit about: a closer-only line whose only non-whitespace characters are `}`, `)`, `]`, `;`, `,`, `?` (or whitespace) is treated as non-executable, including the `?` case. This means the `?` branch BB that LLVM source-maps to a multi-line call's closing `)?;` line is **not** measured at that line. The error-path coverage signal for these sites lives in dedicated tests of the surrounding `Result`-returning call (e.g. "fsync failure aborts the install and leaves no half-written file"), not in whether the specific `?` short-circuited. If you're writing new code that depends on a specific `?` branch being measured, reshape the call so `?` lands on the same line as the expression (single-line form, or `let x = call(...).context("…")?;`) — that line is executable and the DA hit counts.
+
+The fallback markers (`// coverage:ignore-line`, `coverage:ignore-start`/`-end`, and the `LCOV_EXCL_*` aliases) are still honored by `coverage-strip-ast` for backward compatibility — they are **not** a sanctioned way to land new code. A PR that adds a new marker needs a different design instead. Existing markers in the tree are tech debt to remove as the surrounding modules are refactored to the port pattern.

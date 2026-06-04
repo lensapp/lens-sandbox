@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
+  "include-component-in-tag": true,
+  "plugins": ["cargo-workspace"],
+  "exclude-paths": [
+    ".github",
+    ".husky",
+    ".vscode",
+    "docs"
+  ],
+  "packages": {
+    "crates/lns-cli": {
+      "release-type": "rust",
+      "component": "lns",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true
+    },
+    "scripts/lns-install": {
+      "release-type": "simple",
+      "component": "lns-install",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "lns-install.sh"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lns-cli",
+    "crates/lns-init",
+    "crates/lns-ipc",
+    "crates/lns-policy",
+    "crates/lns-service",
+    "crates/lns-session",
+    "crates/lns-session-broker",
+    "crates/lns-supervisor",
+    "crates/bump-kernel",
+    "crates/coverage-strip-ast",
+    "crates/e2e-tests",
+]
+# Workspace members NOT in default-members are opt-in:
+#   - bump-kernel       : operator tooling for kernel pin bumps
+#   - coverage-strip-ast: AST-aware lcov post-processor (run by make coverage)
+#   - e2e-tests         : Layer 1 (E2E) cucumber harness; spawns real
+#                         binaries with side effects — excluded from
+#                         the coverage gate. Run via `make e2e`.
+#   - lns-supervisor    : in-guest supervisor binary built on
+#                         lens-sandbox-core (git-pinned). Cross-built to
+#                         linux-musl for the guest; excluded from
+#                         default-members so host `cargo build` doesn't
+#                         pull the full proxy/MITM/rustls stack.
+default-members = [
+    "crates/lns-cli",
+    "crates/lns-init",
+    "crates/lns-ipc",
+    "crates/lns-policy",
+    "crates/lns-service",
+    "crates/lns-session",
+    "crates/lns-session-broker",
+]
+
+[profile.release]
+lto = true
+strip = true
+
+# Test builds drop full DWARF in favour of `line-tables-only`. Panics
+# still show file:line; `cargo test` gets noticeably faster — the
+# linker has far less debug info to chew through.
+[profile.test]
+debug = "line-tables-only"
+
+# `release-init` profile — for lns-init's static-musl PID-1 binary.
+# Inherits release (lto, strip) and adds size-killing options that
+# require a workspace-wide unification rule (`panic = "abort"` drops
+# the unwinder; cargo can't mix unwind/abort in one workspace build,
+# so it lives on the profile, not as a per-package override).
+#
+# Build with:
+#   cargo build -p lns-init --profile release-init \
+#     --target aarch64-unknown-linux-musl
+#
+# Target is ~150 KB stripped. With the workspace-default release profile
+# the binary lands around 400 KB; this profile takes it down further.
+[profile.release-init]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,168 @@
+[package]
+name = "lns-service"
+version = "0.0.0"
+edition = "2024"
+description = "Lens Sandbox background service — tray-resident process exposing local IPC and orchestrating microVM runs"
+license = "Apache-2.0"
+publish = false
+
+# Binary + library split. The library hosts the orchestration modules
+# (ipc, run_registry, kernel, oci_layer_cache, …) so Layer 2 cucumber
+# tests in tests/behaviours/ can drive them in-process. The binary is
+# a thin shim that wires the boot sequence and hands off to the tray
+# event loop.
+[lib]
+name = "lns_service"
+path = "src/lib.rs"
+# The only ```rust``` fences under this crate are in the vendored
+# composefs upstream (composefs/vendor/{generic_tree,fsverity/hashvalue}.rs)
+# and reference an external `composefs::` crate we don't depend on.
+# `cargo test --doc` therefore can't compile them. Everything we own
+# uses ```text``` fences for layout diagrams. Skip doctests at the
+# lib-target level so `cargo test --workspace` is clean. If we later
+# add doctests of our own and want them run, drop this and either
+# fix the vendored doctests upstream or gate the vendor module
+# behind `#[cfg(not(doctest))]`.
+doctest = false
+
+[[bin]]
+name = "lns-service"
+path = "src/main.rs"
+
+[dependencies]
+lns-ipc     = { path = "../lns-ipc" }
+lns-policy  = { path = "../lns-policy" }
+lns-session = { path = "../lns-session" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "sync", "time"] }
+# eframe / egui drive the main-thread event loop. The hidden main viewport
+# becomes the always-on-top approval window when a pending prompt arrives;
+# `tray-icon` runs alongside via its own event channel.
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.34"
+winit = "0.30"
+tray-icon = "0.24"
+png = "0.17"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+# Orchestration deps moved from lns-cli (caches / VM / ingest / supervisor / relay).
+oci-client = "0.16"
+oci-spec   = "0.9"
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+futures-util = "0.3"
+flate2     = "1"
+tar        = "0.4"
+reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2       = "0.10"
+rand       = "0.8"
+dirs       = "5"
+uuid       = { version = "1", features = ["v4"] }
+hex        = "0.4"
+thiserror  = "2"
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+zerocopy   = { version = "0.8", features = ["derive"] }
+libc       = "0.2"
+tracing            = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
+anstyle = "1"
+
+# Approval-flow deps. serde_yaml: lns-policy.yaml load/save. notify:
+# filesystem watcher for hot-swap on manual policy edits. The
+# approval UI itself is rendered by the eframe/egui setup above —
+# no HTTP stack is involved.
+serde_yaml      = "0.9"
+notify          = "6"
+
+# Apple Virtualization.framework bindings — macOS only. These pull in just
+# the Vz/Foundation symbols we use; the linkage to the underlying frameworks
+# is done by the framework crates themselves (no build.rs required).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2                 = "0.6"
+objc2-foundation      = { version = "0.3", features = ["NSError", "NSString", "NSURL", "NSFileHandle", "NSObject"] }
+objc2-virtualization  = { version = "0.3", features = [
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZSerialPortConfiguration",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZEntropyDeviceConfiguration",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNetworkDeviceAttachment",
+    "VZNATNetworkDeviceAttachment",
+    "VZMACAddress",
+    "VZPlatformConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZSingleDirectoryShare",
+    "VZSharedDirectory",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketListener",
+    "VZStorageDeviceConfiguration",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "block2",
+] }
+block2                = "0.6"
+dispatch2             = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# `#[serial]` for tests that mutate process-wide env state. Without
+# serialization, concurrent set_var / remove_var races make env-driven
+# tests flaky under cargo test's default multi-thread runner.
+serial_test = "3"
+# Capturing tracing subscriber for tests that pin log events
+# (cache-recovery warnings, fetch-in-progress info, etc).
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
+# Local HTTP server for the kernel-resolver end-to-end test that
+# exercises RealFetcher + the ensure_with production-wiring fall-through
+# without hitting the real CDN. Strict-mode mock matches one
+# specific URL and rejects unexpected requests so a regression
+# in URL construction surfaces immediately.
+wiremock = "0.6"
+# Cucumber harness for the Layer 2 behaviours suite under tests/behaviours/.
+cucumber = "0.23"
+# Scriptable AsyncRead/AsyncWrite mock for io error-path tests (diag_console tee).
+tokio-test = "0.4"
+# Used by tests/no_dead_steps.rs to compile each step attribute's
+# pattern and assert it matches at least one .feature phrase. Pulling
+# `regex` in as a dev-dep is cheap because cucumber already depends on
+# it transitively.
+regex = "1"
+
+# Layer 2 (behavioural unit) cucumber harness. Drives lns_service
+# library modules in-process — no subprocess spawns, no real FS, no
+# real sockets. Features live alongside the harness in
+# tests/behaviours/*.feature. harness = false lets cucumber's main()
+# run; libtest would otherwise hijack it and report 0 tests.
+[[test]]
+name    = "behaviours"
+harness = false
+
+# build.rs parses crates/lns-service/kernels.toml to derive
+# KERNEL_VERSION / KERNEL_SHA256 at compile time.
+[build-dependencies]
+serde      = { version = "1", features = ["derive"] }
+toml       = "0.8"
+
+[lints.clippy]
+cognitive_complexity = { level = "deny", priority = 1 }
+
+# `unsafe_code` is needed for the Vz Obj-C glue, a couple of POSIX
+# integration points (setsid, signal, fcntl), and FromRawFd. Each
+# unsafe block carries an inline justification.
+[lints.rust]
+unsafe_code = "allow"

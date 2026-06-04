@@ -1,0 +1,976 @@
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use lns_ipc::{
+    LogLevel, Request, Response, SignalKind, WireFrame, decode_frame, decode_wire_frame_from_bytes,
+    encode_frame, read_frame_bytes_async,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+use crate::chord::{DetachChordDetector, FeedAction};
+use crate::cli::{ExecArgs, KillArgs, RunArgs};
+use lns_ipc::{ExecImageArgs, RunImageArgs};
+
+use super::{client::ServiceClient, real, require_running_check};
+use crate::run::summary::print_run_summary;
+
+pub async fn dispatch(cmd: &crate::cli::ServiceCommand) -> Result<()> {
+    let client = real_client()?;
+    match cmd {
+        crate::cli::ServiceCommand::Start => super::cmd_start(&client).await,
+        crate::cli::ServiceCommand::Stop => super::cmd_stop(&client).await,
+        crate::cli::ServiceCommand::Status => super::cmd_status(&client).await,
+    }
+}
+
+pub async fn require_running() {
+    let client = match real_client() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::log::error!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let alive = client.ping().await;
+    if let Err(msg) = require_running_check(alive) {
+        crate::log::error!("{msg}");
+        std::process::exit(1);
+    }
+}
+fn real_client() -> Result<real::RealServiceClient> {
+    Ok(real::RealServiceClient::new(
+        super::socket_path()?,
+        super::find_service_binary(),
+    ))
+}
+
+pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let resolved_policy = print_run_summary(&args, &cwd, &mut std::io::stderr())?;
+
+    let client = real_client()?;
+    let socket = client.socket();
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+
+    let detached = args.detach;
+    let tty = !detached && args.tty && crate::raw_mode::stdin_is_tty();
+    let stdin = !detached && args.interactive;
+    let initial_winsize = if tty {
+        crate::raw_mode::host_winsize()
+    } else {
+        None
+    };
+    let detach_chord = args.detach_keys.0.clone();
+
+    let request = Request::RunImage(RunImageArgs {
+        image: args.image,
+        cpus: args.cpus,
+        mem: args.mem,
+        policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
+        sandbox_user: args.sandbox_user,
+        sandbox_uid: args.sandbox_uid,
+        cmd: args.cmd,
+        env: args.env,
+        debug,
+        tty,
+        stdin,
+        initial_winsize,
+        detached,
+        published_ports: args.publish,
+        volumes: args.volumes,
+    });
+    let frame = encode_frame(&request).context("encoding RunImage request")?;
+    stream
+        .write_all(&frame)
+        .await
+        .context("writing RunImage request")?;
+
+    let bytes = read_frame_bytes_async(&mut stream)
+        .await
+        .context("reading RunStarted frame")?;
+    let run_id = match decode_frame(&mut &bytes[..]).context("decoding RunStarted")? {
+        Response::RunStarted { run_id } => run_id,
+        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        other => anyhow::bail!("expected RunStarted, got {other:?}"),
+    };
+
+    let outcome = drive_pre_phase(&mut stream, &mut std::io::stderr()).await?;
+    if let PrePhaseOutcome::EarlyExit(code) = outcome {
+        return Ok(code);
+    }
+
+    crate::log::info!("Started", "run #{run_id}");
+
+    if detached {
+        println!("run #{run_id}");
+        return Ok(0);
+    }
+
+    drive_attached_session(
+        stream,
+        Some(socket.to_path_buf()),
+        run_id,
+        tty,
+        detach_chord,
+    )
+    .await
+}
+
+pub async fn exec_image(args: ExecArgs) -> Result<i32> {
+    if args.cmd.is_empty() {
+        anyhow::bail!("lns exec requires a command after `--`");
+    }
+
+    let socket = super::socket_path()?;
+    let mut stream = UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+
+    let target_run_id = args.run_id;
+    let tty = args.tty && crate::raw_mode::stdin_is_tty();
+    let stdin = args.interactive;
+    let initial_winsize = if tty {
+        crate::raw_mode::host_winsize()
+    } else {
+        None
+    };
+    let detach_chord = args.detach_keys.0.clone();
+
+    let request = Request::ExecImage(ExecImageArgs {
+        run_id: target_run_id,
+        argv: args.cmd,
+        env: Vec::new(),
+        tty,
+        stdin,
+        initial_winsize,
+    });
+    let frame = encode_frame(&request).context("encoding ExecImage request")?;
+    stream
+        .write_all(&frame)
+        .await
+        .context("writing ExecImage request")?;
+
+    let bytes = read_frame_bytes_async(&mut stream)
+        .await
+        .context("reading RunStarted frame")?;
+    let run_id = match decode_frame(&mut &bytes[..]).context("decoding RunStarted")? {
+        Response::RunStarted { run_id } => run_id,
+        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        other => anyhow::bail!("expected RunStarted, got {other:?}"),
+    };
+    crate::log::debug!(run_id = run_id, "exec session opened");
+
+    drive_attached_session(stream, Some(socket), run_id, tty, detach_chord).await
+}
+
+pub async fn kill(args: KillArgs) -> Result<()> {
+    let signal = super::parse_signal_name(&args.signal)?;
+    let socket = super::socket_path()?;
+    let response = real::send_request(
+        &socket,
+        &Request::Kill {
+            run_id: args.run_id,
+            signal,
+        },
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
+    match response {
+        Response::Acknowledged => {
+            println!("killed run #{}", args.run_id);
+            Ok(())
+        }
+        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+pub async fn ls() -> Result<()> {
+    let socket = super::socket_path()?;
+    let response = real::send_request(&socket, &Request::ListRuns)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
+    let mut rows = match response {
+        Response::RunList { runs } => runs,
+        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+    };
+    rows.sort_by(|a, b| b.started.cmp(&a.started));
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    super::render_ls_table(&mut out, &rows)?;
+    Ok(())
+}
+
+pub(crate) async fn drive_attached_session<S>(
+    mut stream: S,
+    aux_socket: Option<PathBuf>,
+    run_id: u32,
+    tty: bool,
+    detach_chord: Vec<u8>,
+) -> Result<i32>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let _raw_guard = if tty {
+        crate::raw_mode::RawModeGuard::enable_if_tty()
+    } else {
+        None
+    };
+
+    let (early_exit_tx, mut early_exit_rx) = mpsc::unbounded_channel::<()>();
+
+    let (cancel_task, winsize_task, stdin_task) = match aux_socket {
+        Some(socket) => {
+            let cancel_client = real_client()?;
+            let cancel = tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                cancel_client.cancel_run(run_id).await;
+            });
+            let winsize = tty.then(|| {
+                let s = socket.clone();
+                tokio::spawn(async move { run_winsize_forwarder(s, run_id).await })
+            });
+            let pump_chord = detach_chord;
+            let pump_early_exit = early_exit_tx.clone();
+            let stdin = tokio::spawn(async move {
+                let r = run_stdin_pump(socket, run_id, pump_chord).await;
+                if matches!(&r, Ok(true)) {
+                    let _ = pump_early_exit.send(());
+                }
+                r
+            });
+            (Some(cancel), winsize, Some(stdin))
+        }
+        None => (None, None, None),
+    };
+
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+
+    let exit_code = loop {
+        tokio::select! {
+            biased;
+            _ = early_exit_rx.recv() => {
+                break drain_after_chord(&mut stream, &mut stdout, &mut stderr).await;
+            }
+            res = read_frame_bytes_async(&mut stream) => {
+                let bytes = res.context("reading run-response frame")?;
+                let wire = decode_wire_frame_from_bytes(&bytes).context("decoding run-response")?;
+                match wire {
+                    WireFrame::Stdout(b) => {
+                        stdout.write_all(&b).await?;
+                        stdout.flush().await.ok();
+                    }
+                    WireFrame::Stderr(b) => {
+                        stderr.write_all(&b).await?;
+                        stderr.flush().await.ok();
+                    }
+                    WireFrame::Json(Response::RunLog { level, verb, message }) => {
+                        render_run_log(level, verb.as_deref(), &message);
+                    }
+                    WireFrame::Json(Response::RunExit { code }) => break code,
+                    WireFrame::Json(Response::Error { message }) => {
+                        anyhow::bail!("daemon error: {message}")
+                    }
+                    other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+                }
+            }
+        }
+    };
+
+    if let Some(t) = stdin_task {
+        t.abort();
+    }
+    if let Some(t) = winsize_task {
+        t.abort();
+    }
+    if let Some(t) = cancel_task {
+        t.abort();
+    }
+    Ok(exit_code)
+}
+
+async fn drain_after_chord<S>(
+    stream: &mut S,
+    stdout: &mut tokio::io::Stdout,
+    stderr: &mut tokio::io::Stderr,
+) -> i32
+where
+    S: AsyncReadExt + Unpin,
+{
+    match timeout(
+        Duration::from_secs(5),
+        drain_to_exit(stream, stdout, stderr),
+    )
+    .await
+    {
+        Ok(Ok(code)) => code,
+        Ok(Err(e)) => {
+            crate::log::debug!("post-chord drain error: {e}");
+            0
+        }
+        Err(_) => {
+            crate::log::debug!("post-chord drain timed out; returning 0");
+            0
+        }
+    }
+}
+
+async fn drain_to_exit<S>(
+    stream: &mut S,
+    stdout: &mut tokio::io::Stdout,
+    stderr: &mut tokio::io::Stderr,
+) -> Result<i32>
+where
+    S: AsyncReadExt + Unpin,
+{
+    loop {
+        let bytes = match read_frame_bytes_async(stream).await {
+            Ok(b) => b,
+            Err(_) => return Ok(0),
+        };
+        let wire = decode_wire_frame_from_bytes(&bytes).context("decoding drain-frame")?;
+        match wire {
+            WireFrame::Stdout(b) => {
+                let _ = stdout.write_all(&b).await;
+            }
+            WireFrame::Stderr(b) => {
+                let _ = stderr.write_all(&b).await;
+            }
+            WireFrame::Json(Response::RunLog {
+                level,
+                verb,
+                message,
+            }) => {
+                render_run_log(level, verb.as_deref(), &message);
+            }
+            WireFrame::Json(Response::RunExit { code }) => return Ok(code),
+            WireFrame::Json(Response::Error { message }) => {
+                crate::log::debug!("drain error from daemon: {message}");
+                return Ok(0);
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn run_stdin_pump(socket: PathBuf, run_id: u32, detach_chord: Vec<u8>) -> Result<bool> {
+    let mut input = tokio::io::stdin();
+    let mut buf = [0u8; 4096];
+    let mut detector = (!detach_chord.is_empty()).then(|| DetachChordDetector::new(detach_chord));
+    loop {
+        let n = match input.read(&mut buf).await {
+            Ok(0) => {
+                if let Some(d) = detector.as_mut() {
+                    let held = d.drain_for_eof();
+                    if !held.is_empty() {
+                        let _ = send_one_shot(
+                            &socket,
+                            &Request::RunStdin {
+                                run_id,
+                                bytes: held,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                return Ok(false);
+            }
+            Ok(n) => n,
+            Err(e) => {
+                crate::log::debug!("stdin read error: {e}");
+                return Err(e.into());
+            }
+        };
+        let chunk = &buf[..n];
+        match detector.as_mut() {
+            Some(d) => {
+                if !pump_with_detector(&socket, run_id, chunk, d).await? {
+                    return Ok(true);
+                }
+            }
+            None => {
+                send_one_shot(
+                    &socket,
+                    &Request::RunStdin {
+                        run_id,
+                        bytes: chunk.to_vec(),
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+async fn pump_with_detector(
+    socket: &Path,
+    run_id: u32,
+    bytes: &[u8],
+    detector: &mut DetachChordDetector,
+) -> Result<bool> {
+    let mut pending: Vec<u8> = Vec::new();
+    for &b in bytes {
+        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending);
+        for request in &requests {
+            send_one_shot(socket, request).await?;
+        }
+        if matches!(control, PumpControl::Detach) {
+            return Ok(false);
+        }
+    }
+    if let Some(request) = drain_pending(run_id, &mut pending) {
+        send_one_shot(socket, &request).await?;
+    }
+    Ok(true)
+}
+
+enum PumpControl {
+    Continue,
+    Detach,
+}
+
+fn drain_pending(run_id: u32, pending: &mut Vec<u8>) -> Option<Request> {
+    if pending.is_empty() {
+        None
+    } else {
+        Some(Request::RunStdin {
+            run_id,
+            bytes: std::mem::take(pending),
+        })
+    }
+}
+
+fn plan_feed(
+    action: FeedAction,
+    run_id: u32,
+    pending: &mut Vec<u8>,
+) -> (Vec<Request>, PumpControl) {
+    match action {
+        FeedAction::Forward(byte) => {
+            pending.push(byte);
+            (Vec::new(), PumpControl::Continue)
+        }
+        FeedAction::Hold => (
+            drain_pending(run_id, pending).into_iter().collect(),
+            PumpControl::Continue,
+        ),
+        FeedAction::Flush(held) => {
+            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
+            requests.push(Request::RunStdin {
+                run_id,
+                bytes: held,
+            });
+            (requests, PumpControl::Continue)
+        }
+        FeedAction::FlushAndForward(held, current) => {
+            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
+            let mut combined = held;
+            combined.push(current);
+            requests.push(Request::RunStdin {
+                run_id,
+                bytes: combined,
+            });
+            (requests, PumpControl::Continue)
+        }
+        FeedAction::Trigger => {
+            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
+            requests.push(Request::RunSignal {
+                run_id,
+                signal: SignalKind::Hup,
+            });
+            (requests, PumpControl::Detach)
+        }
+    }
+}
+
+async fn run_winsize_forwarder(socket: PathBuf, run_id: u32) -> Result<()> {
+    use tokio::signal::unix::{SignalKind as TokioSig, signal};
+    let mut sigwinch = match signal(TokioSig::window_change()) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log::warn!("SIGWINCH watcher not installed: {e}");
+            return Ok(());
+        }
+    };
+    while sigwinch.recv().await.is_some() {
+        let Some((rows, cols)) = crate::raw_mode::host_winsize() else {
+            continue;
+        };
+        if send_one_shot(&socket, &Request::RunResize { run_id, rows, cols })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+async fn send_one_shot(socket: &Path, request: &Request) -> Result<()> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .with_context(|| format!("connecting to {} for one-shot", socket.display()))?;
+    let frame = encode_frame(request).context("encoding one-shot request")?;
+    stream
+        .write_all(&frame)
+        .await
+        .context("writing one-shot request")?;
+    let _ = read_frame_bytes_async(&mut stream).await;
+    Ok(())
+}
+
+#[allow(clippy::cognitive_complexity)] // each log-level arm expands the tracing macro, inflating the score past 25
+fn render_run_log(level: LogLevel, verb: Option<&str>, message: &str) {
+    match level {
+        LogLevel::Error => crate::log::error!("{message}"),
+        LogLevel::Warn => crate::log::warn!("{message}"),
+        LogLevel::Info => crate::log::info!(verb.unwrap_or(""), "{message}"),
+        LogLevel::Debug => crate::log::debug!("{message}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrePhaseOutcome {
+    SessionReady,
+    EarlyExit(i32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrePhaseStep {
+    Continue,
+    SessionReady,
+    EarlyExit(i32),
+}
+
+pub async fn pre_phase_step<S, W>(stream: &mut S, writer: &mut W) -> Result<PrePhaseStep>
+where
+    S: AsyncReadExt + Unpin,
+    W: std::io::Write,
+{
+    let bytes = read_frame_bytes_async(stream)
+        .await
+        .context("reading pre-phase frame")?;
+    let wire = decode_wire_frame_from_bytes(&bytes).context("decoding pre-phase frame")?;
+    match wire {
+        WireFrame::Json(Response::RunLog {
+            level,
+            verb,
+            message,
+        }) => {
+            render_pre_phase_log(level, verb.as_deref(), &message, writer)?;
+            if verb.as_deref() == Some("SessionReady") {
+                Ok(PrePhaseStep::SessionReady)
+            } else {
+                Ok(PrePhaseStep::Continue)
+            }
+        }
+        WireFrame::Json(Response::RunExit { code }) => Ok(PrePhaseStep::EarlyExit(code)),
+        WireFrame::Json(Response::Error { message }) => {
+            anyhow::bail!("daemon error: {message}")
+        }
+        other => anyhow::bail!("unexpected frame before SessionReady: {other:?}"),
+    }
+}
+
+pub async fn drive_pre_phase<S, W>(stream: &mut S, writer: &mut W) -> Result<PrePhaseOutcome>
+where
+    S: AsyncReadExt + Unpin,
+    W: std::io::Write,
+{
+    loop {
+        match pre_phase_step(stream, writer).await? {
+            PrePhaseStep::Continue => {}
+            PrePhaseStep::SessionReady => return Ok(PrePhaseOutcome::SessionReady),
+            PrePhaseStep::EarlyExit(code) => return Ok(PrePhaseOutcome::EarlyExit(code)),
+        }
+    }
+}
+
+fn render_pre_phase_log(
+    level: LogLevel,
+    verb: Option<&str>,
+    message: &str,
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    let marker = if matches!(level, LogLevel::Error) {
+        '✗'
+    } else {
+        '✓'
+    };
+    let phrase = phrase_for_verb(verb.unwrap_or(""));
+    if message.is_empty() {
+        writeln!(writer, "{marker} {phrase}")
+    } else {
+        writeln!(writer, "{marker} {phrase} {message}")
+    }
+}
+
+fn phrase_for_verb(verb: &str) -> String {
+    match verb {
+        "SessionReady" => "session ready".to_string(),
+        "ImageCached" => "image cached".to_string(),
+        _ => verb.to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn drive_attached_session_returns_exit_code_from_run_exit_frame() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let frame = encode_frame(&Response::RunExit { code: 7 }).expect("encode RunExit");
+            server.write_all(&frame).await.expect("write RunExit");
+        });
+        let code = drive_attached_session(client, None, 42, false, Vec::new())
+            .await
+            .expect("drive_attached_session");
+        assert_eq!(code, 7);
+    }
+
+    fn run_log(verb: &str, message: &str) -> Response {
+        Response::RunLog {
+            level: LogLevel::Info,
+            verb: Some(verb.to_string()),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn render_pre_phase_log_emits_check_marker_and_lowercased_verb() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, Some("Resolved"), "ubuntu:latest", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ resolved ubuntu:latest\n");
+    }
+
+    #[test]
+    fn render_pre_phase_log_uses_cross_marker_for_error_level() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(
+            LogLevel::Error,
+            Some("Resolve"),
+            "registry timeout",
+            &mut buf,
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✗ resolve registry timeout\n");
+    }
+
+    #[test]
+    fn render_pre_phase_log_special_cases_session_ready_phrase() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ session ready\n");
+    }
+
+    #[test]
+    fn render_pre_phase_log_special_cases_image_cached_phrase() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, Some("ImageCached"), "", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ image cached\n");
+    }
+
+    #[test]
+    fn render_pre_phase_log_omits_trailing_space_when_message_empty() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, Some("Booted"), "", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓ booted\n");
+    }
+
+    #[test]
+    fn render_pre_phase_log_emits_no_ansi_escape_sequences() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, Some("Booted"), "microVM (1.1s)", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains('\x1b'), "ANSI escape leaked: {s:?}");
+    }
+
+    #[test]
+    fn render_pre_phase_log_falls_back_to_lowercased_verb_for_unknown_verbs() {
+        let mut buf = Vec::<u8>::new();
+        render_pre_phase_log(LogLevel::Info, None, "unverbed", &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "✓  unverbed\n");
+    }
+
+    async fn write_response(server: &mut tokio::io::DuplexStream, resp: Response) {
+        let frame = encode_frame(&resp).expect("encode");
+        server.write_all(&frame).await.expect("write");
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_renders_log_frames_and_returns_session_ready() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_log("Resolved", "ubuntu:latest")).await;
+            write_response(&mut server, run_log("Pulled", "7 layers")).await;
+            write_response(&mut server, run_log("Booted", "microVM")).await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf).await.unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("✓ resolved ubuntu:latest"),
+            "missing resolved: {s}"
+        );
+        assert!(s.contains("✓ pulled 7 layers"), "missing pulled: {s}");
+        assert!(s.contains("✓ booted microVM"), "missing booted: {s}");
+        assert!(s.contains("✓ session ready"), "missing session ready: {s}");
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_returns_early_exit_when_run_exits_before_session_ready() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_log("Resolving", "ubuntu:latest")).await;
+            write_response(&mut server, Response::RunExit { code: 42 }).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf).await.unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::EarlyExit(42));
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_bubbles_up_daemon_error_before_session_ready() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(
+                &mut server,
+                Response::Error {
+                    message: "no such image".to_string(),
+                },
+            )
+            .await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let err = drive_pre_phase(&mut client, &mut buf)
+            .await
+            .expect_err("daemon Error must surface");
+        assert!(format!("{err:#}").contains("no such image"));
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_rejects_stdout_frames_before_session_ready() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let frame = lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"early bytes".to_vec()))
+                .expect("encode wire frame");
+            server.write_all(&frame).await.expect("write");
+        });
+        let mut buf = Vec::<u8>::new();
+        let err = drive_pre_phase(&mut client, &mut buf)
+            .await
+            .expect_err("stdout before SessionReady is a protocol violation");
+        assert!(format!("{err:#}").contains("unexpected frame"));
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_bubbles_up_a_daemon_error_frame() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let frame = encode_frame(&Response::Error {
+                message: "policy file is unreadable".to_string(),
+            })
+            .expect("encode Error");
+            server.write_all(&frame).await.expect("write Error");
+        });
+        let err = drive_attached_session(client, None, 42, false, Vec::new())
+            .await
+            .expect_err("daemon Error must surface as anyhow::Error");
+        assert!(
+            format!("{err:#}").contains("policy file is unreadable"),
+            "error context lost"
+        );
+    }
+
+    fn capture_run_logs(emit: impl FnOnce()) -> Vec<(tracing::Level, Option<String>, String)> {
+        use std::sync::{Arc, Mutex, Once};
+        use tracing::field::{Field, Visit};
+        use tracing::{Event, Subscriber};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        static OPEN_GATE: Once = Once::new();
+        OPEN_GATE.call_once(|| {
+            let gate = tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(gate).ok();
+        });
+
+        type Sink = Arc<Mutex<Vec<(tracing::Level, Option<String>, String)>>>;
+        struct CapturingLayer(Sink);
+        impl<S: Subscriber> Layer<S> for CapturingLayer {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                #[derive(Default)]
+                struct Fields {
+                    verb: Option<String>,
+                    message: String,
+                }
+                let mut fields = Fields::default();
+                struct V<'a>(&'a mut Fields);
+                impl Visit for V<'_> {
+                    fn record_str(&mut self, field: &Field, value: &str) {
+                        if field.name() == "verb" {
+                            self.0.verb = Some(value.to_string());
+                        }
+                    }
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        if field.name() == "message" {
+                            self.0.message = format!("{value:?}");
+                        }
+                    }
+                }
+                event.record(&mut V(&mut fields));
+                self.0.lock().unwrap().push((
+                    *event.metadata().level(),
+                    fields.verb,
+                    fields.message,
+                ));
+            }
+        }
+
+        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        let captured = sink.lock().unwrap();
+        captured.clone()
+    }
+
+    #[test]
+    fn render_run_log_routes_info_with_its_verb() {
+        let events = capture_run_logs(|| {
+            render_run_log(LogLevel::Info, Some("Resolved"), "ubuntu:latest");
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, tracing::Level::INFO);
+        assert_eq!(events[0].1.as_deref(), Some("Resolved"));
+        assert_eq!(events[0].2, "ubuntu:latest");
+    }
+
+    #[test]
+    fn render_run_log_routes_each_level_to_its_macro() {
+        let events = capture_run_logs(|| {
+            render_run_log(LogLevel::Error, None, "boom");
+            render_run_log(LogLevel::Warn, None, "careful");
+            render_run_log(LogLevel::Debug, None, "tracing");
+        });
+        let levels: Vec<_> = events.iter().map(|e| e.0).collect();
+        assert_eq!(
+            levels,
+            vec![
+                tracing::Level::ERROR,
+                tracing::Level::WARN,
+                tracing::Level::DEBUG
+            ]
+        );
+        assert_eq!(events[0].2, "boom");
+        assert!(events.iter().all(|e| e.1.is_none()));
+    }
+
+    #[test]
+    fn plan_feed_forward_accumulates_without_sending() {
+        let mut pending = Vec::new();
+        let (requests, control) = plan_feed(FeedAction::Forward(b'a'), 1, &mut pending);
+        assert!(requests.is_empty());
+        assert!(matches!(control, PumpControl::Continue));
+        assert_eq!(pending, vec![b'a']);
+    }
+
+    #[test]
+    fn plan_feed_hold_flushes_accumulated_bytes() {
+        let mut pending = vec![b'x', b'y'];
+        let (requests, _) = plan_feed(FeedAction::Hold, 7, &mut pending);
+        assert_eq!(
+            requests,
+            vec![Request::RunStdin {
+                run_id: 7,
+                bytes: vec![b'x', b'y']
+            }]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_hold_with_nothing_pending_sends_nothing() {
+        let mut pending = Vec::new();
+        let (requests, _) = plan_feed(FeedAction::Hold, 7, &mut pending);
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_flush_sends_pending_before_the_held_bytes() {
+        let mut pending = vec![b'p'];
+        let (requests, _) = plan_feed(FeedAction::Flush(vec![b'h']), 3, &mut pending);
+        assert_eq!(
+            requests,
+            vec![
+                Request::RunStdin {
+                    run_id: 3,
+                    bytes: vec![b'p']
+                },
+                Request::RunStdin {
+                    run_id: 3,
+                    bytes: vec![b'h']
+                },
+            ]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_flush_and_forward_appends_the_current_byte() {
+        let mut pending = Vec::new();
+        let (requests, _) = plan_feed(
+            FeedAction::FlushAndForward(vec![b'h'], b'c'),
+            3,
+            &mut pending,
+        );
+        assert_eq!(
+            requests,
+            vec![Request::RunStdin {
+                run_id: 3,
+                bytes: vec![b'h', b'c']
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_feed_trigger_flushes_then_signals_hup_and_detaches() {
+        let mut pending = vec![b'p'];
+        let (requests, control) = plan_feed(FeedAction::Trigger, 9, &mut pending);
+        assert_eq!(
+            requests,
+            vec![
+                Request::RunStdin {
+                    run_id: 9,
+                    bytes: vec![b'p']
+                },
+                Request::RunSignal {
+                    run_id: 9,
+                    signal: SignalKind::Hup
+                },
+            ]
+        );
+        assert!(matches!(control, PumpControl::Detach));
+        assert!(pending.is_empty());
+    }
+}

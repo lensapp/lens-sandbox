@@ -1,0 +1,29 @@
+node_modules
+target
+target-cov
+dist
+.DS_Store
+coverage
+*.log
+
+# Per-package build artifacts
+bin/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Editor
+.vscode/
+.idea/
+
+# Worktrees
+.claude/worktrees/
+
+# Pruner skill's local index cache
+.pruner/
+
+# LLVM source-based coverage output. cargo-llvm-cov writes `.profraw`
+# files per instrumented process and merges them into `.profdata` via
+# `cargo llvm-cov report`. Both are transient build artifacts.
+*.profraw
+*.profdata

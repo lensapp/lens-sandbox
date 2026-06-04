@@ -1,0 +1,25 @@
+[package]
+name        = "bump-kernel"
+version     = "0.1.0"
+edition     = "2024"
+description = "Internal operator CLI: open a PR to bump the lns guest kernel pin"
+publish     = false
+
+[[bin]]
+name = "bump-kernel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = "1"
+clap       = { version = "4", features = ["derive"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `toml` is value-typed read (used by `show` subcommand); `toml_edit`
+# is the document API that preserves comments + ordering (used by
+# `bump` and `back-fill` writes so kernels.toml's header comments
+# survive every round trip).
+toml       = "0.8"
+toml_edit  = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

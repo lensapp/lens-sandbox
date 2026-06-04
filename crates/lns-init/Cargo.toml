@@ -1,0 +1,33 @@
+[package]
+name = "lns-init"
+version = "0.1.0"
+edition = "2024"
+description = "Lens Sandbox micro-init — PID 1 inside the guest initramfs. Open-codes the composefs + ext4-upper mount sequence and pivots into the supervisor."
+repository = "https://github.com/lensapp/lens-sandbox"
+
+# Static musl binary. The output ELF is the entire initramfs payload at
+# /init (cpio'd by lns-cli's initramfs builder). Keep deps tiny so the
+# final stripped+LTO'd binary stays under ~150 KB.
+[[bin]]
+name = "lns-init"
+path = "src/main.rs"
+
+[dependencies]
+# libc for the syscall surface we need at PID 1: mount, pivot_root,
+# execve, umount2, etc. The host libc crate we already depend on for
+# lns-cli; pinning the same major here keeps the workspace consistent.
+libc = "0.2"
+
+# sha2 for Phase E's descriptor-digest verification. The composefs
+# descriptor is small (kilobytes typically), so the cost of hashing
+# at boot is negligible — but the binary grows ~80 KB stripped to
+# carry it. Worth it for the anti-tamper property.
+sha2 = "0.10"
+
+# Per-package release-profile overrides live in the workspace
+# Cargo.toml under `[profile.release.package.lns-init]` — cargo
+# ignores `[profile.*]` blocks in non-root members (workspace rule).
+
+[dev-dependencies]
+# Phase E unit tests for verify_descriptor_digest fixture writes.
+tempfile = "3"

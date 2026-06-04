@@ -1,0 +1,866 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+
+use lens_sandbox_core::activity::ActivityStream;
+use lens_sandbox_core::child_spawner::{self, ChildSpec};
+use lens_sandbox_core::client::{SandboxDispatcher, SessionHandler};
+use lens_sandbox_core::exec_manager::ExecManager;
+use lens_sandbox_core::exec_protocol::IncomingMessage;
+use lens_sandbox_core::lifecycle::OrphanReaper;
+use lens_sandbox_core::privilege::SandboxCredentials;
+
+use super::runtime::RealAgentRunner;
+use super::{DIM, RESET};
+use crate::config::AgentConfig;
+
+/// Spawns the agent workload for a started session.
+pub(crate) trait AgentRunner: Send + Sync {
+    fn spawn_run(
+        &self,
+        config: Arc<AgentConfig>,
+        creds: Option<SandboxCredentials>,
+        env: HashMap<String, String>,
+        activity: ActivityStream,
+        reaper: Arc<OrphanReaper>,
+    );
+}
+
+pub(crate) struct AgentDispatcher {
+    pub config: Arc<AgentConfig>,
+    sandbox_creds: Option<SandboxCredentials>,
+    reaper: Arc<OrphanReaper>,
+    /// Dispatcher-scoped (not per-session) so a WS reconnect can't launch a second agent.
+    agent_started: Arc<AtomicBool>,
+    /// Observable spawn counter for tests.
+    spawn_count: Arc<AtomicUsize>,
+    /// Shared across WS sessions so an exec started in one session stays addressable after a reconnect.
+    exec_manager: ExecManager,
+    /// Shared across WS sessions so the running agent's output reaches the current session after a reconnect.
+    activity: ActivityStream,
+    runner: Arc<dyn AgentRunner>,
+}
+
+impl AgentDispatcher {
+    pub fn new(
+        config: Arc<AgentConfig>,
+        sandbox_creds: Option<SandboxCredentials>,
+        reaper: Arc<OrphanReaper>,
+    ) -> Self {
+        Self::with_runner(config, sandbox_creds, reaper, Arc::new(RealAgentRunner))
+    }
+
+    pub(crate) fn with_runner(
+        config: Arc<AgentConfig>,
+        sandbox_creds: Option<SandboxCredentials>,
+        reaper: Arc<OrphanReaper>,
+        runner: Arc<dyn AgentRunner>,
+    ) -> Self {
+        let exec_manager = ExecManager::new(sandbox_creds.clone(), config.core.is_root);
+        let activity = ActivityStream::new();
+        spawn_activity_to_stdout(&activity);
+        Self {
+            config,
+            sandbox_creds,
+            reaper,
+            agent_started: Arc::new(AtomicBool::new(false)),
+            spawn_count: Arc::new(AtomicUsize::new(0)),
+            exec_manager,
+            activity,
+            runner,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_count(&self) -> usize {
+        self.spawn_count.load(Ordering::SeqCst)
+    }
+}
+
+impl SandboxDispatcher for AgentDispatcher {
+    fn new_session(&self) -> Box<dyn SessionHandler> {
+        Box::new(AgentSession {
+            config: self.config.clone(),
+            sandbox_creds: self.sandbox_creds.clone(),
+            reaper: self.reaper.clone(),
+            agent_started: self.agent_started.clone(),
+            spawn_count: self.spawn_count.clone(),
+            activity: self.activity.clone(),
+            exec_manager: self.exec_manager.clone(),
+            runner: self.runner.clone(),
+        })
+    }
+}
+
+/// Forward each activity event's summary to `writer`, exiting when the broadcast closes or the writer errors.
+pub(crate) fn spawn_activity_forwarder<W>(
+    activity: &ActivityStream,
+    mut writer: W,
+) -> tokio::task::JoinHandle<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut rx = activity.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let bytes = match rx.recv().await {
+                Ok(event) => event.summary.into_bytes(),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    format!("\x1b[90m[...{n} events skipped...]\x1b[0m\r\n").into_bytes()
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            if let Err(e) = writer.write_all(&bytes).await {
+                tracing::warn!("activity forwarder write failed: {e}");
+                break;
+            }
+            if let Err(e) = writer.flush().await {
+                tracing::warn!("activity forwarder flush failed: {e}");
+                break;
+            }
+        }
+    })
+}
+
+fn spawn_activity_to_stdout(activity: &ActivityStream) {
+    spawn_activity_forwarder(activity, tokio::io::stdout());
+}
+
+struct AgentSession {
+    config: Arc<AgentConfig>,
+    sandbox_creds: Option<SandboxCredentials>,
+    reaper: Arc<OrphanReaper>,
+    /// Cloned from the dispatcher — shared across reconnect-created sessions.
+    agent_started: Arc<AtomicBool>,
+    spawn_count: Arc<AtomicUsize>,
+    activity: ActivityStream,
+    exec_manager: ExecManager,
+    runner: Arc<dyn AgentRunner>,
+}
+
+#[async_trait]
+impl SessionHandler for AgentSession {
+    fn activity(&self) -> &ActivityStream {
+        &self.activity
+    }
+
+    async fn dispatch(&self, raw_text: &str, tx: &mpsc::UnboundedSender<String>) {
+        match serde_json::from_str::<IncomingMessage>(raw_text) {
+            Ok(mut msg) => {
+                if let IncomingMessage::ExecAttach { env, .. } = &mut msg {
+                    let caller = std::mem::take(env);
+                    *env = build_agent_env(&self.config, self.sandbox_creds.as_ref(), &caller);
+                }
+                self.exec_manager.handle(msg, tx).await
+            }
+            Err(e) => {
+                // Not a known exec message — leave for future protocol surfaces.
+                tracing::debug!("ignoring non-exec dispatch message: {e}");
+            }
+        }
+    }
+
+    async fn on_policy(&self, env: HashMap<String, String>) {
+        if self.agent_started.swap(true, Ordering::SeqCst) {
+            tracing::debug!("agent already started, ignoring duplicate policy");
+            return;
+        }
+
+        let config = self.config.clone();
+        let creds = self.sandbox_creds.clone();
+        let activity = self.activity.clone();
+        let reaper = self.reaper.clone();
+        self.spawn_count.fetch_add(1, Ordering::SeqCst);
+        self.runner.spawn_run(config, creds, env, activity, reaper);
+    }
+
+    async fn shutdown(&self) {
+        // no-op: the agent outlives WS reconnects and exits via process::exit, terminating the supervisor.
+    }
+}
+
+/// Layer the agent env (parent → project → proxy → creds) then scrub internal vars; CA env is applied later at the Command level.
+fn build_agent_env(
+    config: &AgentConfig,
+    creds: Option<&SandboxCredentials>,
+    env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut full_env: HashMap<String, String> = std::env::vars().collect();
+    full_env.extend(env.clone());
+
+    if config.core.is_root {
+        let local_proxy = format!("http://{}", config.core.proxy_listen_addr);
+        full_env.insert("HTTPS_PROXY".into(), local_proxy.clone());
+        full_env.insert("https_proxy".into(), local_proxy.clone());
+        full_env.insert("HTTP_PROXY".into(), local_proxy.clone());
+        full_env.insert("http_proxy".into(), local_proxy);
+    }
+
+    if let Some(creds) = creds {
+        full_env.insert("HOME".into(), creds.home().into());
+        full_env.insert("USER".into(), creds.user().into());
+    }
+
+    // Scrub after all layering so no source can reintroduce internal vars
+    lens_sandbox_core::privilege::scrub_internal_vars(&mut full_env);
+
+    full_env
+}
+
+/// Resolve the agent cwd: explicit `WORKSPACE_PATH`, else the post-setuid home, else ".".
+fn resolve_cwd(workspace_path: Option<&str>, creds_home: Option<&str>) -> String {
+    if let Some(w) = workspace_path.filter(|s| !s.is_empty()) {
+        return w.to_string();
+    }
+    if let Some(h) = creds_home.filter(|s| !s.is_empty()) {
+        return h.to_string();
+    }
+    ".".to_string()
+}
+
+/// Assemble the agent `ChildSpec` with agent-specific env layering atop the shared `child_spawner` hardening.
+pub(crate) fn agent_child_spec(
+    config: &AgentConfig,
+    creds: Option<&SandboxCredentials>,
+    env: &HashMap<String, String>,
+) -> ChildSpec {
+    ChildSpec {
+        argv: vec!["sh".into(), "-c".into(), config.agent_command.clone()],
+        cwd: Some(resolve_cwd(
+            config.workspace_path.as_deref(),
+            creds.map(|c| c.home()),
+        )),
+        env: build_agent_env(config, creds, env),
+        creds: creds.cloned(),
+        is_root: config.core.is_root,
+    }
+}
+
+pub(crate) fn build_agent_command(
+    config: &AgentConfig,
+    creds: Option<&SandboxCredentials>,
+    env: &HashMap<String, String>,
+) -> Command {
+    child_spawner::build_command(&agent_child_spec(config, creds, env))
+}
+
+const MAX_LINE_LEN: usize = 4096;
+
+/// Emit one activity event per newline, capping each line at `MAX_LINE_LEN` bytes so an agent can't force unbounded allocation with a newline-less line.
+pub(crate) async fn stream_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    activity: ActivityStream,
+    prefix: &str,
+    color: &str,
+) {
+    let mut line: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut rest = &chunk[..n];
+        while let Some(pos) = rest.iter().position(|&b| b == b'\n') {
+            extend_capped(&mut line, &rest[..pos], &mut truncated);
+            emit_output_line(&activity, &line, truncated, prefix, color);
+            line.clear();
+            truncated = false;
+            rest = &rest[pos + 1..];
+        }
+        extend_capped(&mut line, rest, &mut truncated);
+    }
+    if !line.is_empty() {
+        emit_output_line(&activity, &line, truncated, prefix, color);
+    }
+}
+
+fn extend_capped(line: &mut Vec<u8>, more: &[u8], truncated: &mut bool) {
+    let take = more.len().min(MAX_LINE_LEN.saturating_sub(line.len()));
+    line.extend_from_slice(&more[..take]);
+    if take < more.len() {
+        *truncated = true;
+    }
+}
+
+fn emit_output_line(
+    activity: &ActivityStream,
+    line: &[u8],
+    truncated: bool,
+    prefix: &str,
+    color: &str,
+) {
+    let text = String::from_utf8_lossy(line);
+    if truncated {
+        activity.emit(format!(
+            "{color}{prefix}{RESET} {text}…{DIM}[truncated]{RESET}\r\n"
+        ));
+    } else {
+        activity.emit(format!("{color}{prefix}{RESET} {text}\r\n"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use lens_sandbox_core::ca_env::CA_BUNDLE;
+    use lens_sandbox_core::client::SandboxDispatcher;
+    use lens_sandbox_core::config::{
+        CoreConfig, DEFAULT_DNS_STUB_PORT, DEFAULT_PROXY_PORT, DEFAULT_TRANSPARENT_PORT,
+        SandboxMode,
+    };
+    use tokio::sync::mpsc;
+
+    const PRINT_CA_ENV_CMD: &str = "printf '%s|%s|%s|%s|%s' \"$SSL_CERT_FILE\" \"$REQUESTS_CA_BUNDLE\" \"$NODE_EXTRA_CA_CERTS\" \"$CURL_CA_BUNDLE\" \"$GIT_SSL_CAINFO\"";
+
+    struct FakeRunner {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl AgentRunner for FakeRunner {
+        fn spawn_run(
+            &self,
+            _config: Arc<AgentConfig>,
+            _creds: Option<SandboxCredentials>,
+            _env: HashMap<String, String>,
+            _activity: ActivityStream,
+            _reaper: Arc<OrphanReaper>,
+        ) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn make_agent_config() -> AgentConfig {
+        AgentConfig {
+            core: CoreConfig {
+                mode: SandboxMode::Server {
+                    ws_url: String::new(),
+                    token: String::new(),
+                },
+                idle_timeout: None,
+                proxy_listen_addr: ([127, 0, 0, 1], DEFAULT_PROXY_PORT).into(),
+                transparent_listen_addr: ([127, 0, 0, 1], DEFAULT_TRANSPARENT_PORT).into(),
+                dns_stub_listen_addr: ([127, 0, 0, 1], DEFAULT_DNS_STUB_PORT).into(),
+                is_root: false,
+                sandbox_user: "sandbox".into(),
+            },
+            agent_command: "echo hello".into(),
+            workspace_path: Some("/tmp".into()),
+        }
+    }
+
+    #[test]
+    fn resolve_cwd_prefers_explicit_workspace_path() {
+        assert_eq!(resolve_cwd(Some("/app"), Some("/home/node")), "/app");
+    }
+
+    #[test]
+    fn resolve_cwd_falls_back_to_creds_home() {
+        assert_eq!(resolve_cwd(None, Some("/home/node")), "/home/node");
+    }
+
+    #[test]
+    fn resolve_cwd_treats_empty_strings_as_absent() {
+        assert_eq!(resolve_cwd(Some(""), Some("/home/node")), "/home/node");
+    }
+
+    #[test]
+    fn resolve_cwd_final_fallback_is_dot() {
+        assert_eq!(resolve_cwd(None, None), ".");
+    }
+
+    #[test]
+    fn build_agent_env_inserts_home_and_user_from_creds() {
+        // The Some(creds) arm must layer HOME/USER and survive the post-layering scrub.
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let config = make_agent_config();
+        let env = build_agent_env(&config, Some(&creds), &HashMap::new());
+        assert_eq!(env.get("HOME").map(String::as_str), Some(creds.home()));
+        assert_eq!(env.get("USER").map(String::as_str), Some(creds.user()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_all_messages() {
+        let config = Arc::new(make_agent_config());
+        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let session = dispatcher.new_session();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        session.dispatch("not valid json {{{", &tx).await;
+        session
+            .dispatch(r#"{"type":"exec","id":"r1","command":"ls"}"#, &tx)
+            .await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn session_activity_exposes_its_stream() {
+        let config = Arc::new(make_agent_config());
+        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let session = dispatcher.new_session();
+
+        let mut rx = session.activity().subscribe();
+        session.activity().emit("ping\n".to_string());
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event within 1s")
+            .expect("activity sender open");
+        assert_eq!(event.summary, "ping\n");
+    }
+
+    #[tokio::test]
+    async fn activity_is_shared_across_reconnect_sessions() {
+        let config = Arc::new(make_agent_config());
+        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let session1 = dispatcher.new_session();
+        let session2 = dispatcher.new_session();
+
+        let mut rx2 = session2.activity().subscribe();
+        session1.activity().emit("post-reconnect\n".to_string());
+        let event = tokio::time::timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .expect("event within 1s")
+            .expect("activity sender open");
+        assert_eq!(event.summary, "post-reconnect\n");
+    }
+
+    #[tokio::test]
+    async fn shutdown_leaves_the_agent_running() {
+        // shutdown is a no-op: the agent outlives the WS session, so it must not tear anything down.
+        let config = Arc::new(make_agent_config());
+        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let session = dispatcher.new_session();
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_policy_runs_agent_once_across_reconnects() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(FakeRunner {
+            calls: calls.clone(),
+        });
+        let dispatcher = AgentDispatcher::with_runner(
+            Arc::new(make_agent_config()),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            runner,
+        );
+
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "first policy spawns once");
+        assert_eq!(dispatcher.spawn_count(), 1);
+
+        // Simulate WS reconnect: a fresh session must not re-spawn.
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "reconnect must not spawn a second agent",
+        );
+        assert_eq!(dispatcher.spawn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn exec_manager_persists_across_reconnects() {
+        // The exec registry must outlive a WS session: session2 reattaching session1's id hits "already in use".
+        let mut config = make_agent_config();
+        config.agent_command = "true".into();
+        let dispatcher =
+            AgentDispatcher::new(Arc::new(config), None, Arc::new(OrphanReaper::spawn()));
+
+        let session1 = dispatcher.new_session();
+        let (tx1, mut rx1) = mpsc::unbounded_channel::<String>();
+
+        let attach = r#"{"type":"exec_attach","execId":"e1","argv":["sleep","30"],"env":{},"tty":false,"stdin":true,"stdout":true,"stderr":true}"#;
+        session1.dispatch(attach, &tx1).await;
+
+        // Drain exec_attached so we know the exec is registered.
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx1.recv())
+            .await
+            .expect("attached within 5s")
+            .expect("rx1 open");
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "exec_attached");
+
+        // Simulate WS reconnect.
+        let session2 = dispatcher.new_session();
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<String>();
+
+        let dup_attach = r#"{"type":"exec_attach","execId":"e1","argv":["true"],"env":{},"tty":false,"stdin":true,"stdout":true,"stderr":true}"#;
+        session2.dispatch(dup_attach, &tx2).await;
+
+        let dup = tokio::time::timeout(Duration::from_secs(5), rx2.recv())
+            .await
+            .expect("dup error within 5s")
+            .expect("rx2 open");
+        let dv: serde_json::Value = serde_json::from_str(&dup).unwrap();
+        assert_eq!(dv["type"], "exec_error");
+        let msg = dv["message"].as_str().unwrap();
+        assert!(
+            msg.contains("already in use"),
+            "expected 'already in use', got: {msg}"
+        );
+
+        // Clean up the long-running child so the test process exits.
+        let kill = format!(
+            r#"{{"type":"exec_cancel","execId":"e1","signal":{}}}"#,
+            libc::SIGKILL
+        );
+        session2.dispatch(&kill, &tx2).await;
+        // Read both rx's — we only care that exec_exit appears somewhere within the timeout.
+        let mut saw_exit = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !saw_exit && tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                Some(f) = rx1.recv() => {
+                    let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+                    if v["type"] == "exec_exit" { saw_exit = true; }
+                }
+                Some(f) = rx2.recv() => {
+                    let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+                    if v["type"] == "exec_exit" { saw_exit = true; }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        assert!(saw_exit, "exec_exit did not arrive within 5s after kill");
+    }
+
+    #[test]
+    fn build_agent_command_applies_project_env() {
+        let config = make_agent_config();
+        let mut env = HashMap::new();
+        env.insert("GH_TOKEN".into(), "ghp_secret".into());
+        env.insert("API_KEY".into(), "key123".into());
+
+        let cmd = build_agent_command(&config, None, &env);
+        let envs: HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(envs.get("GH_TOKEN").unwrap(), "ghp_secret");
+        assert_eq!(envs.get("API_KEY").unwrap(), "key123");
+    }
+
+    #[test]
+    fn build_agent_command_proxy_overrides_project_env() {
+        let mut config = make_agent_config();
+        config.core.is_root = true;
+
+        let mut env = HashMap::new();
+        env.insert("HTTPS_PROXY".into(), "http://user-set-proxy".into());
+
+        let cmd = build_agent_command(&config, None, &env);
+        let envs: HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(envs.get("HTTPS_PROXY").unwrap(), "http://127.0.0.1:3128");
+    }
+
+    #[test]
+    fn build_agent_command_ca_env_overrides_project_env() {
+        let config = make_agent_config();
+        let mut env = HashMap::new();
+        env.insert("SSL_CERT_FILE".into(), "/tmp/evil.pem".into());
+        env.insert("NODE_EXTRA_CA_CERTS".into(), "/tmp/evil.pem".into());
+
+        let cmd = build_agent_command(&config, None, &env);
+        let envs: HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        // CA env must win over project env
+        assert_eq!(envs.get("SSL_CERT_FILE").unwrap(), CA_BUNDLE);
+        assert_eq!(envs.get("NODE_EXTRA_CA_CERTS").unwrap(), CA_BUNDLE);
+    }
+
+    #[tokio::test]
+    async fn build_agent_command_applies_ca_env() {
+        let mut config = make_agent_config();
+        config.agent_command = PRINT_CA_ENV_CMD.into();
+
+        let mut cmd = build_agent_command(&config, None, &HashMap::new());
+        let output = cmd.output().await.expect("command should run");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "stderr: {stderr}");
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+        let expected = format!("{0}|{0}|{0}|{0}|{0}", CA_BUNDLE);
+        assert_eq!(stdout, expected);
+    }
+
+    #[tokio::test]
+    async fn stream_output_emits_lines_and_truncates_overlong() {
+        let activity = ActivityStream::new();
+        let mut rx = activity.subscribe();
+
+        let long = "x".repeat(MAX_LINE_LEN + 50);
+        let input = format!("short line\n{long}\n");
+        stream_output(input.as_bytes(), activity.clone(), "[stdout]", DIM).await;
+        drop(activity);
+
+        let first = rx.recv().await.expect("first line emitted");
+        assert!(
+            first.summary.contains("short line"),
+            "got: {first:?}",
+            first = first.summary
+        );
+
+        let second = rx.recv().await.expect("second line emitted");
+        assert!(
+            second.summary.contains("[truncated]"),
+            "overlong line must be truncated: {}",
+            second.summary
+        );
+        assert!(
+            second.summary.len() < long.len(),
+            "truncated payload must be shorter than the input line"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_output_bounds_a_newlineless_blob() {
+        let activity = ActivityStream::new();
+        let mut rx = activity.subscribe();
+
+        let blob = "y".repeat(MAX_LINE_LEN * 8);
+        stream_output(blob.as_bytes(), activity.clone(), "[stdout]", DIM).await;
+        drop(activity);
+
+        let event = rx
+            .recv()
+            .await
+            .expect("newlineless blob still emits at EOF");
+        assert!(
+            event.summary.contains("[truncated]"),
+            "a line with no newline must be truncated, not buffered whole: {}",
+            event.summary
+        );
+        assert!(
+            event.summary.len() < blob.len() / 4,
+            "emitted line stays bounded well under the {}-byte input (got {})",
+            blob.len(),
+            event.summary.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_output_line_terminates_with_crlf() {
+        let activity = ActivityStream::new();
+        let mut rx = activity.subscribe();
+
+        stream_output("hello\n".as_bytes(), activity.clone(), "[stdout]", DIM).await;
+        drop(activity);
+
+        let event = rx.recv().await.expect("line emitted");
+        assert!(
+            event.summary.ends_with("\r\n"),
+            "activity event must end with CRLF, got: {:?}",
+            &event.summary[event.summary.len().saturating_sub(4)..]
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_activity_forwarder_writes_emitted_events() {
+        let activity = ActivityStream::new();
+        let (writer, mut reader) = tokio::io::duplex(256);
+        spawn_activity_forwarder(&activity, writer);
+
+        activity.emit("hello\n".to_string());
+        activity.emit("world\n".to_string());
+
+        // Dropping the stream closes the broadcast; the forwarder drains buffered events then EOFs the reader.
+        drop(activity);
+
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn spawn_activity_forwarder_exits_when_activity_dropped() {
+        let activity = ActivityStream::new();
+        let (writer, mut reader) = tokio::io::duplex(64);
+        spawn_activity_forwarder(&activity, writer);
+        drop(activity);
+
+        // With the sender dropped and nothing buffered, the task exits promptly and the reader sees EOF.
+        let mut buf = [0u8; 16];
+        let read_result = tokio::time::timeout(Duration::from_secs(1), reader.read(&mut buf)).await;
+        assert!(read_result.is_ok(), "forwarder task did not exit");
+        assert_eq!(read_result.unwrap().unwrap(), 0, "expected EOF");
+    }
+
+    #[tokio::test]
+    async fn spawn_activity_forwarder_survives_lagged() {
+        // Tiny duplex parks the forwarder so the 256-cap broadcast ring overflows before it drains.
+        let activity = ActivityStream::new();
+        let (writer, mut reader) = tokio::io::duplex(8);
+        spawn_activity_forwarder(&activity, writer);
+
+        activity.emit("first\n".to_string());
+        tokio::task::yield_now().await;
+
+        // Overflow the 256-cap ring while the forwarder is parked.
+        for i in 0..300 {
+            activity.emit(format!("burst-{i}\n"));
+        }
+        // Sentinel after the burst — only delivered if the loop survives Lagged.
+        activity.emit("final\n".to_string());
+        drop(activity);
+
+        let mut buf = Vec::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut buf)).await;
+        assert!(read_result.is_ok(), "forwarder did not drain in time");
+        let s = String::from_utf8(buf).unwrap();
+
+        assert!(s.contains("first\n"), "pre-lag event missing: {s:?}");
+        assert!(s.contains("events skipped"), "lag marker missing: {s:?}");
+        assert!(
+            s.ends_with("final\n"),
+            "post-lag event missing — forwarder likely exited on Lagged: {s:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_activity_forwarder_exits_on_writer_error() {
+        let activity = ActivityStream::new();
+        let (writer, reader) = tokio::io::duplex(8);
+        drop(reader);
+        let handle = spawn_activity_forwarder(&activity, writer);
+
+        activity.emit("trigger\n".to_string());
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("forwarder did not exit on writer error")
+            .expect("forwarder task panicked");
+    }
+
+    #[tokio::test]
+    async fn spawn_activity_forwarder_exits_on_flush_error() {
+        struct FailingFlush;
+        impl tokio::io::AsyncWrite for FailingFlush {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("flush boom")))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        use tokio::io::AsyncWriteExt;
+        FailingFlush.shutdown().await.unwrap();
+
+        let activity = ActivityStream::new();
+        let handle = spawn_activity_forwarder(&activity, FailingFlush);
+        activity.emit("trigger\n".to_string());
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("forwarder did not exit on flush error")
+            .expect("forwarder task panicked");
+    }
+
+    #[test]
+    fn build_agent_env_preserves_policy_env_vars() {
+        let config = make_agent_config();
+        let mut env = HashMap::new();
+        env.insert(
+            "MCP_URL".into(),
+            "https://lens.example.com/projects/proj-1/mcp".into(),
+        );
+
+        let full_env = build_agent_env(&config, None, &env);
+
+        assert_eq!(
+            full_env.get("MCP_URL").map(String::as_str),
+            Some("https://lens.example.com/projects/proj-1/mcp"),
+            "policy-injected env vars must survive layering and scrubbing"
+        );
+
+        // And the built command should carry it too.
+        let cmd = build_agent_command(&config, None, &env);
+        let envs: HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        assert_eq!(
+            envs.get("MCP_URL").map(String::as_str),
+            Some("https://lens.example.com/projects/proj-1/mcp")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn build_agent_env_scrubs_internal_vars() {
+        // SAFETY: serialized via #[serial(env)]; no other thread reads env during this body.
+        unsafe {
+            std::env::set_var("LENS_SANDBOX_POLICY_FILE", "/run/lens-policy/policy.json");
+            std::env::set_var("LENS_SANDBOX_TOKEN", "secret-token");
+            std::env::set_var("LENS_SANDBOX_WS_URL", "ws://localhost:3002");
+            std::env::set_var("AGENT_KEEP_ME", "visible-to-agent");
+        }
+
+        let config = make_agent_config();
+        let env = build_agent_env(&config, None, &HashMap::new());
+
+        assert!(
+            !env.contains_key("LENS_SANDBOX_POLICY_FILE"),
+            "LENS_SANDBOX_POLICY_FILE must be scrubbed"
+        );
+        assert!(
+            !env.contains_key("LENS_SANDBOX_TOKEN"),
+            "LENS_SANDBOX_TOKEN must be scrubbed"
+        );
+        assert!(
+            !env.contains_key("LENS_SANDBOX_WS_URL"),
+            "LENS_SANDBOX_WS_URL must be scrubbed"
+        );
+        // Inverse: prefix-based scrub must not nuke ordinary agent vars.
+        assert_eq!(
+            env.get("AGENT_KEEP_ME").map(String::as_str),
+            Some("visible-to-agent"),
+            "non-internal vars must survive scrubbing"
+        );
+
+        // SAFETY: serialized via #[serial(env)]; no other thread reads env during this body.
+        unsafe {
+            std::env::remove_var("LENS_SANDBOX_POLICY_FILE");
+            std::env::remove_var("LENS_SANDBOX_TOKEN");
+            std::env::remove_var("LENS_SANDBOX_WS_URL");
+            std::env::remove_var("AGENT_KEEP_ME");
+        }
+    }
+}

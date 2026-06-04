@@ -1,0 +1,43 @@
+[package]
+name = "e2e-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# End-to-end (Layer 1) test harness for the workspace. Per CLAUDE.md's
+# test pyramid, this crate's job is to drive REAL `lns` and
+# `lns-service` binaries through real OS surfaces (sockets,
+# subprocesses, filesystem) and assert on the end-to-end behavior
+# users actually see. Side effects are allowed here and only here.
+#
+# This crate is intentionally NOT in `default-members` (parallel to
+# bump-kernel). Run it via `make e2e` at the workspace root, or
+# directly with:
+#
+#   LNS_BIN=path/to/lns LNS_SERVICE_BIN=path/to/lns-service \
+#       cargo test -p e2e-tests --test e2e
+#
+# Coverage: this crate's tests do NOT contribute to the per-file
+# coverage gate. The `coverage-data` recipe at the workspace root
+# excludes it via `cargo test --workspace --exclude e2e-tests` so
+# subprocess-instrumentation propagation doesn't inflate per-crate
+# scores with E2E-derived data.
+
+[[test]]
+name    = "e2e"
+harness = false
+
+[dependencies]
+# (none — e2e-tests has no production lib surface)
+
+[dev-dependencies]
+cucumber = "0.23"
+tempfile = "3"
+tokio    = { version = "1", features = ["rt-multi-thread", "macros"] }
+lns-ipc  = { path = "../lns-ipc" }
+# upperfs_oracle.rs / composefs_oracle.rs cross-check the pure-Rust ext4 + erofs
+# writers against real e2fsprogs / overlayfs / docker.
+lns-service = { path = "../lns-service" }
+dirs        = "5"
+libc        = "0.2"
+sha2        = "0.10"

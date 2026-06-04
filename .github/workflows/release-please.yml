@@ -1,0 +1,323 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  # Manual escape hatch for partial-release-failure recovery. If
+  # release-please cut a tag but a downstream upload job failed and
+  # "Re-run failed jobs" isn't available (e.g., run expired), an
+  # operator can re-trigger the upload work without going through
+  # release-please again. See the input descriptions below.
+  workflow_dispatch:
+    inputs:
+      lns_tag:
+        description: 'lns-cli tag to (re)build, e.g. lns-cli-v0.1.0'
+        required: false
+        type: string
+      lns_version:
+        description: 'lns-cli version, e.g. 0.1.0'
+        required: false
+        type: string
+      lns_install_tag:
+        description: 'lns-install tag to redeploy, e.g. lns-install-v0.1.0'
+        required: false
+        type: string
+      force_build_lns:
+        description: 'Build + publish lns-cli release binaries (and lns-latest.json) even if release-please did not cut a release in this run'
+        type: boolean
+        default: false
+      force_deploy_install:
+        description: 'Re-deploy lns-install.sh to the CDN even if release-please did not cut a release in this run'
+        type: boolean
+        default: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      lns-released: ${{ steps.release.outputs['crates/lns-cli--release_created'] }}
+      lns-version: ${{ steps.release.outputs['crates/lns-cli--version'] }}
+      lns-tag: ${{ steps.release.outputs['crates/lns-cli--tag_name'] }}
+      lns-install-released: ${{ steps.release.outputs['scripts/lns-install--release_created'] }}
+      lns-install-tag: ${{ steps.release.outputs['scripts/lns-install--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish scripts/lns-install/lns-install.sh to the get.lns.run CDN.
+  # Decoupled from build-lns so the installer (which is version-agnostic
+  # — it reads lns-latest.json at runtime) ships independently of CLI
+  # releases. Gated on release-please cutting a tag for the install
+  # script, so an arbitrary main push doesn't redeploy.
+  deploy-lns-install:
+    needs: release-please
+    if: needs.release-please.outputs.lns-install-released == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_deploy_install)
+    runs-on: ubuntu-latest
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+    steps:
+      - name: Validate dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -z "${{ inputs.lns_install_tag }}" ]; then
+            echo "::error::force_deploy_install requires lns_install_tag input."
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Pin to the released tag so the uploaded artifact matches
+          # the CHANGELOG entry release-please just cut. On manual
+          # dispatch, fall back to the operator-provided tag.
+          ref: ${{ needs.release-please.outputs.lns-install-tag || inputs.lns_install_tag }}
+
+      - name: Validate script syntax
+        run: bash -n scripts/lns-install/lns-install.sh
+
+      - name: Upload lns-install.sh to CDN origin
+        run: |
+          set -euo pipefail
+          # Uploaded as `lns-install.sh` at the bucket root. The
+          # get.lns.run pull zone's edge rule rewrites `/` → `/lns-install.sh`
+          # so `curl https://get.lns.run | bash` returns this content.
+          #
+          # TTLs are controlled by the pull-zone default (~10 min) + an
+          # edge rule that overrides versioned artifact patterns to 1 year.
+          # We don't pass --cache-control: the storage backend drops it on PUT.
+          aws s3 cp scripts/lns-install/lns-install.sh "s3://${S3_BUCKET}/lns-install.sh" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/x-shellscript"
+
+  # Build lns-cli release binaries for darwin-aarch64, linux-aarch64, and
+  # linux-x86_64. Tarball + sha256 are uploaded to the GitHub Release and
+  # mirrored to the CDN origin behind get.lns.run.
+  #
+  # Matrix uses Rust target_arch tokens uniformly (aarch64 / x86_64) — the
+  # install script normalises uname -m to match.
+  build-lns:
+    needs: release-please
+    if: needs.release-please.outputs.lns-released == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_build_lns)
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: darwin
+            arch: aarch64
+            runner: macos-latest
+          - target: aarch64-unknown-linux-gnu
+            os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            os: linux
+            arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.lns-tag || inputs.lns_tag }}
+      VERSION: ${{ needs.release-please.outputs.lns-version || inputs.lns_version }}
+      # Pin empty — build.rs treats empty as unset, and the explicit
+      # pin denies any org-level env injection a path into the
+      # dev-override branch that would ship a 0-byte placeholder.
+      LNS_INIT_BIN: ""
+      LNS_SESSION_BROKER_BIN: ""
+      # build.rs already defaults to rust-lld; pinning here documents
+      # intent and survives an org-level env override that picks a
+      # nonexistent toolchain like `aarch64-linux-musl-gcc`.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      AWS_DEFAULT_REGION: us-east-1
+      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+    steps:
+      - name: Validate dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -z "$TAG" ] || [ -z "$VERSION" ]; then
+            echo "::error::force_build_lns requires lns_tag and lns_version inputs."
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Pin to the released tag so the artifact matches the changelog
+          # and the version bumped into Cargo.toml.
+          ref: ${{ env.TAG }}
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
+      - name: Install aarch64-musl cross toolchain
+        uses: ./.github/actions/install-cross-toolchain
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # toolchain version + aarch64-unknown-linux-musl come from
+          # rust-toolchain.toml. matrix.target is the runner's host
+          # triple — already installed by default.
+          cache-workspaces: .
+          cache-on-failure: true
+
+      - name: Build lns
+        # --locked makes the release build hermetic; the cargo-workspace plugin keeps the tag's Cargo.lock in sync.
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lns-cli
+
+      - name: Build lns-service
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lns-service
+
+      - name: Codesign with virtualization entitlement (macOS only)
+        if: matrix.os == 'darwin'
+        # Ad-hoc sign (--sign -) embeds com.apple.security.virtualization
+        # into the binary. Without it, the Vz backend's
+        # `startWithCompletionHandler:` returns NSCocoaErrorDomain 4097
+        # ("operation not permitted") on Apple Silicon. Ad-hoc signing
+        # needs no Apple Developer cert; users still see a Gatekeeper
+        # "unverified developer" dialog the first time, which the install
+        # script strips via `xattr -d com.apple.quarantine`. Upgrading to
+        # Developer ID + notarization removes that warning entirely; can
+        # be added later when we enroll.
+        run: |
+          set -euo pipefail
+          codesign --force --sign - \
+            --entitlements crates/lns-cli/lns.entitlements \
+            target/${{ matrix.target }}/release/lns
+          codesign --display --entitlements - \
+            target/${{ matrix.target }}/release/lns 2>&1
+
+      - name: Codesign lns-service with virtualization entitlement (macOS only)
+        if: matrix.os == 'darwin'
+        # lns-service is the process that actually creates `VZVirtualMachine`
+        # (see crates/lns-service/src/vm/vz.rs — sole consumer of
+        # objc2-virtualization in the workspace). It needs the same
+        # com.apple.security.virtualization entitlement as `lns` or Vz
+        # rejects boot with "Invalid virtual machine configuration. The
+        # process doesn't have the com.apple.security.virtualization
+        # entitlement." This mirrors the dev signing in
+        # crates/lns-cli/scripts/codesign-macos.sh, which already signs both
+        # binaries with the same entitlements file.
+        run: |
+          set -euo pipefail
+          codesign --force --sign - \
+            --entitlements crates/lns-cli/lns.entitlements \
+            target/${{ matrix.target }}/release/lns-service
+          codesign --display --entitlements - \
+            target/${{ matrix.target }}/release/lns-service 2>&1
+
+      - name: Package tarball and compute checksum
+        id: pkg
+        run: |
+          set -euo pipefail
+          ASSET="lns-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          tar czf "$ASSET" -C target/${{ matrix.target }}/release lns lns-service
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          else
+            echo "Error: no SHA-256 checksum tool (sha256sum or shasum) found." >&2
+            exit 1
+          fi
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ steps.pkg.outputs.asset }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+
+      - name: Upload to CDN origin
+        env:
+          ASSET: ${{ steps.pkg.outputs.asset }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # Versioned tarball. The install script (scripts/lns-install.sh)
+          # reads lns-latest.json to find the newest tarball; each release
+          # is reachable at a stable, never-rewritten URL. The pull-zone
+          # edge rule pins this URL pattern to 1 year cache. We don't pass
+          # --cache-control: the storage backend drops it on PUT.
+          aws s3 cp "$ASSET" "s3://${S3_BUCKET}/${ASSET}" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "application/gzip"
+          aws s3 cp "$ASSET.sha256" "s3://${S3_BUCKET}/${ASSET}.sha256" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/plain"
+
+  # Publish lns-latest.json after all build-lns matrix jobs have uploaded
+  # their tarballs, so the manifest never points at objects that don't
+  # exist yet.
+  publish-lns-manifest:
+    needs: [release-please, build-lns]
+    # Explicit mirror of build-lns's gate. The `needs` cascade already
+    # blocks this job when build-lns is skipped, but pinning the same
+    # condition here documents intent and survives future refactors.
+    if: needs.release-please.outputs.lns-released == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_build_lns)
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.release-please.outputs.lns-version || inputs.lns_version }}
+      TAG: ${{ needs.release-please.outputs.lns-tag || inputs.lns_tag }}
+      CDN_BASE: https://get.lns.run
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+    steps:
+      - name: Build and upload lns-latest.json
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          # Read each platform's sha256 back from the objects build-lns
+          # just uploaded — the storage backend is the source of truth, so
+          # the manifest is guaranteed to match what's actually published.
+          get_sha() {
+            local os="$1" arch="$2"
+            local key="lns-${VERSION}-${os}-${arch}.tar.gz.sha256"
+            aws s3 cp "s3://${S3_BUCKET}/${key}" "${tmp}/${os}-${arch}.sha256" \
+              --endpoint-url "$S3_ENDPOINT_URL" >/dev/null
+            awk '{print $1}' "${tmp}/${os}-${arch}.sha256"
+          }
+          DARWIN_AARCH64_SHA=$(get_sha darwin aarch64)
+          LINUX_AARCH64_SHA=$(get_sha linux aarch64)
+          LINUX_X86_64_SHA=$(get_sha linux x86_64)
+          cat > "${tmp}/lns-latest.json" <<EOF
+          {
+            "version": "${VERSION}",
+            "tag": "${TAG}",
+            "platforms": {
+              "darwin-aarch64": {
+                "url": "${CDN_BASE}/lns-${VERSION}-darwin-aarch64.tar.gz",
+                "sha256": "${DARWIN_AARCH64_SHA}"
+              },
+              "linux-aarch64": {
+                "url": "${CDN_BASE}/lns-${VERSION}-linux-aarch64.tar.gz",
+                "sha256": "${LINUX_AARCH64_SHA}"
+              },
+              "linux-x86_64": {
+                "url": "${CDN_BASE}/lns-${VERSION}-linux-x86_64.tar.gz",
+                "sha256": "${LINUX_X86_64_SHA}"
+              }
+            }
+          }
+          EOF
+          # Short TTL is enforced by the pull-zone default (~10 min); we
+          # don't pass --cache-control because the storage backend drops it on PUT.
+          aws s3 cp "${tmp}/lns-latest.json" "s3://${S3_BUCKET}/lns-latest.json" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "application/json"

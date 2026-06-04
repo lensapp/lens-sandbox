@@ -1,0 +1,5 @@
+npm run lint:md
+make build
+make lint
+make test
+make complexity

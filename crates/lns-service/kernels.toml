@@ -1,0 +1,30 @@
+# Source of truth for the guest kernel that lns boots in the microVM.
+#
+# `build.rs` parses this file at compile time and emits KERNEL_VERSION
+# and the per-target-arch KERNEL_SHA256 as `cargo:rustc-env` values
+# that `kernel.rs` reads via `env!()`. There are no hand-edited kernel
+# constants anywhere; everything derives from this file.
+#
+# Bumping the kernel:
+#   $ cargo run -p bump-kernel -- --kata-version <new-kata-version>
+#
+# See runbooks/kernel-bump.md for the full procedure.
+
+[current]
+# Upstream provenance — where these bytes came from.
+kata_version    = "3.30.0"
+kernel_filename = "vmlinuz-6.18.15-192"
+kernel_variant  = "mainline"
+
+# Published label — the version token in the artifact name on our CDN
+# (`https://get.lns.run/lns-kernel-<published_version>-<arch>`). Must
+# equal `kernel_filename` minus the `vmlinuz-` prefix; CI enforces this.
+published_version = "6.18.15-192"
+
+# Per-arch sha256 of the bytes published at
+#   https://get.lns.run/lns-kernel-<published_version>-<arch>
+# Filled in by the publish-kernel CI workflow on each kernel bump; never
+# by a human. See runbooks/kernel-bump.md.
+[current.sha256]
+aarch64 = "c34f34b93598ddcd4235ae902f7a59bed95025340136dd84d8c0184b85414ba1"
+x86_64  = "2884cd8b108ba0910bb570cb2bb86698fd5fa9346951675ddb646f62a2e13486"

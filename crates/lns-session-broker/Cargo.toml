@@ -1,0 +1,25 @@
+[package]
+name = "lns-session-broker"
+version = "0.1.0"
+edition = "2024"
+description = "Lens Sandbox guest-side session broker — listens on vsock and forks workload children for `lns run` / `lns exec` sessions."
+repository = "https://github.com/lensapp/lens-sandbox"
+
+# Static-musl ELF, built with the workspace's `release-init` profile so
+# it sits in the same size budget as `lns-init` (~150 KB stripped).
+[[bin]]
+name = "lns-session-broker"
+path = "src/main.rs"
+
+[dependencies]
+# Raw syscall surface (vsock, fork, execvp, ptmx, ioctl, waitpid). No
+# tokio / async — blocking threads keep the binary tiny.
+libc = "0.2"
+# Wire-protocol crate shared with lns-cli on the host.
+lns-session = { path = "../lns-session" }
+
+[dev-dependencies]
+# RealFsWriter is exercised against a tempfile in host tests so we
+# don't litter the dev machine with /tmp/lns-udhcpc.script-style
+# artifacts that the production code writes.
+tempfile = "3"

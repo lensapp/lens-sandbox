@@ -1,0 +1,318 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: read
+
+jobs:
+  # Path-change detector. When a PR/push touches only docs, runbooks, or
+  # other non-code paths, downstream heavy jobs (lint/test/coverage) skip
+  # via `if:` and the aggregate `check` job below treats `skipped` as OK.
+  #
+  # Previously the workflow used a top-level `paths-ignore` to skip CI
+  # entirely for docs-only PRs. That left such PRs stuck in BLOCKED
+  # forever because branch protection requires `CI / check` to report,
+  # and a workflow that doesn't trigger never reports anything.
+  #
+  # The detector runs on every PR/push so `check` always reports.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      check-release-build: ${{ steps.filter.outputs['check-release-build'] }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          # `code` excludes docs/runbooks/markdown (last matching pattern wins).
+          # `check-release-build` gates the same-named job to paths that
+          # affect the shipping chain — embedded guest payloads, codesign,
+          # manifests.
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!runbooks/**'
+              - '!**.md'
+            check-release-build:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Makefile'
+              - 'rust-toolchain.toml'
+              - 'crates/lns-init/**'
+              - 'crates/lns-session-broker/**'
+              - 'crates/lns-session/**'
+              - 'crates/lns-service/Cargo.toml'
+              - 'crates/lns-service/build.rs'
+              - 'crates/lns-cli/Cargo.toml'
+              - 'crates/lns-cli/lns.entitlements'
+              - 'crates/lns-cli/scripts/**'
+              - '.github/workflows/release-please.yml'
+              - '.github/workflows/ci.yml'
+              - 'scripts/lns-install/**'
+              - 'scripts/lns-cli.sh'
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    env:
+      # Skip the aarch64-musl cross-build of the embedded guest binaries
+      # (build.rs treats non-empty as skip). Saves ~10 min of apt install
+      # for the cross toolchain; release-please builds the real binary.
+      LNS_INIT_BIN: skip
+      LNS_SESSION_BROKER_BIN: skip
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          version: 1.0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # Per-job cache-shared-key so lint/test/coverage don't fight
+          # for the same target/ slot.
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: lns-ci-lint
+
+      - run: CARGO_LOCKED=--locked make lint
+      - run: make complexity
+
+  test:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    env:
+      LNS_INIT_BIN: skip
+      LNS_SESSION_BROKER_BIN: skip
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Need history back to PR base to detect kernels.toml drift
+          # — drives the --allow-pending decision below.
+          fetch-depth: 0
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          version: 1.0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: lns-ci-test
+
+      - run: CARGO_LOCKED=--locked make test
+      - run: make e2e
+
+      - name: Verify kernel pins match CDN
+        # Strict on push/schedule. On a PR that modifies kernels.toml the
+        # new SHAs aren't on the CDN until merge-time publish, so we
+        # tolerate 404 / empty-sha via --allow-pending. Mismatches always
+        # hard-fail.
+        run: |
+          set -euo pipefail
+          ALLOW=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            if ! git diff --quiet "$BASE" -- crates/lns-service/kernels.toml; then
+              echo "kernels.toml differs from PR base — drift check will tolerate pending publish."
+              ALLOW="--allow-pending"
+            fi
+          fi
+          scripts/check-kernel-pins.sh $ALLOW
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    env:
+      LNS_INIT_BIN: skip
+      LNS_SESSION_BROKER_BIN: skip
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Need history back to the PR base so scripts/affected-crates.sh
+          # can compute the merge-base for the affected-crates filter.
+          # On `push: main`, this is unused (full workspace runs anyway).
+          fetch-depth: 0
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          version: 1.0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # Coverage uses target-cov/ — Makefile owns the path
+          # (COVERAGE_TARGET_DIR). Cache key matches its layout.
+          cache-workspaces: |
+            . -> target-cov
+          cache-on-failure: true
+          cache-shared-key: lns-ci-coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@28ba36d36bfc4814f98a469ff9f76b2a41e9aa8a # cargo-llvm-cov tool tag @ 2026-06-03
+
+      - run: rustup component add llvm-tools-preview
+
+      # On pull_request, narrow coverage to crates affected by this PR's
+      # diff against its base (incl. reverse-dep closure). On push: main,
+      # this step is skipped and full workspace coverage runs unchanged.
+      # See scripts/affected-crates.sh for the three-sentinel contract:
+      #   __FULL__ -> infra-level change, full workspace required
+      #   __NONE__ -> docs/CI-only, skip coverage entirely
+      #   <list>   -> newline-separated crate names to instrument
+      - name: Compute affected crates
+        if: github.event_name == 'pull_request'
+        id: affected
+        run: |
+          set -euo pipefail
+          out=$(scripts/affected-crates.sh "${{ github.event.pull_request.base.sha }}")
+          if [ "$out" = "__NONE__" ]; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "crates="    >> "$GITHUB_OUTPUT"
+          elif [ "$out" = "__FULL__" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "crates="    >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            {
+              echo 'crates<<EOF'
+              echo "$out"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Coverage (skipped — no crates affected)
+        if: github.event_name == 'pull_request' && steps.affected.outputs.skip == 'true'
+        run: echo "No crates affected by this PR's diff — coverage skipped."
+
+      - name: Run coverage
+        if: github.event_name != 'pull_request' || steps.affected.outputs.skip != 'true'
+        run: make coverage
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-cov
+          # Empty on push: main and on __FULL__ PRs => Makefile runs full
+          # workspace. Non-empty on per-crate PRs => Makefile narrows the
+          # cargo invocation and the floor loop. See COVERAGE_CRATES in
+          # the Makefile.
+          COVERAGE_CRATES: ${{ steps.affected.outputs.crates }}
+
+  # Fails the build on any RUSTSEC advisory against the locked graph so
+  # future transitive vulns surface in CI rather than at release time.
+  audit:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: lns-ci-audit
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@28ba36d36bfc4814f98a469ff9f76b2a41e9aa8a # @ 2026-06-03
+        with:
+          tool: cargo-audit
+
+      - run: make audit
+
+  # `make build` with real cross-builds + codesign — what the gate's
+  # LNS_*_BIN=skip flow doesn't validate. Env pins mirror release-please.yml.
+  check-release-build:
+    needs: changes
+    if: needs.changes.outputs['check-release-build'] == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+          - runner: macos-latest
+            os: darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      LNS_INIT_BIN: ""
+      LNS_SESSION_BROKER_BIN: ""
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+      AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        if: matrix.os == 'linux'
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          version: 1.0
+
+      - name: Install aarch64-musl cross toolchain
+        uses: ./.github/actions/install-cross-toolchain
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: lns-ci-check-release-build-${{ matrix.os }}
+
+      - run: CARGO_LOCKED=--locked make build
+
+  # Aggregate gate — single required status check on `main` branch
+  # protection. Lets us split/rename the underlying jobs without
+  # touching branch protection. Treats `skipped` as OK so docs-only PRs
+  # (where the `changes` detector skips lint/test/coverage) still report
+  # a green `check` and unblock the PR; a failed `changes` job still
+  # hard-fails so we don't accidentally green-light real code changes.
+  check:
+    runs-on: ubuntu-latest
+    needs: [changes, lint, test, coverage, audit, check-release-build]
+    if: always()
+    steps:
+      - name: Verify all gates passed
+        run: |
+          ok() {
+            # Pass if success, or skipped (path-filtered jobs skip on
+            # docs-only / release-irrelevant PRs).
+            [ "$1" = "success" ] || [ "$1" = "skipped" ]
+          }
+          if ! ok "${{ needs.lint.result }}" \
+            || ! ok "${{ needs.test.result }}" \
+            || ! ok "${{ needs.coverage.result }}" \
+            || ! ok "${{ needs.audit.result }}" \
+            || ! ok "${{ needs.check-release-build.result }}"; then
+            echo "One or more gates failed: lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }}"
+            exit 1
+          fi
+          # Guard against the changes detector itself failing (e.g.
+          # paths-filter network issue) — without this, a failed
+          # `changes` job would silently skip every downstream job and
+          # check would pass.
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "Changes detector failed: changes=${{ needs.changes.result }}"
+            exit 1
+          fi
+          echo "All gates passed (lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }})."

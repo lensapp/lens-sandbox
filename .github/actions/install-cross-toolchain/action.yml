@@ -1,0 +1,38 @@
+name: Install aarch64-musl cross toolchain
+description: >-
+  Installs the aarch64 cross C toolchain that lns-service's build.rs needs to
+  cross-build the guest payloads (lns-supervisor / lns-init) for
+  aarch64-unknown-linux-musl. lens-sandbox-core's transitive C deps (aws-lc-sys,
+  ring) compile C/.S that need an aarch64 cc.
+
+  On Linux we use the glibc cross-gcc — apt ships no aarch64-musl cc — which is
+  sound here because it only emits relocatable objects whose libc references
+  (malloc/memcpy/…) are ABI-identical on aarch64; rust-lld does the final link
+  against the Rust musl target's own sysroot, so those symbols resolve against
+  musl, not glibc. macOS uses a real aarch64-musl cross-gcc. We avoid
+  taiki-e/setup-cross-toolchain-action because it also sets CARGO_BUILD_TARGET,
+  redirecting the host build of lns-cli/lns-service to the cross target.
+
+runs:
+  using: composite
+  steps:
+    - name: Install aarch64-linux cross toolchain (Linux, glibc cc, musl-linked by rust-lld)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc /usr/local/bin/aarch64-linux-musl-gcc
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-ar  /usr/local/bin/aarch64-linux-musl-ar
+
+    - name: Install aarch64-linux-musl cross toolchain (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew tap messense/macos-cross-toolchains
+        brew install aarch64-unknown-linux-musl
+        prefix="$(brew --prefix)"
+        sudo ln -sf "$prefix/bin/aarch64-unknown-linux-musl-gcc" /usr/local/bin/aarch64-linux-musl-gcc
+        sudo ln -sf "$prefix/bin/aarch64-unknown-linux-musl-ar"  /usr/local/bin/aarch64-linux-musl-ar

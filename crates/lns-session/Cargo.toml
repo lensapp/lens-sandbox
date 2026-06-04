@@ -1,0 +1,32 @@
+[package]
+name = "lns-session"
+version = "0.1.0"
+edition = "2024"
+description = "Wire protocol shared by lns-cli (host) and lns-session-broker (guest) for interactive sessions."
+repository = "https://github.com/lensapp/lens-sandbox"
+
+# Pure-library crate, no binary. Used as a `path` dependency by both
+# `lns-cli` and `lns-session-broker`. Kept dependency-light so it
+# doesn't bloat either binary — especially lns-session-broker, which
+# is static-musl and shares lns-init's ~150 KB budget.
+
+[lib]
+name = "lns_session"
+path = "src/lib.rs"
+
+[dependencies]
+# Postcard: no_std-friendly, small binary, fast encode/decode. Picked
+# over serde_json (text, ~2x larger binary) and bincode (no_std-only
+# via feature gates). The schema is internal so the binary format's
+# opaqueness isn't a debugging concern.
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+
+[dev-dependencies]
+# libc only for the test that sanity-checks `SignalKind::as_libc()`
+# numbers against the platform's POSIX constants. The library itself
+# hardcodes the numbers to keep the no_std door open for future
+# embedded consumers.
+libc = "0.2"
+# Round-trip fuzz-style tests use small randomized inputs.
+proptest = "1"

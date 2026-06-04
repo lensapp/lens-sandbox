@@ -1,0 +1,25 @@
+// markdownlint-cli2 configuration
+// https://github.com/DavidAnson/markdownlint-cli2#configuration
+{
+  "config": {
+    "default": true,
+    // Disable line length — docs often have long lines
+    "MD013": false,
+    // Allow inline HTML — some docs use HTML for formatting
+    "MD033": false,
+    // Don't require first line to be a heading — files like CLAUDE.md start with comments
+    "MD041": false,
+    // Disable fenced code language — many existing blocks are diagrams/pseudo-code
+    "MD040": false,
+    // Disable table column style — existing tables use compact format
+    "MD060": false
+  },
+  "ignores": [
+    "node_modules/**",
+    "**/node_modules/**",
+    ".claude/**",
+    "**/CHANGELOG.md",
+    // Locally generated context — not committed.
+    ".pruner/**"
+  ]
+}

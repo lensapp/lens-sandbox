@@ -1,0 +1,74 @@
+use anyhow::{Context, Result};
+use oci_client::{
+    Reference,
+    client::ClientConfig,
+    manifest::{OciDescriptor, OciImageManifest},
+    secrets::RegistryAuth,
+};
+
+use crate::oci_layer_cache::LayerCache;
+
+use super::manifest_cache::{CachingRegistry, ManifestCache};
+use super::{
+    PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver, pull_inner,
+    serialized_len,
+};
+
+pub struct RealRegistry {
+    client: oci_client::Client,
+    auth: RegistryAuth,
+}
+
+impl RealRegistry {
+    pub fn new() -> Self {
+        let client = oci_client::Client::new(ClientConfig {
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
+            ..Default::default()
+        });
+        Self {
+            client,
+            auth: RegistryAuth::Anonymous,
+        }
+    }
+}
+
+impl Default for RealRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Registry for RealRegistry {
+    async fn pull_manifest_and_config(
+        &self,
+        reference: &Reference,
+    ) -> Result<(OciImageManifest, String, String)> {
+        let (manifest, manifest_digest, config) = self
+            .client
+            .pull_manifest_and_config(reference, &self.auth)
+            .await
+            .with_context(|| format!("failed to pull manifest/config for {reference}"))?;
+        let manifest_bytes = serialized_len(&manifest).unwrap_or(usize::MAX);
+        enforce_manifest_doc_size(&reference.to_string(), manifest_bytes, config.len())?;
+        Ok((manifest, manifest_digest, config))
+    }
+
+    async fn pull_blob(
+        &self,
+        reference: &Reference,
+        descriptor: &OciDescriptor,
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.client
+            .pull_blob(reference, descriptor, &mut out)
+            .await
+            .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
+        Ok(out)
+    }
+}
+
+pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
+    let manifests = crate::cache::root()?.join("manifests");
+    let registry = CachingRegistry::new(RealRegistry::new(), ManifestCache::new(manifests));
+    pull_inner(&registry, image, layer_cache).await
+}

@@ -1,0 +1,435 @@
+name: Publish lns guest kernel
+
+# Three-phase publish for crates/lns-service/kernels.toml.
+#
+#   detect-bump          gate: kernels.toml existed at base AND
+#                        changed AND exists at head
+#   compute + back-fill  PR-time: per-arch sha + provenance back-fill
+#                        (no upload)
+#   publish              push to main (or workflow_dispatch) → CDN upload
+#
+# See `runbooks/kernel-bump.md` for the full design, operator flow,
+# failure modes, and emergency procedures. Repo secrets required:
+#   S3_ENDPOINT_URL       — S3-compatible endpoint URL
+#   S3_BUCKET             — release-artifacts bucket
+#   S3_ACCESS_KEY_ID      — access key id
+#   S3_SECRET_ACCESS_KEY  — access key secret
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - crates/lns-service/kernels.toml
+      - .github/workflows/publish-kernel.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/lns-service/kernels.toml
+      - .github/workflows/publish-kernel.yml
+  # Manual trigger for emergency-overwrite recovery — see
+  # runbooks/kernel-bump.md. Bypasses detect-bump (operator decision).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  # Serialise per kernels.toml change. Two operators opening bump
+  # PRs at once won't race the same artifact key. On push to main,
+  # the commit sha keys it.
+  group: publish-kernel-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: false
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+  S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Phase 0: detect whether this is an actual kernel bump.
+  # ────────────────────────────────────────────────────────────────
+  # The path filter also fires on introduction PRs, workflow-only
+  # edits, and deletions — none of which have anything to publish.
+  # Short-circuit before the 670 MB Kata fetch and S3 preflight.
+  # workflow_dispatch bypasses (operator decision).
+  detect-bump:
+    runs-on: ubuntu-latest
+    outputs:
+      is-bump: ${{ steps.check.outputs.is-bump }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # fetch-depth: 2 covers HEAD^ on push events; the PR base
+          # SHA is fetched explicitly below.
+          fetch-depth: 2
+
+      - id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "is-bump=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch; bypassing change detection."
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Base SHA may not be in a shallow PR checkout; fetch it.
+            git fetch --quiet --depth 1 origin "$PR_BASE_SHA"
+            BASE="$PR_BASE_SHA"
+          else
+            BASE=$(git rev-parse HEAD^ 2>/dev/null || echo "")
+            if [ -z "$BASE" ]; then
+              echo "is-bump=false" >> "$GITHUB_OUTPUT"
+              echo "No HEAD^ reachable (initial commit?); nothing to publish."
+              exit 0
+            fi
+          fi
+
+          if [ ! -f crates/lns-service/kernels.toml ]; then
+            echo "is-bump=false" >> "$GITHUB_OUTPUT"
+            echo "crates/lns-service/kernels.toml missing at HEAD (deletion); nothing to publish."
+            exit 0
+          fi
+
+          if ! git cat-file -e "${BASE}:crates/lns-service/kernels.toml" 2>/dev/null; then
+            echo "is-bump=false" >> "$GITHUB_OUTPUT"
+            echo "crates/lns-service/kernels.toml did not exist at base (introduction); nothing to publish."
+            exit 0
+          fi
+
+          if git diff --quiet "$BASE" -- crates/lns-service/kernels.toml; then
+            echo "is-bump=false" >> "$GITHUB_OUTPUT"
+            echo "crates/lns-service/kernels.toml unchanged from base (workflow tweak only); nothing to publish."
+            exit 0
+          fi
+
+          echo "is-bump=true" >> "$GITHUB_OUTPUT"
+          echo "Detected kernel pin bump."
+
+  # ────────────────────────────────────────────────────────────────
+  # Phase 1: PR-time verify + compute (no upload).
+  # ────────────────────────────────────────────────────────────────
+  compute:
+    needs: detect-bump
+    if: github.event_name == 'pull_request' && needs.detect-bump.outputs.is-bump == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            kata_arch: arm64
+          - arch: x86_64
+            kata_arch: amd64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # rust-toolchain.toml pins the version. Cache scoped to this
+          # workflow so it doesn't fight ci.yml's cache.
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: publish-kernel
+
+      - name: Parse kernels.toml
+        id: manifest
+        run: cargo run --locked --quiet -p bump-kernel -- show >> "$GITHUB_OUTPUT"
+
+      - name: Validate Kata release tarball exists upstream
+        env:
+          KATA: ${{ steps.manifest.outputs.kata_version }}
+          KATA_ARCH: ${{ matrix.kata_arch }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --head -L "$URL")
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Kata bundle not found at $URL (HEAD returned $STATUS). Check kata_version in kernels.toml."
+            exit 1
+          fi
+          echo "Kata bundle URL valid: $URL"
+
+      - name: Refuse to overwrite existing CDN artifact
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          PV: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          # If published_version is still "pending"/empty, the publish
+          # job will check again with the concrete value. Skip here.
+          if [ -z "$PV" ] || [ "$PV" = "pending" ]; then
+            echo "published_version is pending; skipping overwrite preflight (will check again after extraction)."
+            exit 0
+          fi
+          ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
+          if aws s3 ls "s3://${S3_BUCKET}/${ARTIFACT}" --endpoint-url "$S3_ENDPOINT_URL" >/dev/null 2>&1; then
+            echo "::error::s3://${S3_BUCKET}/${ARTIFACT} already exists in storage."
+            echo "::error::Pick a new published_version in kernels.toml, or follow the emergency-overwrite procedure in runbooks/kernel-bump.md."
+            exit 1
+          fi
+
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Fetch Kata static bundle
+        env:
+          KATA: ${{ steps.manifest.outputs.kata_version }}
+          KATA_ARCH: ${{ matrix.kata_arch }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
+          echo "Fetching $URL (~670 MB)"
+          curl -L --fail --output kata.tar.zst "$URL"
+          zstd -d kata.tar.zst -o kata.tar
+
+      - name: Resolve kernel filename (auto-detect when pending)
+        id: resolve
+        env:
+          DECLARED: ${{ steps.manifest.outputs.kernel_filename }}
+          VARIANT: ${{ steps.manifest.outputs.kernel_variant }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DECLARED" ] && [ "$DECLARED" != "pending" ]; then
+            echo "filename=$DECLARED" >> "$GITHUB_OUTPUT"
+            echo "Using declared filename: $DECLARED"
+            exit 0
+          fi
+          case "$VARIANT" in
+            mainline)
+              # Plain vmlinuz-X.Y.Z-N, excluding tagged variants.
+              # `-experimental` catches dragonball today and any future
+              # experimental tag Kata adds.
+              FILENAME=$(tar -tf kata.tar \
+                | grep -E '^\./opt/kata/share/kata-containers/vmlinuz-[0-9]' \
+                | grep -vE -- '-confidential|-tdx|-sev|-snp|-experimental' \
+                | head -1 | sed 's|.*/||')
+              ;;
+            dragonball)
+              # Kata ships dragonball only as `-dragonball-experimental`.
+              FILENAME=$(tar -tf kata.tar \
+                | grep -E '^\./opt/kata/share/kata-containers/vmlinuz-[0-9].*-dragonball-experimental$' \
+                | head -1 | sed 's|.*/||')
+              ;;
+            confidential|tdx|sev|snp)
+              FILENAME=$(tar -tf kata.tar \
+                | grep -E "^\./opt/kata/share/kata-containers/vmlinuz-[0-9].*-${VARIANT}\$" \
+                | head -1 | sed 's|.*/||')
+              ;;
+            *)
+              echo "::error::Unknown kernel_variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+          if [ -z "$FILENAME" ]; then
+            echo "::error::No kernel matching variant=$VARIANT found in Kata $KATA bundle."
+            exit 1
+          fi
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "Auto-detected filename for variant=$VARIANT: $FILENAME"
+
+      - name: Extract + conditionally gunzip + compute sha
+        id: extract
+        env:
+          FILENAME: ${{ steps.resolve.outputs.filename }}
+          PV_DECLARED: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          tar -xf kata.tar "./opt/kata/share/kata-containers/${FILENAME}"
+          if [ -z "$PV_DECLARED" ] || [ "$PV_DECLARED" = "pending" ]; then
+            PUBVER="${FILENAME#vmlinuz-}"
+          else
+            PUBVER="$PV_DECLARED"
+            # Schema invariant: published_version == strip_prefix(kernel_filename, "vmlinuz-")
+            EXPECTED="${FILENAME#vmlinuz-}"
+            if [ "$PUBVER" != "$EXPECTED" ]; then
+              echo "::error::kernels.toml: published_version=$PUBVER doesn't match strip_prefix(kernel_filename, 'vmlinuz-')=$EXPECTED"
+              exit 1
+            fi
+          fi
+          ARTIFACT="lns-kernel-${PUBVER}-${{ matrix.arch }}"
+          # Kata ships aarch64 vmlinuz gzip-compressed (decompresses to
+          # the raw `Image` Vz wants); x86_64 vmlinuz is already a
+          # bzImage (Cloud Hypervisor's expected format). Sniff and branch.
+          if [ "$(head -c 2 "./opt/kata/share/kata-containers/${FILENAME}" | xxd -p)" = "1f8b" ]; then
+            gzip -dc "./opt/kata/share/kata-containers/${FILENAME}" > "$ARTIFACT"
+          else
+            cp "./opt/kata/share/kata-containers/${FILENAME}" "$ARTIFACT"
+          fi
+          file "$ARTIFACT"
+          SHA=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          echo "filename=$FILENAME"          >> "$GITHUB_OUTPUT"
+          echo "published_version=$PUBVER"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA"                 >> "$GITHUB_OUTPUT"
+          echo "Computed $ARTIFACT sha256=$SHA"
+
+      - name: Save per-arch result for back-fill job
+        run: |
+          mkdir -p .compute-results
+          cat > .compute-results/${{ matrix.arch }}.json <<EOF
+          {
+            "arch": "${{ matrix.arch }}",
+            "kernel_filename": "${{ steps.extract.outputs.filename }}",
+            "published_version": "${{ steps.extract.outputs.published_version }}",
+            "sha256": "${{ steps.extract.outputs.sha256 }}"
+          }
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-compute-${{ matrix.arch }}
+          path: .compute-results/${{ matrix.arch }}.json
+          retention-days: 1
+
+  # ────────────────────────────────────────────────────────────────
+  # Phase 1.5: aggregate per-arch results, write back to PR branch.
+  # ────────────────────────────────────────────────────────────────
+  back-fill:
+    if: github.event_name == 'pull_request' && needs.detect-bump.outputs.is-bump == 'true'
+    needs: [detect-bump, compute]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: publish-kernel
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: kernel-compute-*
+          path: .compute-results
+          merge-multiple: true
+
+      - name: Rewrite kernels.toml with computed values
+        run: cargo run --locked --quiet -p bump-kernel -- back-fill --results-dir .compute-results
+
+      - name: Commit back to PR if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet crates/lns-service/kernels.toml; then
+            echo "::notice::Nothing to back-fill — manifest already matches computed values. This run was a no-op; the earlier red run (if any) was from a different cause."
+            exit 0
+          fi
+          PV=$(cargo run --locked --quiet -p bump-kernel -- show \
+            | awk -F= '$1 == "published_version" {print $2}')
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add crates/lns-service/kernels.toml
+          git commit -m "chore(kernel): fill provenance and shas for ${PV}"
+          git push
+          echo "::notice::Kernel pin fields back-filled. GITHUB_TOKEN-authored commits do not retrigger CI; click 'Re-run all jobs' on the PR to verify the back-filled state."
+
+  # ────────────────────────────────────────────────────────────────
+  # Phase 2: merge-time upload to CDN origin. Per-arch matrix.
+  # ────────────────────────────────────────────────────────────────
+  publish:
+    needs: detect-bump
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.detect-bump.outputs.is-bump == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            kata_arch: arm64
+          - arch: x86_64
+            kata_arch: amd64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: publish-kernel
+
+      - name: Parse kernels.toml
+        id: manifest
+        run: cargo run --locked --quiet -p bump-kernel -- show --arch ${{ matrix.arch }} >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite existing CDN artifact (defence in depth)
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          PV: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
+          if aws s3 ls "s3://${S3_BUCKET}/${ARTIFACT}" --endpoint-url "$S3_ENDPOINT_URL" >/dev/null 2>&1; then
+            echo "::error::s3://${S3_BUCKET}/${ARTIFACT} already exists in storage."
+            echo "::error::This should have been caught at PR time. Possible causes:"
+            echo "::error::  - two bump PRs raced with the same published_version (concurrent merges)"
+            echo "::error::  - a previous publish wrote bytes but the merging PR wasn't aware"
+            echo "::error::See runbooks/kernel-bump.md for recovery."
+            exit 1
+          fi
+
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Fetch + extract Kata kernel
+        env:
+          KATA: ${{ steps.manifest.outputs.kata_version }}
+          KATA_ARCH: ${{ matrix.kata_arch }}
+          FILENAME: ${{ steps.manifest.outputs.kernel_filename }}
+          PV: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
+          curl -L --fail --output kata.tar.zst "$URL"
+          zstd -d kata.tar.zst -o kata.tar
+          tar -xf kata.tar "./opt/kata/share/kata-containers/${FILENAME}"
+          ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
+          if [ "$(head -c 2 "./opt/kata/share/kata-containers/${FILENAME}" | xxd -p)" = "1f8b" ]; then
+            gzip -dc "./opt/kata/share/kata-containers/${FILENAME}" > "$ARTIFACT"
+          else
+            cp "./opt/kata/share/kata-containers/${FILENAME}" "$ARTIFACT"
+          fi
+          file "$ARTIFACT"
+
+      - name: Verify sha matches manifest before uploading
+        env:
+          EXPECTED: ${{ steps.manifest.outputs.expected_sha }}
+          PV: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
+          ACTUAL=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::sha mismatch — refusing to upload."
+            echo "::error::  expected (manifest): $EXPECTED"
+            echo "::error::  actual (computed):   $ACTUAL"
+            echo "::error::Same Kata version + kernel_filename should hash deterministically."
+            echo "::error::Either upstream Kata re-uploaded the release, or the PR's bot back-fill didn't run cleanly."
+            exit 1
+          fi
+          sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+
+      - name: Upload to CDN origin
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          PV: ${{ steps.manifest.outputs.published_version }}
+        run: |
+          set -euo pipefail
+          ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
+          aws s3 cp "$ARTIFACT" "s3://${S3_BUCKET}/${ARTIFACT}" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "application/octet-stream"
+          aws s3 cp "$ARTIFACT.sha256" "s3://${S3_BUCKET}/${ARTIFACT}.sha256" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/plain"
+          echo "::notice::Published https://get.lns.run/${ARTIFACT}"

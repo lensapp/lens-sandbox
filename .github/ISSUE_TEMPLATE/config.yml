@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lensapp/lens-sandbox/security/policy
+    about: Please report security issues privately — do not open a public issue.
