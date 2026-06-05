@@ -35,9 +35,7 @@ info()  { printf "%s[info]%s  %s\n" "$GREEN" "$RESET" "$1"; }
 warn()  { printf "%s[warn]%s  %s\n" "$YELLOW" "$RESET" "$1" >&2; }
 error() { printf "%s[error]%s %s\n" "$RED" "$RESET" "$1" >&2; exit 1; }
 
-# Service auto-start is on by default. LNS_NO_SERVICE=1 is the primary opt-out
-# (the published path is curl|bash, which has no argv); --no-service works when
-# args are passed. Under `set -u`, "$@" with zero args expands to nothing.
+# Opt out via LNS_NO_SERVICE=1 (the curl|bash path has no argv) or --no-service.
 NO_SERVICE="${LNS_NO_SERVICE:-}"
 for arg in "$@"; do
   case "$arg" in
@@ -250,9 +248,7 @@ fi
 
 if [ "$HAS_SERVICE" = true ] && [ -z "$NO_SERVICE" ]; then
   info "Starting the Lens Sandbox service and enabling login auto-start..."
-  # Never let enable fail the install: `lns service enable` exits 0 even when it
-  # degrades to start-for-session on a headless/no-bus host. The `if` guard keeps
-  # `set -e` from aborting if the binary itself is unrunnable.
+  # The `if` guard keeps `set -e` from aborting the install if the binary is unrunnable.
   if "${INSTALL_DIR}/${BINARY_NAME}" service enable; then
     SERVICE_ENABLED=true
   else

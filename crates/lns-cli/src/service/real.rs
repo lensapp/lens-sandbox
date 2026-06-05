@@ -112,6 +112,19 @@ async fn wait_for_ready_with(
     }
 }
 
+async fn poll_until_ready_with(pinger: &dyn Pinger, total_timeout: Duration) -> bool {
+    let deadline = Instant::now() + total_timeout;
+    loop {
+        if pinger.ping().await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn wait_for_stopped_with(pinger: &dyn Pinger, total_timeout: Duration) -> bool {
     let deadline = Instant::now() + total_timeout;
     while Instant::now() < deadline {
@@ -203,6 +216,15 @@ impl ServiceClient for RealServiceClient {
             };
             let mut probe = RealChildProbe { child: &mut child };
             wait_for_ready_with(&pinger, &mut probe, &self.socket, total_timeout).await
+        })
+    }
+
+    fn wait_for_ready(&self, total_timeout: Duration) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let pinger = RealPinger {
+                socket: &self.socket,
+            };
+            poll_until_ready_with(&pinger, total_timeout).await
         })
     }
 
@@ -325,6 +347,24 @@ mod tests {
             wait_for_ready_with(&pinger, &mut child, &socket, Duration::from_millis(200)).await;
 
         assert!(result.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_poll_returns_true_as_soon_as_ping_succeeds() {
+        let pinger = FakePinger::scripted([false, false, true]);
+
+        let ready = poll_until_ready_with(&pinger, Duration::from_millis(500)).await;
+
+        assert!(ready);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_poll_times_out_without_spawning_when_ping_never_succeeds() {
+        let pinger = FakePinger::scripted([false, false, false]);
+
+        let ready = poll_until_ready_with(&pinger, Duration::from_millis(100)).await;
+
+        assert!(!ready);
     }
 
     #[tokio::test(start_paused = true)]
