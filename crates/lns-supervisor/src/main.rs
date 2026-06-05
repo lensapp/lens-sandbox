@@ -10,28 +10,30 @@ use lens_sandbox_core::network;
 use lens_sandbox_core::privilege;
 use lens_sandbox_core::proxy;
 
-/// Resolve the sandbox user for privilege drop, or `None` to run the agent as root with capabilities dropped.
-fn resolve_agent_creds(fallback_username: &str) -> Option<privilege::SandboxCredentials> {
-    match privilege::SandboxCredentials::resolve(fallback_username) {
-        Ok(Some(creds)) => {
-            tracing::info!(
-                user = fallback_username,
-                "resolved sandbox uid/gid for privilege drop"
-            );
+/// Drop to the uid/gid lns-init resolved in the guest, or `None` to run the agent as root with capabilities dropped.
+fn resolve_agent_creds() -> Option<privilege::SandboxCredentials> {
+    let uid = env_u32("LENS_RUN_UID");
+    let gid = env_u32("LENS_RUN_GID");
+    let (Some(uid), Some(gid)) = (uid, gid) else {
+        tracing::info!(
+            "no run-as uid/gid from lns-init — agent will run as root with capabilities dropped"
+        );
+        return None;
+    };
+    match privilege::SandboxCredentials::resolve_by_uid(uid, gid) {
+        Ok(creds) => {
+            tracing::info!(uid, gid, "resolved run-as uid/gid for privilege drop");
             Some(creds)
         }
-        Ok(None) => {
-            tracing::info!(
-                user = fallback_username,
-                "sandbox user absent in image — agent will run as root with capabilities dropped"
-            );
-            None
-        }
         Err(e) => {
-            tracing::error!("sandbox user lookup failed: {e}");
+            tracing::error!("run-as uid/gid resolution failed: {e}");
             std::process::exit(1);
         }
     }
+}
+
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok().and_then(|s| s.parse().ok())
 }
 
 #[tokio::main]
@@ -83,7 +85,7 @@ async fn main() {
     );
 
     let sandbox_creds = if config.core.is_root {
-        resolve_agent_creds(&config.core.sandbox_user)
+        resolve_agent_creds()
     } else {
         None
     };

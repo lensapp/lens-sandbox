@@ -49,7 +49,7 @@ pub(crate) enum MountFlags {
 
 pub(crate) struct SandboxUser {
     pub name: String,
-    pub uid: u32,
+    pub uid: Option<u32>,
 }
 
 pub(crate) trait Syscalls {
@@ -74,7 +74,14 @@ pub(crate) trait Syscalls {
     fn umount(&self, target: &CStr) -> std::io::Result<()>;
     fn write_root_file(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
     fn write_sysctl(&self, path: &str, value: &str) -> std::io::Result<()>;
-    fn seed_pristine_volume(&self, seed_mount: &str, image_target: &str) -> Result<(), MountError>;
+    fn export_env(&self, key: &str, value: &str);
+    fn seed_pristine_volume(
+        &self,
+        seed_mount: &str,
+        image_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), MountError>;
     fn verify_descriptor_digest(
         &self,
         device_path: &str,
@@ -90,6 +97,7 @@ pub enum MountError {
     Syscall { op: String, err: std::io::Error },
     DescriptorDigestMismatch { expected: String, actual: String },
     DescriptorRead(std::io::Error),
+    UnresolvableUser(String),
 }
 
 impl fmt::Display for MountError {
@@ -119,6 +127,11 @@ impl fmt::Display for MountError {
                     "reading composefs descriptor device for digest check: {err}"
                 )
             }
+            Self::UnresolvableUser(name) => write!(
+                f,
+                "image USER {name:?} is absent from the image's /etc/passwd and carries no uid to seed; \
+                 refusing to boot rather than silently run the workload as root"
+            ),
         }
     }
 }
@@ -186,31 +199,49 @@ pub(crate) fn resolve_sandbox_user(
     if name.is_empty() {
         return None;
     }
-    let uid: u32 = env_get("SANDBOX_UID")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(65534);
+    let uid = env_get("SANDBOX_UID").and_then(|s| s.parse().ok());
     Some(SandboxUser { name, uid })
 }
 
-pub(crate) fn write_sandbox_user_if_missing(newroot: &str, user: &SandboxUser, sys: &dyn Syscalls) {
+fn passwd_uid_gid(newroot: &str, name: &str) -> Option<(u32, u32)> {
+    let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == name).then_some(())?;
+        let uid = fields.nth(1)?.parse().ok()?;
+        let gid = fields.next()?.parse().ok()?;
+        Some((uid, gid))
+    })
+}
+
+/// Resolve the (uid, gid) the workload runs as: an image-defined user is taken verbatim from the image's passwd, an absent user is seeded at its requested uid, and a named user that is neither in passwd nor carries a uid is unresolvable (`None`) — the caller refuses to boot rather than let it fall through to root.
+pub(crate) fn resolve_workload_ids(
+    newroot: &str,
+    user: &SandboxUser,
+    sys: &dyn Syscalls,
+) -> Option<(u32, u32)> {
+    if let Some(ids) = passwd_uid_gid(newroot, &user.name) {
+        return Some(ids);
+    }
+    let uid = user.uid?;
+    seed_sandbox_user(newroot, &user.name, uid, sys);
+    Some((uid, uid))
+}
+
+fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, sys: &dyn Syscalls) {
     let etc = format!("{newroot}/etc");
     let _ = std::fs::create_dir_all(&etc);
 
-    let passwd = format!("{etc}/passwd");
-    append_user_line(&passwd, &user.name, user.uid);
-    let group = format!("{etc}/group");
-    append_group_line(&group, &user.name, user.uid);
+    append_user_line(&format!("{etc}/passwd"), name, uid);
+    append_group_line(&format!("{etc}/group"), name, uid);
 
-    let home = format!("{newroot}/home/{}", user.name);
+    let home = format!("{newroot}/home/{name}");
     match CString::new(home.as_str()) {
         Ok(home_c) => {
             if std::fs::create_dir_all(&home).is_ok() {
                 let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755));
-                if let Err(err) = sys.lchown(&home_c, user.uid, user.uid) {
-                    eprintln!(
-                        "lns-init: lchown({home:?}, {}, {}) failed: {err}",
-                        user.uid, user.uid
-                    );
+                if let Err(err) = sys.lchown(&home_c, uid, uid) {
+                    eprintln!("lns-init: lchown({home:?}, {uid}, {uid}) failed: {err}");
                 }
             }
         }
@@ -338,10 +369,10 @@ fn allow_unprivileged_low_ports(sys: &dyn Syscalls) -> Result<(), MountError> {
         })
 }
 
-fn do_lchown(sys: &dyn Syscalls, path: &str, uid: u32) -> Result<(), MountError> {
+fn do_lchown(sys: &dyn Syscalls, path: &str, uid: u32, gid: u32) -> Result<(), MountError> {
     let c = cstring(path, "lchown-path")?;
-    sys.lchown(&c, uid, uid).map_err(|err| MountError::Syscall {
-        op: format!("lchown({path}, {uid})"),
+    sys.lchown(&c, uid, gid).map_err(|err| MountError::Syscall {
+        op: format!("lchown({path}, {uid}:{gid})"),
         err,
     })
 }
@@ -358,12 +389,13 @@ fn mount_volumes(
     sys: &dyn Syscalls,
     volumes: &[crate::cmdline::VolumeParam],
     newroot: &str,
+    run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
     let mut seeded: Vec<&str> = Vec::new();
     for vol in volumes {
         let target = format!("{newroot}{}", vol.target);
         if !seeded.contains(&vol.dev.as_str()) {
-            seed_volume_if_pristine(sys, &vol.dev, &target)?;
+            seed_volume_if_pristine(sys, &vol.dev, &target, run_ids)?;
             seeded.push(&vol.dev);
         }
         do_mkdir_p(sys, &target, 0o755)?;
@@ -379,7 +411,7 @@ fn mount_volumes(
 fn mount_run_tmpfs(
     sys: &dyn Syscalls,
     newroot: &str,
-    sandbox_user: Option<&SandboxUser>,
+    run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
     let run = format!("{newroot}{RUN}");
     do_mkdir(sys, &run, 0o755)?;
@@ -391,8 +423,8 @@ fn mount_run_tmpfs(
         MountFlags::Tmpfs,
         Some(RUN_TMPFS_OPTS),
     )?;
-    if let Some(user) = sandbox_user {
-        do_lchown(sys, &run, user.uid)?;
+    if let Some((uid, gid)) = run_ids {
+        do_lchown(sys, &run, uid, gid)?;
     }
     let lock = format!("{newroot}{RUN_LOCK}");
     do_mkdir(sys, &lock, 0o755)?;
@@ -410,10 +442,12 @@ fn seed_volume_if_pristine(
     sys: &dyn Syscalls,
     dev: &str,
     image_target: &str,
+    run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
     do_mkdir(sys, VOLUME_SEED_MOUNT, 0o755).ok();
     do_mount(sys, dev, VOLUME_SEED_MOUNT, "ext4", MountFlags::None, None)?;
-    let result = sys.seed_pristine_volume(VOLUME_SEED_MOUNT, image_target);
+    let (uid, gid) = run_ids.unwrap_or((0, 0));
+    let result = sys.seed_pristine_volume(VOLUME_SEED_MOUNT, image_target, uid, gid);
     do_umount(sys, VOLUME_SEED_MOUNT)?;
     result
 }
@@ -575,9 +609,22 @@ fn mount_composefs_and_exec_broker_inner(
         Some(&opts),
     )?;
 
-    mount_volumes(sys, &params.volumes, newroot)?;
+    let run_ids = match sandbox_user {
+        Some(user) => Some(
+            resolve_workload_ids(newroot, user, sys)
+                .ok_or_else(|| MountError::UnresolvableUser(user.name.clone()))?,
+        ),
+        None => None,
+    };
 
-    mount_run_tmpfs(sys, newroot, sandbox_user)?;
+    if let Some((uid, gid)) = run_ids {
+        sys.export_env("LENS_RUN_UID", &uid.to_string());
+        sys.export_env("LENS_RUN_GID", &gid.to_string());
+    }
+
+    mount_volumes(sys, &params.volumes, newroot, run_ids)?;
+
+    mount_run_tmpfs(sys, newroot, run_ids)?;
 
     allow_unprivileged_low_ports(sys)?;
 
@@ -595,10 +642,6 @@ fn mount_composefs_and_exec_broker_inner(
     do_move_mount(sys, DEV, &newroot_dev)?;
 
     mask_proc_cmdline(sys, newroot, raw_cmdline)?;
-
-    if let Some(user) = sandbox_user {
-        write_sandbox_user_if_missing(newroot, user, sys);
-    }
 
     do_chdir(sys, newroot)?;
     do_move_mount(sys, ".", "/")?;
@@ -790,6 +833,8 @@ mod tests {
             actual: "bb".into(),
         };
         assert!(format!("{mismatch}").contains("sha256 mismatch — expected aa, got bb"));
+        let unresolvable = MountError::UnresolvableUser("www-data".into());
+        assert!(format!("{unresolvable}").contains("refusing to boot"));
     }
 
     #[test]
@@ -800,21 +845,21 @@ mod tests {
         ]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
         assert_eq!(user.name, "agent");
-        assert_eq!(user.uid, 1000);
+        assert_eq!(user.uid, Some(1000));
     }
 
     #[test]
-    fn resolve_sandbox_user_defaults_uid_when_unparseable_or_absent() {
+    fn resolve_sandbox_user_leaves_uid_unknown_when_unparseable_or_absent() {
         let env = HashMap::from([("SANDBOX_USER".to_string(), "agent".to_string())]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
-        assert_eq!(user.uid, 65534);
+        assert_eq!(user.uid, None);
 
         let env = HashMap::from([
             ("SANDBOX_USER".to_string(), "agent".to_string()),
             ("SANDBOX_UID".to_string(), "not-a-number".to_string()),
         ]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
-        assert_eq!(user.uid, 65534);
+        assert_eq!(user.uid, None);
     }
 
     #[test]
@@ -822,6 +867,109 @@ mod tests {
         assert!(resolve_sandbox_user(|_| None).is_none());
         let env = HashMap::from([("SANDBOX_USER".to_string(), String::new())]);
         assert!(resolve_sandbox_user(|k| env.get(k).cloned()).is_none());
+    }
+
+    fn newroot_with_passwd(contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        std::fs::write(dir.path().join("etc/passwd"), contents).unwrap();
+        dir
+    }
+
+    #[test]
+    fn passwd_lookup_matches_by_exact_name_and_skips_malformed_lines() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             trunc:x\n\
+             baduid:x:nope:5:::\n\
+             badgid:x:1000:nope:::\n\
+             nogid:x:1000\n\
+             good:x:1000:2000:::\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        assert_eq!(passwd_uid_gid(newroot, "good"), Some((1000, 2000)));
+        assert_eq!(passwd_uid_gid(newroot, "absent"), None);
+        assert_eq!(passwd_uid_gid(newroot, "trunc"), None);
+        assert_eq!(passwd_uid_gid(newroot, "baduid"), None);
+        assert_eq!(passwd_uid_gid(newroot, "badgid"), None);
+        assert_eq!(passwd_uid_gid(newroot, "nogid"), None);
+    }
+
+    #[test]
+    fn passwd_lookup_is_none_when_the_image_has_no_passwd_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(passwd_uid_gid(dir.path().to_str().unwrap(), "anyone"), None);
+    }
+
+    #[test]
+    fn workload_ids_take_an_image_users_uid_gid_from_passwd_without_reseeding() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             appuser:x:1000:2000:app:/home/appuser:/bin/sh\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "appuser".into(),
+            uid: None,
+        };
+        assert_eq!(
+            resolve_workload_ids(newroot, &user, &sys),
+            Some((1000, 2000))
+        );
+        assert!(
+            !sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })),
+            "an image-defined user must not be re-chowned"
+        );
+        let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
+        assert_eq!(
+            passwd.matches("appuser:x:").count(),
+            1,
+            "image-defined user must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn workload_ids_seed_an_absent_user_at_its_requested_uid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "sandbox".into(),
+            uid: Some(65534),
+        };
+        assert_eq!(
+            resolve_workload_ids(newroot, &user, &sys),
+            Some((65534, 65534))
+        );
+        let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
+        assert!(passwd.contains("sandbox:x:65534:65534:"));
+        assert!(sys.calls().iter().any(|c| matches!(
+            c,
+            Call::Lchown {
+                uid: 65534,
+                gid: 65534,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn workload_ids_run_a_named_user_with_unknown_uid_unprivileged_without_seeding_root() {
+        let dir = newroot_with_passwd("root:x:0:0:root:/root:/bin/sh\n");
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "www-data".into(),
+            uid: None,
+        };
+        assert_eq!(resolve_workload_ids(newroot, &user, &sys), None);
+        let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
+        assert!(
+            !passwd.contains("www-data"),
+            "an unresolvable named user must not be seeded as uid 0"
+        );
+        assert!(!sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })));
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -874,10 +1022,16 @@ mod tests {
         SeedVolume {
             seed_mount: String,
             image_target: String,
+            uid: u32,
+            gid: u32,
         },
         VerifyDigest {
             device: String,
             expected: String,
+        },
+        ExportEnv {
+            key: String,
+            value: String,
         },
     }
 
@@ -1021,14 +1175,24 @@ mod tests {
                 value: value.to_string(),
             })
         }
+        fn export_env(&self, key: &str, value: &str) {
+            self.calls.borrow_mut().push(Call::ExportEnv {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+        }
         fn seed_pristine_volume(
             &self,
             seed_mount: &str,
             image_target: &str,
+            uid: u32,
+            gid: u32,
         ) -> Result<(), MountError> {
             self.calls.borrow_mut().push(Call::SeedVolume {
                 seed_mount: seed_mount.to_string(),
                 image_target: image_target.to_string(),
+                uid,
+                gid,
             });
             Ok(())
         }
@@ -1413,7 +1577,7 @@ mod tests {
         let sys = FakeSyscalls::new();
         let user = SandboxUser {
             name: "agent".into(),
-            uid: 4242,
+            uid: Some(4242),
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1439,6 +1603,39 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_boot_when_a_named_image_user_resolves_to_no_uid() {
+        let dir = newroot_with_passwd("root:x:0:0:root:/root:/bin/sh\n");
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "www-data".into(),
+            uid: None,
+        };
+        let err = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, MountError::UnresolvableUser(name) if name == "www-data"),
+            "got {err:?}"
+        );
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| matches!(c, Call::SeedVolume { .. })),
+            "volumes must not be seeded as root once the run-as user is unresolvable"
+        );
+        assert!(
+            !sys.calls().iter().any(|c| matches!(c, Call::Chroot(_))),
+            "the workload must never be pivoted into when its user can't be resolved"
+        );
+    }
+
+    #[test]
     fn write_sandbox_user_is_idempotent_and_appends_newline_to_seeded_files() {
         let dir = tempfile::TempDir::new().unwrap();
         let newroot = dir.path().to_str().unwrap();
@@ -1451,12 +1648,8 @@ mod tests {
         .unwrap();
         std::fs::write(format!("{newroot}/etc/group"), "root:x:0:").unwrap();
         let sys = FakeSyscalls::new();
-        let user = SandboxUser {
-            name: "agent".into(),
-            uid: 1000,
-        };
-        write_sandbox_user_if_missing(newroot, &user, &sys);
-        write_sandbox_user_if_missing(newroot, &user, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, &sys);
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
         assert_eq!(
             passwd.matches("agent:x:1000").count(),
@@ -1480,11 +1673,7 @@ mod tests {
         let newroot = dir.path().to_str().unwrap();
         let sys = FakeSyscalls::new()
             .fail_when(|c| matches!(c, Call::Lchown { .. }).then_some(ErrorKind::PermissionDenied));
-        let user = SandboxUser {
-            name: "agent".into(),
-            uid: 1000,
-        };
-        write_sandbox_user_if_missing(newroot, &user, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, &sys);
         assert!(
             std::fs::metadata(format!("{newroot}/home/agent"))
                 .unwrap()
@@ -1497,11 +1686,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let newroot = dir.path().to_str().unwrap();
         let sys = FakeSyscalls::new();
-        let user = SandboxUser {
-            name: "ag\0ent".into(),
-            uid: 1000,
-        };
-        write_sandbox_user_if_missing(newroot, &user, &sys);
+        seed_sandbox_user(newroot, "ag\0ent", 1000, &sys);
         // The interior NUL makes the home CString fail → home setup skipped, no lchown attempted.
         assert!(!sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })));
         // passwd is still (best-effort) written before the home step.
@@ -1523,7 +1708,7 @@ mod tests {
             volume("/dev/vdc", "/data", false),
             volume("/dev/vdc", "/cache", true),
         ];
-        mount_volumes(&sys, &volumes, "/newroot").unwrap();
+        mount_volumes(&sys, &volumes, "/newroot", Some((1000, 1000))).unwrap();
         let calls = sys.calls();
 
         let seeds: Vec<_> = calls
@@ -1537,7 +1722,7 @@ mod tests {
         );
         assert!(matches!(
             seeds[0],
-            Call::SeedVolume { image_target, .. } if image_target == "/newroot/data"
+            Call::SeedVolume { image_target, uid: 1000, gid: 1000, .. } if image_target == "/newroot/data"
         ));
         // Seeding mounts the device at the staging path and unmounts it afterward.
         assert!(
@@ -1564,8 +1749,13 @@ mod tests {
     fn mount_volumes_surfaces_a_failed_seed_unmount_with_its_op_string() {
         let sys = FakeSyscalls::new()
             .fail_when(|c| matches!(c, Call::Umount(_)).then_some(ErrorKind::PermissionDenied));
-        let err =
-            mount_volumes(&sys, &[volume("/dev/vdc", "/data", false)], "/newroot").unwrap_err();
+        let err = mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/data", false)],
+            "/newroot",
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, MountError::Syscall { op, .. } if op.contains("umount(/mnt/vol-seed)")),
             "got {err:?}"
@@ -1709,7 +1899,7 @@ mod tests {
         let sys = FakeSyscalls::new();
         let user = SandboxUser {
             name: "agent".into(),
-            uid: 4242,
+            uid: Some(4242),
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1725,6 +1915,97 @@ mod tests {
                 Call::Lchown { path, uid: 4242, gid: 4242 } if path == &run_target
             )),
             "/run must be chowned to the sandbox user so it is actually writable"
+        );
+    }
+
+    #[test]
+    fn boot_chowns_run_to_a_named_image_users_passwd_resolved_uid() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "www-data".into(),
+            uid: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let run_target = format!("{newroot}/run");
+        assert!(
+            sys.calls().iter().any(|c| matches!(
+                c,
+                Call::Lchown { path, uid: 33, gid: 33 } if path == &run_target
+            )),
+            "a named image user's /run must be chowned to its passwd-resolved uid, not left root-owned"
+        );
+    }
+
+    #[test]
+    fn boot_exports_the_passwd_resolved_run_ids_for_the_supervisor_to_drop_to() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             www-data:x:33:50:www-data:/var/www:/usr/sbin/nologin\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "www-data".into(),
+            uid: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_UID" && value == "33"
+            )),
+            "the supervisor must drop to the uid lns-init resolved in the guest, not re-resolve the user by name"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_GID" && value == "50"
+            )),
+            "the gid must come from the image passwd's gid field, not from a like-named group or the uid"
+        );
+        let run_target = format!("{newroot}/run");
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::Lchown { path, uid: 33, gid: 50 } if path == &run_target
+            )),
+            "/run must be group-owned by the workload's passwd gid, not by the uid"
+        );
+    }
+
+    #[test]
+    fn boot_exports_no_run_ids_for_a_rootful_image_so_the_supervisor_keeps_root() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| matches!(c, Call::ExportEnv { .. })),
+            "with no sandbox user the supervisor must see no run-as ids and keep the workload as root"
         );
     }
 
@@ -1758,7 +2039,7 @@ mod tests {
         });
         let user = SandboxUser {
             name: "agent".into(),
-            uid: 4242,
+            uid: Some(4242),
         };
         let err = mount_composefs_and_exec_broker_inner(
             &full_params(),

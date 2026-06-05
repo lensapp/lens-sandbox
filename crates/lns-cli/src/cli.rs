@@ -364,11 +364,17 @@ pub struct RunArgs {
     )]
     pub policy: Option<PathBuf>,
 
-    #[arg(long, default_value = "sandbox")]
-    pub sandbox_user: String,
+    #[arg(
+        long,
+        help = "Run-as user inside the sandbox. Defaults to the image's USER (root when the image sets none); imageless runs default to `sandbox`."
+    )]
+    pub sandbox_user: Option<String>,
 
-    #[arg(long, default_value_t = 65534)]
-    pub sandbox_uid: u32,
+    #[arg(
+        long,
+        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; imageless runs default to 65534."
+    )]
+    pub sandbox_uid: Option<u32>,
 
     #[arg(
         short = 'i',
