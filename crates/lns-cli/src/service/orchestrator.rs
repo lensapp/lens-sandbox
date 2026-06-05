@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -225,6 +226,7 @@ where
         aux_socket,
         run_id,
         tty,
+        std::io::stdout().is_terminal(),
         detach_chord,
         &mut stdout,
         &mut stderr,
@@ -232,11 +234,13 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // explicit stream/writer/terminal seam so the attached-session loop is host-testable over in-memory duplexes
 pub async fn drive_attached_session_with_writers<S, O, E>(
     mut stream: S,
     aux_socket: Option<PathBuf>,
     run_id: u32,
     tty: bool,
+    stdout_is_terminal: bool,
     detach_chord: Vec<u8>,
     stdout: &mut O,
     stderr: &mut E,
@@ -313,7 +317,7 @@ where
         }
     };
 
-    if !tty && needs_final_newline(last_stdout_byte) {
+    if !tty && stdout_is_terminal && needs_final_newline(last_stdout_byte) {
         stdout.write_all(b"\n").await.ok();
         stdout.flush().await.ok();
     }
@@ -331,7 +335,7 @@ where
 }
 
 fn needs_final_newline(last_byte: Option<u8>) -> bool {
-    !matches!(last_byte, Some(b'\n'))
+    matches!(last_byte, Some(b) if b != b'\n')
 }
 
 async fn render_attached_run_log<E>(
@@ -958,7 +962,10 @@ mod tests {
 
     #[test]
     fn needs_final_newline_truth_table() {
-        assert!(needs_final_newline(None), "no output yet needs a newline");
+        assert!(
+            !needs_final_newline(None),
+            "no stdout means stderr status lines already left the cursor at column 0",
+        );
         assert!(
             needs_final_newline(Some(b'o')),
             "non-newline last byte needs a newline"
@@ -986,6 +993,7 @@ mod tests {
             None,
             1,
             false,
+            true,
             Vec::new(),
             &mut captured,
             &mut status,
@@ -1016,6 +1024,7 @@ mod tests {
             None,
             1,
             false,
+            true,
             Vec::new(),
             &mut captured,
             &mut status,
@@ -1024,6 +1033,37 @@ mod tests {
         .expect("drive");
         assert_eq!(code, 0);
         assert_eq!(captured, b"hello\n", "must not add a second newline");
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_relays_piped_stdout_byte_for_byte_without_appending() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let out = lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"hello".to_vec()))
+                .expect("encode stdout");
+            server.write_all(&out).await.expect("write stdout");
+            let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode exit");
+            server.write_all(&exit).await.expect("write exit");
+        });
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let code = drive_attached_session_with_writers(
+            client,
+            None,
+            1,
+            false,
+            false,
+            Vec::new(),
+            &mut captured,
+            &mut status,
+        )
+        .await
+        .expect("drive");
+        assert_eq!(code, 0);
+        assert_eq!(
+            captured, b"hello",
+            "a redirected/piped stdout must receive the workload's exact bytes",
+        );
     }
 
     #[tokio::test]
@@ -1042,6 +1082,7 @@ mod tests {
             None,
             1,
             false,
+            true,
             Vec::new(),
             &mut captured,
             &mut status,

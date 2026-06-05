@@ -96,3 +96,9 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Given the image is not in the local cache
     When the workload prints without a trailing newline and then exits
     Then the final byte emitted to the user's terminal is a newline
+
+  Scenario: Redirected stdout receives the workload's bytes unchanged
+    Given the image is not in the local cache
+    And the user's stdout is redirected to a pipe or file
+    When the workload prints without a trailing newline and then exits
+    Then the captured stdout is exactly the workload's bytes with no appended newline
