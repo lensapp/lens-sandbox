@@ -808,12 +808,24 @@ mod tests {
                 .expect("FakeServiceCtl: no start_and_wait_for_ready queued");
             Box::pin(async move { v.map_err(anyhow::Error::msg) })
         }
+        fn wait_for_ready(
+            &self,
+            _total_timeout: Duration,
+        ) -> crate::service::client::BoxFuture<'_, bool> {
+            unreachable!("update flow does not call wait_for_ready()")
+        }
         fn status(&self) -> crate::service::client::BoxFuture<'_, Option<lns_ipc::StatusInfo>> {
             unreachable!("update flow does not call status()")
         }
         fn cancel_run(&self, _run_id: u32) -> crate::service::client::BoxFuture<'_, ()> {
             unreachable!("update flow does not call cancel_run()")
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "update flow does not call wait_for_ready()")]
+    fn fake_service_ctl_wait_for_ready_is_a_regression_tripwire() {
+        drop(FakeServiceCtl::default().wait_for_ready(Duration::from_secs(0)));
     }
 
     #[test]

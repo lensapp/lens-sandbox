@@ -95,8 +95,18 @@ async fn enable_with_outcome(
     client: &impl ServiceClient,
     outcome: login_agent::EnableOutcome,
 ) -> Result<()> {
+    let login_agent_owns_start = matches!(
+        outcome,
+        login_agent::EnableOutcome::Registered | login_agent::EnableOutcome::AlreadyRegistered
+    );
     report_enable_outcome(outcome);
-    if let Err(e) = cmd_start(client).await {
+    if login_agent_owns_start {
+        if !client.wait_for_ready(START_TIMEOUT).await {
+            crate::log::warn!(
+                "the login agent is registered but the service is not responding yet; it will start on the next login"
+            );
+        }
+    } else if let Err(e) = cmd_start(client).await {
         crate::log::warn!(
             "the service did not start for this session ({e}); it will start on the next login"
         );
@@ -271,6 +281,7 @@ mod tests {
         status_response: std::sync::Mutex<Option<Option<StatusInfo>>>,
         shutdown_response: std::sync::Mutex<Option<Option<()>>>,
         start_response: std::sync::Mutex<Option<Result<bool, String>>>,
+        wait_for_ready_response: std::sync::Mutex<Option<bool>>,
         wait_for_stopped_response: std::sync::Mutex<Option<bool>>,
         calls: std::sync::Mutex<Vec<String>>,
     }
@@ -334,6 +345,17 @@ mod tests {
                 .take()
                 .expect("FakeClient: start_and_wait_for_ready called with no queued response");
             Box::pin(async move { v.map_err(|msg| anyhow::anyhow!(msg)) })
+        }
+
+        fn wait_for_ready(&self, _total_timeout: Duration) -> BoxFuture<'_, bool> {
+            self.record("wait_for_ready");
+            let v = self
+                .wait_for_ready_response
+                .lock()
+                .unwrap()
+                .take()
+                .expect("FakeClient: wait_for_ready called with no queued response");
+            Box::pin(async move { v })
         }
 
         fn wait_for_stopped(&self, _total_timeout: Duration) -> BoxFuture<'_, bool> {
@@ -702,16 +724,38 @@ exit 0
     }
 
     #[tokio::test]
-    async fn enable_with_outcome_chains_start_after_reporting() {
+    async fn enable_with_outcome_waits_for_managed_start_without_spawning() {
         let client = FakeClient::default();
-        client.ping_responses.lock().unwrap().push_back(false);
-        *client.start_response.lock().unwrap() = Some(Ok(true));
+        *client.wait_for_ready_response.lock().unwrap() = Some(true);
 
         enable_with_outcome(&client, EnableOutcome::Registered)
             .await
             .expect("enable should succeed");
 
-        assert_eq!(client.calls(), vec!["ping", "start_and_wait_for_ready"]);
+        assert_eq!(
+            client.calls(),
+            vec!["wait_for_ready"],
+            "the login agent owns the start; we must never spawn a competing instance"
+        );
+    }
+
+    #[test]
+    fn enable_with_outcome_warns_when_managed_service_never_responds() {
+        let client = FakeClient::default();
+        *client.wait_for_ready_response.lock().unwrap() = Some(false);
+
+        let events = capture_warn(|| {
+            futures_block_on(enable_with_outcome(
+                &client,
+                EnableOutcome::AlreadyRegistered,
+            ))
+            .expect("enable must not fail the install when the service is slow to respond");
+        });
+        assert_eq!(client.calls(), vec!["wait_for_ready"]);
+        assert!(
+            events.iter().any(|e| e.contains("start on the next login")),
+            "expected a not-responding-yet warn: {events:?}"
+        );
     }
 
     #[test]
