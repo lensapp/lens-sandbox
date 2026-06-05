@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.4.0...lns-install-v0.5.0) (2026-06-05)
+
+
+### Features
+
+* auto-start the service on install and login (lns service enable/disable) ([7196a95](https://github.com/lensapp/lens-sandbox/commit/7196a95a9f7a6126aa756907299299d504aba996))
+
+
+### Bug Fixes
+
+* never spawn a competing service instance during enable ([0a9758f](https://github.com/lensapp/lens-sandbox/commit/0a9758f89b94527f925d4cf69c9ba3078c5294d9))
+
 ## [0.4.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.3.0...lns-install-v0.4.0) (2026-05-21)
 
 
