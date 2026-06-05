@@ -157,8 +157,13 @@ impl Syscalls for RealSyscalls {
         std::fs::write(path, value)
     }
 
-    fn seed_pristine_volume(&self, seed_mount: &str, image_target: &str) -> Result<(), MountError> {
-        let (uid, gid) = sandbox_ids();
+    fn seed_pristine_volume(
+        &self,
+        seed_mount: &str,
+        image_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), MountError> {
         crate::seed::prepare_pristine_volume(
             std::path::Path::new(seed_mount),
             std::path::Path::new(image_target),
@@ -179,6 +184,11 @@ impl Syscalls for RealSyscalls {
     ) -> Result<(), MountError> {
         super::verify_descriptor_digest(device_path, expected_hex)
     }
+
+    fn export_env(&self, key: &str, value: &str) {
+        // SAFETY: lns-init is single-threaded PID-1 here; nothing else can race the environment before the imminent fexecve into the broker.
+        unsafe { std::env::set_var(key, value) };
+    }
 }
 
 pub fn mount_and_exec() -> Result<std::convert::Infallible, MountError> {
@@ -191,12 +201,4 @@ pub fn mount_and_exec() -> Result<std::convert::Infallible, MountError> {
 
     let user = super::resolve_sandbox_user(|k| std::env::var(k).ok());
     super::mount_composefs_and_exec_broker_inner(&params, user.as_ref(), NEWROOT, &cmdline, &sys)
-}
-
-fn sandbox_ids() -> (u32, u32) {
-    let uid = std::env::var("SANDBOX_UID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(65534);
-    (uid, uid)
 }

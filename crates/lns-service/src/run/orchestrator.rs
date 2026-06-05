@@ -131,9 +131,19 @@ async fn orchestrate(
         "composefs descriptor materialised",
     );
 
-    let exec = vm::ExecSpec::for_run(
-        &args.sandbox_user,
+    let (run_user, run_uid) = vm::resolve_run_as(
+        args.sandbox_user.as_deref(),
         args.sandbox_uid,
+        image
+            .config
+            .as_ref()
+            .and_then(|c| c.config.as_ref())
+            .and_then(|c| c.user.as_deref()),
+        imageless,
+    );
+    let exec = vm::ExecSpec::for_run(
+        &run_user,
+        run_uid,
         &args.cmd,
         image.config.as_ref(),
         session.as_ref(),

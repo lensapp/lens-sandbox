@@ -99,7 +99,7 @@ impl ExecSpec {
     pub fn server(
         image_config: Option<&oci_client::config::ConfigFile>,
         sandbox_user: &str,
-        sandbox_uid: u32,
+        sandbox_uid: Option<u32>,
         ws_url: &str,
         token: &str,
         cmd: &[String],
@@ -110,23 +110,26 @@ impl ExecSpec {
             None => crate::workload_argv::shell_quote_argv(cmd),
         };
 
+        let mut kernel_env = vec![
+            ("LENS_SANDBOX_WS_URL".into(), ws_url.to_string()),
+            ("LENS_SANDBOX_TOKEN".into(), token.to_string()),
+            ("SANDBOX_USER".into(), sandbox_user.to_string()),
+        ];
+        if let Some(uid) = sandbox_uid {
+            kernel_env.push(("SANDBOX_UID".into(), uid.to_string()));
+        }
+        kernel_env.push(("LENS_SANDBOX_USER".into(), sandbox_user.to_string()));
+        kernel_env.push((
+            "AGENT_COMMAND_B64".into(),
+            crate::base64::encode(agent_command.as_bytes()),
+        ));
+        kernel_env.push((
+            "PATH".into(),
+            "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+        ));
+
         ExecSpec {
-            kernel_env: vec![
-                ("LENS_SANDBOX_WS_URL".into(), ws_url.to_string()),
-                ("LENS_SANDBOX_TOKEN".into(), token.to_string()),
-                ("SANDBOX_USER".into(), sandbox_user.to_string()),
-                ("SANDBOX_UID".into(), sandbox_uid.to_string()),
-                ("LENS_SANDBOX_USER".into(), sandbox_user.to_string()),
-                (
-                    "AGENT_COMMAND_B64".into(),
-                    crate::base64::encode(agent_command.as_bytes()),
-                ),
-                (
-                    "PATH".into(),
-                    "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                        .into(),
-                ),
-            ],
+            kernel_env,
             workdir,
         }
     }
@@ -158,7 +161,7 @@ impl ExecSpec {
 
     pub fn for_run(
         sandbox_user: &str,
-        sandbox_uid: u32,
+        sandbox_uid: Option<u32>,
         cmd: &[String],
         image_config: Option<&oci_client::config::ConfigFile>,
         session: Option<&crate::supervisor::SupervisorSession>,
@@ -182,6 +185,34 @@ fn image_config_workdir(image_config: Option<&oci_client::config::ConfigFile>) -
         .and_then(|c| c.config.as_ref())
         .and_then(|c| c.working_dir.clone())
         .filter(|s| !s.is_empty())
+}
+
+const DEFAULT_SANDBOX_USER: &str = "sandbox";
+const DEFAULT_SANDBOX_UID: u32 = 65534;
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub fn resolve_run_as(
+    explicit_user: Option<&str>,
+    explicit_uid: Option<u32>,
+    image_user: Option<&str>,
+    imageless: bool,
+) -> (String, Option<u32>) {
+    if explicit_user.is_some() || explicit_uid.is_some() {
+        return (
+            explicit_user.unwrap_or(DEFAULT_SANDBOX_USER).to_string(),
+            Some(explicit_uid.unwrap_or(DEFAULT_SANDBOX_UID)),
+        );
+    }
+    if imageless {
+        return (DEFAULT_SANDBOX_USER.to_string(), Some(DEFAULT_SANDBOX_UID));
+    }
+    match image_user.map(str::trim).filter(|u| !u.is_empty()) {
+        None => (String::new(), Some(0)),
+        Some(spec) => {
+            let name = spec.split(':').next().unwrap_or(spec);
+            (name.to_string(), name.parse::<u32>().ok())
+        }
+    }
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -532,7 +563,7 @@ mod tests {
         let exec = ExecSpec::server(
             None,
             "sandbox",
-            65534,
+            Some(65534),
             "vsock://host:1024/v1/sandbox",
             "token",
             &["echo".into(), "hello".into()],
@@ -576,7 +607,7 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run("sandbox", 65534, &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, Some(&session));
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert_eq!(
             env.get("LENS_SANDBOX_WS_URL").map(String::as_str),
@@ -610,7 +641,7 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["sh".to_string()];
-        let exec = ExecSpec::for_run("sandbox", 65534, &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, Some(&session));
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             !env.contains_key("RUST_LOG"),
@@ -624,7 +655,7 @@ mod tests {
     fn for_run_unsupervised_sets_agent_command_b64() {
         use std::collections::HashMap;
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run("sandbox", 65534, &cmd, None, None);
+        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, None);
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             env.contains_key("AGENT_COMMAND_B64"),
@@ -714,7 +745,7 @@ mod tests {
         let spec = ExecSpec::server(
             Some(&cfg),
             "sandbox",
-            65534,
+            Some(65534),
             "vsock://host:1024/v1/sandbox",
             "token-xyz",
             &[],
@@ -817,5 +848,106 @@ mod tests {
         assert!(s.contains('/'));
         assert!(s.contains('+'));
         assert_eq!(base64_decode_for_test(&s).as_deref(), Some("???>>>"));
+    }
+
+    #[test]
+    fn run_as_image_without_a_user_directive_runs_as_root() {
+        assert_eq!(
+            resolve_run_as(None, None, None, false),
+            (String::new(), Some(0))
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some(""), false),
+            (String::new(), Some(0))
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("  "), false),
+            (String::new(), Some(0))
+        );
+    }
+
+    #[test]
+    fn run_as_leaves_a_named_image_users_uid_for_the_guest_to_resolve_by_name() {
+        assert_eq!(
+            resolve_run_as(None, None, Some("www-data"), false),
+            ("www-data".to_string(), None)
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("www-data:www-data"), false),
+            ("www-data".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn run_as_parses_a_numeric_image_user_into_its_uid() {
+        assert_eq!(
+            resolve_run_as(None, None, Some("1000"), false),
+            ("1000".to_string(), Some(1000))
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("1000:1000"), false),
+            ("1000".to_string(), Some(1000))
+        );
+    }
+
+    #[test]
+    fn run_as_explicit_cli_override_wins_over_the_image_user() {
+        assert_eq!(
+            resolve_run_as(Some("alice"), Some(1234), Some("www-data"), false),
+            ("alice".to_string(), Some(1234))
+        );
+        assert_eq!(
+            resolve_run_as(None, Some(1234), Some("www-data"), false),
+            ("sandbox".to_string(), Some(1234))
+        );
+        assert_eq!(
+            resolve_run_as(Some("alice"), None, None, true),
+            ("alice".to_string(), Some(65534))
+        );
+    }
+
+    #[test]
+    fn run_as_imageless_runs_unprivileged_as_the_sandbox_user() {
+        assert_eq!(
+            resolve_run_as(None, None, None, true),
+            ("sandbox".to_string(), Some(65534))
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("ignored-when-imageless"), true),
+            ("sandbox".to_string(), Some(65534))
+        );
+    }
+
+    #[test]
+    fn server_omits_sandbox_uid_for_a_named_user_so_the_guest_resolves_it_by_name() {
+        use std::collections::HashMap;
+        let named = ExecSpec::server(
+            None,
+            "www-data",
+            None,
+            "vsock://host:1024/v1/sandbox",
+            "token",
+            &["true".into()],
+        );
+        let env: HashMap<_, _> = named.kernel_env.iter().cloned().collect();
+        assert_eq!(
+            env.get("SANDBOX_USER").map(String::as_str),
+            Some("www-data")
+        );
+        assert!(
+            !env.contains_key("SANDBOX_UID"),
+            "a named user must not pin a placeholder SANDBOX_UID: {env:?}"
+        );
+
+        let numeric = ExecSpec::server(
+            None,
+            "1000",
+            Some(1000),
+            "vsock://host:1024/v1/sandbox",
+            "token",
+            &["true".into()],
+        );
+        let env: HashMap<_, _> = numeric.kernel_env.iter().cloned().collect();
+        assert_eq!(env.get("SANDBOX_UID").map(String::as_str), Some("1000"));
     }
 }
