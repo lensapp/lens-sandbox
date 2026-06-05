@@ -94,11 +94,11 @@ echo "[wrap] init started, pid=$$, argv=$@"
 echo "[wrap] env (sorted):"
 env | sort | sed 's/^/[wrap]   /'
 echo "[wrap] /run tree:"
-ls -la /run /run/lns /run/lns/bin 2>&1 | sed 's/^/[wrap]   /'
+ls -la /run /run/lock 2>&1 | sed 's/^/[wrap]   /'
 echo "[wrap] /.lens tree:"
-ls -la /.lens 2>&1 | sed 's/^/[wrap]   /'
+ls -la /.lens /.lens/bin 2>&1 | sed 's/^/[wrap]   /'
 echo "[wrap] nft probe (supervisor checks /.lens/nft first, PATH second):"
-for p in /.lens/nft /run/lns/bin/nft /usr/sbin/nft; do
+for p in /.lens/nft /.lens/bin/nft /usr/sbin/nft; do
   if [ -e "$p" ]; then
     echo "[wrap]   ls $p -> $(ls -la "$p" 2>&1)"
   fi
@@ -107,7 +107,7 @@ done
 echo "[wrap]   exit=$?"
 
 echo "[wrap] launching supervisor.real (RUST_LOG=debug to force trace output through is_terminal silence)..."
-RUST_LOG=debug /run/lns/bin/supervisor.real "$@"
+RUST_LOG=debug /.lens/bin/supervisor.real "$@"
 RC=$?
 echo "[wrap] supervisor.real exited rc=$RC"
 echo "[wrap] sleeping 15s before init exits (so output flushes)"
@@ -125,18 +125,18 @@ pub fn runtime_specs(
 
     if std::env::var_os("LNS_DEBUG_WRAP").is_some() {
         specs.push(RuntimeFileSpec {
-            guest_path: "/run/lns/bin/supervisor.real".into(),
+            guest_path: "/.lens/bin/supervisor.real".into(),
             mode: 0o755,
             source: RuntimeSource::HostFile(assets.supervisor_bin.clone()),
         });
         specs.push(RuntimeFileSpec {
-            guest_path: "/run/lns/bin/lns-supervisor".into(),
+            guest_path: "/.lens/bin/lns-supervisor".into(),
             mode: 0o755,
             source: RuntimeSource::Bytes(DEBUG_WRAPPER.as_bytes().to_vec()),
         });
     } else {
         specs.push(RuntimeFileSpec {
-            guest_path: "/run/lns/bin/lns-supervisor".into(),
+            guest_path: "/.lens/bin/lns-supervisor".into(),
             mode: 0o755,
             source: RuntimeSource::HostFile(assets.supervisor_bin.clone()),
         });
@@ -175,7 +175,7 @@ pub fn imageless_runtime_extras() -> Vec<crate::runtime_layer::RuntimeFileSpec> 
     vec![RuntimeFileSpec {
         guest_path: "/bin/sh".into(),
         mode: 0o777,
-        source: RuntimeSource::Symlink("/run/lns/guest-tools/bin/busybox".into()),
+        source: RuntimeSource::Symlink("/.lens/guest-tools/bin/busybox".into()),
     }]
 }
 
@@ -262,7 +262,7 @@ mod tests {
             "/bin/sh source must be a symlink, got {content:?}"
         );
         if let RuntimeSource::Symlink(target) = content {
-            assert_eq!(target, "/run/lns/guest-tools/bin/busybox");
+            assert_eq!(target, "/.lens/guest-tools/bin/busybox");
         }
     }
 
@@ -373,7 +373,7 @@ mod tests {
         let specs = runtime_specs(&assets).expect("specs");
         let wrapper = specs
             .iter()
-            .find(|s| s.guest_path == "/run/lns/bin/lns-supervisor")
+            .find(|s| s.guest_path == "/.lens/bin/lns-supervisor")
             .expect("wrapper spec present");
         let source = &wrapper.source;
         assert!(
@@ -388,7 +388,7 @@ mod tests {
         assert!(
             specs
                 .iter()
-                .any(|s| s.guest_path == "/run/lns/bin/supervisor.real"),
+                .any(|s| s.guest_path == "/.lens/bin/supervisor.real"),
             "LNS_DEBUG_WRAP path must also ship the real supervisor at .real"
         );
     }
@@ -410,7 +410,7 @@ mod tests {
         let specs = runtime_specs(&assets).expect("specs");
         let canonical = specs
             .iter()
-            .find(|s| s.guest_path == "/run/lns/bin/lns-supervisor")
+            .find(|s| s.guest_path == "/.lens/bin/lns-supervisor")
             .expect("canonical spec present");
         let source = &canonical.source;
         assert!(
@@ -423,7 +423,7 @@ mod tests {
         assert!(
             !specs
                 .iter()
-                .any(|s| s.guest_path == "/run/lns/bin/supervisor.real"),
+                .any(|s| s.guest_path == "/.lens/bin/supervisor.real"),
             "default path must not ship `.real` indirection"
         );
     }

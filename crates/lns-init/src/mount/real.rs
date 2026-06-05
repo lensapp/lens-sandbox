@@ -30,6 +30,8 @@ impl Syscalls for RealSyscalls {
             MountFlags::None => 0,
             MountFlags::ReadOnly => libc::MS_RDONLY,
             MountFlags::Bind => libc::MS_BIND,
+            MountFlags::Tmpfs => libc::MS_NOSUID | libc::MS_NODEV,
+            MountFlags::TmpfsNoExec => libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
         };
         let data_ptr = data
             .map(|c| c.as_ptr() as *const libc::c_void)

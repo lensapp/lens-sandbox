@@ -284,7 +284,7 @@ mod tests {
             .build(
                 &store,
                 &[RuntimeFileSpec {
-                    guest_path: "/run/lns/bin/super".into(),
+                    guest_path: "/.lens/bin/super".into(),
                     mode: 0o755,
                     source: RuntimeSource::Bytes(b"super-a".to_vec()),
                 }],
@@ -294,7 +294,7 @@ mod tests {
             .build(
                 &store,
                 &[RuntimeFileSpec {
-                    guest_path: "/run/lns/bin/super".into(),
+                    guest_path: "/.lens/bin/super".into(),
                     mode: 0o755,
                     source: RuntimeSource::Bytes(b"super-b".to_vec()),
                 }],

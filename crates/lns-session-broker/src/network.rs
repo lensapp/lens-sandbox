@@ -4,16 +4,16 @@ mod real;
 #[cfg(target_os = "linux")]
 pub use real::{bring_up_eth0, configure_dns};
 
-pub const BUSYBOX: &str = "/run/lns/guest-tools/bin/busybox";
+pub const BUSYBOX: &str = "/.lens/guest-tools/bin/busybox";
 pub const UDHCPC_SCRIPT_PATH: &str = "/tmp/lns-udhcpc.script";
 
-pub const DHCP_DNS_PATH: &str = "/run/lns/dhcp-dns";
+pub const DHCP_DNS_PATH: &str = "/.lens/dhcp-dns";
 pub const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 pub const FALLBACK_DNS: &[&str] = &["1.1.1.1", "8.8.8.8"];
 
-pub const UDHCPC_SCRIPT: &str = r#"#!/run/lns/guest-tools/bin/busybox sh
-BB=/run/lns/guest-tools/bin/busybox
+pub const UDHCPC_SCRIPT: &str = r#"#!/.lens/guest-tools/bin/busybox sh
+BB=/.lens/guest-tools/bin/busybox
 case "$1" in
 deconfig)
     "$BB" ip addr flush dev "$interface" 2>/dev/null
@@ -24,11 +24,11 @@ bound|renew)
     if [ -n "$router" ]; then
         "$BB" ip route add default via "$router" dev "$interface" 2>/dev/null || true
     fi
-    "$BB" mkdir -p /run/lns
-    : > /run/lns/dhcp-dns
+    "$BB" mkdir -p /.lens
+    : > /.lens/dhcp-dns
     if [ -n "$dns" ]; then
         for d in $dns; do
-            echo "$d" >> /run/lns/dhcp-dns
+            echo "$d" >> /.lens/dhcp-dns
         done
     fi
     ;;
@@ -151,7 +151,7 @@ mod tests {
             "$interface",
             "${ip}",
             "\"$BB\" ip route add default",
-            "/run/lns/dhcp-dns",
+            "/.lens/dhcp-dns",
             "echo \"$d\"",
         ] {
             assert!(
