@@ -29,6 +29,7 @@ const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const RUN_TMPFS_OPTS: &str = "mode=0755,size=64m";
 const RUN_LOCK_TMPFS_OPTS: &str = "mode=1777,size=4m";
+const UNPRIV_PORT_START_SYSCTL: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountFlags {
@@ -65,6 +66,7 @@ pub(crate) trait Syscalls {
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
     fn umount(&self, target: &CStr) -> std::io::Result<()>;
     fn write_root_file(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
+    fn write_sysctl(&self, path: &str, value: &str) -> std::io::Result<()>;
     fn seed_pristine_volume(&self, seed_mount: &str, image_target: &str) -> Result<(), MountError>;
     fn verify_descriptor_digest(
         &self,
@@ -322,6 +324,14 @@ fn do_mkdir_p(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<(), MountErro
     Ok(())
 }
 
+fn allow_unprivileged_low_ports(sys: &dyn Syscalls) -> Result<(), MountError> {
+    sys.write_sysctl(UNPRIV_PORT_START_SYSCTL, "0")
+        .map_err(|err| MountError::Syscall {
+            op: format!("write {UNPRIV_PORT_START_SYSCTL}"),
+            err,
+        })
+}
+
 fn do_lchown(sys: &dyn Syscalls, path: &str, uid: u32) -> Result<(), MountError> {
     let c = cstring(path, "lchown-path")?;
     sys.lchown(&c, uid, uid).map_err(|err| MountError::Syscall {
@@ -351,10 +361,9 @@ fn mount_volumes(
             seeded.push(&vol.dev);
         }
         do_mkdir_p(sys, &target, 0o755)?;
-        let flags = if vol.read_only {
-            MountFlags::ReadOnly
-        } else {
-            MountFlags::None
+        let flags = match vol.read_only {
+            true => MountFlags::ReadOnly,
+            false => MountFlags::None,
         };
         do_mount(sys, &vol.dev, &target, "ext4", flags, None)?;
     }
@@ -544,6 +553,8 @@ fn mount_composefs_and_exec_broker_inner(
     mount_volumes(sys, &params.volumes, newroot)?;
 
     mount_run_tmpfs(sys, newroot, sandbox_user)?;
+
+    allow_unprivileged_low_ports(sys)?;
 
     let broker_path_c = cstring(INIT_BROKER_PATH, "broker-path")?;
     let broker_fd = open_broker_fd(sys, &broker_path_c)?;
@@ -831,6 +842,10 @@ mod tests {
             contents: Vec<u8>,
             mode: u32,
         },
+        WriteSysctl {
+            path: String,
+            value: String,
+        },
         SeedVolume {
             seed_mount: String,
             image_target: String,
@@ -973,6 +988,12 @@ mod tests {
                 path: path.to_string(),
                 contents: contents.to_vec(),
                 mode,
+            })
+        }
+        fn write_sysctl(&self, path: &str, value: &str) -> std::io::Result<()> {
+            self.record(Call::WriteSysctl {
+                path: path.to_string(),
+                value: value.to_string(),
             })
         }
         fn seed_pristine_volume(
@@ -1674,6 +1695,71 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, MountError::Syscall { op, .. } if op.contains("lchown")));
+    }
+
+    #[test]
+    fn boot_enables_unprivileged_low_port_binding_so_a_nonroot_workload_can_bind_port_80() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            sys.calls().iter().any(|c| matches!(
+                c,
+                Call::WriteSysctl { path, value }
+                    if path == "/proc/sys/net/ipv4/ip_unprivileged_port_start" && value == "0"
+            )),
+            "unprivileged workloads must be allowed to bind ports below 1024"
+        );
+    }
+
+    #[test]
+    fn boot_writes_the_port_sysctl_while_proc_is_still_mounted_at_proc() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        let sysctl = calls
+            .iter()
+            .position(
+                |c| matches!(c, Call::WriteSysctl { path, .. } if path == UNPRIV_PORT_START_SYSCTL),
+            )
+            .unwrap();
+        let proc_move = calls
+            .iter()
+            .position(|c| matches!(c, Call::MoveMount { from, .. } if from == PROC))
+            .unwrap();
+        assert!(
+            sysctl < proc_move,
+            "the sysctl must be written before /proc is moved off its mountpoint"
+        );
+    }
+
+    #[test]
+    fn boot_aborts_when_the_low_port_sysctl_cannot_be_written() {
+        let sys = FakeSyscalls::new().fail_when(|c| {
+            matches!(c, Call::WriteSysctl { .. }).then_some(std::io::ErrorKind::PermissionDenied)
+        });
+        let err = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MountError::Syscall { op, .. } if op.contains("ip_unprivileged_port_start"))
+        );
     }
 
     #[test]
