@@ -153,6 +153,10 @@ impl Syscalls for RealSyscalls {
         file.write_all(contents)
     }
 
+    fn write_sysctl(&self, path: &str, value: &str) -> io::Result<()> {
+        std::fs::write(path, value)
+    }
+
     fn seed_pristine_volume(&self, seed_mount: &str, image_target: &str) -> Result<(), MountError> {
         let (uid, gid) = sandbox_ids();
         crate::seed::prepare_pristine_volume(
