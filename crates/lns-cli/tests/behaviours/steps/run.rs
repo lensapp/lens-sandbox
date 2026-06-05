@@ -544,6 +544,7 @@ async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>)
         None,
         42,
         false,
+        world.attached_stdout_is_terminal.unwrap_or(true),
         Vec::new(),
         &mut stdout,
         &mut status,
@@ -657,6 +658,23 @@ fn final_terminal_byte_newline(world: &mut BehaviourWorld) -> Result<(), String>
     match world.attached_stdout.last() {
         Some(b'\n') => Ok(()),
         other => Err(format!("expected final byte newline, got {other:?}")),
+    }
+}
+
+#[given(regex = r"^the user's stdout is redirected to a pipe or file$")]
+fn stdout_is_redirected(world: &mut BehaviourWorld) {
+    world.attached_stdout_is_terminal = Some(false);
+}
+
+#[then(regex = r"^the captured stdout is exactly the workload's bytes with no appended newline$")]
+fn captured_stdout_is_byte_exact(world: &mut BehaviourWorld) -> Result<(), String> {
+    if world.attached_stdout == b"no trailing newline here" {
+        Ok(())
+    } else {
+        Err(format!(
+            "redirected stdout was mutated: {:?}",
+            String::from_utf8_lossy(&world.attached_stdout)
+        ))
     }
 }
 
