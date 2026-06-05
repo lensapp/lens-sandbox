@@ -335,7 +335,7 @@ pub enum ServiceCommand {
 
 #[derive(clap::Args)]
 pub struct AuditArgs {
-    #[arg(help = "Run identifier surfaced by `lns run` as `Started  run #<id>`.")]
+    #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
     pub run_id: String,
 }
 

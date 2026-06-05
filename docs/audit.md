@@ -29,7 +29,7 @@ anchor mirrored to external append-only storage) is tracked as follow-up.
 
 ## Verifying a run
 
-Use the run id that `lns run` prints (`Started  run #<id>`, also shown by
+Use the run id that `lns run` prints (`✓ started run #<id>`, also shown by
 `lns ls`):
 
 ```bash

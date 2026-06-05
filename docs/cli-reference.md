@@ -85,7 +85,7 @@ Verify the audit chain of a run.
 lns audit <RUN_ID>
 ```
 
-`RUN_ID` is the identifier surfaced by `lns run` as `Started  run #<id>`. Exits `0`
+`RUN_ID` is the identifier surfaced by `lns run` as `✓ started run #<id>`. Exits `0`
 on an intact chain, non-zero if tampering is detected. See [Audit](audit.md).
 
 ## `lns service`
