@@ -322,6 +322,14 @@ fn do_mkdir_p(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<(), MountErro
     Ok(())
 }
 
+fn do_lchown(sys: &dyn Syscalls, path: &str, uid: u32) -> Result<(), MountError> {
+    let c = cstring(path, "lchown-path")?;
+    sys.lchown(&c, uid, uid).map_err(|err| MountError::Syscall {
+        op: format!("lchown({path}, {uid})"),
+        err,
+    })
+}
+
 fn do_umount(sys: &dyn Syscalls, target: &str) -> Result<(), MountError> {
     let c = cstring(target, "umount-target")?;
     sys.umount(&c).map_err(|err| MountError::Syscall {
@@ -353,7 +361,11 @@ fn mount_volumes(
     Ok(())
 }
 
-fn mount_run_tmpfs(sys: &dyn Syscalls, newroot: &str) -> Result<(), MountError> {
+fn mount_run_tmpfs(
+    sys: &dyn Syscalls,
+    newroot: &str,
+    sandbox_user: Option<&SandboxUser>,
+) -> Result<(), MountError> {
     let run = format!("{newroot}{RUN}");
     do_mkdir(sys, &run, 0o755)?;
     do_mount(
@@ -364,6 +376,9 @@ fn mount_run_tmpfs(sys: &dyn Syscalls, newroot: &str) -> Result<(), MountError> 
         MountFlags::Tmpfs,
         Some(RUN_TMPFS_OPTS),
     )?;
+    if let Some(user) = sandbox_user {
+        do_lchown(sys, &run, user.uid)?;
+    }
     let lock = format!("{newroot}{RUN_LOCK}");
     do_mkdir(sys, &lock, 0o755)?;
     do_mount(
@@ -528,7 +543,7 @@ fn mount_composefs_and_exec_broker_inner(
 
     mount_volumes(sys, &params.volumes, newroot)?;
 
-    mount_run_tmpfs(sys, newroot)?;
+    mount_run_tmpfs(sys, newroot, sandbox_user)?;
 
     let broker_path_c = cstring(INIT_BROKER_PATH, "broker-path")?;
     let broker_fd = open_broker_fd(sys, &broker_path_c)?;
@@ -1590,6 +1605,75 @@ mod tests {
             lock < chroot,
             "the writable /run is in place before the pivot"
         );
+    }
+
+    #[test]
+    fn boot_chowns_run_to_the_sandbox_user_so_an_unprivileged_workload_can_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "agent".into(),
+            uid: 4242,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let run_target = format!("{newroot}/run");
+        assert!(
+            sys.calls().iter().any(|c| matches!(
+                c,
+                Call::Lchown { path, uid: 4242, gid: 4242 } if path == &run_target
+            )),
+            "/run must be chowned to the sandbox user so it is actually writable"
+        );
+    }
+
+    #[test]
+    fn boot_leaves_run_root_owned_when_there_is_no_sandbox_user() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Lchown { path, .. } if path == "/newroot/run")),
+            "a rootful workload keeps the standard root-owned 0755 /run"
+        );
+    }
+
+    #[test]
+    fn boot_aborts_when_run_chown_fails_rather_than_run_with_an_unwritable_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let run_target = format!("{newroot}/run");
+        let fail_on = run_target.clone();
+        let sys = FakeSyscalls::new().fail_when(move |c| {
+            matches!(c, Call::Lchown { path, .. } if path == &fail_on)
+                .then_some(std::io::ErrorKind::PermissionDenied)
+        });
+        let user = SandboxUser {
+            name: "agent".into(),
+            uid: 4242,
+        };
+        let err = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MountError::Syscall { op, .. } if op.contains("lchown")));
     }
 
     #[test]
