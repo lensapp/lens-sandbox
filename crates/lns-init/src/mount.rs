@@ -4,6 +4,7 @@ use core::fmt;
 use std::ffi::{CStr, CString};
 use std::io::ErrorKind;
 use std::os::fd::RawFd;
+use std::os::unix::fs::PermissionsExt;
 
 use crate::cmdline::CmdlineParams;
 
@@ -25,6 +26,12 @@ const INIT_BROKER_PATH: &str = "/init-broker";
 const VOLUME_SEED_MOUNT: &str = "/mnt/vol-seed";
 const PROC_CMDLINE: &str = "/proc/cmdline";
 const CMDLINE_MASK_FILE: &str = "/.lens/.cmdline";
+const DEV_FD_LINKS: &[(&str, &str)] = &[
+    ("/proc/self/fd", "/dev/fd"),
+    ("/proc/self/fd/0", "/dev/stdin"),
+    ("/proc/self/fd/1", "/dev/stdout"),
+    ("/proc/self/fd/2", "/dev/stderr"),
+];
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const RUN_TMPFS_OPTS: &str = "mode=0755,size=64m";
@@ -198,7 +205,6 @@ pub(crate) fn write_sandbox_user_if_missing(newroot: &str, user: &SandboxUser, s
     match CString::new(home.as_str()) {
         Ok(home_c) => {
             if std::fs::create_dir_all(&home).is_ok() {
-                use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755));
                 if let Err(err) = sys.lchown(&home_c, user.uid, user.uid) {
                     eprintln!(
@@ -428,6 +434,24 @@ fn mask_proc_cmdline(
     do_mount(sys, &mask_file, &target, "none", MountFlags::Bind, None)
 }
 
+fn ensure_dev_fd_links(sys: &dyn Syscalls) -> Result<(), MountError> {
+    for (target, link) in DEV_FD_LINKS {
+        let target_c = cstring(target, "devfd-target")?;
+        let link_c = cstring(link, "devfd-link")?;
+        match sys.symlink(&target_c, &link_c) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(MountError::Syscall {
+                    op: format!("symlink({link} -> {target})"),
+                    err,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_dev_ptmx(sys: &dyn Syscalls) -> Result<(), MountError> {
     let target_c = cstring("/dev/pts/ptmx", "symlink-target")?;
     let link_c = cstring(DEV_PTMX, "symlink-linkpath")?;
@@ -501,6 +525,7 @@ fn mount_composefs_and_exec_broker_inner(
     if !sys.path_exists(&ptmx_c) {
         ensure_dev_ptmx(sys)?;
     }
+    ensure_dev_fd_links(sys)?;
 
     let content_tag = params.content_tag.as_deref().unwrap();
     do_mount(
@@ -1093,7 +1118,7 @@ mod tests {
         assert!(
             !sys.calls()
                 .iter()
-                .any(|c| matches!(c, Call::Symlink { .. }))
+                .any(|c| matches!(c, Call::Symlink { linkpath, .. } if linkpath == DEV_PTMX))
         );
     }
 
@@ -1117,6 +1142,55 @@ mod tests {
             !sys.calls()
                 .iter()
                 .any(|c| matches!(c, Call::MknodChar { .. }))
+        );
+    }
+
+    #[test]
+    fn boot_links_dev_fd_and_std_streams_into_proc_self_fd() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        for (target, link) in [
+            ("/proc/self/fd", "/dev/fd"),
+            ("/proc/self/fd/0", "/dev/stdin"),
+            ("/proc/self/fd/1", "/dev/stdout"),
+            ("/proc/self/fd/2", "/dev/stderr"),
+        ] {
+            assert!(
+                calls.iter().any(|c| matches!(
+                    c,
+                    Call::Symlink { target: t, linkpath: l } if t == target && l == link
+                )),
+                "missing symlink {link} -> {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_fd_links_tolerate_an_already_existing_link() {
+        let sys = FakeSyscalls::new().fail_when(|c| {
+            matches!(c, Call::Symlink { linkpath, .. } if linkpath == "/dev/fd")
+                .then_some(ErrorKind::AlreadyExists)
+        });
+        ensure_dev_fd_links(&sys).expect("an existing /dev/fd is benign, not fatal");
+    }
+
+    #[test]
+    fn dev_fd_links_abort_boot_on_an_unexpected_symlink_error() {
+        let sys = FakeSyscalls::new().fail_when(|c| {
+            matches!(c, Call::Symlink { linkpath, .. } if linkpath == "/dev/stdout")
+                .then_some(ErrorKind::PermissionDenied)
+        });
+        let err = ensure_dev_fd_links(&sys).unwrap_err();
+        assert!(
+            matches!(&err, MountError::Syscall { op, .. } if op.contains("/dev/stdout")),
+            "got {err:?}"
         );
     }
 
