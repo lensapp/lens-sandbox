@@ -163,7 +163,7 @@ fn extract_package(root: &Path, bytes: &[u8]) -> Result<()> {
 
 fn map_guest_tool_path(path: &Path) -> Option<PathBuf> {
     (path == Path::new("bin/busybox.static"))
-        .then(|| Path::new("run/lns/guest-tools/bin/busybox").to_path_buf())
+        .then(|| Path::new(".lens/guest-tools/bin/busybox").to_path_buf())
 }
 
 fn validate_archive_path(path: &Path) -> Result<()> {
@@ -227,10 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn map_guest_tool_path_relocates_static_busybox_under_run_lns() {
+    fn map_guest_tool_path_relocates_static_busybox_under_dot_lens() {
         assert_eq!(
             map_guest_tool_path(Path::new("bin/busybox.static")).as_deref(),
-            Some(Path::new("run/lns/guest-tools/bin/busybox"))
+            Some(Path::new(".lens/guest-tools/bin/busybox"))
         );
         assert!(map_guest_tool_path(Path::new("bin/busybox")).is_none());
         assert!(map_guest_tool_path(Path::new("bin/sh")).is_none());
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_package_relocates_static_busybox_under_run_lns_guest_tools() {
+    fn extract_package_relocates_static_busybox_under_dot_lens_guest_tools() {
         let bytes = gzip_tar(|b| {
             write_tar_entry(b, "bin/busybox.static", b"busybox-bin");
             write_tar_entry(b, "bin/sh", b"unwanted");
@@ -327,8 +327,8 @@ mod tests {
         });
         let dir = tempfile::TempDir::new().unwrap();
         extract_package(dir.path(), &bytes).unwrap();
-        assert!(dir.path().join("run/lns/guest-tools/bin/busybox").is_file());
-        assert!(!dir.path().join("run/lns/guest-tools/bin/sh").exists());
+        assert!(dir.path().join(".lens/guest-tools/bin/busybox").is_file());
+        assert!(!dir.path().join(".lens/guest-tools/bin/sh").exists());
         assert!(
             !dir.path().join(".PKGINFO").exists(),
             "apk metadata skipped"
@@ -532,11 +532,8 @@ mod tests {
             ".ready marker must be written so the next call short-circuits"
         );
         assert!(
-            result
-                .root
-                .join("run/lns/guest-tools/bin/busybox")
-                .is_file(),
-            "busybox landed under run/lns/guest-tools"
+            result.root.join(".lens/guest-tools/bin/busybox").is_file(),
+            "busybox landed under .lens/guest-tools"
         );
         assert!(
             !result.root.join("lib").exists(),

@@ -123,7 +123,7 @@ impl ExecSpec {
                 ),
                 (
                     "PATH".into(),
-                    "/run/lns/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                         .into(),
                 ),
             ],

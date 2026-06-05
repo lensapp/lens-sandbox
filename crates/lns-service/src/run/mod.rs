@@ -33,7 +33,7 @@ pub(super) fn build_workload_argv(
     supervised: bool,
 ) -> Vec<String> {
     if supervised {
-        return vec!["/run/lns/bin/lns-supervisor".to_string()];
+        return vec!["/.lens/bin/lns-supervisor".to_string()];
     }
     let joined = match image_config {
         Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn build_workload_argv_supervised_returns_supervisor_wrapper() {
         let argv = build_workload_argv(None, &["echo".into(), "hi".into()], true);
-        assert_eq!(argv, vec!["/run/lns/bin/lns-supervisor".to_string()]);
+        assert_eq!(argv, vec!["/.lens/bin/lns-supervisor".to_string()]);
     }
 
     #[cfg(target_os = "macos")]

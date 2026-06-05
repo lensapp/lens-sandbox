@@ -351,7 +351,7 @@ mod tests {
             .build(
                 &s,
                 &[RuntimeFileSpec {
-                    guest_path: "/run/lns/bin/lns-supervisor".into(),
+                    guest_path: "/.lens/bin/lns-supervisor".into(),
                     mode: 0o755,
                     source: RuntimeSource::Bytes(b"#!/bin/sh\necho fake supervisor".to_vec()),
                 }],
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(layer.manifest.label, "test-label");
         assert_eq!(layer.manifest.files.len(), 1);
         let e = &layer.manifest.files[0];
-        assert_eq!(e.path, "run/lns/bin/lns-supervisor");
+        assert_eq!(e.path, ".lens/bin/lns-supervisor");
         assert_eq!(e.mode, 0o755);
         assert!(matches!(e.kind, ManifestKind::Regular));
         assert!(e.digest.starts_with("sha256:"));
@@ -480,7 +480,7 @@ mod tests {
             .build(
                 &s,
                 &[RuntimeFileSpec {
-                    guest_path: "/run/lns/bin/super".into(),
+                    guest_path: "/.lens/bin/super".into(),
                     mode: 0o755,
                     source: RuntimeSource::HostFile(source),
                 }],
@@ -493,10 +493,7 @@ mod tests {
 
     #[test]
     fn normalize_guest_path_strips_leading_slash() {
-        assert_eq!(
-            normalize_guest_path("/run/lns/bin/x").unwrap(),
-            "run/lns/bin/x"
-        );
+        assert_eq!(normalize_guest_path("/.lens/bin/x").unwrap(), ".lens/bin/x");
     }
 
     #[test]
@@ -533,7 +530,7 @@ mod tests {
             .build(
                 &s,
                 &[RuntimeFileSpec {
-                    guest_path: "/run/lns/bin/foo".into(),
+                    guest_path: "/.lens/bin/foo".into(),
                     mode: 0o755,
                     source: RuntimeSource::Bytes(b"foo bytes".to_vec()),
                 }],
@@ -541,9 +538,8 @@ mod tests {
             .unwrap();
         layer.inject_into_filesystem(&mut fs).unwrap();
 
-        let run = fs.root.get_directory_mut(OsStr::new("run")).unwrap();
-        let lns = run.get_directory_mut(OsStr::new("lns")).unwrap();
-        let bin = lns.get_directory_mut(OsStr::new("bin")).unwrap();
+        let lens = fs.root.get_directory_mut(OsStr::new(".lens")).unwrap();
+        let bin = lens.get_directory_mut(OsStr::new("bin")).unwrap();
         let leaf_id = bin.leaf_id(OsStr::new("foo")).unwrap();
         assert!(matches!(
             &fs.leaves[leaf_id.0].content,
@@ -682,7 +678,7 @@ mod tests {
         assert!(matches!(
             &bin_sh.kind,
             ManifestKind::Symlink { target }
-                if target == "/run/lns/guest-tools/bin/busybox"
+                if target == "/.lens/guest-tools/bin/busybox"
         ));
     }
 
@@ -699,7 +695,7 @@ mod tests {
                 &[RuntimeFileSpec {
                     guest_path: "/bin/sh".into(),
                     mode: 0o777,
-                    source: RuntimeSource::Symlink("/run/lns/guest-tools/bin/busybox".into()),
+                    source: RuntimeSource::Symlink("/.lens/guest-tools/bin/busybox".into()),
                 }],
             )
             .unwrap();
@@ -711,7 +707,7 @@ mod tests {
         assert!(matches!(
             &leaf.content,
             LeafContent::Symlink(target)
-                if target.as_ref() == OsStr::new("/run/lns/guest-tools/bin/busybox")
+                if target.as_ref() == OsStr::new("/.lens/guest-tools/bin/busybox")
         ));
         assert_eq!(
             leaf.stat.st_mode & type_bits(libc::S_IFMT),
@@ -814,8 +810,8 @@ mod tests {
         let assets = fake_assets(&d);
         let layer = for_run(false, &s, &gt, Some(&assets)).unwrap().unwrap();
         let p = paths(&layer);
-        assert!(p.contains(&"run/lns/bin/lns-supervisor"));
-        assert!(!p.contains(&"run/lns/bin/supervisor.real"));
+        assert!(p.contains(&".lens/bin/lns-supervisor"));
+        assert!(!p.contains(&".lens/bin/supervisor.real"));
         assert!(p.contains(&".lens/nft"));
         assert!(!p.contains(&"bin/sh"));
         assert!(!layer.manifest.label.contains("imageless"));
@@ -831,7 +827,7 @@ mod tests {
         let assets = fake_assets(&d);
         let layer = for_run(true, &s, &gt, Some(&assets)).unwrap().unwrap();
         let p = paths(&layer);
-        assert!(p.contains(&"run/lns/bin/lns-supervisor"));
+        assert!(p.contains(&".lens/bin/lns-supervisor"));
         assert!(
             p.contains(&"bin/sh"),
             "imageless+supervised must carry /bin/sh"
@@ -849,7 +845,7 @@ mod tests {
         let p = paths(&layer);
         assert!(p.contains(&"marker"));
         assert!(!p.contains(&"bin/sh"));
-        assert!(!p.contains(&"run/lns/bin/supervisor.real"));
+        assert!(!p.contains(&".lens/bin/supervisor.real"));
         assert!(!layer.manifest.label.contains("imageless"));
     }
 
@@ -861,7 +857,7 @@ mod tests {
         let layer = for_run(true, &s, &gt, None).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&"bin/sh"));
-        assert!(!p.contains(&"run/lns/bin/supervisor.real"));
+        assert!(!p.contains(&".lens/bin/supervisor.real"));
         assert!(layer.manifest.label.ends_with("+imageless"));
     }
 }

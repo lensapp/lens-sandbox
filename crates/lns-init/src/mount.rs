@@ -24,13 +24,19 @@ const NEWROOT: &str = "/newroot";
 const INIT_BROKER_PATH: &str = "/init-broker";
 const VOLUME_SEED_MOUNT: &str = "/mnt/vol-seed";
 const PROC_CMDLINE: &str = "/proc/cmdline";
-const CMDLINE_MASK_FILE: &str = "/run/lns/.cmdline";
+const CMDLINE_MASK_FILE: &str = "/.lens/.cmdline";
+const RUN: &str = "/run";
+const RUN_LOCK: &str = "/run/lock";
+const RUN_TMPFS_OPTS: &str = "mode=0755,size=64m";
+const RUN_LOCK_TMPFS_OPTS: &str = "mode=1777,size=4m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountFlags {
     None,
     ReadOnly,
     Bind,
+    Tmpfs,
+    TmpfsNoExec,
 }
 
 pub(crate) struct SandboxUser {
@@ -347,6 +353,29 @@ fn mount_volumes(
     Ok(())
 }
 
+fn mount_run_tmpfs(sys: &dyn Syscalls, newroot: &str) -> Result<(), MountError> {
+    let run = format!("{newroot}{RUN}");
+    do_mkdir(sys, &run, 0o755)?;
+    do_mount(
+        sys,
+        "tmpfs",
+        &run,
+        "tmpfs",
+        MountFlags::Tmpfs,
+        Some(RUN_TMPFS_OPTS),
+    )?;
+    let lock = format!("{newroot}{RUN_LOCK}");
+    do_mkdir(sys, &lock, 0o755)?;
+    do_mount(
+        sys,
+        "tmpfs",
+        &lock,
+        "tmpfs",
+        MountFlags::TmpfsNoExec,
+        Some(RUN_LOCK_TMPFS_OPTS),
+    )
+}
+
 fn seed_volume_if_pristine(
     sys: &dyn Syscalls,
     dev: &str,
@@ -498,6 +527,8 @@ fn mount_composefs_and_exec_broker_inner(
     )?;
 
     mount_volumes(sys, &params.volumes, newroot)?;
+
+    mount_run_tmpfs(sys, newroot)?;
 
     let broker_path_c = cstring(INIT_BROKER_PATH, "broker-path")?;
     let broker_fd = open_broker_fd(sys, &broker_path_c)?;
@@ -1456,6 +1487,112 @@ mod tests {
     }
 
     #[test]
+    fn boot_mounts_run_as_a_hardened_writable_tmpfs() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let run = sys
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount {
+                    target,
+                    fstype,
+                    flags,
+                    data,
+                    ..
+                } if target == "/newroot/run" && fstype == "tmpfs" => Some((flags, data)),
+                _ => None,
+            })
+            .expect("/run is mounted as tmpfs under newroot");
+        let (flags, data) = run;
+        assert_eq!(flags, MountFlags::Tmpfs, "/run must be nosuid,nodev");
+        let opts = data.expect("/run tmpfs carries options");
+        assert!(opts.contains("mode=0755"), "/run must be 0755: {opts}");
+        assert!(opts.contains("size="), "/run must be size-capped: {opts}");
+    }
+
+    #[test]
+    fn boot_mounts_run_lock_as_a_sticky_noexec_tmpfs() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let lock = sys
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount {
+                    target,
+                    fstype,
+                    flags,
+                    data,
+                    ..
+                } if target == "/newroot/run/lock" && fstype == "tmpfs" => Some((flags, data)),
+                _ => None,
+            })
+            .expect("/run/lock is mounted as tmpfs under newroot");
+        let (flags, data) = lock;
+        assert_eq!(
+            flags,
+            MountFlags::TmpfsNoExec,
+            "/run/lock must be nosuid,nodev,noexec"
+        );
+        assert!(
+            data.expect("/run/lock tmpfs carries options")
+                .contains("mode=1777"),
+            "/run/lock must be world-writable sticky 1777"
+        );
+    }
+
+    #[test]
+    fn boot_mounts_run_after_overlay_and_before_pivot_with_lock_nested() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        let overlay = calls
+            .iter()
+            .position(|c| matches!(c, Call::Mount { fstype, .. } if fstype == "overlay"))
+            .unwrap();
+        let run = calls
+            .iter()
+            .position(|c| matches!(c, Call::Mount { target, fstype, .. } if target == "/newroot/run" && fstype == "tmpfs"))
+            .unwrap();
+        let lock = calls
+            .iter()
+            .position(|c| matches!(c, Call::Mount { target, .. } if target == "/newroot/run/lock"))
+            .unwrap();
+        let chroot = calls
+            .iter()
+            .position(|c| matches!(c, Call::Chroot(_)))
+            .unwrap();
+        assert!(
+            overlay < run,
+            "/run tmpfs mounts after the overlay root exists"
+        );
+        assert!(run < lock, "/run/lock mounts onto the fresh /run tmpfs");
+        assert!(
+            lock < chroot,
+            "the writable /run is in place before the pivot"
+        );
+    }
+
+    #[test]
     fn boot_writes_a_0600_cmdline_mask_with_the_relay_token_stripped() {
         let sys = FakeSyscalls::new();
         let _ = mount_composefs_and_exec_broker_inner(
@@ -1473,7 +1610,7 @@ mod tests {
                     path,
                     contents,
                     mode,
-                } if path == "/newroot/run/lns/.cmdline" => Some((contents, mode)),
+                } if path == "/newroot/.lens/.cmdline" => Some((contents, mode)),
                 _ => None,
             })
             .expect("masked cmdline file written under newroot");
