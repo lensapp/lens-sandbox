@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.6.0...lns-v0.7.0) (2026-06-05)
+
+
+### Features
+
+* auto-start the service on install and login (lns service enable/disable) ([7196a95](https://github.com/lensapp/lens-sandbox/commit/7196a95a9f7a6126aa756907299299d504aba996))
+
+
+### Bug Fixes
+
+* gate run-scoped local-render suppression on a shared tty ([9376cea](https://github.com/lensapp/lens-sandbox/commit/9376ceac42d3fe9205a09ecb7161939df7d263e3))
+* never spawn a competing service instance during enable ([0a9758f](https://github.com/lensapp/lens-sandbox/commit/0a9758f89b94527f925d4cf69c9ba3078c5294d9))
+* only newline-pad attached stdout when it is a terminal ([00a5887](https://github.com/lensapp/lens-sandbox/commit/00a58870523914a0764c625354b319b9bcf13f3e))
+* render lns run status lines once in ✓ form ([0219d76](https://github.com/lensapp/lens-sandbox/commit/0219d76a298dc22b515bacc7302a502e924efb10)), closes [#3](https://github.com/lensapp/lens-sandbox/issues/3)
+
 ## [0.6.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.5.0...lns-v0.6.0) (2026-06-03)
 
 
