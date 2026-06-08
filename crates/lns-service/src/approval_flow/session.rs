@@ -188,6 +188,26 @@ impl ApprovalSession {
             ));
         }
     }
+
+    /// Connects an integration live: records it under `integrations:`, allows its routes, persists, and emits so a held request sees the routes (and, once the credential is valued, the injection) without a relaunch.
+    pub fn connect_integration(&self, id: &str, routes: Vec<RouteRule>) {
+        let snapshot = {
+            let mut policy = self.policy.lock().expect("policy mutex poisoned");
+            policy.connect(id);
+            policy.network.allowed_routes.extend(routes);
+            policy.clone()
+        };
+        let credentials = self.current_credentials();
+        let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
+            network: Some(snapshot.network.clone()),
+            credentials,
+        }));
+        if let Err(e) = self.store.save(&snapshot) {
+            self.notifier.inform(&format!(
+                "integration connected in-memory but not persisted: {e}"
+            ));
+        }
+    }
 }
 
 fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
@@ -739,5 +759,39 @@ pub(crate) mod tests {
 
         let deny = rule_for_always_decision("h", Decision::DenyAlways).unwrap();
         assert_eq!(deny.verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn connect_integration_records_the_id_allows_routes_emits_and_persists() {
+        let (s, _n, store, mut rx) = fixture();
+        s.connect_integration("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
+        let saves = store.saves.lock().unwrap();
+        assert_eq!(saves.len(), 1, "the connection is persisted once");
+        assert_eq!(saves[0].integrations, ["gitlab"]);
+        assert!(
+            saves[0]
+                .network
+                .allowed_routes
+                .iter()
+                .any(|r| r.match_pattern == "gitlab.com"),
+            "the integration's route is allowed"
+        );
+        drop(saves);
+        let v = serde_json::to_value(rx.try_recv().expect("policy frame")).unwrap();
+        assert_eq!(v["type"], "policy");
+        assert_eq!(
+            v["network"]["allowedRoutes"][0]["match"], "gitlab.com",
+            "the live frame carries the route so a held request can proceed"
+        );
+    }
+
+    #[test]
+    fn connect_integration_informs_when_persist_fails() {
+        let (s, n, store, _rx) = fixture();
+        store.fail_next(io::ErrorKind::PermissionDenied, "disk full");
+        s.connect_integration("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
+        let informed = n.informed.lock().unwrap();
+        assert_eq!(informed.len(), 1);
+        assert!(informed[0].contains("not persisted"), "got: {:?}", informed);
     }
 }
