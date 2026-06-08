@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod credentials;
+pub mod integrations;
 pub mod providers;
 #[cfg(test)]
 mod test_env;
@@ -14,6 +15,8 @@ mod test_env;
 pub struct Policy {
     #[serde(default)]
     pub network: NetworkPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations: Vec<String>,
     #[serde(default, skip_serializing_if = "CredentialsSection::is_empty")]
     pub credentials: CredentialsSection,
 }
@@ -50,6 +53,10 @@ impl Default for NetworkPolicy {
     }
 }
 
+pub(crate) fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteRule {
@@ -59,7 +66,22 @@ pub struct RouteRule {
     pub verdict: Verdict,
     pub transport: Transport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<Scheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tls_terminate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<HttpRule>,
+}
+
+/// HTTP method/path restriction within a route rule; wire-compatible with lens-sandbox-core's `HttpRule`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +97,13 @@ pub enum Verdict {
 pub enum Transport {
     Upstream,
     Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    Http,
+    Https,
 }
 
 impl Policy {
@@ -104,6 +133,19 @@ impl Policy {
     pub fn add_rule(&mut self, rule: RouteRule) {
         self.network.allowed_routes.push(rule);
     }
+
+    pub fn connect(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if !self.integrations.contains(&id) {
+            self.integrations.push(id);
+        }
+    }
+
+    pub fn disconnect(&mut self, id: &str) -> bool {
+        let before = self.integrations.len();
+        self.integrations.retain(|i| i != id);
+        self.integrations.len() != before
+    }
 }
 
 pub trait PolicyStore: Send + Sync {
@@ -132,7 +174,10 @@ impl RouteRule {
             match_pattern: host.into(),
             verdict: Verdict::Allow,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         }
     }
 
@@ -141,7 +186,10 @@ impl RouteRule {
             match_pattern: host.into(),
             verdict: Verdict::Deny,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         }
     }
 }
@@ -190,6 +238,59 @@ mod tests {
             !yaml.contains("matchPattern"),
             "rust field name leaked into wire format:\n{yaml}"
         );
+    }
+
+    #[test]
+    fn schemes_serialize_in_lowercase() {
+        assert_eq!(serde_yaml::to_string(&Scheme::Http).unwrap().trim(), "http");
+        assert_eq!(
+            serde_yaml::to_string(&Scheme::Https).unwrap().trim(),
+            "https"
+        );
+    }
+
+    #[test]
+    fn a_plain_route_omits_the_richness_keys() {
+        let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.github.com")).unwrap();
+        assert!(
+            !yaml.contains("scheme") && !yaml.contains("tlsTerminate") && !yaml.contains("rules"),
+            "a plain allow rule must stay minimal:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn a_rich_route_rule_round_trips_with_sandbox_core_wire_names() {
+        let rule = RouteRule {
+            match_pattern: "gitlab.com".into(),
+            verdict: Verdict::Allow,
+            transport: Transport::Direct,
+            scheme: Some(Scheme::Https),
+            description: None,
+            tls_terminate: true,
+            rules: vec![HttpRule {
+                method: Some("GET".into()),
+                path: Some("/api/v4/**".into()),
+            }],
+        };
+        let yaml = serde_yaml::to_string(&rule).unwrap();
+        assert!(yaml.contains("scheme: https"), "got:\n{yaml}");
+        assert!(yaml.contains("tlsTerminate: true"), "got:\n{yaml}");
+        assert!(yaml.contains("path: /api/v4/**"), "got:\n{yaml}");
+        let parsed: RouteRule = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, rule);
+    }
+
+    #[test]
+    fn an_http_rule_omits_absent_method_and_path() {
+        let any = HttpRule {
+            method: None,
+            path: None,
+        };
+        let yaml = serde_yaml::to_string(&any).unwrap();
+        assert!(!yaml.contains("method"), "got:\n{yaml}");
+        assert!(!yaml.contains("path"), "got:\n{yaml}");
+        let parsed: HttpRule = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, any);
     }
 
     #[test]
@@ -364,7 +465,7 @@ network:
     }
 
     #[test]
-    fn legacy_network_only_yaml_parses_with_empty_custom_providers() {
+    fn legacy_network_only_yaml_parses_with_empty_custom_providers_and_integrations() {
         let yaml = "\
 network:
   allowedRoutes: []
@@ -373,5 +474,79 @@ network:
 ";
         let p: Policy = serde_yaml::from_str(yaml).unwrap();
         assert!(p.credentials.custom_providers.is_empty());
+        assert!(p.integrations.is_empty());
+    }
+
+    #[test]
+    fn default_policy_omits_the_integrations_key() {
+        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
+        assert!(
+            !yaml.contains("integrations"),
+            "an empty integrations list must not clutter the shareable file:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn policy_with_integrations_yaml_roundtrip_is_lossless() {
+        let mut p = Policy::default();
+        p.connect("gitlab");
+        p.connect("acme");
+        let yaml = serde_yaml::to_string(&p).unwrap();
+        assert!(yaml.contains("integrations"), "got:\n{yaml}");
+        let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(p, parsed);
+    }
+
+    #[test]
+    fn existing_custom_providers_yaml_still_parses_with_empty_integrations() {
+        let yaml = "\
+network:
+  allowedRoutes: []
+  defaultVerdict: ask
+  defaultTransport: direct
+credentials:
+  customProviders:
+    - id: acme
+      envVar: ACME_API_KEY
+      placeholder: acme_LNSPLACEHOLDER0000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: api.acme.corp
+";
+        let p: Policy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(p.credentials.custom_providers.len(), 1);
+        assert!(p.integrations.is_empty());
+    }
+
+    #[test]
+    fn connect_adds_an_integration_id() {
+        let mut p = Policy::default();
+        p.connect("github");
+        assert_eq!(p.integrations, ["github"]);
+    }
+
+    #[test]
+    fn connect_is_idempotent_and_does_not_duplicate() {
+        let mut p = Policy::default();
+        p.connect("github");
+        p.connect("github");
+        assert_eq!(p.integrations, ["github"]);
+    }
+
+    #[test]
+    fn disconnect_removes_an_applied_integration_and_reports_true() {
+        let mut p = Policy::default();
+        p.connect("github");
+        p.connect("gitlab");
+        assert!(p.disconnect("github"));
+        assert_eq!(p.integrations, ["gitlab"]);
+    }
+
+    #[test]
+    fn disconnect_reports_false_when_the_id_is_not_applied() {
+        let mut p = Policy::default();
+        p.connect("gitlab");
+        assert!(!p.disconnect("github"));
+        assert_eq!(p.integrations, ["gitlab"]);
     }
 }
