@@ -262,7 +262,10 @@ mod tests {
             match_pattern: host.to_string(),
             verdict: Verdict::Allow,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         }
     }
 
@@ -271,7 +274,10 @@ mod tests {
             match_pattern: host.to_string(),
             verdict: Verdict::Deny,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         }
     }
 
@@ -411,7 +417,10 @@ mod tests {
             match_pattern: "ambiguous.example".to_string(),
             verdict: Verdict::Ask,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         });
         let s = format_summary(
             &run_args(Some("ubuntu")),
