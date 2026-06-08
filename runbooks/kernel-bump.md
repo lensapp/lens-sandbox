@@ -58,14 +58,25 @@ The CLI does this for you:
 3. Requires a clean git tree (commit or stash any local edits first).
 4. Refuses if the target branch `chore/bump-kernel-<tag>` already
    exists locally or on origin.
-5. Edits `crates/lns-service/kernels.toml`:
+5. Downloads each upstream `kata-static-<tag>-<arch>.tar.zst` (~670 MB
+   per arch; arm64 + amd64) and hashes it in-stream to pin its sha256.
+   Kata publishes no checksum of its own, so this local download is the
+   integrity anchor: the value lands in the PR for review and CI then
+   verifies the bundle against it before extraction.
+6. Edits `crates/lns-service/kernels.toml`:
    - `kata_version` → your input
    - `kernel_variant` → your variant
    - `kernel_filename`, `published_version` → `"pending"`
    - all `[current.sha256]` values → `""`
-6. Creates branch `chore/bump-kernel-<tag>`, commits with subject
+   - `[current.kata_bundle_sha256]` `arm64` / `amd64` → the sha256 of
+     each bundle you just downloaded
+7. Creates branch `chore/bump-kernel-<tag>`, commits with subject
    `<type>(lns): bump guest kernel to Kata <tag>`, pushes, opens a PR
    via `gh`.
+
+> `--dry-run` skips the ~1.3 GB download and shows
+> `kata_bundle_sha256` as a placeholder, so you can preview the branch
+> / commit / PR plan cheaply; a real bump performs the download.
 
 ### Step 2 — Wait for the bot back-fill (~3–5 min)
 
@@ -79,7 +90,10 @@ overwrite-refusal guard). Then the `compute` job runs per-arch:
 2. Refuses if the CDN origin already has an artifact at the destination URL
    (the [overwrite refusal](#emergency-overwriting-an-already-published-artifact)
    contract).
-3. Downloads Kata's `kata-static-<tag>-<arch>.tar.zst`.
+3. Downloads Kata's `kata-static-<tag>-<arch>.tar.zst` and verifies it
+   against the `kata_bundle_sha256` you pinned in Step 1 before
+   extracting (a bundle pinned before this check existed is skipped
+   with a warning).
 4. Resolves the kernel filename for the requested variant.
 5. Extracts, conditionally gunzips (aarch64 only), computes sha256.
 
@@ -118,6 +132,7 @@ What to look for:
 | `kernel_filename` | The bot wrote `vmlinuz-<x.y.z-build>`. Cross-check against the workflow run's job summary. |
 | `published_version` | Equals `kernel_filename` minus the `vmlinuz-` prefix. |
 | `[current.sha256]` | Two values, both 64 hex chars. Cross-check against the workflow run's matrix outputs. |
+| `[current.kata_bundle_sha256]` | `arm64` + `amd64`, both 64 hex chars, written by your `bump-kernel` run. CI verified the downloaded bundle against these. |
 | Bot commit author | `github-actions[bot]` (the GITHUB_TOKEN-authored back-fill). |
 | Commit subject | Your original `<type>(lns): bump guest kernel to Kata <tag>`. |
 

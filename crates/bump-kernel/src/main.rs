@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand};
-use std::io::{self, BufRead, Write};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod operations;
 
@@ -137,7 +139,6 @@ fn cmd_bump(cli: BumpArgs) -> Result<()> {
     let manifest_path = workspace.join(KERNELS_TOML);
     let original = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let updated = bump_manifest(&original, &cli.kata_version, cli.variant.as_str())?;
 
     let subject = format!(
         "{}(lns): bump guest kernel to Kata {}",
@@ -154,6 +155,9 @@ fn cmd_bump(cli: BumpArgs) -> Result<()> {
     println!("       kernel_filename    ...      -> \"pending\"  (CI back-fills)");
     println!("       published_version  ...      -> \"pending\"  (CI back-fills)");
     println!("       [current.sha256].* cleared  -> \"\"         (CI back-fills)");
+    println!(
+        "       [current.kata_bundle_sha256] -> sha256 of each upstream bundle (computed now)"
+    );
     println!();
     println!("==> Commit subject: {subject}");
     println!(
@@ -169,6 +173,14 @@ fn cmd_bump(cli: BumpArgs) -> Result<()> {
         println!("Aborted.");
         return Ok(());
     }
+
+    let bundle_shas = resolve_bundle_shas(&cli.kata_version, cli.dry_run)?;
+    let updated = bump_manifest(
+        &original,
+        &cli.kata_version,
+        cli.variant.as_str(),
+        &bundle_shas,
+    )?;
 
     std::fs::write(&manifest_path, &updated)
         .with_context(|| format!("writing {}", manifest_path.display()))?;
@@ -202,7 +214,8 @@ fn cmd_bump(cli: BumpArgs) -> Result<()> {
     println!();
     println!("==> PR opened: {pr_url}");
     println!("==> What happens next:");
-    println!("     1. CI's `publish-kernel` workflow downloads Kata, resolves the variant,");
+    println!("     1. CI's `publish-kernel` workflow downloads Kata, verifies each bundle");
+    println!("        against the kata_bundle_sha256 just pinned, resolves the variant,");
     println!("        computes per-arch sha256s, and commits the values back to your PR");
     println!("        as `chore(kernel): fill provenance and shas for ...`.");
     println!("     2. After the bot commit appears, click \"Re-run all jobs\" in the PR's");
@@ -239,6 +252,69 @@ fn cmd_back_fill(args: BackFillArgs) -> Result<()> {
         archs,
     );
     Ok(())
+}
+
+const KATA_BUNDLE_ARCHES: [&str; 2] = ["arm64", "amd64"];
+
+fn resolve_bundle_shas(kata_version: &str, dry_run: bool) -> Result<BTreeMap<String, String>> {
+    if dry_run {
+        println!();
+        println!(
+            "==> --dry-run: skipping the ~1.3 GB bundle download; kata_bundle_sha256 shown as a placeholder."
+        );
+        return Ok(KATA_BUNDLE_ARCHES
+            .iter()
+            .map(|a| {
+                (
+                    a.to_string(),
+                    "<computed-from-bundle-download-on-a-real-bump>".to_string(),
+                )
+            })
+            .collect());
+    }
+    let mut shas = BTreeMap::new();
+    for kata_arch in KATA_BUNDLE_ARCHES {
+        let url = kata_bundle_url(kata_version, kata_arch);
+        println!("==> Downloading {url}");
+        println!("       (~670 MB; hashing in-stream to pin kata_bundle_sha256.{kata_arch})");
+        let sha = curl_sha256(&url)?;
+        println!("       {kata_arch} sha256 = {sha}");
+        shas.insert(kata_arch.to_string(), sha);
+    }
+    Ok(shas)
+}
+
+fn kata_bundle_url(kata_version: &str, kata_arch: &str) -> String {
+    format!(
+        "https://github.com/kata-containers/kata-containers/releases/download/\
+         {kata_version}/kata-static-{kata_version}-{kata_arch}.tar.zst"
+    )
+}
+
+fn curl_sha256(url: &str) -> Result<String> {
+    let mut child = Command::new("curl")
+        .args(["-L", "--fail", "--silent", "--show-error", url])
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("invoking curl to download the Kata bundle (is curl on PATH?)")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("capturing curl stdout for hashing")?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1 << 16];
+    loop {
+        let n = stdout
+            .read(&mut buf)
+            .context("reading Kata bundle bytes from curl")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let status = child.wait().context("waiting on curl")?;
+    ensure!(status.success(), "curl failed downloading {url} ({status})");
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn validate_kata_release_exists(version: &str) -> Result<()> {
@@ -379,8 +455,9 @@ fn gh_pr_create(dir: &Path, subject: &str, cli: &BumpArgs, base: &str) -> Result
          \n\
          1. Validates the Kata release tarball exists upstream.\n\
          2. Refuses if the CDN origin already has an artifact at the destination URL.\n\
-         3. Downloads Kata's static bundle, resolves the `vmlinuz-*` matching the \
-            `{variant}` variant, conditionally gunzips (aarch64 only), and computes \
+         3. Downloads Kata's static bundle, verifies it against the \
+            `kata_bundle_sha256` pinned in this PR, resolves the `vmlinuz-*` matching \
+            the `{variant}` variant, conditionally gunzips (aarch64 only), and computes \
             sha256 for each arch.\n\
          4. Commits provenance + per-arch SHAs back to this PR branch as \
             `chore(kernel): fill provenance and shas for ...`.\n\

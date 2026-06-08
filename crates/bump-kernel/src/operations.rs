@@ -3,7 +3,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, value};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 pub(crate) const KERNELS_TOML: &str = "crates/lns-service/kernels.toml";
 
@@ -75,6 +75,8 @@ struct ShowCurrent {
     kernel_variant: Option<String>,
     published_version: Option<String>,
     sha256: BTreeMap<String, String>,
+    #[serde(default)]
+    kata_bundle_sha256: BTreeMap<String, String>,
 }
 
 pub(crate) fn render_show(raw: &str, arch: Option<&str>) -> Result<String> {
@@ -98,6 +100,9 @@ pub(crate) fn render_show(raw: &str, arch: Option<&str>) -> Result<String> {
         "published_version={}\n",
         m.current.published_version.unwrap_or_default()
     ));
+    for (kata_arch, sha) in &m.current.kata_bundle_sha256 {
+        out.push_str(&format!("kata_bundle_sha256_{kata_arch}={sha}\n"));
+    }
     if let Some(a) = arch {
         let sha = m.current.sha256.get(a).cloned().unwrap_or_default();
         if sha.is_empty() {
@@ -176,7 +181,17 @@ pub(crate) fn back_fill_manifest(current: &str, results: &[ComputeResult]) -> Re
     Ok(doc.to_string())
 }
 
-pub(crate) fn bump_manifest(current: &str, kata_version: &str, variant: &str) -> Result<String> {
+pub(crate) fn bump_manifest(
+    current: &str,
+    kata_version: &str,
+    variant: &str,
+    bundle_shas: &BTreeMap<String, String>,
+) -> Result<String> {
+    ensure!(
+        !bundle_shas.is_empty(),
+        "no kata_bundle_sha256 values to pin — bump-kernel computes these from the downloaded Kata bundles"
+    );
+
     let mut doc: DocumentMut = current
         .parse()
         .context("parsing kernels.toml as a toml_edit document")?;
@@ -203,6 +218,13 @@ pub(crate) fn bump_manifest(current: &str, kata_version: &str, variant: &str) ->
     for arch in arches {
         shas[&arch] = value("");
     }
+
+    let mut bundle_tbl = Table::new();
+    bundle_tbl.set_implicit(false);
+    for (kata_arch, sha) in bundle_shas {
+        bundle_tbl[kata_arch] = value(sha.as_str());
+    }
+    current_tbl["kata_bundle_sha256"] = Item::Table(bundle_tbl);
 
     Ok(doc.to_string())
 }
@@ -280,9 +302,17 @@ x86_64  = \"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\"
         toml::from_str(manifest).unwrap()
     }
 
+    fn sample_bundle_shas() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("arm64".to_string(), "c".repeat(64)),
+            ("amd64".to_string(), "d".repeat(64)),
+        ])
+    }
+
     #[test]
     fn bump_clears_pending_fields_and_shas() {
-        let out = bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline").unwrap();
+        let out =
+            bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline", &sample_bundle_shas()).unwrap();
         let v = parsed(&out);
         let current = &v["current"];
         assert_eq!(current["kata_version"].as_str(), Some("3.31.0"));
@@ -295,21 +325,51 @@ x86_64  = \"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\"
     }
 
     #[test]
+    fn bump_pins_kata_bundle_shas_creating_the_table_when_absent() {
+        let out =
+            bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline", &sample_bundle_shas()).unwrap();
+        let v = parsed(&out);
+        let bundle = v["current"]["kata_bundle_sha256"].as_table().unwrap();
+        assert_eq!(bundle["arm64"].as_str(), Some("c".repeat(64).as_str()));
+        assert_eq!(bundle["amd64"].as_str(), Some("d".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn bump_overwrites_a_preexisting_bundle_sha_table() {
+        let with_stale = format!(
+            "{SAMPLE_MANIFEST}\n[current.kata_bundle_sha256]\narm64 = \"{stale}\"\namd64 = \"{stale}\"\n",
+            stale = "0".repeat(64),
+        );
+        let out = bump_manifest(&with_stale, "3.31.0", "mainline", &sample_bundle_shas()).unwrap();
+        let v = parsed(&out);
+        let bundle = v["current"]["kata_bundle_sha256"].as_table().unwrap();
+        assert_eq!(bundle["arm64"].as_str(), Some("c".repeat(64).as_str()));
+        assert_eq!(bundle["amd64"].as_str(), Some("d".repeat(64).as_str()));
+    }
+
+    #[test]
     fn bump_preserves_comments() {
-        let out = bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline").unwrap();
+        let out =
+            bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline", &sample_bundle_shas()).unwrap();
         assert!(out.starts_with("# Top comment that should survive editing."));
     }
 
     #[test]
     fn bump_can_switch_variant() {
-        let out = bump_manifest(SAMPLE_MANIFEST, "3.31.0", "tdx").unwrap();
+        let out = bump_manifest(SAMPLE_MANIFEST, "3.31.0", "tdx", &sample_bundle_shas()).unwrap();
         let v = parsed(&out);
         assert_eq!(v["current"]["kernel_variant"].as_str(), Some("tdx"));
     }
 
     #[test]
     fn bump_fails_on_missing_current_table() {
-        let err = bump_manifest("[other]\nfoo=1\n", "3.31.0", "mainline").unwrap_err();
+        let err = bump_manifest(
+            "[other]\nfoo=1\n",
+            "3.31.0",
+            "mainline",
+            &sample_bundle_shas(),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("[current]"));
     }
 
@@ -319,6 +379,7 @@ x86_64  = \"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\"
             "[current]\nkata_version=\"3.30.0\"\nkernel_filename=\"x\"\npublished_version=\"y\"\n",
             "3.31.0",
             "mainline",
+            &sample_bundle_shas(),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("[current.sha256]"));
@@ -335,8 +396,15 @@ published_version=\"v\"
 
 [current.sha256]
 ";
-        let err = bump_manifest(manifest, "3.31.0", "mainline").unwrap_err();
+        let err = bump_manifest(manifest, "3.31.0", "mainline", &sample_bundle_shas()).unwrap_err();
         assert!(format!("{err:#}").contains("empty"));
+    }
+
+    #[test]
+    fn bump_fails_when_no_bundle_shas_provided() {
+        let err =
+            bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline", &BTreeMap::new()).unwrap_err();
+        assert!(format!("{err:#}").contains("kata_bundle_sha256"));
     }
 
     #[test]
@@ -384,6 +452,21 @@ aarch64=\"a\"
     fn show_rejects_unparseable_toml() {
         let err = render_show("this is not toml at all {{{", None).unwrap_err();
         assert!(format!("{err:#}").contains("parsing kernels.toml"));
+    }
+
+    #[test]
+    fn show_emits_kata_bundle_shas_keyed_by_kata_arch_when_present() {
+        let bumped =
+            bump_manifest(SAMPLE_MANIFEST, "3.31.0", "mainline", &sample_bundle_shas()).unwrap();
+        let out = render_show(&bumped, None).unwrap();
+        assert!(out.contains(&format!("kata_bundle_sha256_arm64={}", "c".repeat(64))));
+        assert!(out.contains(&format!("kata_bundle_sha256_amd64={}", "d".repeat(64))));
+    }
+
+    #[test]
+    fn show_omits_kata_bundle_shas_when_the_table_is_absent() {
+        let out = render_show(SAMPLE_MANIFEST, None).unwrap();
+        assert!(!out.contains("kata_bundle_sha256_"));
     }
 
     fn r(arch: &str, sha: &str) -> ComputeResult {
