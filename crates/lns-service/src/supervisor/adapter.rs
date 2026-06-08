@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +14,9 @@ use crate::approval_flow::protocol::PolicyMessage;
 use crate::approval_flow::session::ApprovalSession;
 use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{self, CredentialDecisionDelivery, DecisionDelivery};
-use crate::credential_flow::integrations::resolve_applied_integrations;
+use crate::credential_flow::integrations::{
+    resolve_applied_integrations, resolve_connectable_integrations,
+};
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{self, DefProvider, Provider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
@@ -24,7 +27,7 @@ use crate::credential_flow::store::{
 use crate::credential_flow::watcher::CredentialWatcher;
 use crate::log;
 use crate::relay;
-use lns_policy::{FilePolicyStore, Policy};
+use lns_policy::{FilePolicyStore, Policy, RouteRule};
 
 use super::real::RealFs;
 use super::traits::{Fs, WritableFile};
@@ -250,6 +253,17 @@ fn make_policy_emitter(
     })
 }
 
+/// Connecting an un-connected catalog integration allows its routes on the approval session's live policy (and persists `integrations:`), so the held request proceeds without a relaunch.
+fn make_connect_emitter(
+    session: Arc<ApprovalSession>,
+    routes: Arc<HashMap<String, Vec<RouteRule>>>,
+) -> crate::credential_flow::session::ConnectEmitter {
+    Box::new(move |id| {
+        let rules = routes.get(id).cloned().unwrap_or_default();
+        session.connect_integration(id, rules);
+    })
+}
+
 type CredentialSubsystem = (
     Arc<CredentialSession>,
     crate::credential_flow::watcher::CredentialWatcher,
@@ -259,6 +273,8 @@ fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
+    connectable_ids: HashSet<String>,
+    connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = default_credentials_path();
@@ -278,6 +294,7 @@ fn start_credential_subsystem(
         credential_frame_tx.clone(),
         custom_providers.clone(),
     );
+    let connect_emitter = make_connect_emitter(session.clone(), connectable_routes);
     let credential_session = Arc::new(
         CredentialSession::with_policy_emitter(
             initial_credential_state,
@@ -287,7 +304,8 @@ fn start_credential_subsystem(
             APPROVAL_TIMEOUT,
             policy_emitter,
         )
-        .with_custom_providers(custom_providers),
+        .with_custom_providers(custom_providers)
+        .with_connect_emitter(connectable_ids, connect_emitter),
     );
 
     tokio::spawn(credential_delivery_loop(
@@ -320,9 +338,18 @@ pub(super) async fn start(
         load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
     let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
     let applied = resolve_applied_integrations(&policy, &catalog);
+    // Un-connected catalog integrations are seeded unarmed so their use offers a live connect.
+    let connectable = resolve_connectable_integrations(&policy, &catalog);
     policy.network.allowed_routes.extend(applied.routes);
+    let connectable_ids: HashSet<String> = connectable
+        .providers
+        .iter()
+        .map(|p| p.id().to_string())
+        .collect();
+    let connectable_routes = Arc::new(connectable.routes);
     let mut custom = providers::build_policy_providers(&policy);
     custom.extend(applied.providers);
+    custom.extend(connectable.providers);
     let custom_providers = Arc::new(custom);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
@@ -358,8 +385,13 @@ pub(super) async fn start(
     let watcher = PolicyWatcher::spawn(policy_path.to_path_buf(), session.clone())
         .with_context(|| format!("watching policy {}", policy_path.display()))?;
 
-    let (credential_session, credential_watcher) =
-        start_credential_subsystem(session.clone(), credential_frame_tx, custom_providers)?;
+    let (credential_session, credential_watcher) = start_credential_subsystem(
+        session.clone(),
+        credential_frame_tx,
+        custom_providers,
+        connectable_ids,
+        connectable_routes,
+    )?;
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(run_id, session, credential_session, frame_rx, user_env)?;
@@ -694,6 +726,38 @@ mod tests {
     #[test]
     fn collect_managed_env_vars_lists_each_run_providers_env_var() {
         assert_eq!(collect_managed_env_vars(&acme_custom()), ["ACME_API_KEY"]);
+    }
+
+    #[test]
+    fn make_connect_emitter_connects_the_integration_on_the_approval_session() {
+        let (session, mut rx) = fixture_session();
+        while rx.try_recv().is_ok() {}
+        let mut routes = HashMap::new();
+        routes.insert(
+            "gitlab".to_string(),
+            vec![lns_policy::RouteRule::allow_host("gitlab.com")],
+        );
+        let connect = make_connect_emitter(session.clone(), Arc::new(routes));
+        connect("gitlab");
+        assert_eq!(session.current_policy().integrations, ["gitlab"]);
+        assert!(
+            session
+                .current_policy()
+                .network
+                .allowed_routes
+                .iter()
+                .any(|r| r.match_pattern == "gitlab.com"),
+            "the integration's route is allowed live"
+        );
+        assert!(rx.try_recv().is_ok(), "a Policy frame is emitted");
+    }
+
+    #[test]
+    fn make_connect_emitter_with_no_routes_for_an_id_still_connects_it() {
+        let (session, _rx) = fixture_session();
+        let connect = make_connect_emitter(session.clone(), Arc::new(HashMap::new()));
+        connect("gitlab");
+        assert_eq!(session.current_policy().integrations, ["gitlab"]);
     }
 
     #[test]

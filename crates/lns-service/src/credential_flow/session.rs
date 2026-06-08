@@ -1,6 +1,6 @@
 //! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,9 @@ pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
 /// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection.
 pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile) + Send + Sync>;
+
+/// Invoked when an un-connected catalog integration is accepted, to connect it live (allow its routes + persist `integrations:`).
+pub type ConnectEmitter = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPendingPrompt {
@@ -61,6 +64,8 @@ pub struct CredentialSession {
     policy_emitter: PolicyEmitter,
     timeout: Duration,
     custom_providers: Arc<Vec<DefProvider>>,
+    connectable: HashSet<String>,
+    connect: ConnectEmitter,
 }
 
 impl CredentialSession {
@@ -91,12 +96,25 @@ impl CredentialSession {
             policy_emitter,
             timeout,
             custom_providers: Arc::new(Vec::new()),
+            connectable: HashSet::new(),
+            connect: Box::new(|_| {}),
         }
     }
 
     /// Captures the run's custom providers once at construction so a mid-run policy edit can't retroactively change a running workload's placeholder set.
     pub fn with_custom_providers(mut self, custom_providers: Arc<Vec<DefProvider>>) -> Self {
         self.custom_providers = custom_providers;
+        self
+    }
+
+    /// Marks the catalog integrations that aren't connected yet: detecting one offers to connect, and accepting runs `connect` to allow its routes live.
+    pub fn with_connect_emitter(
+        mut self,
+        connectable: HashSet<String>,
+        connect: ConnectEmitter,
+    ) -> Self {
+        self.connectable = connectable;
+        self.connect = connect;
         self
     }
 
@@ -131,10 +149,15 @@ impl CredentialSession {
             },
         );
         drop(pending);
+        let action = if self.connectable.contains(&req.credential_id) {
+            format!("connect to {}", req.credential_id)
+        } else {
+            req.action
+        };
         self.notifier.present(&CredentialPendingPrompt {
             id: req.id,
             credential_id: req.credential_id,
-            action: req.action,
+            action,
         });
     }
 
@@ -155,7 +178,13 @@ impl CredentialSession {
         };
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
+        // Accepting an un-connected catalog integration connects it live (routes) before the value is armed, so the held request sees both.
+        let connect_now = matches!(request, CredentialDecisionRequest::Allow(_))
+            && self.connectable.contains(&credential_id);
         if let Some(entry) = persistent_entry(request) {
+            if connect_now {
+                (self.connect)(&credential_id);
+            }
             self.apply_persistent_entry(credential_id, entry);
         }
         for request_id in &request_ids {
@@ -937,5 +966,91 @@ mod tests {
             Some(CredentialEntry::Deny)
         );
         assert_eq!(persistent_entry(CredentialDecisionRequest::Timeout), None);
+    }
+
+    type ConnectableFixture = (
+        CredentialSession,
+        Arc<RecordingNotifier>,
+        Arc<CapturingStore>,
+        mpsc::UnboundedReceiver<HostFrame>,
+        Arc<StdMutex<Vec<String>>>,
+    );
+
+    fn fixture_connectable(connectable: &[&str]) -> ConnectableFixture {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(StdMutex::new(Vec::new()));
+        let connected_cb = connected.clone();
+        let set: HashSet<String> = connectable.iter().map(|s| s.to_string()).collect();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            store.clone(),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_connect_emitter(
+            set,
+            Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
+        );
+        (session, notifier, store, rx, connected)
+    }
+
+    #[test]
+    fn submit_pending_flavors_the_action_as_connect_for_a_connectable_id() {
+        let (s, n, _store, _rx, _connected) = fixture_connectable(&["gitlab"]);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        let p = n.presented.lock().unwrap();
+        assert_eq!(p[0].action, "connect to gitlab");
+    }
+
+    #[test]
+    fn allow_for_a_connectable_id_connects_live_and_records_the_value() {
+        let (s, _n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        s.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["gitlab".to_string()],
+            "accepting a connectable id connects it"
+        );
+        assert_eq!(
+            store.saves.lock().unwrap()[0].get("gitlab"),
+            Some(&CredentialEntry::HostDetect),
+            "the value decision is still recorded"
+        );
+    }
+
+    #[test]
+    fn deny_for_a_connectable_id_does_not_connect() {
+        let (s, _n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        assert!(
+            connected.lock().unwrap().is_empty(),
+            "denying must not connect the integration"
+        );
+        assert_eq!(
+            store.saves.lock().unwrap()[0].get("gitlab"),
+            Some(&CredentialEntry::Deny)
+        );
+    }
+
+    #[test]
+    fn allow_for_a_non_connectable_id_does_not_connect() {
+        let (s, _n, _store, _rx, connected) = fixture_connectable(&[]);
+        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert!(
+            connected.lock().unwrap().is_empty(),
+            "a built-in/connected id must not trigger a connect"
+        );
     }
 }
