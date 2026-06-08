@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.7.0...lns-v0.8.0) (2026-06-08)
+
+
+### Features
+
+* **run:** default OCI image runs to the image's USER ([09aeadb](https://github.com/lensapp/lens-sandbox/commit/09aeadbecc7ef5c4576e908101a7b13d151ea5b9))
+
+
+### Bug Fixes
+
+* **run:** honor the group component of an image's OCI USER ([3a0b21e](https://github.com/lensapp/lens-sandbox/commit/3a0b21e284bbed3dfca692d3452ad7be628700cd))
+
 ## [0.7.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.6.0...lns-v0.7.0) (2026-06-05)
 
 
