@@ -50,6 +50,7 @@ pub(crate) enum MountFlags {
 pub(crate) struct SandboxUser {
     pub name: String,
     pub uid: Option<u32>,
+    pub group: Option<String>,
 }
 
 pub(crate) trait Syscalls {
@@ -98,6 +99,7 @@ pub enum MountError {
     DescriptorDigestMismatch { expected: String, actual: String },
     DescriptorRead(std::io::Error),
     UnresolvableUser(String),
+    UnresolvableGroup(String),
 }
 
 impl fmt::Display for MountError {
@@ -131,6 +133,11 @@ impl fmt::Display for MountError {
                 f,
                 "image USER {name:?} is absent from the image's /etc/passwd and carries no uid to seed; \
                  refusing to boot rather than silently run the workload as root"
+            ),
+            Self::UnresolvableGroup(group) => write!(
+                f,
+                "image USER group {group:?} is absent from the image's /etc/group and is not a numeric gid; \
+                 refusing to boot rather than silently run the workload with the wrong group"
             ),
         }
     }
@@ -200,7 +207,8 @@ pub(crate) fn resolve_sandbox_user(
         return None;
     }
     let uid = env_get("SANDBOX_UID").and_then(|s| s.parse().ok());
-    Some(SandboxUser { name, uid })
+    let group = env_get("SANDBOX_GROUP").filter(|g| !g.is_empty());
+    Some(SandboxUser { name, uid, group })
 }
 
 fn passwd_uid_gid(newroot: &str, name: &str) -> Option<(u32, u32)> {
@@ -214,34 +222,59 @@ fn passwd_uid_gid(newroot: &str, name: &str) -> Option<(u32, u32)> {
     })
 }
 
-/// Resolve the (uid, gid) the workload runs as: an image-defined user is taken verbatim from the image's passwd, an absent user is seeded at its requested uid, and a named user that is neither in passwd nor carries a uid is unresolvable (`None`) — the caller refuses to boot rather than let it fall through to root.
+/// Resolve the (uid, gid) the workload runs as: the user's uid comes from passwd or its seeded numeric id, the gid honors an explicit `USER` group (numeric or resolved against `/etc/group`) and otherwise tracks the user's primary group, and a user or group that resolves to neither an `/etc/{passwd,group}` entry nor a numeric id is unresolvable — the caller refuses to boot rather than let it fall through to root.
 pub(crate) fn resolve_workload_ids(
     newroot: &str,
     user: &SandboxUser,
     sys: &dyn Syscalls,
-) -> Option<(u32, u32)> {
-    if let Some(ids) = passwd_uid_gid(newroot, &user.name) {
-        return Some(ids);
+) -> Result<(u32, u32), MountError> {
+    let in_passwd = passwd_uid_gid(newroot, &user.name);
+    let uid = match in_passwd {
+        Some((uid, _)) => uid,
+        None => user
+            .uid
+            .ok_or_else(|| MountError::UnresolvableUser(user.name.clone()))?,
+    };
+    let gid = match &user.group {
+        Some(spec) => resolve_group_gid(newroot, spec)
+            .ok_or_else(|| MountError::UnresolvableGroup(spec.clone()))?,
+        None => in_passwd.map(|(_, gid)| gid).unwrap_or(uid),
+    };
+    if in_passwd.is_none() {
+        seed_sandbox_user(newroot, &user.name, uid, gid, sys);
     }
-    let uid = user.uid?;
-    seed_sandbox_user(newroot, &user.name, uid, sys);
-    Some((uid, uid))
+    Ok((uid, gid))
 }
 
-fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, sys: &dyn Syscalls) {
+fn resolve_group_gid(newroot: &str, spec: &str) -> Option<u32> {
+    spec.parse::<u32>()
+        .ok()
+        .or_else(|| group_gid(newroot, spec))
+}
+
+fn group_gid(newroot: &str, name: &str) -> Option<u32> {
+    let group = std::fs::read_to_string(format!("{newroot}/etc/group")).ok()?;
+    group.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == name).then_some(())?;
+        fields.nth(1)?.parse().ok()
+    })
+}
+
+fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, gid: u32, sys: &dyn Syscalls) {
     let etc = format!("{newroot}/etc");
     let _ = std::fs::create_dir_all(&etc);
 
-    append_user_line(&format!("{etc}/passwd"), name, uid);
-    append_group_line(&format!("{etc}/group"), name, uid);
+    append_user_line(&format!("{etc}/passwd"), name, uid, gid);
+    append_group_line(&format!("{etc}/group"), name, gid);
 
     let home = format!("{newroot}/home/{name}");
     match CString::new(home.as_str()) {
         Ok(home_c) => {
             if std::fs::create_dir_all(&home).is_ok() {
                 let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755));
-                if let Err(err) = sys.lchown(&home_c, uid, uid) {
-                    eprintln!("lns-init: lchown({home:?}, {uid}, {uid}) failed: {err}");
+                if let Err(err) = sys.lchown(&home_c, uid, gid) {
+                    eprintln!("lns-init: lchown({home:?}, {uid}, {gid}) failed: {err}");
                 }
             }
         }
@@ -253,7 +286,7 @@ fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, sys: &dyn Syscalls) {
     }
 }
 
-fn append_user_line(passwd_path: &str, user: &str, uid: u32) {
+fn append_user_line(passwd_path: &str, user: &str, uid: u32, gid: u32) {
     let existing = std::fs::read_to_string(passwd_path).unwrap_or_default();
     let prefix = format!("{user}:");
     if existing.lines().any(|l| l.starts_with(&prefix)) {
@@ -264,7 +297,7 @@ fn append_user_line(passwd_path: &str, user: &str, uid: u32) {
         updated.push('\n');
     }
     updated.push_str(&format!(
-        "{user}:x:{uid}:{uid}:lens sandbox user:/home/{user}:/bin/sh\n"
+        "{user}:x:{uid}:{gid}:lens sandbox user:/home/{user}:/bin/sh\n"
     ));
     let _ = std::fs::write(passwd_path, updated);
 }
@@ -610,10 +643,7 @@ fn mount_composefs_and_exec_broker_inner(
     )?;
 
     let run_ids = match sandbox_user {
-        Some(user) => Some(
-            resolve_workload_ids(newroot, user, sys)
-                .ok_or_else(|| MountError::UnresolvableUser(user.name.clone()))?,
-        ),
+        Some(user) => Some(resolve_workload_ids(newroot, user, sys)?),
         None => None,
     };
 
@@ -835,31 +865,42 @@ mod tests {
         assert!(format!("{mismatch}").contains("sha256 mismatch — expected aa, got bb"));
         let unresolvable = MountError::UnresolvableUser("www-data".into());
         assert!(format!("{unresolvable}").contains("refusing to boot"));
+        let bad_group = MountError::UnresolvableGroup("staff".into());
+        let rendered = format!("{bad_group}");
+        assert!(rendered.contains("staff") && rendered.contains("refusing to boot"));
     }
 
     #[test]
-    fn resolve_sandbox_user_reads_name_and_uid() {
+    fn resolve_sandbox_user_reads_name_uid_and_group() {
         let env = HashMap::from([
             ("SANDBOX_USER".to_string(), "agent".to_string()),
             ("SANDBOX_UID".to_string(), "1000".to_string()),
+            ("SANDBOX_GROUP".to_string(), "staff".to_string()),
         ]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
         assert_eq!(user.name, "agent");
         assert_eq!(user.uid, Some(1000));
+        assert_eq!(user.group.as_deref(), Some("staff"));
     }
 
     #[test]
-    fn resolve_sandbox_user_leaves_uid_unknown_when_unparseable_or_absent() {
+    fn resolve_sandbox_user_leaves_uid_and_group_unknown_when_unparseable_or_absent() {
         let env = HashMap::from([("SANDBOX_USER".to_string(), "agent".to_string())]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
         assert_eq!(user.uid, None);
+        assert_eq!(user.group, None);
 
         let env = HashMap::from([
             ("SANDBOX_USER".to_string(), "agent".to_string()),
             ("SANDBOX_UID".to_string(), "not-a-number".to_string()),
+            ("SANDBOX_GROUP".to_string(), String::new()),
         ]);
         let user = resolve_sandbox_user(|k| env.get(k).cloned()).expect("user");
         assert_eq!(user.uid, None);
+        assert_eq!(
+            user.group, None,
+            "an empty SANDBOX_GROUP is treated as unset"
+        );
     }
 
     #[test]
@@ -912,10 +953,11 @@ mod tests {
         let user = SandboxUser {
             name: "appuser".into(),
             uid: None,
+            group: None,
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys),
-            Some((1000, 2000))
+            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            (1000, 2000)
         );
         assert!(
             !sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })),
@@ -937,10 +979,11 @@ mod tests {
         let user = SandboxUser {
             name: "sandbox".into(),
             uid: Some(65534),
+            group: None,
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys),
-            Some((65534, 65534))
+            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            (65534, 65534)
         );
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
         assert!(passwd.contains("sandbox:x:65534:65534:"));
@@ -955,21 +998,98 @@ mod tests {
     }
 
     #[test]
-    fn workload_ids_run_a_named_user_with_unknown_uid_unprivileged_without_seeding_root() {
+    fn workload_ids_reject_a_named_user_with_unknown_uid_without_seeding_root() {
         let dir = newroot_with_passwd("root:x:0:0:root:/root:/bin/sh\n");
         let newroot = dir.path().to_str().unwrap();
         let sys = FakeSyscalls::new();
         let user = SandboxUser {
             name: "www-data".into(),
             uid: None,
+            group: None,
         };
-        assert_eq!(resolve_workload_ids(newroot, &user, &sys), None);
+        assert!(matches!(
+            resolve_workload_ids(newroot, &user, &sys),
+            Err(MountError::UnresolvableUser(name)) if name == "www-data"
+        ));
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
         assert!(
             !passwd.contains("www-data"),
             "an unresolvable named user must not be seeded as uid 0"
         );
         assert!(!sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })));
+    }
+
+    #[test]
+    fn workload_ids_honor_a_numeric_group_against_a_seeded_user() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "1001".into(),
+            uid: Some(1001),
+            group: Some("0".into()),
+        };
+        assert_eq!(
+            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            (1001, 0),
+            "a numeric USER uid:gid must seed at the requested gid, not gid == uid"
+        );
+        let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
+        assert!(passwd.contains("1001:x:1001:0:"));
+        assert!(sys.calls().iter().any(|c| matches!(
+            c,
+            Call::Lchown {
+                uid: 1001,
+                gid: 0,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn workload_ids_resolve_a_named_group_against_etc_group_overriding_the_users_primary() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             app:x:1000:1000:app:/home/app:/bin/sh\n",
+        );
+        std::fs::write(
+            dir.path().join("etc/group"),
+            "root:x:0:\nstaff:x:50:\napp:x:1000:\n",
+        )
+        .unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "app".into(),
+            uid: None,
+            group: Some("staff".into()),
+        };
+        assert_eq!(
+            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            (1000, 50),
+            "an explicitly named group must win over the user's passwd primary gid"
+        );
+        assert!(
+            !sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })),
+            "a passwd-defined user must not be re-seeded just to apply an explicit group"
+        );
+    }
+
+    #[test]
+    fn workload_ids_reject_a_named_group_absent_from_etc_group() {
+        let dir = newroot_with_passwd("app:x:1000:1000:app:/home/app:/bin/sh\n");
+        std::fs::write(dir.path().join("etc/group"), "root:x:0:\n").unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "app".into(),
+            uid: None,
+            group: Some("nope".into()),
+        };
+        assert!(matches!(
+            resolve_workload_ids(newroot, &user, &sys),
+            Err(MountError::UnresolvableGroup(group)) if group == "nope"
+        ));
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -1578,6 +1698,7 @@ mod tests {
         let user = SandboxUser {
             name: "agent".into(),
             uid: Some(4242),
+            group: None,
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1610,6 +1731,7 @@ mod tests {
         let user = SandboxUser {
             name: "www-data".into(),
             uid: None,
+            group: None,
         };
         let err = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1648,8 +1770,8 @@ mod tests {
         .unwrap();
         std::fs::write(format!("{newroot}/etc/group"), "root:x:0:").unwrap();
         let sys = FakeSyscalls::new();
-        seed_sandbox_user(newroot, "agent", 1000, &sys);
-        seed_sandbox_user(newroot, "agent", 1000, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, 1000, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, 1000, &sys);
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
         assert_eq!(
             passwd.matches("agent:x:1000").count(),
@@ -1673,7 +1795,7 @@ mod tests {
         let newroot = dir.path().to_str().unwrap();
         let sys = FakeSyscalls::new()
             .fail_when(|c| matches!(c, Call::Lchown { .. }).then_some(ErrorKind::PermissionDenied));
-        seed_sandbox_user(newroot, "agent", 1000, &sys);
+        seed_sandbox_user(newroot, "agent", 1000, 1000, &sys);
         assert!(
             std::fs::metadata(format!("{newroot}/home/agent"))
                 .unwrap()
@@ -1686,7 +1808,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let newroot = dir.path().to_str().unwrap();
         let sys = FakeSyscalls::new();
-        seed_sandbox_user(newroot, "ag\0ent", 1000, &sys);
+        seed_sandbox_user(newroot, "ag\0ent", 1000, 1000, &sys);
         // The interior NUL makes the home CString fail → home setup skipped, no lchown attempted.
         assert!(!sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })));
         // passwd is still (best-effort) written before the home step.
@@ -1900,6 +2022,7 @@ mod tests {
         let user = SandboxUser {
             name: "agent".into(),
             uid: Some(4242),
+            group: None,
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1929,6 +2052,7 @@ mod tests {
         let user = SandboxUser {
             name: "www-data".into(),
             uid: None,
+            group: None,
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1958,6 +2082,7 @@ mod tests {
         let user = SandboxUser {
             name: "www-data".into(),
             uid: None,
+            group: None,
         };
         let _ = mount_composefs_and_exec_broker_inner(
             &full_params(),
@@ -1988,6 +2113,41 @@ mod tests {
                 Call::Lchown { path, uid: 33, gid: 50 } if path == &run_target
             )),
             "/run must be group-owned by the workload's passwd gid, not by the uid"
+        );
+    }
+
+    #[test]
+    fn boot_exports_the_explicit_image_group_not_the_seeded_users_uid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "1001".into(),
+            uid: Some(1001),
+            group: Some("0".into()),
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_GID" && value == "0"
+            )),
+            "USER 1001:0 must run with gid 0, not the gid==uid fallback that drops the group"
+        );
+        let run_target = format!("{newroot}/run");
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::Lchown { path, uid: 1001, gid: 0 } if path == &run_target
+            )),
+            "/run must be group-owned by the explicitly requested gid 0"
         );
     }
 
@@ -2040,6 +2200,7 @@ mod tests {
         let user = SandboxUser {
             name: "agent".into(),
             uid: Some(4242),
+            group: None,
         };
         let err = mount_composefs_and_exec_broker_inner(
             &full_params(),

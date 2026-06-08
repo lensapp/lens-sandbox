@@ -98,8 +98,7 @@ pub struct ExecSpec {
 impl ExecSpec {
     pub fn server(
         image_config: Option<&oci_client::config::ConfigFile>,
-        sandbox_user: &str,
-        sandbox_uid: Option<u32>,
+        run_as: &RunAs,
         ws_url: &str,
         token: &str,
         cmd: &[String],
@@ -113,12 +112,15 @@ impl ExecSpec {
         let mut kernel_env = vec![
             ("LENS_SANDBOX_WS_URL".into(), ws_url.to_string()),
             ("LENS_SANDBOX_TOKEN".into(), token.to_string()),
-            ("SANDBOX_USER".into(), sandbox_user.to_string()),
+            ("SANDBOX_USER".into(), run_as.user.clone()),
         ];
-        if let Some(uid) = sandbox_uid {
+        if let Some(uid) = run_as.uid {
             kernel_env.push(("SANDBOX_UID".into(), uid.to_string()));
         }
-        kernel_env.push(("LENS_SANDBOX_USER".into(), sandbox_user.to_string()));
+        if let Some(group) = &run_as.group {
+            kernel_env.push(("SANDBOX_GROUP".into(), group.clone()));
+        }
+        kernel_env.push(("LENS_SANDBOX_USER".into(), run_as.user.clone()));
         kernel_env.push((
             "AGENT_COMMAND_B64".into(),
             crate::base64::encode(agent_command.as_bytes()),
@@ -160,21 +162,13 @@ impl ExecSpec {
     }
 
     pub fn for_run(
-        sandbox_user: &str,
-        sandbox_uid: Option<u32>,
+        run_as: &RunAs,
         cmd: &[String],
         image_config: Option<&oci_client::config::ConfigFile>,
         session: Option<&crate::supervisor::SupervisorSession>,
     ) -> Self {
         match session {
-            Some(s) => Self::server(
-                image_config,
-                sandbox_user,
-                sandbox_uid,
-                &s.relay.url,
-                &s.relay.token,
-                cmd,
-            ),
+            Some(s) => Self::server(image_config, run_as, &s.relay.url, &s.relay.token, cmd),
             None => Self::from_image_config(image_config, cmd),
         }
     }
@@ -191,26 +185,50 @@ const DEFAULT_SANDBOX_USER: &str = "sandbox";
 const DEFAULT_SANDBOX_UID: u32 = 65534;
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct RunAs {
+    pub user: String,
+    pub uid: Option<u32>,
+    pub group: Option<String>,
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub fn resolve_run_as(
     explicit_user: Option<&str>,
     explicit_uid: Option<u32>,
     image_user: Option<&str>,
     imageless: bool,
-) -> (String, Option<u32>) {
+) -> RunAs {
     if explicit_user.is_some() || explicit_uid.is_some() {
-        return (
-            explicit_user.unwrap_or(DEFAULT_SANDBOX_USER).to_string(),
-            Some(explicit_uid.unwrap_or(DEFAULT_SANDBOX_UID)),
-        );
+        return RunAs {
+            user: explicit_user.unwrap_or(DEFAULT_SANDBOX_USER).to_string(),
+            uid: Some(explicit_uid.unwrap_or(DEFAULT_SANDBOX_UID)),
+            group: None,
+        };
     }
     if imageless {
-        return (DEFAULT_SANDBOX_USER.to_string(), Some(DEFAULT_SANDBOX_UID));
+        return RunAs {
+            user: DEFAULT_SANDBOX_USER.to_string(),
+            uid: Some(DEFAULT_SANDBOX_UID),
+            group: None,
+        };
     }
     match image_user.map(str::trim).filter(|u| !u.is_empty()) {
-        None => (String::new(), Some(0)),
+        None => RunAs {
+            user: String::new(),
+            uid: Some(0),
+            group: None,
+        },
         Some(spec) => {
-            let name = spec.split(':').next().unwrap_or(spec);
-            (name.to_string(), name.parse::<u32>().ok())
+            let (user, group) = match spec.split_once(':') {
+                Some((user, group)) => (user, (!group.is_empty()).then(|| group.to_string())),
+                None => (spec, None),
+            };
+            RunAs {
+                user: user.to_string(),
+                uid: user.parse::<u32>().ok(),
+                group,
+            }
         }
     }
 }
@@ -562,8 +580,7 @@ mod tests {
     fn server_mode_emits_agent_command_b64_not_raw_agent_command() {
         let exec = ExecSpec::server(
             None,
-            "sandbox",
-            Some(65534),
+            &run_as("sandbox", Some(65534)),
             "vsock://host:1024/v1/sandbox",
             "token",
             &["echo".into(), "hello".into()],
@@ -582,6 +599,14 @@ mod tests {
             Some("echo hello"),
             "supervised path must encode the user's command verbatim"
         );
+    }
+
+    fn run_as(user: &str, uid: Option<u32>) -> RunAs {
+        RunAs {
+            user: user.to_string(),
+            uid,
+            group: None,
+        }
     }
 
     fn fake_session(url: &str, token: &str) -> crate::supervisor::SupervisorSession {
@@ -607,7 +632,7 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, Some(&session));
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert_eq!(
             env.get("LENS_SANDBOX_WS_URL").map(String::as_str),
@@ -641,7 +666,7 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["sh".to_string()];
-        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, Some(&session));
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             !env.contains_key("RUST_LOG"),
@@ -655,7 +680,7 @@ mod tests {
     fn for_run_unsupervised_sets_agent_command_b64() {
         use std::collections::HashMap;
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run("sandbox", Some(65534), &cmd, None, None);
+        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, None);
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             env.contains_key("AGENT_COMMAND_B64"),
@@ -744,8 +769,7 @@ mod tests {
         let cfg = config_with_workdir("/srv");
         let spec = ExecSpec::server(
             Some(&cfg),
-            "sandbox",
-            Some(65534),
+            &run_as("sandbox", Some(65534)),
             "vsock://host:1024/v1/sandbox",
             "token-xyz",
             &[],
@@ -852,29 +876,27 @@ mod tests {
 
     #[test]
     fn run_as_image_without_a_user_directive_runs_as_root() {
-        assert_eq!(
-            resolve_run_as(None, None, None, false),
-            (String::new(), Some(0))
-        );
-        assert_eq!(
-            resolve_run_as(None, None, Some(""), false),
-            (String::new(), Some(0))
-        );
-        assert_eq!(
-            resolve_run_as(None, None, Some("  "), false),
-            (String::new(), Some(0))
-        );
+        for image_user in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                resolve_run_as(None, None, image_user, false),
+                RunAs {
+                    user: String::new(),
+                    uid: Some(0),
+                    group: None,
+                }
+            );
+        }
     }
 
     #[test]
     fn run_as_leaves_a_named_image_users_uid_for_the_guest_to_resolve_by_name() {
         assert_eq!(
             resolve_run_as(None, None, Some("www-data"), false),
-            ("www-data".to_string(), None)
-        );
-        assert_eq!(
-            resolve_run_as(None, None, Some("www-data:www-data"), false),
-            ("www-data".to_string(), None)
+            RunAs {
+                user: "www-data".to_string(),
+                uid: None,
+                group: None,
+            }
         );
     }
 
@@ -882,40 +904,97 @@ mod tests {
     fn run_as_parses_a_numeric_image_user_into_its_uid() {
         assert_eq!(
             resolve_run_as(None, None, Some("1000"), false),
-            ("1000".to_string(), Some(1000))
-        );
-        assert_eq!(
-            resolve_run_as(None, None, Some("1000:1000"), false),
-            ("1000".to_string(), Some(1000))
+            RunAs {
+                user: "1000".to_string(),
+                uid: Some(1000),
+                group: None,
+            }
         );
     }
 
     #[test]
-    fn run_as_explicit_cli_override_wins_over_the_image_user() {
+    fn run_as_keeps_the_group_component_of_the_image_user() {
         assert_eq!(
-            resolve_run_as(Some("alice"), Some(1234), Some("www-data"), false),
-            ("alice".to_string(), Some(1234))
+            resolve_run_as(None, None, Some("www-data:www-data"), false),
+            RunAs {
+                user: "www-data".to_string(),
+                uid: None,
+                group: Some("www-data".to_string()),
+            },
+            "a named user:group must carry its group on so the guest can resolve it"
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("app:root"), false),
+            RunAs {
+                user: "app".to_string(),
+                uid: None,
+                group: Some("root".to_string()),
+            },
+            "an explicitly requested group must not be replaced by the user's primary group"
+        );
+        assert_eq!(
+            resolve_run_as(None, None, Some("1001:0"), false),
+            RunAs {
+                user: "1001".to_string(),
+                uid: Some(1001),
+                group: Some("0".to_string()),
+            },
+            "a numeric uid:gid must keep its gid, not fall back to gid == uid"
+        );
+    }
+
+    #[test]
+    fn run_as_treats_an_empty_group_component_as_no_group() {
+        assert_eq!(
+            resolve_run_as(None, None, Some("app:"), false),
+            RunAs {
+                user: "app".to_string(),
+                uid: None,
+                group: None,
+            }
+        );
+    }
+
+    #[test]
+    fn run_as_explicit_cli_override_wins_over_the_image_user_and_carries_no_group() {
+        assert_eq!(
+            resolve_run_as(Some("alice"), Some(1234), Some("www-data:www-data"), false),
+            RunAs {
+                user: "alice".to_string(),
+                uid: Some(1234),
+                group: None,
+            }
         );
         assert_eq!(
             resolve_run_as(None, Some(1234), Some("www-data"), false),
-            ("sandbox".to_string(), Some(1234))
+            RunAs {
+                user: "sandbox".to_string(),
+                uid: Some(1234),
+                group: None,
+            }
         );
         assert_eq!(
             resolve_run_as(Some("alice"), None, None, true),
-            ("alice".to_string(), Some(65534))
+            RunAs {
+                user: "alice".to_string(),
+                uid: Some(65534),
+                group: None,
+            }
         );
     }
 
     #[test]
     fn run_as_imageless_runs_unprivileged_as_the_sandbox_user() {
-        assert_eq!(
-            resolve_run_as(None, None, None, true),
-            ("sandbox".to_string(), Some(65534))
-        );
-        assert_eq!(
-            resolve_run_as(None, None, Some("ignored-when-imageless"), true),
-            ("sandbox".to_string(), Some(65534))
-        );
+        for image_user in [None, Some("ignored:when-imageless")] {
+            assert_eq!(
+                resolve_run_as(None, None, image_user, true),
+                RunAs {
+                    user: "sandbox".to_string(),
+                    uid: Some(65534),
+                    group: None,
+                }
+            );
+        }
     }
 
     #[test]
@@ -923,8 +1002,7 @@ mod tests {
         use std::collections::HashMap;
         let named = ExecSpec::server(
             None,
-            "www-data",
-            None,
+            &run_as("www-data", None),
             "vsock://host:1024/v1/sandbox",
             "token",
             &["true".into()],
@@ -941,13 +1019,47 @@ mod tests {
 
         let numeric = ExecSpec::server(
             None,
-            "1000",
-            Some(1000),
+            &run_as("1000", Some(1000)),
             "vsock://host:1024/v1/sandbox",
             "token",
             &["true".into()],
         );
         let env: HashMap<_, _> = numeric.kernel_env.iter().cloned().collect();
         assert_eq!(env.get("SANDBOX_UID").map(String::as_str), Some("1000"));
+    }
+
+    #[test]
+    fn server_emits_sandbox_group_only_when_the_image_user_requested_one() {
+        use std::collections::HashMap;
+        let with_group = ExecSpec::server(
+            None,
+            &RunAs {
+                user: "app".to_string(),
+                uid: None,
+                group: Some("root".to_string()),
+            },
+            "vsock://host:1024/v1/sandbox",
+            "token",
+            &["true".into()],
+        );
+        let env: HashMap<_, _> = with_group.kernel_env.iter().cloned().collect();
+        assert_eq!(
+            env.get("SANDBOX_GROUP").map(String::as_str),
+            Some("root"),
+            "the guest needs the requested group to resolve its gid: {env:?}"
+        );
+
+        let without_group = ExecSpec::server(
+            None,
+            &run_as("sandbox", Some(65534)),
+            "vsock://host:1024/v1/sandbox",
+            "token",
+            &["true".into()],
+        );
+        let env: HashMap<_, _> = without_group.kernel_env.iter().cloned().collect();
+        assert!(
+            !env.contains_key("SANDBOX_GROUP"),
+            "no group means the guest falls back to the user's primary group: {env:?}"
+        );
     }
 }
