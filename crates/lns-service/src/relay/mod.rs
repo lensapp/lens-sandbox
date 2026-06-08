@@ -105,11 +105,12 @@ async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink
 
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
+    extra_managed: &[String],
     chain: &mut lns_ipc::AuditChain,
     audit_file: &mut L,
     anchor_sink: &mut S,
 ) -> Result<()> {
-    let Some(obj) = crate::workload_env::injected_env_audit(user_env) else {
+    let Some(obj) = crate::workload_env::injected_env_audit(user_env, extra_managed) else {
         return Ok(());
     };
     let bytes = chain.augment_obj(obj);
@@ -694,6 +695,7 @@ mod tests {
         let mut anchor = MemAnchor::default();
         write_run_env_event(
             &["CLAUDE_CODE_USE_BEDROCK=1".into()],
+            &[],
             &mut chain,
             &mut log,
             &mut anchor,
@@ -722,7 +724,7 @@ mod tests {
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
-        write_run_env_event(&[], &mut chain, &mut log, &mut anchor)
+        write_run_env_event(&[], &[], &mut chain, &mut log, &mut anchor)
             .await
             .expect("write_run_env_event");
         assert!(log.bytes.is_empty(), "no injected env → no audit line");
