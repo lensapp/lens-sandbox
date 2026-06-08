@@ -50,7 +50,7 @@ crates/lns-service/build.rs                              host cross-build glue (
 crates/lns-service/src/kernel/real.rs                    production wiring over reqwest + tokio::fs; pinned by wiremock tests in kernel.rs
 crates/lns-service/src/kernel/traits.rs                  trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/image/real.rs                     production wiring over oci_client::Client + linux/host-arch resolver; pinned by fake-Registry tests in image/mod.rs
-crates/lns-service/src/guest_tools/real.rs               production wiring over reqwest::get for dl-cdn.alpinelinux.org + cache::root(); pinned by fake-Fetcher tests in guest_tools/mod.rs
+crates/lns-service/src/guest_tools/real.rs               production wiring over reqwest::get for dl-cdn.alpinelinux.org + cache::root() + current_exe() self-hash build id; pinned by fake-Fetcher tests in guest_tools/mod.rs
 crates/lns-service/src/supervisor/traits.rs              trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/forward/real.rs                   macOS Vz vsock connector + tokio TCP listener/splice syscall leaf; PortForwarder lifecycle + accept-error classification pinned by fake-forwarder and classify_accept_error tests in forward/mod.rs
 crates/lns-cli/src/service/real.rs                       leaf adapters (RealPinger, RealChildProbe, send_request, send_cancel_impl, spawn_service_impl) over tokio UnixStream + std::process; loop logic tested via _with + FakePinger/FakeChild

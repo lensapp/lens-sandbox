@@ -53,11 +53,14 @@ pub struct GuestTools {
 pub(crate) async fn ensure_with<F: Fetcher>(
     fetcher: &F,
     cache_root: PathBuf,
+    build_id: &str,
     packages: &[PackageSpec],
 ) -> Result<GuestTools> {
     let apks_dir = cache_root.join("apks");
-    let extracted = cache_root.join("extracted");
+    let extracted_root = cache_root.join("extracted");
+    let extracted = extracted_root.join(build_id);
     tokio::fs::create_dir_all(&apks_dir).await?;
+    prune_stale_extracts(&extracted_root, build_id).await;
 
     if extracted.join(".ready").exists() {
         return Ok(GuestTools { root: extracted });
@@ -79,6 +82,17 @@ pub(crate) async fn ensure_with<F: Fetcher>(
 
     tokio::fs::write(extracted.join(".ready"), b"").await?;
     Ok(GuestTools { root: extracted })
+}
+
+async fn prune_stale_extracts(extracted_root: &Path, keep: &str) {
+    let Ok(mut entries) = tokio::fs::read_dir(extracted_root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_name().to_str() != Some(keep) {
+            tokio::fs::remove_dir_all(entry.path()).await.ok();
+        }
+    }
 }
 
 async fn ensure_apk_with<F: Fetcher>(
@@ -478,14 +492,14 @@ mod tests {
     #[tokio::test]
     async fn ensure_with_short_circuits_when_ready_marker_present() {
         let dir = tempfile::TempDir::new().unwrap();
-        let extracted = dir.path().join("extracted");
+        let extracted = dir.path().join("extracted").join("test-build");
         tokio::fs::create_dir_all(&extracted).await.unwrap();
         tokio::fs::write(extracted.join(".ready"), b"")
             .await
             .unwrap();
 
         let fetcher = FakeFetcher::new();
-        let result = ensure_with(&fetcher, dir.path().to_path_buf(), PACKAGES)
+        let result = ensure_with(&fetcher, dir.path().to_path_buf(), "test-build", PACKAGES)
             .await
             .unwrap();
         assert_eq!(result.root, extracted);
@@ -498,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_with_clears_partial_extract_before_redoing_work() {
         let dir = tempfile::TempDir::new().unwrap();
-        let extracted = dir.path().join("extracted");
+        let extracted = dir.path().join("extracted").join("test-build");
         tokio::fs::create_dir_all(&extracted).await.unwrap();
         tokio::fs::write(extracted.join("stale.txt"), b"old")
             .await
@@ -510,7 +524,7 @@ mod tests {
             spec.name, spec.version
         );
         let fetcher = FakeFetcher::new().err(url, "boom");
-        let _err = ensure_with(&fetcher, dir.path().to_path_buf(), PACKAGES)
+        let _err = ensure_with(&fetcher, dir.path().to_path_buf(), "test-build", PACKAGES)
             .await
             .unwrap_err();
         assert!(
@@ -523,10 +537,10 @@ mod tests {
     async fn ensure_with_completes_end_to_end_writing_ready_marker_after_full_extract() {
         let (packages, fetcher) = matched_test_pin();
         let dir = tempfile::TempDir::new().unwrap();
-        let result = ensure_with(&fetcher, dir.path().to_path_buf(), &packages)
+        let result = ensure_with(&fetcher, dir.path().to_path_buf(), "test-build", &packages)
             .await
             .expect("ensure_with happy path");
-        assert_eq!(result.root, dir.path().join("extracted"));
+        assert_eq!(result.root, dir.path().join("extracted").join("test-build"));
         assert!(
             result.root.join(".ready").exists(),
             ".ready marker must be written so the next call short-circuits"
@@ -553,5 +567,53 @@ mod tests {
         let base = Path::new("/cache");
         let p = cache_subpath(base);
         assert_eq!(p, base.join("guest-tools").join(ALPINE_VERSION).join(ARCH));
+    }
+
+    #[tokio::test]
+    async fn ensure_with_buckets_extracted_per_build_id_but_shares_apks() {
+        let (packages, fetcher) = matched_test_pin();
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let a = ensure_with(&fetcher, dir.path().to_path_buf(), "build-a", &packages)
+            .await
+            .unwrap();
+        let b = ensure_with(&fetcher, dir.path().to_path_buf(), "build-b", &packages)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            a.root, b.root,
+            "a binary with a different layout must not reuse another's extracted tree"
+        );
+        assert!(a.root.ends_with("extracted/build-a"));
+        assert!(b.root.ends_with("extracted/build-b"));
+        assert_eq!(
+            fetcher.calls.lock().unwrap().len(),
+            1,
+            "the sha-pinned apk cache is shared across build ids — the second build must not refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_with_reclaims_a_previous_build_ids_extracted_tree() {
+        let (packages, fetcher) = matched_test_pin();
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let stale = dir.path().join("extracted").join("old-build");
+        tokio::fs::create_dir_all(&stale).await.unwrap();
+        tokio::fs::write(stale.join(".ready"), b"").await.unwrap();
+
+        let fresh = ensure_with(&fetcher, dir.path().to_path_buf(), "new-build", &packages)
+            .await
+            .unwrap();
+
+        assert!(
+            !stale.exists(),
+            "a binary no longer running must not leave its extracted tree behind"
+        );
+        assert!(
+            fresh.root.join(".ready").exists(),
+            "the current build's extracted tree is the one that survives"
+        );
     }
 }
