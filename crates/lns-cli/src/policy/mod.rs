@@ -29,7 +29,10 @@ fn add_rule(
         match_pattern: args.pattern.clone(),
         verdict,
         transport: transport_of(args.transport),
+        scheme: None,
         description: args.description.clone(),
+        tls_terminate: false,
+        rules: Vec::new(),
     });
     policy
         .save_atomic(&path)
@@ -172,7 +175,10 @@ mod tests {
             match_pattern: "ask.example".into(),
             verdict: Verdict::Ask,
             transport: Transport::Direct,
+            scheme: None,
             description: Some("undecided".into()),
+            tls_terminate: false,
+            rules: Vec::new(),
         });
         policy.save_atomic(&path).unwrap();
         let mut out = Vec::new();

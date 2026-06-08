@@ -95,7 +95,10 @@ fn that_policy_has(world: &mut BehaviourWorld, verdict: String, allows: usize, d
             match_pattern: format!("allow-{i}.example"),
             verdict: Verdict::Allow,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         });
     }
     for i in 0..denies {
@@ -103,7 +106,10 @@ fn that_policy_has(world: &mut BehaviourWorld, verdict: String, allows: usize, d
             match_pattern: format!("deny-{i}.example"),
             verdict: Verdict::Deny,
             transport: Transport::Direct,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         });
     }
     policy

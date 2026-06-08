@@ -222,7 +222,10 @@ mod tests {
             match_pattern: "api.linear.app".into(),
             verdict: Verdict::Allow,
             transport: Transport::Upstream,
+            scheme: None,
             description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
         });
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(net),
