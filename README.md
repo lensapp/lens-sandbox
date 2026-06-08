@@ -23,17 +23,21 @@ This installs the `lns` CLI and the `lns-service` background service. Lens Sandb
 ```bash
 lns service start              # start the background service once per session
 cd ~/dev/my-app
-lns run ghcr.io/anthropic/claude-code
+lns run nousresearch/hermes-agent \
+  -v hermes:/opt/data \
+  -p 8642:8642 -p 9119:9119 \
+  -- hermes
 ```
 
 `lns run` prints a summary of the run and the policy that applies before the workload starts:
 
 ```text
 lns run
-  Image:     ghcr.io/anthropic/claude-code (resolving…)
+  Image:     nousresearch/hermes-agent (resolving…)
+  Volume:    hermes → /opt/data
   Resources: 1 vCPU · 512 MiB
   Flags:     -i -t
-  Ports:     (none)
+  Ports:     127.0.0.1:8642 -> 8642, 127.0.0.1:9119 -> 9119
   Policy:
     file: /Users/you/dev/my-app/lns-policy.yaml
     default verdict: ask
