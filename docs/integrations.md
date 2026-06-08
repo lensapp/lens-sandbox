@@ -91,9 +91,16 @@ integrations:
       envVar: GITLAB_TOKEN
       placeholder: glpat-LNSPLACEHOLDER0000000000000000
       injections:
+        - kind: api_key_header
+          domain: gitlab.com
+          header: PRIVATE-TOKEN
         - kind: bearer_header
           domain: gitlab.com
 ```
+
+An entry may list several injections so one credential reaches a service however its
+clients send it — here both the `PRIVATE-TOKEN` header `glab` uses and the
+`Authorization: Bearer` form OAuth-style clients send.
 
 A route may carry the same detail a [policy rule](policy.md#rules) can — a `scheme`
 and HTTP method/path `rules` for least-privilege access — beyond the bare `match`.
