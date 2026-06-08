@@ -23,6 +23,9 @@ You drive everything through one binary: the `lns` CLI.
   `ask` verdict, the approval window, and editing rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of
   the workload, the built-in providers, and managing them with `lns credential`.
+- **[Integrations](integrations.md)** — connect workloads to external services
+  (credential injection + the routes they need) with `lns integration` and
+  `lns connect`.
 - **[Audit](audit.md)** — the per-run audit chain and verifying it with
   `lns audit`.
 - **[The background service](service.md)** — what `lns-service` does and managing
