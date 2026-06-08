@@ -52,6 +52,83 @@ pub enum Command {
     Policy(PolicyArgs),
     #[command(about = "Manage credential providers and their per-machine value decisions.")]
     Credential(CredentialArgs),
+    #[command(about = "Manage the credential-integration catalog (connectable services).")]
+    Integration(IntegrationArgs),
+    #[command(about = "Connect an integration to this directory's policy.")]
+    Connect(ConnectArgs),
+    #[command(about = "Disconnect an integration from this directory's policy.")]
+    Disconnect(DisconnectArgs),
+}
+
+#[derive(clap::Args)]
+pub struct IntegrationArgs {
+    #[command(subcommand)]
+    pub command: IntegrationCommand,
+}
+
+#[derive(Subcommand)]
+pub enum IntegrationCommand {
+    #[command(about = "Declare a credential integration in your machine-global catalog.")]
+    Add(IntegrationAddArgs),
+    #[command(about = "List the bundled and user-declared integrations.")]
+    List,
+    #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
+    Remove(IntegrationRemoveArgs),
+}
+
+#[derive(clap::Args)]
+pub struct IntegrationAddArgs {
+    #[arg(
+        help = "New integration id; must not collide with a bundled or existing user integration."
+    )]
+    pub id: String,
+    #[arg(long, help = "Environment variable the placeholder is seeded into.")]
+    pub env_var: String,
+    #[arg(
+        long = "inject",
+        required = true,
+        value_parser = parse_injection,
+        help = "Per-domain injection as KIND:DOMAIN (api_key_header needs KIND:DOMAIN:HEADER). Repeatable."
+    )]
+    pub inject: Vec<lns_policy::providers::InjectionDef>,
+    #[arg(
+        long = "route",
+        help = "A host pattern the integration needs reachable. Repeatable."
+    )]
+    pub route: Vec<String>,
+    #[arg(
+        long,
+        help = "Placeholder value; auto-generated (self-identifying) when omitted."
+    )]
+    pub placeholder: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct IntegrationRemoveArgs {
+    #[arg(help = "User-declared integration id to remove.")]
+    pub id: String,
+}
+
+#[derive(clap::Args)]
+pub struct ConnectArgs {
+    #[arg(help = "Integration id to connect (from `lns integration list`).")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct DisconnectArgs {
+    #[arg(help = "Integration id to disconnect.")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
