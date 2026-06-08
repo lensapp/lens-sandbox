@@ -13,6 +13,7 @@ use crate::approval_flow::protocol::PolicyMessage;
 use crate::approval_flow::session::ApprovalSession;
 use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{self, CredentialDecisionDelivery, DecisionDelivery};
+use crate::credential_flow::integrations::resolve_applied_integrations;
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{self, DefProvider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
@@ -187,6 +188,20 @@ fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> Credent
     }
 }
 
+/// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-integrations.yaml` doesn't break a run — the bundled catalog still applies.
+fn load_user_catalog_or_warn(path: &Path) -> lns_policy::integrations::Catalog {
+    match lns_policy::integrations::Catalog::load_or_default(path) {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            let path_str = path.display();
+            log::warn!(
+                "could not load {path_str} ({e}); using the bundled integration catalog only"
+            );
+            lns_policy::integrations::Catalog::default()
+        }
+    }
+}
+
 /// `Weak` so the closure doesn't keep the credential session alive past the run; a dropped session yields an empty list.
 fn make_credentials_provider(
     credential_session: &Arc<CredentialSession>,
@@ -293,10 +308,17 @@ pub(super) async fn start(
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
-    let policy = Policy::load_or_default(policy_path)
+    let mut policy = Policy::load_or_default(policy_path)
         .with_context(|| format!("loading policy {}", policy_path.display()))?;
-    // Captured once here so the run's placeholder set is fixed at boot; a later policy edit can't reach an already-forked workload.
-    let custom_providers = Arc::new(providers::build_policy_providers(&policy));
+    // Applied integrations resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
+    let user_catalog =
+        load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
+    let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
+    let applied = resolve_applied_integrations(&policy, &catalog);
+    policy.network.allowed_routes.extend(applied.routes);
+    let mut custom = providers::build_policy_providers(&policy);
+    custom.extend(applied.providers);
+    let custom_providers = Arc::new(custom);
 
     let window_state = window::get().context(
         "approval window state was not installed at boot; \
@@ -542,6 +564,43 @@ mod tests {
         assert!(
             state.is_empty(),
             "malformed credentials file must surface as empty in-memory state, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn load_user_catalog_or_warn_reads_an_existing_user_catalog() {
+        use lns_policy::integrations::{AuthKind, Catalog, CredentialAuth, Integration};
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join(".lns-integrations.yaml");
+        Catalog {
+            integrations: vec![Integration {
+                id: "acme".into(),
+                auth_kind: AuthKind::Credential,
+                routes: Vec::new(),
+                credential: Some(CredentialAuth {
+                    env_var: "ACME_API_KEY".into(),
+                    placeholder: "acme_LNSPLACEHOLDER".into(),
+                    injections: Vec::new(),
+                }),
+            }],
+        }
+        .save_atomic(&path)
+        .unwrap();
+        let catalog = load_user_catalog_or_warn(&path);
+        assert_eq!(catalog.integrations.len(), 1);
+        assert_eq!(catalog.integrations[0].id, "acme");
+    }
+
+    #[test]
+    fn load_user_catalog_or_warn_defaults_to_empty_and_warns_on_load_error() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join(".lns-integrations.yaml");
+        std::fs::write(&path, "integrations: not-a-list\n").unwrap();
+        let catalog = load_user_catalog_or_warn(&path);
+        assert!(
+            catalog.integrations.is_empty(),
+            "a malformed user catalog must surface as empty so the run still gets the bundled set"
         );
     }
 
