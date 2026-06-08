@@ -55,12 +55,14 @@ pub async fn run(cli: Cli) -> Result<i32> {
         Command::Credential(args) => {
             let cwd = std::env::current_dir()?;
             let creds_path = lns_policy::credentials::default_credentials_path();
+            let catalog_path = lns_policy::integrations::default_integrations_path();
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
             credential::run(
                 &args.command,
                 &cwd,
                 &creds_path,
+                &catalog_path,
                 &mut reader,
                 &mut std::io::stdout(),
             )?
