@@ -131,7 +131,7 @@ async fn orchestrate(
         "composefs descriptor materialised",
     );
 
-    let (run_user, run_uid) = vm::resolve_run_as(
+    let run_as = vm::resolve_run_as(
         args.sandbox_user.as_deref(),
         args.sandbox_uid,
         image
@@ -141,13 +141,7 @@ async fn orchestrate(
             .and_then(|c| c.user.as_deref()),
         imageless,
     );
-    let exec = vm::ExecSpec::for_run(
-        &run_user,
-        run_uid,
-        &args.cmd,
-        image.config.as_ref(),
-        session.as_ref(),
-    );
+    let exec = vm::ExecSpec::for_run(&run_as, &args.cmd, image.config.as_ref(), session.as_ref());
 
     let kernel_path = kernel::ensure().await?;
     log::debug!("prepared kernel in {:.2?}", lap());
