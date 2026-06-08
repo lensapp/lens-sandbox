@@ -48,6 +48,7 @@ pub(super) fn exec_env_strings(
     override_cmd: &[String],
     user_env: &[String],
     supervised: bool,
+    extra_managed: &[String],
 ) -> crate::workload_env::WorkloadEnv {
     let agent_command = supervised.then(|| match image_config {
         Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
@@ -56,7 +57,12 @@ pub(super) fn exec_env_strings(
     let image_env = image_config
         .and_then(|c| c.config.as_ref())
         .and_then(|c| c.env.as_deref());
-    crate::workload_env::run_workload_env(image_env, user_env, agent_command.as_deref())
+    crate::workload_env::run_workload_env(
+        image_env,
+        user_env,
+        agent_command.as_deref(),
+        extra_managed,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -155,7 +161,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_derives_agent_command_from_the_override_cmd() {
-        let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true);
+        let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[]);
         assert!(
             env.env.contains(&"AGENT_COMMAND=echo hi".to_string()),
             "expected AGENT_COMMAND in supervised env, got: {env:?}"
@@ -174,6 +180,7 @@ mod tests {
             ],
             &[],
             true,
+            &[],
         );
         let agent = env
             .env
@@ -194,6 +201,7 @@ mod tests {
             &["echo".into(), "hi".into()],
             &["FOO=bar".into()],
             false,
+            &[],
         );
         assert_eq!(
             env.env,
@@ -234,7 +242,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &[], true);
+        let env = exec_env_strings(Some(&cfg), &[], &[], true, &[]);
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
@@ -250,7 +258,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &["PORT=4000".into()], true);
+        let env = exec_env_strings(Some(&cfg), &[], &["PORT=4000".into()], true, &[]);
         assert!(
             env.env.contains(&"PORT=4000".to_string()),
             "user overrides image: {env:?}"
