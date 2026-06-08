@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use lns_policy::Policy;
 use lns_policy::credentials::{CredentialEntry, CredentialStore, JsonFileCredentialStore};
+use lns_policy::integrations::{AuthKind, Catalog, Integration, effective_integrations};
 use lns_policy::providers::{ProviderDef, is_self_identifying};
 
 use crate::cli::{
@@ -16,13 +17,14 @@ pub fn run(
     cmd: &CredentialCommand,
     cwd: &Path,
     creds_path: &Path,
+    catalog_path: &Path,
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
         CredentialCommand::Add(args) => add(args, cwd, creds_path, reader, writer),
         CredentialCommand::AddInjection(args) => add_injection(args, cwd, writer),
-        CredentialCommand::Set(args) => set(args, cwd, creds_path, reader, writer),
+        CredentialCommand::Set(args) => set(args, cwd, creds_path, catalog_path, reader, writer),
         CredentialCommand::Clear(args) => clear(args, creds_path, writer),
         CredentialCommand::List(args) => list(args, cwd, creds_path, writer),
         CredentialCommand::Remove(args) => remove(args, cwd, creds_path, writer),
@@ -172,13 +174,16 @@ fn remove(
     Ok(0)
 }
 
-fn is_known(id: &str, policy: &Policy) -> bool {
+fn is_known(id: &str, policy: &Policy, catalog: &[Integration]) -> bool {
     lns_policy::providers::builtins().iter().any(|p| p.id == id)
         || policy
             .credentials
             .custom_providers
             .iter()
             .any(|p| p.id == id)
+        || catalog
+            .iter()
+            .any(|i| i.id == id && i.auth_kind == AuthKind::Credential)
 }
 
 fn load_creds(
@@ -198,14 +203,17 @@ fn set(
     args: &CredentialSetArgs,
     cwd: &Path,
     creds_path: &Path,
+    catalog_path: &Path,
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let policy = Policy::load_or_default(&policy_path(args.policy.as_deref(), cwd))
-        .context("loading policy")?;
-    if !is_known(&args.id, &policy) {
+    let path = policy_path(args.policy.as_deref(), cwd);
+    let policy = Policy::load_or_default(&path).context("loading policy")?;
+    let user_catalog = Catalog::load_or_default(catalog_path).context("loading integrations")?;
+    let catalog = effective_integrations(&user_catalog);
+    if !is_known(&args.id, &policy, &catalog) {
         bail!(
-            "unknown credential provider {:?}; declare it first with `lns credential add`",
+            "unknown credential provider {:?}; declare it with `lns credential add` or connect an integration",
             args.id
         );
     }
@@ -253,8 +261,8 @@ fn list(
     creds_path: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let policy = Policy::load_or_default(&policy_path(args.policy.as_deref(), cwd))
-        .context("loading policy")?;
+    let path = policy_path(args.policy.as_deref(), cwd);
+    let policy = Policy::load_or_default(&path).context("loading policy")?;
     let (_store, state) = load_creds(creds_path)?;
     for def in lns_policy::providers::builtins() {
         writeln!(
@@ -309,6 +317,10 @@ mod tests {
         std::io::empty()
     }
 
+    fn no_catalog() -> std::path::PathBuf {
+        std::path::PathBuf::from("/nonexistent-lns-test/.lns-integrations.yaml")
+    }
+
     fn acme_policy(dir: &Path) {
         let mut policy = Policy::default();
         policy.credentials.custom_providers.push(ProviderDef {
@@ -341,6 +353,7 @@ mod tests {
             &CredentialCommand::Set(args),
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut no_stdin(),
             &mut out,
         )
@@ -360,7 +373,15 @@ mod tests {
         let mut args = set_args("github");
         args.host = true;
         let mut out = Vec::new();
-        set(&args, dir.path(), &creds, &mut no_stdin(), &mut out).unwrap();
+        set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut no_stdin(),
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(
             load_state(&creds).get("github"),
             Some(&CredentialEntry::HostDetect)
@@ -374,7 +395,15 @@ mod tests {
         let mut args = set_args("github");
         args.deny = true;
         let mut out = Vec::new();
-        set(&args, dir.path(), &creds, &mut no_stdin(), &mut out).unwrap();
+        set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut no_stdin(),
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(
             load_state(&creds).get("github"),
             Some(&CredentialEntry::Deny)
@@ -389,7 +418,15 @@ mod tests {
         let mut args = set_args("acme");
         args.value = Some("acme_real".into());
         let mut out = Vec::new();
-        set(&args, dir.path(), &creds, &mut no_stdin(), &mut out).unwrap();
+        set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut no_stdin(),
+            &mut out,
+        )
+        .unwrap();
         assert!(load_state(&creds).contains_key("acme"));
     }
 
@@ -400,7 +437,15 @@ mod tests {
         let mut args = set_args("made-up");
         args.value = Some("x".into());
         let mut out = Vec::new();
-        let err = set(&args, dir.path(), &creds, &mut no_stdin(), &mut out).unwrap_err();
+        let err = set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut no_stdin(),
+            &mut out,
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("made-up"));
         assert!(
             !creds.exists(),
@@ -414,7 +459,15 @@ mod tests {
         let creds = dir.path().join("creds.json");
         let mut args = set_args("github");
         args.host = true;
-        set(&args, dir.path(), &creds, &mut no_stdin(), &mut Vec::new()).unwrap();
+        set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut no_stdin(),
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         let mut out = Vec::new();
         clear(
@@ -442,7 +495,15 @@ mod tests {
                 "openai" => a.value = Some("sk-real-token".into()),
                 _ => a.deny = true,
             }
-            set(&a, dir.path(), &creds, &mut no_stdin(), &mut Vec::new()).unwrap();
+            set(
+                &a,
+                dir.path(),
+                &creds,
+                &no_catalog(),
+                &mut no_stdin(),
+                &mut Vec::new(),
+            )
+            .unwrap();
         }
         let mut out = Vec::new();
         list(
@@ -538,6 +599,7 @@ mod tests {
             &set_value,
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut no_stdin(),
             &mut Vec::new(),
         )
@@ -631,6 +693,7 @@ mod tests {
             &args,
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut &b"ghp_real\n"[..],
             &mut Vec::new(),
         )
@@ -653,6 +716,7 @@ mod tests {
             &args,
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut &b"ghp_real\r\n"[..],
             &mut Vec::new(),
         )
@@ -675,6 +739,7 @@ mod tests {
             &args,
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut &b"ghp_real"[..],
             &mut Vec::new(),
         )
@@ -693,7 +758,15 @@ mod tests {
         let creds = dir.path().join("creds.json");
         let mut args = set_args("github");
         args.value_stdin = true;
-        let err = set(&args, dir.path(), &creds, &mut &b"\n"[..], &mut Vec::new()).unwrap_err();
+        let err = set(
+            &args,
+            dir.path(),
+            &creds,
+            &no_catalog(),
+            &mut &b"\n"[..],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("stdin"), "got: {err:#}");
         assert!(
             !creds.exists(),
@@ -711,6 +784,7 @@ mod tests {
             &args,
             dir.path(),
             &creds,
+            &no_catalog(),
             &mut &[0xff_u8, 0xfe][..],
             &mut Vec::new(),
         )

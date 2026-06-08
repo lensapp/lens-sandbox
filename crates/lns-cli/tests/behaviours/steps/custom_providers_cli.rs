@@ -25,10 +25,11 @@ fn creds_path(world: &mut BehaviourWorld) -> PathBuf {
 fn run_credential(world: &mut BehaviourWorld, cmd: CredentialCommand) {
     let dir = cwd(world);
     let creds = creds_path(world);
+    let catalog = dir.join(".lns-integrations.yaml");
     let stdin = world.stdin.clone().unwrap_or_default();
     let mut reader = stdin.as_bytes();
     let mut out = Vec::<u8>::new();
-    let run = match credential::run(&cmd, &dir, &creds, &mut reader, &mut out) {
+    let run = match credential::run(&cmd, &dir, &creds, &catalog, &mut reader, &mut out) {
         Ok(exit_code) => CliRun {
             exit_code,
             output: String::from_utf8_lossy(&out).into_owned(),
@@ -44,6 +45,7 @@ fn run_credential(world: &mut BehaviourWorld, cmd: CredentialCommand) {
 fn run_add_via_clap(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
     let creds = creds_path(world);
+    let catalog = dir.join(".lns-integrations.yaml");
     let mut full = vec![
         "lns".to_string(),
         "credential".to_string(),
@@ -57,16 +59,18 @@ fn run_add_via_clap(world: &mut BehaviourWorld, tail: &[&str]) {
             };
             let mut reader = std::io::empty();
             let mut out = Vec::<u8>::new();
-            let run = match credential::run(&args.command, &dir, &creds, &mut reader, &mut out) {
-                Ok(exit_code) => CliRun {
-                    exit_code,
-                    output: String::from_utf8_lossy(&out).into_owned(),
-                },
-                Err(e) => CliRun {
-                    exit_code: 1,
-                    output: format!("{e:#}"),
-                },
-            };
+            let run =
+                match credential::run(&args.command, &dir, &creds, &catalog, &mut reader, &mut out)
+                {
+                    Ok(exit_code) => CliRun {
+                        exit_code,
+                        output: String::from_utf8_lossy(&out).into_owned(),
+                    },
+                    Err(e) => CliRun {
+                        exit_code: 1,
+                        output: format!("{e:#}"),
+                    },
+                };
             world.result = Some(run);
         }
         Err(e) => {
