@@ -407,6 +407,29 @@ mod tests {
     }
 
     #[test]
+    fn bundled_gitlab_injects_both_private_token_for_glab_and_bearer_for_oauth_clients() {
+        let gitlab = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "gitlab")
+            .expect("gitlab is bundled");
+        let injections = &gitlab.credential.as_ref().unwrap().injections;
+        assert!(
+            injections
+                .iter()
+                .any(|inj| inj.kind == InjectionKind::ApiKeyHeader
+                    && inj.domain == "gitlab.com"
+                    && inj.header.as_deref() == Some("PRIVATE-TOKEN")),
+            "glab sends its PAT in PRIVATE-TOKEN; expected an api_key_header injection for it, got: {injections:?}"
+        );
+        assert!(
+            injections
+                .iter()
+                .any(|inj| inj.kind == InjectionKind::BearerHeader && inj.domain == "gitlab.com"),
+            "Authorization: Bearer clients still need covering, got: {injections:?}"
+        );
+    }
+
+    #[test]
     fn every_bundled_integration_is_a_valid_credential_with_self_identifying_placeholder_and_routes()
      {
         for i in bundled_integrations() {

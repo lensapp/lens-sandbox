@@ -7,6 +7,9 @@ integrations:
       envVar: GITLAB_TOKEN
       placeholder: glpat-LNSPLACEHOLDER0000000000000000
       injections:
+        - kind: api_key_header
+          domain: gitlab.com
+          header: PRIVATE-TOKEN
         - kind: bearer_header
           domain: gitlab.com
   - id: huggingface
