@@ -180,15 +180,22 @@ jobs:
       - name: Install zstd
         run: sudo apt-get update && sudo apt-get install -y zstd
 
-      - name: Fetch Kata static bundle
+      - name: Fetch + verify Kata static bundle
         env:
           KATA: ${{ steps.manifest.outputs.kata_version }}
           KATA_ARCH: ${{ matrix.kata_arch }}
+          BUNDLE_SHA: ${{ steps.manifest.outputs[format('kata_bundle_sha256_{0}', matrix.kata_arch)] }}
         run: |
           set -euo pipefail
           URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
           echo "Fetching $URL (~670 MB)"
           curl -L --fail --output kata.tar.zst "$URL"
+          if [ -n "$BUNDLE_SHA" ]; then
+            echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
+            echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
+          else
+            echo "::warning::No kata_bundle_sha256 pinned for ${KATA_ARCH}; skipping bundle integrity check (kernel was pinned before bundle verification existed)."
+          fi
           zstd -d kata.tar.zst -o kata.tar
 
       - name: Resolve kernel filename (auto-detect when pending)
@@ -382,16 +389,23 @@ jobs:
       - name: Install zstd
         run: sudo apt-get update && sudo apt-get install -y zstd
 
-      - name: Fetch + extract Kata kernel
+      - name: Fetch + verify + extract Kata kernel
         env:
           KATA: ${{ steps.manifest.outputs.kata_version }}
           KATA_ARCH: ${{ matrix.kata_arch }}
           FILENAME: ${{ steps.manifest.outputs.kernel_filename }}
           PV: ${{ steps.manifest.outputs.published_version }}
+          BUNDLE_SHA: ${{ steps.manifest.outputs[format('kata_bundle_sha256_{0}', matrix.kata_arch)] }}
         run: |
           set -euo pipefail
           URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
           curl -L --fail --output kata.tar.zst "$URL"
+          if [ -n "$BUNDLE_SHA" ]; then
+            echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
+            echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
+          else
+            echo "::warning::No kata_bundle_sha256 pinned for ${KATA_ARCH}; skipping bundle integrity check (kernel was pinned before bundle verification existed)."
+          fi
           zstd -d kata.tar.zst -o kata.tar
           tar -xf kata.tar "./opt/kata/share/kata-containers/${FILENAME}"
           ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"

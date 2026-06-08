@@ -20,6 +20,9 @@ serde_json = "1"
 # survive every round trip).
 toml       = "0.8"
 toml_edit  = "0.22"
+# Hashes the downloaded Kata bundles so `bump` can pin their sha256 in
+# kernels.toml; CI verifies the bundle against the pin before extraction.
+sha2       = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
