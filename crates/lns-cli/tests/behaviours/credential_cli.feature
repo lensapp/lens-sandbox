@@ -22,6 +22,13 @@ Feature: shaping credential rules from the CLI
     When the developer sets the "github" credential to a stored value piped on stdin as "ghp_piped"
     Then "~/.lns-credentials.json" gains an entry for "github" with kind "stored" carrying "ghp_piped"
 
+  Scenario: Setting a credential for a catalog integration is accepted
+    A connected integration (e.g. the bundled "gitlab") is a known
+    credential provider too, so its value can be pre-set non-interactively
+    just like a built-in — the value arms its injection on next use.
+    When the developer sets the "gitlab" credential to a stored value "glpat-real"
+    Then "~/.lns-credentials.json" gains an entry for "gitlab" with kind "stored" carrying "glpat-real"
+
   Scenario: Setting a value from stdin with nothing piped fails clearly
     When the developer sets the "github" credential from empty stdin
     Then the command fails with a clear error mentioning stdin

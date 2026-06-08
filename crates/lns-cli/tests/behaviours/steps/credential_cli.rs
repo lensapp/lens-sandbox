@@ -25,10 +25,11 @@ fn creds_path(world: &mut BehaviourWorld) -> PathBuf {
 fn run_credential(world: &mut BehaviourWorld, cmd: CredentialCommand) {
     let dir = cwd(world);
     let creds = dir.join(".lns-credentials.json");
+    let catalog = dir.join(".lns-integrations.yaml");
     let stdin = world.stdin.clone().unwrap_or_default();
     let mut reader = stdin.as_bytes();
     let mut buf = Vec::<u8>::new();
-    let run = match credential::run(&cmd, &dir, &creds, &mut reader, &mut buf) {
+    let run = match credential::run(&cmd, &dir, &creds, &catalog, &mut reader, &mut buf) {
         Ok(exit_code) => CliRun {
             exit_code,
             output: String::from_utf8_lossy(&buf).into_owned(),
@@ -44,6 +45,7 @@ fn run_credential(world: &mut BehaviourWorld, cmd: CredentialCommand) {
 fn run_set_via_clap(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
     let creds = dir.join(".lns-credentials.json");
+    let catalog = dir.join(".lns-integrations.yaml");
     let stdin = world.stdin.clone().unwrap_or_default();
     let mut reader = stdin.as_bytes();
     let mut full = vec![
@@ -58,7 +60,7 @@ fn run_set_via_clap(world: &mut BehaviourWorld, tail: &[&str]) {
                 panic!("expected a credential command");
             };
             let mut buf = Vec::<u8>::new();
-            match credential::run(&args.command, &dir, &creds, &mut reader, &mut buf) {
+            match credential::run(&args.command, &dir, &creds, &catalog, &mut reader, &mut buf) {
                 Ok(exit_code) => CliRun {
                     exit_code,
                     output: String::from_utf8_lossy(&buf).into_owned(),
