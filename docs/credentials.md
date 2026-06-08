@@ -145,4 +145,6 @@ static placeholder — it carries real STS material.
 
 - [Policy and approvals](policy.md) — credential decisions follow the same
   allow / deny / ask model as network rules.
+- [Integrations](integrations.md) — bundle a provider's injection with the routes
+  it needs into a connectable service.
 - [CLI reference](cli-reference.md) — the full `lns credential` flag list.
