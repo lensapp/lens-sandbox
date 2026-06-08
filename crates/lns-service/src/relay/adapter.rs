@@ -152,7 +152,22 @@ async fn handle_connection(
     let resume_anchor = crate::audit::read_anchor_async(&anchor_path).await;
     let mut chain = lns_ipc::AuditChain::resuming_from_anchor(resume_anchor.as_ref());
     let mut anchor_sink = crate::audit::FileAnchorSink::new(anchor_path);
-    super::write_run_env_event(&user_env, &mut chain, &mut audit_file, &mut anchor_sink).await?;
+    let extra_managed: Vec<String> = {
+        use crate::credential_flow::providers::Provider;
+        credential_session
+            .custom_providers()
+            .iter()
+            .map(|p| p.env_var().to_string())
+            .collect()
+    };
+    super::write_run_env_event(
+        &user_env,
+        &extra_managed,
+        &mut chain,
+        &mut audit_file,
+        &mut anchor_sink,
+    )
+    .await?;
 
     let result = serve(
         &mut write,

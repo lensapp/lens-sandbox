@@ -210,6 +210,10 @@ async fn orchestrate(
             &args.cmd,
             &args.env,
             session.is_some(),
+            session
+                .as_ref()
+                .map(|s| s.managed_env_vars.as_slice())
+                .unwrap_or(&[]),
         );
         for refused in &composed.refused {
             let _ = frame_tx

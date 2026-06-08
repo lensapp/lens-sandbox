@@ -15,7 +15,7 @@ use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{self, CredentialDecisionDelivery, DecisionDelivery};
 use crate::credential_flow::integrations::resolve_applied_integrations;
 use crate::credential_flow::notification::WindowCredentialNotifier;
-use crate::credential_flow::providers::{self, DefProvider};
+use crate::credential_flow::providers::{self, DefProvider, Provider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
 use crate::credential_flow::session::CredentialSession;
 use crate::credential_flow::store::{
@@ -202,6 +202,11 @@ fn load_user_catalog_or_warn(path: &Path) -> lns_policy::integrations::Catalog {
     }
 }
 
+/// The env vars seeded as placeholders for this run's custom providers + connected integrations; stripped from `-e` so a real secret can't bypass the placeholder. Built-ins are handled globally by `is_managed_env`.
+fn collect_managed_env_vars(providers: &[DefProvider]) -> Vec<String> {
+    providers.iter().map(|p| p.env_var().to_string()).collect()
+}
+
 /// `Weak` so the closure doesn't keep the credential session alive past the run; a dropped session yields an empty list.
 fn make_credentials_provider(
     credential_session: &Arc<CredentialSession>,
@@ -319,6 +324,7 @@ pub(super) async fn start(
     let mut custom = providers::build_policy_providers(&policy);
     custom.extend(applied.providers);
     let custom_providers = Arc::new(custom);
+    let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
     let window_state = window::get().context(
         "approval window state was not installed at boot; \
@@ -367,6 +373,7 @@ pub(super) async fn start(
         relay,
         watcher: Some(watcher),
         credential_watcher: Some(credential_watcher),
+        managed_env_vars,
     })
 }
 
@@ -682,6 +689,11 @@ mod tests {
                 header: None,
             }],
         })])
+    }
+
+    #[test]
+    fn collect_managed_env_vars_lists_each_run_providers_env_var() {
+        assert_eq!(collect_managed_env_vars(&acme_custom()), ["ACME_API_KEY"]);
     }
 
     #[test]

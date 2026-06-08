@@ -38,7 +38,7 @@ fn given_registry_seeds(_world: &mut BehaviourWorld) {
 fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
     let user_env = user_env_from(&cmd);
     let image_env = world.image_env.clone();
-    world.composed_env = Some(run_workload_env(image_env.as_deref(), &user_env, None));
+    world.composed_env = Some(run_workload_env(image_env.as_deref(), &user_env, None, &[]));
     world.user_env = user_env;
 }
 
@@ -112,7 +112,7 @@ fn then_audit_records(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let obj = lns_service::workload_env::injected_env_audit(&world.user_env)
+    let obj = lns_service::workload_env::injected_env_audit(&world.user_env, &[])
         .ok_or("no run_env audit event was built")?;
     let env = obj
         .get("env")
