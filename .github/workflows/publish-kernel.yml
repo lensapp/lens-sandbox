@@ -40,12 +40,6 @@ concurrency:
   group: publish-kernel-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: false
 
-env:
-  AWS_DEFAULT_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-  S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
-  S3_BUCKET: ${{ secrets.S3_BUCKET }}
-
 jobs:
   # ────────────────────────────────────────────────────────────────
   # Phase 0: detect whether this is an actual kernel bump.
@@ -160,7 +154,11 @@ jobs:
 
       - name: Refuse to overwrite existing CDN artifact
         env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
           PV: ${{ steps.manifest.outputs.published_version }}
         run: |
           set -euo pipefail
@@ -372,7 +370,11 @@ jobs:
 
       - name: Refuse to overwrite existing CDN artifact (defence in depth)
         env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
           PV: ${{ steps.manifest.outputs.published_version }}
         run: |
           set -euo pipefail
@@ -436,7 +438,11 @@ jobs:
 
       - name: Upload to CDN origin
         env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
           PV: ${{ steps.manifest.outputs.published_version }}
         run: |
           set -euo pipefail
