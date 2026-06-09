@@ -57,6 +57,12 @@ If a provider has no value decision yet, the first request that carries its
 placeholder pauses for an approval — the same allow / deny flow as
 [network policy](policy.md), deciding whether to inject the real value.
 
+An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
+than a pasted secret it's a self-renewing **token set** obtained by an interactive
+device sign-in (`lns integration connect <id>`), refreshed automatically and
+re-prompted when the grant can no longer be refreshed. It lives in the same per-machine
+file and is never written to `lns-policy.yaml`.
+
 Clear a decision so the next use prompts again:
 
 ```bash
