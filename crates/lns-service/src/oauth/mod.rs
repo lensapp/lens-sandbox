@@ -96,9 +96,14 @@ pub async fn refresh_due_entries(
                 changed = true;
             }
             Ok(None) => {}
-            Err(e) => crate::log::warn!(
-                "oauth refresh for {id} failed ({e:#}); leaving the stale grant for re-sign-in on next use"
-            ),
+            Err(e) => {
+                // A grant that can't be refreshed is dead; drop it so the placeholder unarms and the next use re-prompts a fresh sign-in (scenario C).
+                state.remove(id);
+                changed = true;
+                crate::log::warn!(
+                    "oauth refresh for {id} failed ({e:#}); dropped the dead grant so the next use re-prompts"
+                );
+            }
         }
     }
     if changed && let Err(e) = store.save(state) {
@@ -428,12 +433,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_due_entries_keeps_an_unrefreshable_grant_in_place() {
+    async fn refresh_due_entries_drops_an_unrefreshable_grant_so_it_re_prompts() {
         let flow = FakeDeviceFlow::refreshing(Err(anyhow!("invalid_grant")));
         let store = CapturingStore::new();
-        let stale = oauth_entry("expired", "revoked", 0);
         let mut state = CredentialStateFile::new();
-        state.insert("github_oauth".into(), stale.clone());
+        state.insert("github_oauth".into(), oauth_entry("expired", "revoked", 0));
         refresh_due_entries(
             &mut state,
             &configs_for("github_oauth"),
@@ -443,12 +447,15 @@ mod tests {
             60,
         )
         .await;
-        assert_eq!(
-            state.get("github_oauth"),
-            Some(&stale),
-            "a failed refresh leaves the grant for the next held request to re-prompt"
+        assert!(
+            !state.contains_key("github_oauth"),
+            "a dead grant is dropped so the placeholder unarms and the next use re-prompts"
         );
-        assert!(store.saved.lock().unwrap().is_empty());
+        assert_eq!(
+            store.saved.lock().unwrap().len(),
+            1,
+            "the removal is persisted"
+        );
     }
 
     #[tokio::test]
