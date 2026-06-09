@@ -68,6 +68,7 @@ fn resolve(
     match state.get(p.id())? {
         CredentialEntry::Stored { value } => Some(value.clone()),
         CredentialEntry::HostDetect => detect_host(p.id()),
+        CredentialEntry::Oauth { access_token, .. } => Some(access_token.clone()),
         CredentialEntry::Deny => None,
     }
 }

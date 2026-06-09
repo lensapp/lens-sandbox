@@ -292,6 +292,7 @@ fn describe(entry: Option<&CredentialEntry>) -> &'static str {
         None => "no decision yet",
         Some(CredentialEntry::HostDetect) => "host value",
         Some(CredentialEntry::Stored { .. }) => "stored (hidden)",
+        Some(CredentialEntry::Oauth { .. }) => "signed in (oauth)",
         Some(CredentialEntry::Deny) => "denied",
     }
 }
