@@ -92,7 +92,7 @@ exec >/dev/console 2>&1
 
 echo "[wrap] init started, pid=$$, argv=$@"
 echo "[wrap] env (sorted):"
-env | sort | sed 's/^/[wrap]   /'
+env | sort | sed -E 's/^([A-Z0-9_]*(TOKEN|SECRET|PASSWORD|KEY)[A-Z0-9_]*)=.*/\1=<redacted>/' | sed 's/^/[wrap]   /'
 echo "[wrap] /run tree:"
 ls -la /run /run/lock 2>&1 | sed 's/^/[wrap]   /'
 echo "[wrap] /.lens tree:"
@@ -384,6 +384,18 @@ mod tests {
             let body_str = std::str::from_utf8(body).expect("wrapper body utf-8");
             let msg = format!("wrapper missing [wrap]: {body_str}");
             assert!(body_str.contains("[wrap]"), "{msg}");
+            assert!(
+                body_str.contains("(TOKEN|SECRET|PASSWORD|KEY)"),
+                "env dump must redact secret-shaped names via a portable ERE: {body_str}"
+            );
+            assert!(
+                body_str.contains("=<redacted>"),
+                "env dump must mask secret-shaped values with <redacted>: {body_str}"
+            );
+            assert!(
+                !body_str.contains("env | sort | sed 's/^/[wrap]   /'"),
+                "env dump must not be a bare unredacted prefix dump: {body_str}"
+            );
         }
         assert!(
             specs
