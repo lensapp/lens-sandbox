@@ -54,8 +54,8 @@ An integration only affects a project once you **connect** it, which records it 
 that directory's [`lns-policy.yaml`](policy.md):
 
 ```bash
-lns connect gitlab
-lns disconnect gitlab
+lns integration connect gitlab
+lns integration disconnect gitlab
 ```
 
 The policy stores the integration by id under `integrations:`, so the definition
@@ -105,9 +105,15 @@ clients send it — here both the `PRIVATE-TOKEN` header `glab` uses and the
 A route may carry the same detail a [policy rule](policy.md#rules) can — a `scheme`
 and HTTP method/path `rules` for least-privilege access — beyond the bare `match`.
 
-`authKind` is `credential` today. `oauth` (an interactive sign-in that obtains the
-token for you, rather than you supplying it) is reserved for a future release;
-connecting an `oauth` integration isn't supported yet.
+`authKind` is `credential` or `oauth`. An `oauth` integration authenticates by an
+interactive **device sign-in** (RFC 8628) the background service drives for you:
+`lns integration connect <id>` prints a verification URL and a code, you authorize in
+a browser, and the obtained token is injected at the boundary like any credential —
+but it's short-lived and refreshed automatically, and a grant that can no longer be
+refreshed re-prompts the sign-in on next use. The bundled `github_oauth` integration
+signs in this way. Its live token is stored per machine, never in `lns-policy.yaml`.
+An `oauth` entry carries an `oauth:` block (client id, scopes, the device-authorization
+and token endpoints) in place of `credential:`.
 
 ## See also
 
