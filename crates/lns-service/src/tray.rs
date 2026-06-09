@@ -137,6 +137,8 @@ impl TrayApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its card.
+                ctx.request_repaint();
                 self.last_visible = true;
             }
             VisibilityTransition::Hide => {
