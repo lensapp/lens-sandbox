@@ -1,6 +1,7 @@
 pub mod approval_flow;
 pub mod audit;
 mod base64;
+pub mod browser;
 pub mod cache;
 pub mod composefs;
 pub mod content_store;

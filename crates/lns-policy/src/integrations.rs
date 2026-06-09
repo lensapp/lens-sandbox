@@ -75,6 +75,8 @@ pub struct OauthAuth {
 #[serde(rename_all = "camelCase")]
 pub struct Integration {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub auth_kind: AuthKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<IntegrationRoute>,
@@ -85,6 +87,11 @@ pub struct Integration {
 }
 
 impl Integration {
+    /// The user-facing label for cards and prompts; falls back to the id when no `name` is set.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
     /// Each authKind must carry its matching block — `credential:` for credential, `oauth:` for oauth.
     pub fn validate(&self) -> Result<(), String> {
         match self.auth_kind {
@@ -155,9 +162,8 @@ static BUNDLED: LazyLock<Vec<Integration>> =
 fn parse_catalog(yaml_src: &str) -> Catalog {
     let catalog: Catalog =
         serde_yaml::from_str(yaml_src).expect("bundled integration catalog must be valid YAML");
-    catalog
-        .validate()
-        .expect("bundled integration catalog must be internally consistent");
+    let consistent = "bundled integration catalog must be internally consistent";
+    catalog.validate().expect(consistent);
     catalog
 }
 
@@ -255,6 +261,7 @@ mod tests {
     fn sample_integration() -> Integration {
         Integration {
             id: "acme".into(),
+            name: None,
             auth_kind: AuthKind::Credential,
             routes: vec![route("api.acme.corp")],
             credential: Some(credential(
@@ -269,6 +276,7 @@ mod tests {
     fn oauth_integration() -> Integration {
         Integration {
             id: "examplehub".into(),
+            name: None,
             auth_kind: AuthKind::Oauth,
             routes: vec![route("api.examplehub.com")],
             credential: None,
@@ -392,9 +400,41 @@ mod tests {
     }
 
     #[test]
+    fn display_name_prefers_an_explicit_name_and_falls_back_to_id() {
+        let mut i = sample_integration();
+        assert_eq!(
+            i.display_name(),
+            "acme",
+            "an absent name falls back to the id"
+        );
+        i.name = Some("Acme Corp".into());
+        assert_eq!(i.display_name(), "Acme Corp");
+    }
+
+    #[test]
+    fn an_integration_round_trips_its_optional_display_name() {
+        let mut i = oauth_integration();
+        i.name = Some("ExampleHub".into());
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(yaml.contains("name: ExampleHub"), "got: {yaml}");
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_integration_without_a_name_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&sample_integration()).unwrap();
+        assert!(
+            !yaml.contains("name:"),
+            "an absent name must not serialize: {yaml}"
+        );
+    }
+
+    #[test]
     fn validate_rejects_a_credential_integration_missing_its_block() {
         let bad = Integration {
             id: "x".into(),
+            name: None,
             auth_kind: AuthKind::Credential,
             routes: Vec::new(),
             credential: None,
@@ -413,6 +453,7 @@ mod tests {
     fn validate_rejects_an_oauth_integration_missing_its_block() {
         let bad = Integration {
             id: "x".into(),
+            name: None,
             auth_kind: AuthKind::Oauth,
             routes: Vec::new(),
             credential: None,

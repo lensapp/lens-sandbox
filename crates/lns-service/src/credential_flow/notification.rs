@@ -3,10 +3,10 @@ use std::sync::Arc;
 use eframe::egui;
 use tokio::sync::mpsc;
 
-use crate::approval_flow::window::{CredentialDecisionDelivery, WindowState};
+use crate::approval_flow::window::{CredentialDecisionDelivery, SignInCard, WindowState};
 use crate::credential_flow::providers::DefProvider;
 use crate::credential_flow::registry;
-use crate::credential_flow::session::{CredentialNotifier, CredentialPendingPrompt};
+use crate::credential_flow::session::{CredentialNotifier, CredentialPendingPrompt, SignInPrompt};
 
 pub struct NoopCredentialNotifier;
 
@@ -86,6 +86,24 @@ impl CredentialNotifier for WindowCredentialNotifier {
         self.state.clear_informs();
         self.wake();
     }
+
+    fn present_sign_in(&self, prompt: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+        self.state.insert_sign_in(
+            SignInCard {
+                credential_id: prompt.credential_id.clone(),
+                display_name: prompt.display_name.clone(),
+                user_code: prompt.user_code.clone(),
+                verification_uri: prompt.verification_uri.clone(),
+            },
+            cancel,
+        );
+        self.wake();
+    }
+
+    fn dismiss_sign_in(&self, credential_id: &str) {
+        self.state.remove_sign_in(credential_id);
+        self.wake();
+    }
 }
 
 #[cfg(test)]
@@ -97,6 +115,7 @@ mod tests {
             id: id.into(),
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
+            oauth_display_name: None,
         }
     }
 
@@ -203,6 +222,35 @@ mod tests {
         n.inform("hello");
         n.clear_informs();
         assert_eq!(state.snapshot().pending_credentials.len(), 0);
+    }
+
+    fn sign_in_prompt() -> SignInPrompt {
+        SignInPrompt {
+            credential_id: "github_oauth".into(),
+            display_name: "GitHub".into(),
+            user_code: "WXYZ-1234".into(),
+            verification_uri: "https://github.com/login/device".into(),
+        }
+    }
+
+    #[test]
+    fn present_sign_in_inserts_a_sign_in_card() {
+        let (n, state, _rx) = fixture(false, false);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        n.present_sign_in(&sign_in_prompt(), cancel_tx);
+        let snap = state.snapshot();
+        assert_eq!(snap.sign_ins.len(), 1);
+        assert_eq!(snap.sign_ins[0].display_name, "GitHub");
+        assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+    }
+
+    #[test]
+    fn dismiss_sign_in_removes_the_card() {
+        let (n, state, _rx) = fixture(false, false);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        n.present_sign_in(&sign_in_prompt(), cancel_tx);
+        n.dismiss_sign_in("github_oauth");
+        assert!(state.snapshot().sign_ins.is_empty());
     }
 
     #[test]
