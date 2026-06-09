@@ -20,10 +20,15 @@ impl PtySyscalls for RealPtySyscalls {
         // SAFETY: posix_openpt allocates a new master fd.
         let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
         if fd < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(fd)
+            return Err(io::Error::last_os_error());
         }
+        // SAFETY: fd is the freshly-allocated master; FD_CLOEXEC keeps it out of the workload exec.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let err = io::Error::last_os_error();
+            close(fd);
+            return Err(err);
+        }
+        Ok(fd)
     }
 
     fn grantpt(&self, master: RawFd) -> io::Result<()> {

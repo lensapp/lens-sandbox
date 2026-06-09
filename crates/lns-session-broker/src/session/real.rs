@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::io;
 use std::os::fd::RawFd;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_long, c_uint};
 use std::ptr;
 use std::sync::mpsc::SyncSender;
 
@@ -362,14 +362,23 @@ fn send_exit(conn: &SharedFd, code: i32) {
 
 fn make_pipe() -> Result<(RawFd, RawFd), SessionError> {
     let mut fds = [0i32; 2];
-    // SAFETY: pipe(2) writes a pair of fds into the 2-element array.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+    // SAFETY: pipe2 writes a pair of fds into the 2-element array; O_CLOEXEC keeps them out of the workload exec.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
         return Err(SessionError::Io(io::Error::last_os_error()));
     }
     Ok((fds[0], fds[1]))
 }
 
 fn exec_child(argv: &[String], env: &[String]) -> ! {
+    // SAFETY: post-dup2 child; raw close_range (no musl binding) drops every fd>=3 so conn/pty.master/listeners never survive execvp.
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as c_long,
+            c_uint::MAX as c_long,
+            0 as c_long,
+        )
+    };
     for kv in env {
         if let Ok(c) = CString::new(kv.as_str()) {
             let raw = c.into_raw();

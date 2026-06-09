@@ -12,8 +12,8 @@ struct RealVsockSyscalls;
 
 impl VsockSyscalls for RealVsockSyscalls {
     fn socket(&self) -> io::Result<RawFd> {
-        // SAFETY: socket(2) only reads its int args.
-        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+        // SAFETY: socket(2) only reads its int args; SOCK_CLOEXEC keeps the listener out of the workload.
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -48,8 +48,15 @@ impl VsockSyscalls for RealVsockSyscalls {
     }
 
     fn accept_once(&self, listen_fd: RawFd) -> io::Result<RawFd> {
-        // SAFETY: null addr/addrlen tells accept(2) to skip peer-address writeback.
-        let fd = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        // SAFETY: null addr/addrlen skips peer-address writeback; SOCK_CLOEXEC keeps the conn out of the workload.
+        let fd = unsafe {
+            libc::accept4(
+                listen_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_CLOEXEC,
+            )
+        };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
