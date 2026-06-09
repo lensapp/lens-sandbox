@@ -185,6 +185,7 @@ pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::integrations::OauthAuth;
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
 
@@ -226,7 +227,19 @@ mod tests {
                 rules: Vec::new(),
             }],
             credential: None,
-            oauth: None,
+            oauth: Some(OauthAuth {
+                client_id: "Iv1.somesaas".into(),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: "https://api.somesaas.com/login/device/code".into(),
+                token_endpoint: "https://api.somesaas.com/login/oauth/access_token".into(),
+                env_var: "SOMESAAS_TOKEN".into(),
+                placeholder: "lns-somesaas-placeholder".into(),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: "api.somesaas.com".into(),
+                    header: None,
+                }],
+            }),
         }
     }
 

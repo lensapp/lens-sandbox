@@ -14,6 +14,7 @@ pub mod initramfs;
 pub mod ipc;
 pub mod kernel;
 pub mod log;
+pub mod oauth;
 pub mod oci_layer_cache;
 pub mod paths;
 pub mod relay;
