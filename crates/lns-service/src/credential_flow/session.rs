@@ -25,6 +25,16 @@ pub struct CredentialPendingPrompt {
     pub id: String,
     pub credential_id: String,
     pub action: String,
+    /// Some(display name) when this is an oauth integration to connect via a browser sign-in, so the card offers "Connect to <name>" instead of a value field.
+    pub oauth_display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInPrompt {
+    pub credential_id: String,
+    pub display_name: String,
+    pub user_code: String,
+    pub verification_uri: String,
 }
 
 /// Abstracts the desktop notification surface so tests can drive prompts without the real system.
@@ -33,6 +43,18 @@ pub trait CredentialNotifier: Send + Sync {
     fn dismiss(&self, id: &str);
     fn inform(&self, message: &str);
     fn clear_informs(&self);
+    /// Presents the device-flow verification step; firing `cancel` aborts the in-flight sign-in. The default renders it as an inform and drops `cancel`, so notifiers without a sign-in card still surface the code.
+    fn present_sign_in(&self, prompt: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+        let _ = cancel;
+        self.inform(&format!(
+            "To connect {}, open {} and enter code {}",
+            prompt.display_name, prompt.verification_uri, prompt.user_code
+        ));
+    }
+    /// Removes the sign-in card for `credential_id` once its flow resolves; the default is a no-op for notifiers that don't model one.
+    fn dismiss_sign_in(&self, credential_id: &str) {
+        let _ = credential_id;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +89,7 @@ pub struct CredentialSession {
     connectable: HashSet<String>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
+    oauth_display_names: HashMap<String, String>,
     device_flow: Option<Arc<dyn crate::oauth::DeviceFlow>>,
     clock: Option<Arc<dyn crate::oauth::Clock>>,
 }
@@ -102,6 +125,7 @@ impl CredentialSession {
             connectable: HashSet::new(),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
+            oauth_display_names: HashMap::new(),
             device_flow: None,
             clock: None,
         }
@@ -118,6 +142,19 @@ impl CredentialSession {
         self.device_flow = Some(device_flow);
         self.clock = Some(clock);
         self
+    }
+
+    /// Per-id user-facing labels (e.g. `github_oauth` → "GitHub") for connect prompts and the sign-in card; ids absent here fall back to the id itself.
+    pub fn with_oauth_display_names(mut self, display_names: HashMap<String, String>) -> Self {
+        self.oauth_display_names = display_names;
+        self
+    }
+
+    fn display_name_for(&self, credential_id: &str) -> String {
+        self.oauth_display_names
+            .get(credential_id)
+            .cloned()
+            .unwrap_or_else(|| credential_id.to_string())
     }
 
     /// Captures the run's custom providers once at construction so a mid-run policy edit can't retroactively change a running workload's placeholder set.
@@ -168,6 +205,10 @@ impl CredentialSession {
             },
         );
         drop(pending);
+        let oauth_display_name = self
+            .oauth_configs
+            .contains_key(&req.credential_id)
+            .then(|| self.display_name_for(&req.credential_id));
         let action = if self.connectable.contains(&req.credential_id) {
             format!("connect to {}", req.credential_id)
         } else {
@@ -177,6 +218,7 @@ impl CredentialSession {
             id: req.id,
             credential_id: req.credential_id,
             action,
+            oauth_display_name,
         });
     }
 
@@ -234,13 +276,29 @@ impl CredentialSession {
             self.fail_held(&request_ids);
             return DecisionOutcome::Resolved;
         };
-        let present = |code: &crate::oauth::DeviceCode| {
-            self.notifier.inform(&format!(
-                "To connect {credential_id}, open {} and enter code {}",
-                code.verification_uri, code.user_code
-            ));
+        let display_name = self.display_name_for(&credential_id);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let card_id = credential_id.clone();
+        let present = move |code: &crate::oauth::DeviceCode| {
+            self.notifier.present_sign_in(
+                &SignInPrompt {
+                    credential_id: card_id,
+                    display_name,
+                    user_code: code.user_code.clone(),
+                    verification_uri: code.verification_uri.clone(),
+                },
+                cancel_tx,
+            );
         };
-        match crate::oauth::run_device_flow(flow.as_ref(), cfg, present).await {
+        let cancel = async move {
+            // Only a sent value is a real cancel; a dropped sender means the notifier has no cancel surface, so the sign-in runs to its natural end.
+            if cancel_rx.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        let result = crate::oauth::run_device_flow(flow.as_ref(), cfg, present, cancel).await;
+        self.notifier.dismiss_sign_in(&credential_id);
+        match result {
             Ok(crate::oauth::SignIn::Completed(token)) => {
                 let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
                 if self.connectable.contains(&credential_id) {
@@ -251,7 +309,11 @@ impl CredentialSession {
                     self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
                 }
             }
-            Ok(crate::oauth::SignIn::Denied) | Ok(crate::oauth::SignIn::Expired) => {
+            Ok(
+                crate::oauth::SignIn::Denied
+                | crate::oauth::SignIn::Expired
+                | crate::oauth::SignIn::Cancelled,
+            ) => {
                 self.fail_held(&request_ids);
             }
             Err(e) => {
@@ -375,9 +437,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingNotifier {
         presented: StdMutex<Vec<CredentialPendingPrompt>>,
+        sign_ins: StdMutex<Vec<SignInPrompt>>,
+        dismissed_sign_ins: StdMutex<Vec<String>>,
+        cancel_next: std::sync::atomic::AtomicBool,
         dismissed: StdMutex<Vec<String>>,
         informed: StdMutex<Vec<String>>,
         informs_cleared: StdMutex<usize>,
+    }
+
+    impl RecordingNotifier {
+        fn cancel_next_sign_in(&self) {
+            self.cancel_next
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     impl CredentialNotifier for RecordingNotifier {
@@ -392,6 +464,19 @@ mod tests {
         }
         fn clear_informs(&self) {
             *self.informs_cleared.lock().unwrap() += 1;
+        }
+        fn present_sign_in(&self, p: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+            self.sign_ins.lock().unwrap().push(p.clone());
+            if self.cancel_next.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = cancel.send(());
+            }
+            // Otherwise drop the sender: connect_oauth treats that as "no cancel surface" and runs to completion.
+        }
+        fn dismiss_sign_in(&self, credential_id: &str) {
+            self.dismissed_sign_ins
+                .lock()
+                .unwrap()
+                .push(credential_id.to_string());
         }
     }
 
@@ -1082,6 +1167,57 @@ mod tests {
     }
 
     #[test]
+    fn submit_pending_for_a_non_oauth_id_carries_no_oauth_display_name() {
+        let (s, n, _store, _rx, _connected) = fixture_connectable(&["gitlab"]);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].oauth_display_name,
+            None,
+            "a credential connectable is not a browser sign-in"
+        );
+    }
+
+    #[test]
+    fn submit_pending_for_an_oauth_id_flavors_the_prompt_with_its_display_name() {
+        let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].oauth_display_name,
+            Some("GitHub".to_string())
+        );
+    }
+
+    #[test]
+    fn submit_pending_for_an_oauth_id_without_a_configured_name_falls_back_to_the_id() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut configs = HashMap::new();
+        configs.insert(
+            "github_oauth".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.test".into(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        );
+        let s = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_oauth(configs, FakeFlow::polling(vec![]), Arc::new(FixedClock(0)));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap()[0].oauth_display_name,
+            Some("github_oauth".to_string()),
+            "absent a configured name, the id is the fallback label"
+        );
+    }
+
+    #[test]
     fn allow_for_a_connectable_id_connects_live_and_records_the_value() {
         let (s, _n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
         s.submit_pending(pending("c1", "gitlab"), Instant::now());
@@ -1251,7 +1387,11 @@ mod tests {
             HashSet::from(["github_oauth".to_string()]),
             Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
         )
-        .with_oauth(configs, flow, Arc::new(FixedClock(1000)));
+        .with_oauth(configs, flow, Arc::new(FixedClock(1000)))
+        .with_oauth_display_names(HashMap::from([(
+            "github_oauth".to_string(),
+            "GitHub".to_string(),
+        )]));
         (session, notifier, store, rx, connected)
     }
 
@@ -1306,13 +1446,42 @@ mod tests {
         assert_eq!(f1.decision, CredentialDecisionKind::Allow);
         assert_eq!(f2.decision, CredentialDecisionKind::Allow);
         assert_eq!(vec![f1.id, f2.id], vec!["c1".to_string(), "c2".to_string()]);
+        let sign_ins = n.sign_ins.lock().unwrap();
+        assert_eq!(sign_ins.len(), 1, "the verification step is presented once");
+        assert_eq!(sign_ins[0].display_name, "GitHub");
+        assert_eq!(sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(sign_ins[0].verification_uri, "https://example.com/device");
+        drop(sign_ins);
+        assert_eq!(
+            n.dismissed_sign_ins.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "the sign-in card is dismissed once the flow resolves"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_cancelled_fails_held_requests_and_dismisses_the_card() {
+        let (s, n, store, mut rx, connected) = oauth_fixture(FakeFlow::polling(vec![]));
+        n.cancel_next_sign_in();
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+
+        s.connect_oauth("c1").await;
+
         assert!(
-            n.informed
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|m| m.contains("WXYZ-1234")),
-            "the verification code is surfaced to the user"
+            connected.lock().unwrap().is_empty(),
+            "a cancelled sign-in connects nothing"
+        );
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "a cancelled sign-in arms nothing"
+        );
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+        assert_eq!(
+            n.dismissed_sign_ins.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()]
         );
     }
 

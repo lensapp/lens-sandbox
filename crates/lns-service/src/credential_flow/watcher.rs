@@ -62,7 +62,9 @@ fn is_credentials_change(event: &Event, target: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential_flow::session::{CredentialNotifier, CredentialPendingPrompt};
+    use crate::credential_flow::session::{
+        CredentialNotifier, CredentialPendingPrompt, SignInPrompt,
+    };
     use crate::credential_flow::store::{CredentialEntry, CredentialStateFile};
     use notify::event::{CreateKind, ModifyKind, RemoveKind};
     use std::time::Duration;
@@ -144,7 +146,19 @@ mod tests {
             id: "x".into(),
             credential_id: "github".into(),
             action: "use".into(),
+            oauth_display_name: None,
         });
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        n.present_sign_in(
+            &SignInPrompt {
+                credential_id: "github".into(),
+                display_name: "GitHub".into(),
+                user_code: "WXYZ-1234".into(),
+                verification_uri: "https://example.com/device".into(),
+            },
+            cancel_tx,
+        );
+        n.dismiss_sign_in("github");
         n.dismiss("x");
         n.inform("anything");
         n.clear_informs();

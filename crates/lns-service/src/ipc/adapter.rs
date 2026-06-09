@@ -135,9 +135,14 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     };
 
     let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
-    let flow = run_device_flow(&RealDeviceFlow, &cfg, move |code: &DeviceCode| {
-        let _ = code_tx.send(code.clone());
-    });
+    let flow = run_device_flow(
+        &RealDeviceFlow,
+        &cfg,
+        move |code: &DeviceCode| {
+            let _ = code_tx.send(code.clone());
+        },
+        std::future::pending::<()>(),
+    );
     tokio::pin!(flow);
     let outcome = loop {
         tokio::select! {
@@ -166,6 +171,9 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
         },
         Ok(SignIn::Expired) => Response::OauthSignInFailed {
             reason: "the device code expired before authorization".into(),
+        },
+        Ok(SignIn::Cancelled) => Response::OauthSignInFailed {
+            reason: "the sign-in was cancelled".into(),
         },
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),

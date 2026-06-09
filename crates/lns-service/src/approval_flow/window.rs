@@ -20,13 +20,23 @@ pub struct CredentialDecisionDelivery {
     pub request: CredentialDecisionRequest,
 }
 
-/// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time.
+/// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time; `oauth_display_name` is `Some` for an oauth integration, making the card a browser-sign-in consent rather than a value prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialCardPrompt {
     pub id: String,
     pub credential_id: String,
     pub action: String,
     pub host_value_available: bool,
+    pub oauth_display_name: Option<String>,
+}
+
+/// The device-flow verification card: which service, the code to type, and where to type it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInCard {
+    pub credential_id: String,
+    pub display_name: String,
+    pub user_code: String,
+    pub verification_uri: String,
 }
 
 pub struct WindowState {
@@ -37,6 +47,7 @@ pub struct WindowState {
 struct WindowInner {
     pending: Vec<PendingEntry>,
     pending_credentials: Vec<CredentialPendingEntry>,
+    pending_sign_ins: Vec<SignInEntry>,
     informs: Vec<String>,
 }
 
@@ -48,6 +59,11 @@ struct PendingEntry {
 struct CredentialPendingEntry {
     prompt: CredentialCardPrompt,
     decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
+}
+
+struct SignInEntry {
+    card: SignInCard,
+    cancel: tokio::sync::oneshot::Sender<()>,
 }
 
 impl WindowState {
@@ -96,6 +112,7 @@ impl WindowState {
                 credential_id: prompt.credential_id,
                 action: prompt.action,
                 host_value_available,
+                oauth_display_name: prompt.oauth_display_name,
             },
             decision_tx,
         });
@@ -105,6 +122,39 @@ impl WindowState {
         self.lock()
             .pending_credentials
             .retain(|e| e.prompt.id != id);
+    }
+
+    /// Coalesces by `credential_id`; the `cancel` sender aborts the in-flight device-flow poll when the card's Cancel is clicked.
+    pub fn insert_sign_in(&self, card: SignInCard, cancel: tokio::sync::oneshot::Sender<()>) {
+        let mut g = self.lock();
+        if g.pending_sign_ins
+            .iter()
+            .any(|e| e.card.credential_id == card.credential_id)
+        {
+            return;
+        }
+        g.pending_sign_ins.push(SignInEntry { card, cancel });
+    }
+
+    pub fn remove_sign_in(&self, credential_id: &str) {
+        self.lock()
+            .pending_sign_ins
+            .retain(|e| e.card.credential_id != credential_id);
+    }
+
+    /// Drops the card and fires its cancel so the device-flow poll aborts; returns whether a card was present.
+    pub fn cancel_sign_in(&self, credential_id: &str) -> bool {
+        let mut g = self.lock();
+        let Some(idx) = g
+            .pending_sign_ins
+            .iter()
+            .position(|e| e.card.credential_id == credential_id)
+        else {
+            return false;
+        };
+        let entry = g.pending_sign_ins.remove(idx);
+        let _ = entry.cancel.send(());
+        true
     }
 
     pub fn push_inform(&self, msg: String) {
@@ -131,14 +181,15 @@ impl WindowState {
                 .iter()
                 .map(|e| e.prompt.clone())
                 .collect(),
+            sign_ins: g.pending_sign_ins.iter().map(|e| e.card.clone()).collect(),
             informs: g.informs.clone(),
         }
     }
 
-    /// Total pending across both flows; drives `tray::sync_viewport_visibility`.
+    /// Total pending across every flow; drives `tray::sync_viewport_visibility`.
     pub fn pending_count(&self) -> usize {
         let g = self.lock();
-        g.pending.len() + g.pending_credentials.len()
+        g.pending.len() + g.pending_credentials.len() + g.pending_sign_ins.len()
     }
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
@@ -177,6 +228,7 @@ impl WindowState {
 pub struct Snapshot {
     pub pending: Vec<PendingPrompt>,
     pub pending_credentials: Vec<CredentialCardPrompt>,
+    pub sign_ins: Vec<SignInCard>,
     pub informs: Vec<String>,
 }
 
@@ -270,6 +322,7 @@ mod tests {
             id: id.into(),
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
+            oauth_display_name: None,
         }
     }
 
@@ -503,6 +556,65 @@ mod tests {
         assert!(!s.decide_credential("nope", CredentialDecisionRequest::Deny));
         assert_eq!(s.snapshot().pending_credentials.len(), 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    fn sign_in_card(credential_id: &str) -> SignInCard {
+        SignInCard {
+            credential_id: credential_id.into(),
+            display_name: "GitHub".into(),
+            user_code: "WXYZ-1234".into(),
+            verification_uri: "https://github.com/login/device".into(),
+        }
+    }
+
+    #[test]
+    fn insert_sign_in_shows_in_snapshot_and_counts_toward_pending() {
+        let s = WindowState::new();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
+        let snap = s.snapshot();
+        assert_eq!(snap.sign_ins.len(), 1);
+        assert_eq!(snap.sign_ins[0].display_name, "GitHub");
+        assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(s.pending_count(), 1, "a sign-in card keeps the window up");
+    }
+
+    #[test]
+    fn insert_sign_in_dedupes_by_credential_id() {
+        let s = WindowState::new();
+        let (tx1, _r1) = tokio::sync::oneshot::channel();
+        let (tx2, _r2) = tokio::sync::oneshot::channel();
+        s.insert_sign_in(sign_in_card("github_oauth"), tx1);
+        s.insert_sign_in(sign_in_card("github_oauth"), tx2);
+        assert_eq!(s.snapshot().sign_ins.len(), 1);
+    }
+
+    #[test]
+    fn remove_sign_in_drops_the_card_without_firing_cancel() {
+        let s = WindowState::new();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
+        s.remove_sign_in("github_oauth");
+        assert!(s.snapshot().sign_ins.is_empty());
+        // remove drops the sender without sending a cancel, so the receiver observes a closed channel.
+        let recv = cancel_rx.try_recv();
+        assert_eq!(recv, Err(tokio::sync::oneshot::error::TryRecvError::Closed));
+    }
+
+    #[test]
+    fn cancel_sign_in_drops_the_card_and_fires_cancel() {
+        let s = WindowState::new();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
+        assert!(s.cancel_sign_in("github_oauth"));
+        assert!(s.snapshot().sign_ins.is_empty());
+        assert_eq!(cancel_rx.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn cancel_sign_in_for_unknown_id_is_false() {
+        let s = WindowState::new();
+        assert!(!s.cancel_sign_in("nope"));
     }
 
     #[test]

@@ -21,25 +21,43 @@ pub enum SignIn {
     Completed(TokenSet),
     Denied,
     Expired,
+    Cancelled,
 }
 
-/// Requests a device code, surfaces it to the user via `present`, then polls the token endpoint until the grant resolves.
+async fn sleep_then_poll(
+    flow: &dyn DeviceFlow,
+    cfg: &OauthConfig,
+    device_code: &str,
+    interval: Duration,
+) -> Result<PollOutcome> {
+    tokio::time::sleep(interval).await;
+    flow.poll_token(cfg, device_code).await
+}
+
+/// Requests a device code, surfaces it to the user via `present`, then polls the token endpoint until the grant resolves or `cancel` fires.
 pub async fn run_device_flow(
     flow: &dyn DeviceFlow,
     cfg: &OauthConfig,
-    present: impl Fn(&DeviceCode),
+    present: impl FnOnce(&DeviceCode),
+    cancel: impl std::future::Future<Output = ()>,
 ) -> Result<SignIn> {
     let code = flow.request_device_code(cfg).await?;
     present(&code);
     let mut interval = code.interval;
+    tokio::pin!(cancel);
     loop {
-        tokio::time::sleep(interval).await;
-        match flow.poll_token(cfg, &code.device_code).await? {
-            PollOutcome::Pending => {}
-            PollOutcome::SlowDown => interval = interval.saturating_add(SLOW_DOWN_INCREMENT),
-            PollOutcome::Token(token) => return Ok(SignIn::Completed(token)),
-            PollOutcome::Denied => return Ok(SignIn::Denied),
-            PollOutcome::Expired => return Ok(SignIn::Expired),
+        tokio::select! {
+            biased;
+            _ = &mut cancel => return Ok(SignIn::Cancelled),
+            outcome = sleep_then_poll(flow, cfg, &code.device_code, interval) => {
+                match outcome? {
+                    PollOutcome::Pending => {}
+                    PollOutcome::SlowDown => interval = interval.saturating_add(SLOW_DOWN_INCREMENT),
+                    PollOutcome::Token(token) => return Ok(SignIn::Completed(token)),
+                    PollOutcome::Denied => return Ok(SignIn::Denied),
+                    PollOutcome::Expired => return Ok(SignIn::Expired),
+                }
+            }
         }
     }
 }
@@ -223,12 +241,17 @@ mod tests {
         let flow =
             FakeDeviceFlow::polling(vec![PollOutcome::Pending, PollOutcome::Token(token(3600))]);
         let shown = Mutex::new(Vec::new());
-        let out = run_device_flow(&flow, &sample_cfg(), |c| {
-            shown
-                .lock()
-                .unwrap()
-                .push((c.user_code.clone(), c.verification_uri.clone()));
-        })
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |c| {
+                shown
+                    .lock()
+                    .unwrap()
+                    .push((c.user_code.clone(), c.verification_uri.clone()));
+            },
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
         assert_eq!(out, SignIn::Completed(token(3600)));
@@ -246,7 +269,9 @@ mod tests {
     async fn a_slow_down_response_keeps_polling_to_completion() {
         let flow =
             FakeDeviceFlow::polling(vec![PollOutcome::SlowDown, PollOutcome::Token(token(60))]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
+            .await
+            .unwrap();
         assert_eq!(out, SignIn::Completed(token(60)));
         assert!(
             flow.polls.lock().unwrap().is_empty(),
@@ -257,15 +282,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_denied_grant_resolves_to_denied() {
         let flow = FakeDeviceFlow::polling(vec![PollOutcome::Denied]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
+            .await
+            .unwrap();
         assert_eq!(out, SignIn::Denied);
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_expired_device_code_resolves_to_expired() {
         let flow = FakeDeviceFlow::polling(vec![PollOutcome::Pending, PollOutcome::Expired]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
+            .await
+            .unwrap();
         assert_eq!(out, SignIn::Expired);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_signal_aborts_before_any_token_poll() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::ready(()))
+            .await
+            .unwrap();
+        assert_eq!(out, SignIn::Cancelled);
+        assert!(
+            flow.polls.lock().unwrap().is_empty(),
+            "cancel must abort before consuming a poll"
+        );
     }
 
     #[tokio::test]

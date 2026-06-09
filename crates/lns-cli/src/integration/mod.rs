@@ -87,6 +87,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
         .collect();
     catalog.integrations.push(Integration {
         id: args.id.clone(),
+        name: None,
         auth_kind: AuthKind::Credential,
         routes,
         credential: Some(CredentialAuth {
@@ -240,6 +241,7 @@ mod tests {
     fn oauth_integration(id: &str) -> Integration {
         Integration {
             id: id.into(),
+            name: None,
             auth_kind: AuthKind::Oauth,
             routes: vec![IntegrationRoute {
                 match_pattern: "api.somesaas.com".into(),
@@ -364,6 +366,7 @@ mod tests {
             &path,
             vec![Integration {
                 id: "gitlab".into(),
+                name: None,
                 auth_kind: AuthKind::Credential,
                 routes: Vec::new(),
                 credential: Some(CredentialAuth {

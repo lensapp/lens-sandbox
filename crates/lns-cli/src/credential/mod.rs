@@ -322,6 +322,27 @@ mod tests {
         std::path::PathBuf::from("/nonexistent-lns-test/.lns-integrations.yaml")
     }
 
+    #[test]
+    fn describe_labels_each_credential_state() {
+        assert_eq!(describe(None), "no decision yet");
+        assert_eq!(describe(Some(&CredentialEntry::HostDetect)), "host value");
+        assert_eq!(
+            describe(Some(&CredentialEntry::Stored {
+                value: "secret".into()
+            })),
+            "stored (hidden)"
+        );
+        assert_eq!(
+            describe(Some(&CredentialEntry::Oauth {
+                access_token: "gho_x".into(),
+                refresh_token: "ghr_x".into(),
+                expires_at: 0,
+            })),
+            "signed in (oauth)"
+        );
+        assert_eq!(describe(Some(&CredentialEntry::Deny)), "denied");
+    }
+
     fn acme_policy(dir: &Path) {
         let mut policy = Policy::default();
         policy.credentials.custom_providers.push(ProviderDef {
