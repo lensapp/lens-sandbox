@@ -66,6 +66,9 @@ pub struct CredentialSession {
     custom_providers: Arc<Vec<DefProvider>>,
     connectable: HashSet<String>,
     connect: ConnectEmitter,
+    oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
+    device_flow: Option<Arc<dyn crate::oauth::DeviceFlow>>,
+    clock: Option<Arc<dyn crate::oauth::Clock>>,
 }
 
 impl CredentialSession {
@@ -98,7 +101,23 @@ impl CredentialSession {
             custom_providers: Arc::new(Vec::new()),
             connectable: HashSet::new(),
             connect: Box::new(|_| {}),
+            oauth_configs: HashMap::new(),
+            device_flow: None,
+            clock: None,
         }
+    }
+
+    /// Wires the device-flow engine and per-integration oauth configs so an accepted oauth prompt can run an interactive sign-in.
+    pub fn with_oauth(
+        mut self,
+        oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
+        device_flow: Arc<dyn crate::oauth::DeviceFlow>,
+        clock: Arc<dyn crate::oauth::Clock>,
+    ) -> Self {
+        self.oauth_configs = oauth_configs;
+        self.device_flow = Some(device_flow);
+        self.clock = Some(clock);
+        self
     }
 
     /// Captures the run's custom providers once at construction so a mid-run policy edit can't retroactively change a running workload's placeholder set.
@@ -191,6 +210,63 @@ impl CredentialSession {
             self.send_decision_frame(request_id, kind);
         }
         DecisionOutcome::Resolved
+    }
+
+    /// True when a held prompt belongs to an oauth integration, so its acceptance must drive a device sign-in rather than a static value decision.
+    pub fn is_oauth_prompt(&self, prompt_id: &str) -> bool {
+        let pending = self.pending.lock().expect("pending mutex poisoned");
+        pending
+            .iter()
+            .any(|(id, e)| e.prompt_id == prompt_id && self.oauth_configs.contains_key(id))
+    }
+
+    /// Drives a device sign-in for an accepted oauth prompt: on success connects the integration live and arms the token set, releasing held requests; denial, expiry, or error fails them closed without persisting (the next use re-prompts).
+    pub async fn connect_oauth(&self, prompt_id: &str) -> DecisionOutcome {
+        let Some((credential_id, request_ids)) = self.remove_pending(prompt_id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        self.notifier.dismiss(prompt_id);
+        let (Some(cfg), Some(flow), Some(clock)) = (
+            self.oauth_configs.get(&credential_id),
+            self.device_flow.as_ref(),
+            self.clock.as_ref(),
+        ) else {
+            self.fail_held(&request_ids);
+            return DecisionOutcome::Resolved;
+        };
+        let present = |code: &crate::oauth::DeviceCode| {
+            self.notifier.inform(&format!(
+                "To connect {credential_id}, open {} and enter code {}",
+                code.verification_uri, code.user_code
+            ));
+        };
+        match crate::oauth::run_device_flow(flow.as_ref(), cfg, present).await {
+            Ok(crate::oauth::SignIn::Completed(token)) => {
+                let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
+                if self.connectable.contains(&credential_id) {
+                    (self.connect)(&credential_id);
+                }
+                self.apply_persistent_entry(credential_id, entry);
+                for request_id in &request_ids {
+                    self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
+                }
+            }
+            Ok(crate::oauth::SignIn::Denied) | Ok(crate::oauth::SignIn::Expired) => {
+                self.fail_held(&request_ids);
+            }
+            Err(e) => {
+                self.notifier
+                    .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
+                self.fail_held(&request_ids);
+            }
+        }
+        DecisionOutcome::Resolved
+    }
+
+    fn fail_held(&self, request_ids: &[String]) {
+        for request_id in request_ids {
+            self.send_decision_frame(request_id, CredentialDecisionKind::Deny);
+        }
     }
 
     /// Keyed by `prompt_id` because decisions and timeouts arrive against the card id, not the provider.
@@ -1052,5 +1128,240 @@ mod tests {
             connected.lock().unwrap().is_empty(),
             "a built-in/connected id must not trigger a connect"
         );
+    }
+
+    use std::collections::VecDeque;
+
+    use futures_util::future::BoxFuture;
+
+    struct FakeFlow {
+        code_err: bool,
+        polls: StdMutex<VecDeque<crate::oauth::PollOutcome>>,
+    }
+    impl FakeFlow {
+        fn polling(polls: Vec<crate::oauth::PollOutcome>) -> Arc<Self> {
+            Arc::new(Self {
+                code_err: false,
+                polls: StdMutex::new(polls.into()),
+            })
+        }
+        fn code_error() -> Arc<Self> {
+            Arc::new(Self {
+                code_err: true,
+                polls: StdMutex::new(VecDeque::new()),
+            })
+        }
+    }
+    impl crate::oauth::DeviceFlow for FakeFlow {
+        fn request_device_code<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+        ) -> BoxFuture<'a, anyhow::Result<crate::oauth::DeviceCode>> {
+            let err = self.code_err;
+            Box::pin(async move {
+                if err {
+                    anyhow::bail!("device-authorization request failed");
+                }
+                Ok(crate::oauth::DeviceCode {
+                    device_code: "dc".into(),
+                    user_code: "WXYZ-1234".into(),
+                    verification_uri: "https://example.com/device".into(),
+                    interval: Duration::ZERO,
+                    expires_in: Duration::from_secs(900),
+                })
+            })
+        }
+        fn poll_token<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+            _device_code: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<crate::oauth::PollOutcome>> {
+            Box::pin(async move {
+                Ok(self
+                    .polls
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("poll_token scripted"))
+            })
+        }
+        fn refresh<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+            _refresh_token: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<crate::oauth::TokenSet>> {
+            Box::pin(async move { anyhow::bail!("refresh is not exercised by connect tests") })
+        }
+    }
+
+    struct FixedClock(u64);
+    impl crate::oauth::Clock for FixedClock {
+        fn now_unix(&self) -> u64 {
+            self.0
+        }
+    }
+
+    fn oauth_token(expires_in: u64) -> crate::oauth::TokenSet {
+        crate::oauth::TokenSet {
+            access_token: "gho_access".into(),
+            refresh_token: "ghr_refresh".into(),
+            expires_in: Duration::from_secs(expires_in),
+        }
+    }
+
+    fn oauth_fixture(flow: Arc<dyn crate::oauth::DeviceFlow>) -> ConnectableFixture {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(StdMutex::new(Vec::new()));
+        let connected_cb = connected.clone();
+        let mut configs = HashMap::new();
+        configs.insert(
+            "github_oauth".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.test".into(),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        );
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            store.clone(),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_connect_emitter(
+            HashSet::from(["github_oauth".to_string()]),
+            Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
+        )
+        .with_oauth(configs, flow, Arc::new(FixedClock(1000)));
+        (session, notifier, store, rx, connected)
+    }
+
+    #[test]
+    fn is_oauth_prompt_distinguishes_oauth_from_plain_pending() {
+        let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c2", "plain"), Instant::now());
+        assert!(s.is_oauth_prompt("c1"));
+        assert!(
+            !s.is_oauth_prompt("c2"),
+            "a non-oauth prompt is not an oauth prompt"
+        );
+        assert!(
+            !s.is_oauth_prompt("nope"),
+            "an unknown prompt id is not an oauth prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_completes_arms_the_token_connects_live_and_releases_held_requests() {
+        let (s, n, store, mut rx, connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c2", "github_oauth"), Instant::now());
+        let outcome = s.connect_oauth("c1").await;
+        assert_eq!(outcome, DecisionOutcome::Resolved);
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "accepting an oauth prompt connects the integration live"
+        );
+        assert_eq!(
+            store
+                .saves
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .get("github_oauth"),
+            Some(&CredentialEntry::Oauth {
+                access_token: "gho_access".into(),
+                refresh_token: "ghr_refresh".into(),
+                expires_at: 1000 + 3600,
+            }),
+            "the obtained token set is armed and persisted"
+        );
+        let f1 = decision_frame(&mut rx);
+        let f2 = decision_frame(&mut rx);
+        assert_eq!(f1.decision, CredentialDecisionKind::Allow);
+        assert_eq!(f2.decision, CredentialDecisionKind::Allow);
+        assert_eq!(vec![f1.id, f2.id], vec!["c1".to_string(), "c2".to_string()]);
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("WXYZ-1234")),
+            "the verification code is surfaced to the user"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_denied_fails_held_requests_without_arming_or_connecting() {
+        let (s, _n, store, mut rx, connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert!(connected.lock().unwrap().is_empty());
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_expired_fails_held_requests_without_arming() {
+        let (s, _n, store, mut rx, _connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Expired]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_surfaces_a_device_flow_error_and_fails_held_requests() {
+        let (s, n, store, mut rx, _connected) = oauth_fixture(FakeFlow::code_error());
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_on_an_unknown_prompt_is_a_noop() {
+        let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        assert_eq!(s.connect_oauth("nope").await, DecisionOutcome::UnknownId);
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_for_a_prompt_without_an_oauth_config_fails_it_closed() {
+        let (s, _n, store, mut rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        s.submit_pending(pending("c1", "plain"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+        assert!(store.saves.lock().unwrap().is_empty());
     }
 }

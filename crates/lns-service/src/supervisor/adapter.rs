@@ -137,7 +137,17 @@ async fn credential_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        session.record_decision(&delivery.id, delivery.request);
+        // Accepting an oauth prompt drives a device sign-in (async) instead of arming a static value.
+        if session.is_oauth_prompt(&delivery.id)
+            && matches!(
+                delivery.request,
+                crate::credential_flow::session::CredentialDecisionRequest::Allow(_)
+            )
+        {
+            session.connect_oauth(&delivery.id).await;
+        } else {
+            session.record_decision(&delivery.id, delivery.request);
+        }
     }
 }
 
@@ -319,7 +329,12 @@ async fn start_credential_subsystem(
             policy_emitter,
         )
         .with_custom_providers(custom_providers)
-        .with_connect_emitter(connectable_ids, connect_emitter),
+        .with_connect_emitter(connectable_ids, connect_emitter)
+        .with_oauth(
+            oauth_configs,
+            Arc::new(crate::oauth::RealDeviceFlow),
+            Arc::new(crate::oauth::RealClock),
+        ),
     );
 
     tokio::spawn(credential_delivery_loop(
