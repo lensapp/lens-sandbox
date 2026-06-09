@@ -196,6 +196,7 @@ fn volume_attached_obj(name: &str, target: &str) -> Map<String, Value> {
         "type".to_string(),
         Value::String("volume_attached".to_string()),
     );
+    obj.insert("origin".to_string(), Value::String("host".to_string()));
     obj.insert("name".to_string(), Value::String(name.to_string()));
     obj.insert("target".to_string(), Value::String(target.to_string()));
     obj
@@ -212,6 +213,16 @@ pub fn record_volume_attached(run_id: u32, name: &str, target: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_attached_obj_stamps_host_origin() {
+        let obj = volume_attached_obj("prism-data", "/data");
+        assert_eq!(
+            obj.get("origin").unwrap(),
+            "host",
+            "host-authored volume_attached events must be distinguishable from guest-proxied events"
+        );
+    }
 
     #[test]
     fn record_volume_attached_writes_name_and_target_as_genesis_line() {
