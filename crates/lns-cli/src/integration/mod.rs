@@ -14,11 +14,25 @@ use crate::cli::{
 };
 use crate::run::summary::policy_path;
 
-pub fn run(cmd: &IntegrationCommand, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+mod real;
+mod sign_in;
+
+pub use real::RealIntegrationSignIn;
+pub use sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+
+pub async fn run(
+    cmd: &IntegrationCommand,
+    cwd: &Path,
+    catalog_path: &Path,
+    signin: &dyn IntegrationSignIn,
+    writer: &mut impl Write,
+) -> Result<i32> {
     match cmd {
         IntegrationCommand::Add(args) => add(args, catalog_path, writer),
         IntegrationCommand::List => list(catalog_path, writer),
         IntegrationCommand::Remove(args) => remove(args, catalog_path, writer),
+        IntegrationCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
+        IntegrationCommand::Disconnect(args) => disconnect(args, cwd, writer),
     }
 }
 
@@ -133,10 +147,11 @@ fn remove(
     Ok(0)
 }
 
-pub fn connect(
+pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
+    signin: &dyn IntegrationSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
@@ -147,11 +162,18 @@ pub fn connect(
             args.id
         );
     };
+    // An oauth integration authenticates by an interactive device sign-in the service drives; only on success do we record it in the policy.
     if integ.auth_kind == AuthKind::Oauth {
-        bail!(
-            "integration {:?} uses oauth, which isn't supported yet",
-            args.id
-        );
+        match signin.sign_in(&args.id, writer).await? {
+            SignInOutcome::ServiceUnavailable => bail!(
+                "the background service must be running to sign in to {:?}; start it with `lns service start`",
+                args.id
+            ),
+            SignInOutcome::Failed(reason) => {
+                bail!("sign-in to {:?} did not complete: {reason}", args.id)
+            }
+            SignInOutcome::Completed => {}
+        }
     }
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
@@ -411,8 +433,35 @@ mod tests {
         assert!(format!("{err:#}").contains("ghost"));
     }
 
-    #[test]
-    fn connect_writes_a_bundled_integration_id_into_the_policy() {
+    struct FakeSignIn {
+        outcome: SignInOutcome,
+    }
+    impl FakeSignIn {
+        fn completed() -> Self {
+            Self {
+                outcome: SignInOutcome::Completed,
+            }
+        }
+        fn returning(outcome: SignInOutcome) -> Self {
+            Self { outcome }
+        }
+    }
+    impl IntegrationSignIn for FakeSignIn {
+        fn sign_in<'a>(
+            &'a self,
+            id: &'a str,
+            out: &'a mut dyn Write,
+        ) -> super::sign_in::LocalBoxFuture<'a, Result<SignInOutcome>> {
+            let outcome = self.outcome.clone();
+            Box::pin(async move {
+                writeln!(out, "(signing in to {id})")?;
+                Ok(outcome)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_writes_a_bundled_integration_id_into_the_policy() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
         let mut out = Vec::new();
@@ -423,15 +472,17 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &FakeSignIn::completed(),
             &mut out,
         )
+        .await
         .unwrap();
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert_eq!(policy.integrations, ["gitlab"]);
     }
 
-    #[test]
-    fn connect_rejects_an_unknown_integration() {
+    #[tokio::test]
+    async fn connect_rejects_an_unknown_integration() {
         let dir = TempDir::new().unwrap();
         let err = connect(
             &ConnectArgs {
@@ -440,14 +491,41 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &FakeSignIn::completed(),
             &mut Vec::new(),
         )
+        .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("unknown integration"));
     }
 
-    #[test]
-    fn connect_rejects_an_oauth_integration_as_unsupported() {
+    #[tokio::test]
+    async fn connect_signs_in_an_oauth_integration_then_records_it() {
+        let dir = TempDir::new().unwrap();
+        let catalog = catalog_at(dir.path());
+        write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
+        connect(
+            &ConnectArgs {
+                id: "somesaas".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog,
+            &FakeSignIn::completed(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        assert_eq!(
+            policy.integrations,
+            ["somesaas"],
+            "a completed sign-in records the integration"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_to_oauth_fails_without_recording_when_sign_in_does_not_complete() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
         write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
@@ -458,14 +536,44 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &FakeSignIn::returning(SignInOutcome::Failed("access_denied".into())),
             &mut Vec::new(),
         )
+        .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("oauth"));
+        assert!(format!("{err:#}").contains("access_denied"), "got: {err:#}");
+        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        assert!(
+            policy.integrations.is_empty(),
+            "a failed sign-in must not record the integration"
+        );
     }
 
-    #[test]
-    fn disconnect_removes_a_connected_integration() {
+    #[tokio::test]
+    async fn connect_to_oauth_reports_when_the_service_is_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let catalog = catalog_at(dir.path());
+        write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
+        let err = connect(
+            &ConnectArgs {
+                id: "somesaas".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog,
+            &FakeSignIn::returning(SignInOutcome::ServiceUnavailable),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("service must be running"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_a_connected_integration() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
         connect(
@@ -475,8 +583,10 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &FakeSignIn::completed(),
             &mut Vec::new(),
         )
+        .await
         .unwrap();
         disconnect(
             &DisconnectArgs {
@@ -506,11 +616,19 @@ mod tests {
         assert!(format!("{err:#}").contains("not connected"));
     }
 
-    #[test]
-    fn run_dispatches_list() {
+    #[tokio::test]
+    async fn run_dispatches_list() {
         let dir = TempDir::new().unwrap();
         let mut out = Vec::new();
-        run(&IntegrationCommand::List, &catalog_at(dir.path()), &mut out).unwrap();
+        run(
+            &IntegrationCommand::List,
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::completed(),
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -518,23 +636,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_dispatches_add_and_remove() {
+    #[tokio::test]
+    async fn run_dispatches_add_and_remove() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         run(
             &IntegrationCommand::Add(add_args("acme")),
+            dir.path(),
             &path,
+            &FakeSignIn::completed(),
             &mut Vec::new(),
         )
+        .await
         .unwrap();
         assert_eq!(load(&path).integrations.len(), 1);
         run(
             &IntegrationCommand::Remove(IntegrationRemoveArgs { id: "acme".into() }),
+            dir.path(),
             &path,
+            &FakeSignIn::completed(),
             &mut Vec::new(),
         )
+        .await
         .unwrap();
         assert!(load(&path).integrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_connect_and_disconnect() {
+        let dir = TempDir::new().unwrap();
+        let path = catalog_at(dir.path());
+        run(
+            &IntegrationCommand::Connect(ConnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            }),
+            dir.path(),
+            &path,
+            &FakeSignIn::completed(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
+                .unwrap()
+                .integrations,
+            ["gitlab"]
+        );
+        run(
+            &IntegrationCommand::Disconnect(DisconnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            }),
+            dir.path(),
+            &path,
+            &FakeSignIn::completed(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
+                .unwrap()
+                .integrations
+                .is_empty()
+        );
     }
 }

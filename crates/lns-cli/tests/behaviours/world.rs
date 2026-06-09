@@ -22,6 +22,7 @@ pub struct BehaviourWorld {
     pub attached_status: Vec<u8>,
     pub attached_stdout_is_terminal: Option<bool>,
     pub uc: UpdateCheckRig,
+    pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
 }
 
 #[derive(Debug, Default)]

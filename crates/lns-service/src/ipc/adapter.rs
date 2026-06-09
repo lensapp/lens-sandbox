@@ -105,8 +105,89 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
+        Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
+}
+
+/// Drives an oauth integration's device sign-in host-side, streaming the verification prompt to the client and persisting the obtained token set for the next run to arm.
+async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+    use crate::oauth::{
+        DeviceCode, OauthConfig, RealClock, RealDeviceFlow, SignIn, run_device_flow,
+    };
+
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let Some(cfg) = catalog
+        .iter()
+        .find(|i| i.id == id)
+        .and_then(|i| i.oauth.as_ref())
+        .map(OauthConfig::from)
+    else {
+        let frame = encode_frame(&Response::OauthSignInFailed {
+            reason: format!("{id:?} is not an oauth integration"),
+        })?;
+        stream.write_all(&frame).await?;
+        return Ok(());
+    };
+
+    let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
+    let flow = run_device_flow(&RealDeviceFlow, &cfg, move |code: &DeviceCode| {
+        let _ = code_tx.send(code.clone());
+    });
+    tokio::pin!(flow);
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            Some(code) = code_rx.recv() => {
+                let frame = encode_frame(&Response::OauthVerification {
+                    verification_uri: code.verification_uri,
+                    user_code: code.user_code,
+                    expires_in_secs: code.expires_in.as_secs(),
+                })?;
+                stream.write_all(&frame).await?;
+            }
+            res = &mut flow => break res,
+        }
+    };
+
+    let response = match outcome {
+        Ok(SignIn::Completed(token)) => match persist_oauth_token(&id, &token, &RealClock) {
+            Ok(()) => Response::OauthSignInComplete,
+            Err(e) => Response::OauthSignInFailed {
+                reason: format!("storing the token failed: {e}"),
+            },
+        },
+        Ok(SignIn::Denied) => Response::OauthSignInFailed {
+            reason: "access was denied".into(),
+        },
+        Ok(SignIn::Expired) => Response::OauthSignInFailed {
+            reason: "the device code expired before authorization".into(),
+        },
+        Err(e) => Response::OauthSignInFailed {
+            reason: format!("{e:#}"),
+        },
+    };
+    let frame = encode_frame(&response)?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
+fn persist_oauth_token(
+    id: &str,
+    token: &crate::oauth::TokenSet,
+    clock: &dyn crate::oauth::Clock,
+) -> std::io::Result<()> {
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+    let store = JsonFileCredentialStore::new(default_credentials_path());
+    let mut state = store.load()?;
+    state.insert(id.to_string(), crate::oauth::entry_from_token(clock, token));
+    store.save(&state)
 }
 
 async fn handle_one_shot(

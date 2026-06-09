@@ -68,17 +68,17 @@ pub async fn run(cli: Cli) -> Result<i32> {
             )?
         }
         Command::Integration(args) => {
-            let catalog_path = lns_policy::integrations::default_integrations_path();
-            integration::run(&args.command, &catalog_path, &mut std::io::stdout())?
-        }
-        Command::Connect(args) => {
             let cwd = std::env::current_dir()?;
             let catalog_path = lns_policy::integrations::default_integrations_path();
-            integration::connect(&args, &cwd, &catalog_path, &mut std::io::stdout())?
-        }
-        Command::Disconnect(args) => {
-            let cwd = std::env::current_dir()?;
-            integration::disconnect(&args, &cwd, &mut std::io::stdout())?
+            let signin = integration::RealIntegrationSignIn::new(service::socket_path()?);
+            integration::run(
+                &args.command,
+                &cwd,
+                &catalog_path,
+                &signin,
+                &mut std::io::stdout(),
+            )
+            .await?
         }
     };
     Ok(code)
