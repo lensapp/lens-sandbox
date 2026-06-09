@@ -4,4 +4,5 @@ pub mod custom_providers;
 pub mod env_injection;
 pub mod forward;
 pub mod ipc;
+pub mod oauth_integration;
 pub mod volumes;

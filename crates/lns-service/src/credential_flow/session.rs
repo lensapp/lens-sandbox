@@ -1194,6 +1194,21 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fake_flow_refresh_is_pinned_directly() {
+        // connect_oauth requests-then-polls and never refreshes, so the connect-test fake's refresh arm is exercised directly.
+        use crate::oauth::DeviceFlow;
+        let flow = FakeFlow::polling(vec![]);
+        let cfg = crate::oauth::OauthConfig {
+            client_id: "Iv1.test".into(),
+            scopes: vec![],
+            device_authorization_endpoint: "https://example.com/device/code".into(),
+            token_endpoint: "https://example.com/oauth/token".into(),
+        };
+        let err = flow.refresh(&cfg, "rt").await.unwrap_err();
+        assert!(err.to_string().contains("not exercised"), "got: {err}");
+    }
+
     struct FixedClock(u64);
     impl crate::oauth::Clock for FixedClock {
         fn now_unix(&self) -> u64 {

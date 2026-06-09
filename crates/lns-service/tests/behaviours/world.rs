@@ -19,6 +19,9 @@ pub struct BehaviourWorld {
     /// Lazily-built credential-flow rig — see `BehaviourWorld::credential`.
     pub credential: Option<CredentialRig>,
 
+    /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
+    pub oauth_id: Option<String>,
+
     /// Custom-provider scenarios: the loaded policy file and the boot-time wire credentials seeded into the workload at launch.
     pub custom_policy: Option<lns_policy::Policy>,
     pub running_seed: Option<Vec<lns_service::approval_flow::protocol::Credential>>,

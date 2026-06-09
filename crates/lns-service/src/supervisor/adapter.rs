@@ -900,6 +900,129 @@ mod tests {
         .expect("loop must exit promptly when upgrade fails");
     }
 
+    struct LoopFakeFlow;
+    impl crate::oauth::DeviceFlow for LoopFakeFlow {
+        fn request_device_code<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<crate::oauth::DeviceCode>> {
+            Box::pin(async move {
+                Ok(crate::oauth::DeviceCode {
+                    device_code: "dc".into(),
+                    user_code: "WXYZ-1234".into(),
+                    verification_uri: "https://example.com/device".into(),
+                    interval: std::time::Duration::ZERO,
+                    expires_in: std::time::Duration::from_secs(900),
+                })
+            })
+        }
+        fn poll_token<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+            _device_code: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<crate::oauth::PollOutcome>>
+        {
+            Box::pin(async move {
+                Ok(crate::oauth::PollOutcome::Token(crate::oauth::TokenSet {
+                    access_token: "gho_access".into(),
+                    refresh_token: "ghr_refresh".into(),
+                    expires_in: std::time::Duration::from_secs(3600),
+                }))
+            })
+        }
+        fn refresh<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::OauthConfig,
+            _refresh_token: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<crate::oauth::TokenSet>> {
+            Box::pin(async move { anyhow::bail!("refresh unused in the routing test") })
+        }
+    }
+
+    struct LoopClock;
+    impl crate::oauth::Clock for LoopClock {
+        fn now_unix(&self) -> u64 {
+            1000
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_routes_an_oauth_accept_to_a_device_sign_in() {
+        use crate::approval_flow::protocol::{CredentialDecisionKind, CredentialPending};
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        use std::collections::HashMap;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let configs = HashMap::from([(
+            "acme".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.acme".into(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(crate::credential_flow::notification::NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_oauth(configs, Arc::new(LoopFakeFlow), Arc::new(LoopClock)),
+        );
+        session.submit_pending(
+            CredentialPending {
+                id: "c1".into(),
+                credential_id: "acme".into(),
+                action: "use of acme placeholder".into(),
+                reason: "placeholder-unauthorized".into(),
+            },
+            std::time::Instant::now(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
+        tx.send(CredentialDecisionDelivery {
+            id: "c1".into(),
+            request: CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        })
+        .unwrap();
+        drop(tx);
+        credential_delivery_loop(Arc::downgrade(&session), rx).await;
+        let mut allowed = false;
+        while let Ok(frame) = frame_rx.try_recv() {
+            if let HostFrame::CredentialDecision(d) = frame {
+                allowed |= d.decision == CredentialDecisionKind::Allow;
+            }
+        }
+        assert!(
+            allowed,
+            "an oauth accept must route to connect_oauth and release the held request"
+        );
+        assert!(
+            matches!(
+                session.current_state().get("acme"),
+                Some(CredentialEntry::Oauth { .. })
+            ),
+            "the device sign-in must arm the oauth token set"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_fake_flow_refresh_is_pinned_directly() {
+        // connect_oauth requests-then-polls and never refreshes, so the routing-test fake's refresh arm is exercised directly.
+        use crate::oauth::DeviceFlow;
+        let cfg = crate::oauth::OauthConfig {
+            client_id: "x".into(),
+            scopes: vec![],
+            device_authorization_endpoint: "https://example.com/device/code".into(),
+            token_endpoint: "https://example.com/oauth/token".into(),
+        };
+        assert!(LoopFakeFlow.refresh(&cfg, "rt").await.is_err());
+    }
+
     #[tokio::test]
     async fn credential_tick_timeouts_loop_exits_when_strong_refs_drop() {
         let (session, _frame_rx) = fixture_credential_session();

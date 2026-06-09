@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
 use lns_service::approval_flow::window::WindowState;
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
@@ -11,6 +12,7 @@ use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
     CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
+use lns_service::oauth::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -56,6 +58,7 @@ pub struct CredentialRig {
     pub store: Arc<FlakyCredentialStore>,
     pub credentials_path: PathBuf,
     pub timeout: Duration,
+    pub connected: Arc<Mutex<Vec<String>>>,
     _tempdir: TempDir,
 }
 
@@ -103,6 +106,7 @@ impl CredentialRig {
             store,
             credentials_path,
             timeout,
+            connected: Arc::new(Mutex::new(Vec::new())),
             _tempdir: dir,
         }
     }
@@ -129,5 +133,146 @@ impl std::fmt::Debug for CredentialRig {
         f.debug_struct("CredentialRig")
             .field("credentials_path", &self.credentials_path)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum RigSignIn {
+    Completes,
+    Expires,
+    Denied,
+}
+
+struct RigDeviceFlow {
+    poll: Mutex<Option<PollOutcome>>,
+}
+
+impl DeviceFlow for RigDeviceFlow {
+    fn request_device_code<'a>(
+        &'a self,
+        _cfg: &'a OauthConfig,
+    ) -> BoxFuture<'a, anyhow::Result<DeviceCode>> {
+        Box::pin(async move {
+            Ok(DeviceCode {
+                device_code: "dc".into(),
+                user_code: "WXYZ-1234".into(),
+                verification_uri: "https://example.com/device".into(),
+                interval: Duration::ZERO,
+                expires_in: Duration::from_secs(900),
+            })
+        })
+    }
+    fn poll_token<'a>(
+        &'a self,
+        _cfg: &'a OauthConfig,
+        _device_code: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<PollOutcome>> {
+        Box::pin(async move {
+            Ok(self
+                .poll
+                .lock()
+                .unwrap()
+                .take()
+                .expect("poll scripted once"))
+        })
+    }
+    fn refresh<'a>(
+        &'a self,
+        _cfg: &'a OauthConfig,
+        _refresh_token: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<TokenSet>> {
+        Box::pin(async move { anyhow::bail!("refresh is not exercised by connect scenarios") })
+    }
+}
+
+struct FixedClock;
+impl Clock for FixedClock {
+    fn now_unix(&self) -> u64 {
+        1000
+    }
+}
+
+impl CredentialRig {
+    /// A rig whose session is wired with one connectable oauth integration `id` and a device flow scripted to `outcome`.
+    pub fn oauth(id: &str, outcome: RigSignIn) -> Self {
+        let dir = TempDir::new().expect("create tempdir");
+        let credentials_path = dir.path().join("lns-credentials.json");
+        let window_state = WindowState::new();
+        let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let detector_values = host_values.clone();
+        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let notifier = Arc::new(WindowCredentialNotifier::new(
+            window_state.clone(),
+            decision_tx,
+            None,
+            Arc::new(move |id: &str| detector_values.lock().unwrap().contains_key(id)),
+        ));
+        let store = Arc::new(FlakyCredentialStore::new(credentials_path.clone()));
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let frame_tx_for_emitter = frame_tx.clone();
+        let host_values_for_emitter = host_values.clone();
+        let timeout = Duration::from_secs(30);
+        let connected = Arc::new(Mutex::new(Vec::new()));
+        let connected_cb = connected.clone();
+        let poll = match outcome {
+            RigSignIn::Completes => PollOutcome::Token(TokenSet {
+                access_token: "gho_access".into(),
+                refresh_token: "ghr_refresh".into(),
+                expires_in: Duration::from_secs(3600),
+            }),
+            RigSignIn::Expires => PollOutcome::Expired,
+            RigSignIn::Denied => PollOutcome::Denied,
+        };
+        let configs = HashMap::from([(
+            id.to_string(),
+            OauthConfig {
+                client_id: format!("Iv1.{id}"),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: format!("https://example.com/{id}/device/code"),
+                token_endpoint: format!("https://example.com/{id}/oauth/token"),
+            },
+        )]);
+        let session = Arc::new(
+            CredentialSession::with_policy_emitter(
+                CredentialStateFile::new(),
+                notifier,
+                store.clone(),
+                frame_tx,
+                timeout,
+                Box::new(move |state| {
+                    let values = host_values_for_emitter.lock().unwrap().clone();
+                    let credentials =
+                        expand_credentials_with(state, &|id: &str| values.get(id).cloned());
+                    let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
+                        network: None,
+                        credentials: Some(credentials),
+                    }));
+                }),
+            )
+            .with_connect_emitter(
+                HashSet::from([id.to_string()]),
+                Box::new(move |connected_id| {
+                    connected_cb.lock().unwrap().push(connected_id.to_string())
+                }),
+            )
+            .with_oauth(
+                configs,
+                Arc::new(RigDeviceFlow {
+                    poll: Mutex::new(Some(poll)),
+                }),
+                Arc::new(FixedClock),
+            ),
+        );
+        Self {
+            session,
+            window_state,
+            frames: frame_rx,
+            host_values,
+            store,
+            credentials_path,
+            timeout,
+            connected,
+            _tempdir: dir,
+        }
     }
 }
