@@ -556,6 +556,7 @@ fn assert_entry_kind(entry: &CredentialEntry, kind: &str) -> Result<(), String> 
     let actual = match entry {
         CredentialEntry::HostDetect => "host-detect",
         CredentialEntry::Stored { .. } => "stored",
+        CredentialEntry::Oauth { .. } => "oauth",
         CredentialEntry::Deny => "deny",
     };
     if actual != kind {

@@ -1,0 +1,308 @@
+//! Host-side OAuth 2.0 Device Authorization Grant (RFC 8628): the orchestration is here and unit-tested via a fake; the reqwest/SystemTime leaves live in `real.rs`.
+
+mod real;
+pub mod traits;
+
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::credential_flow::store::CredentialEntry;
+pub use real::{RealClock, RealDeviceFlow};
+pub use traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
+
+/// RFC 8628 §3.5: a `slow_down` response bumps the poll interval by 5 seconds.
+const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
+
+/// The terminal result of driving a device sign-in to completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignIn {
+    Completed(TokenSet),
+    Denied,
+    Expired,
+}
+
+/// Requests a device code, surfaces it to the user via `present`, then polls the token endpoint until the grant resolves.
+pub async fn run_device_flow(
+    flow: &dyn DeviceFlow,
+    cfg: &OauthConfig,
+    present: impl Fn(&DeviceCode),
+) -> Result<SignIn> {
+    let code = flow.request_device_code(cfg).await?;
+    present(&code);
+    let mut interval = code.interval;
+    loop {
+        tokio::time::sleep(interval).await;
+        match flow.poll_token(cfg, &code.device_code).await? {
+            PollOutcome::Pending => {}
+            PollOutcome::SlowDown => interval = interval.saturating_add(SLOW_DOWN_INCREMENT),
+            PollOutcome::Token(token) => return Ok(SignIn::Completed(token)),
+            PollOutcome::Denied => return Ok(SignIn::Denied),
+            PollOutcome::Expired => return Ok(SignIn::Expired),
+        }
+    }
+}
+
+/// Turns a freshly-obtained grant into the stored entry, stamping an absolute expiry off the injected clock.
+pub fn entry_from_token(clock: &dyn Clock, token: &TokenSet) -> CredentialEntry {
+    CredentialEntry::Oauth {
+        access_token: token.access_token.clone(),
+        refresh_token: token.refresh_token.clone(),
+        expires_at: clock.now_unix().saturating_add(token.expires_in.as_secs()),
+    }
+}
+
+/// Refreshes an oauth entry whose access token is within `skew_secs` of expiry; `Ok(None)` means no refresh was needed (or the entry isn't oauth), `Err` means the grant can no longer be refreshed.
+pub async fn refresh_if_due(
+    flow: &dyn DeviceFlow,
+    clock: &dyn Clock,
+    cfg: &OauthConfig,
+    entry: &CredentialEntry,
+    skew_secs: u64,
+) -> Result<Option<CredentialEntry>> {
+    let CredentialEntry::Oauth {
+        refresh_token,
+        expires_at,
+        ..
+    } = entry
+    else {
+        return Ok(None);
+    };
+    if *expires_at > clock.now_unix().saturating_add(skew_secs) {
+        return Ok(None);
+    }
+    let token = flow.refresh(cfg, refresh_token).await?;
+    Ok(Some(entry_from_token(clock, &token)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use anyhow::anyhow;
+    use futures_util::future::BoxFuture;
+
+    struct FakeDeviceFlow {
+        code: DeviceCode,
+        polls: Mutex<VecDeque<PollOutcome>>,
+        refresh_result: Mutex<Option<Result<TokenSet>>>,
+        seen_refresh: Mutex<Vec<String>>,
+    }
+
+    impl FakeDeviceFlow {
+        fn polling(polls: Vec<PollOutcome>) -> Self {
+            Self {
+                code: sample_code(),
+                polls: Mutex::new(polls.into()),
+                refresh_result: Mutex::new(None),
+                seen_refresh: Mutex::new(Vec::new()),
+            }
+        }
+        fn refreshing(result: Result<TokenSet>) -> Self {
+            Self {
+                code: sample_code(),
+                polls: Mutex::new(VecDeque::new()),
+                refresh_result: Mutex::new(Some(result)),
+                seen_refresh: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DeviceFlow for FakeDeviceFlow {
+        fn request_device_code<'a>(
+            &'a self,
+            _cfg: &'a OauthConfig,
+        ) -> BoxFuture<'a, Result<DeviceCode>> {
+            Box::pin(async move { Ok(self.code.clone()) })
+        }
+        fn poll_token<'a>(
+            &'a self,
+            _cfg: &'a OauthConfig,
+            _device_code: &'a str,
+        ) -> BoxFuture<'a, Result<PollOutcome>> {
+            Box::pin(async move {
+                Ok(self
+                    .polls
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("poll_token called more times than scripted"))
+            })
+        }
+        fn refresh<'a>(
+            &'a self,
+            _cfg: &'a OauthConfig,
+            refresh_token: &'a str,
+        ) -> BoxFuture<'a, Result<TokenSet>> {
+            let seen = refresh_token.to_string();
+            Box::pin(async move {
+                self.seen_refresh.lock().unwrap().push(seen);
+                self.refresh_result
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("refresh called but not scripted")
+            })
+        }
+    }
+
+    struct FakeClock(u64);
+    impl Clock for FakeClock {
+        fn now_unix(&self) -> u64 {
+            self.0
+        }
+    }
+
+    fn sample_code() -> DeviceCode {
+        DeviceCode {
+            device_code: "dc-xyz".into(),
+            user_code: "WDJB-MJHT".into(),
+            verification_uri: "https://github.com/login/device".into(),
+            interval: Duration::from_secs(5),
+            expires_in: Duration::from_secs(900),
+        }
+    }
+
+    fn sample_cfg() -> OauthConfig {
+        OauthConfig {
+            client_id: "Iv1.test".into(),
+            scopes: vec!["repo".into()],
+            device_authorization_endpoint: "https://example.com/device/code".into(),
+            token_endpoint: "https://example.com/oauth/token".into(),
+        }
+    }
+
+    fn token(expires_in: u64) -> TokenSet {
+        TokenSet {
+            access_token: "gho_access".into(),
+            refresh_token: "ghr_refresh".into(),
+            expires_in: Duration::from_secs(expires_in),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polling_through_pending_to_a_token_completes_and_surfaces_the_user_code() {
+        let flow =
+            FakeDeviceFlow::polling(vec![PollOutcome::Pending, PollOutcome::Token(token(3600))]);
+        let shown = Mutex::new(Vec::new());
+        let out = run_device_flow(&flow, &sample_cfg(), |c| {
+            shown
+                .lock()
+                .unwrap()
+                .push((c.user_code.clone(), c.verification_uri.clone()));
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, SignIn::Completed(token(3600)));
+        assert_eq!(
+            shown.lock().unwrap().as_slice(),
+            &[(
+                "WDJB-MJHT".to_string(),
+                "https://github.com/login/device".to_string()
+            )],
+            "the user code and verification URL must be surfaced exactly once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_down_response_keeps_polling_to_completion() {
+        let flow =
+            FakeDeviceFlow::polling(vec![PollOutcome::SlowDown, PollOutcome::Token(token(60))]);
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        assert_eq!(out, SignIn::Completed(token(60)));
+        assert!(
+            flow.polls.lock().unwrap().is_empty(),
+            "both the slow_down and the token poll must be consumed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_grant_resolves_to_denied() {
+        let flow = FakeDeviceFlow::polling(vec![PollOutcome::Denied]);
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        assert_eq!(out, SignIn::Denied);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_device_code_resolves_to_expired() {
+        let flow = FakeDeviceFlow::polling(vec![PollOutcome::Pending, PollOutcome::Expired]);
+        let out = run_device_flow(&flow, &sample_cfg(), |_| {}).await.unwrap();
+        assert_eq!(out, SignIn::Expired);
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_skips_a_non_oauth_entry() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let out = refresh_if_due(
+            &flow,
+            &FakeClock(1000),
+            &sample_cfg(),
+            &CredentialEntry::Deny,
+            60,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_leaves_a_still_fresh_token_untouched() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let entry = CredentialEntry::Oauth {
+            access_token: "still-good".into(),
+            refresh_token: "r".into(),
+            expires_at: 10_000,
+        };
+        let out = refresh_if_due(&flow, &FakeClock(1000), &sample_cfg(), &entry, 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            out, None,
+            "a token well before expiry must not be refreshed"
+        );
+        assert!(flow.seen_refresh.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_renews_a_token_within_the_skew_window() {
+        let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
+        let entry = CredentialEntry::Oauth {
+            access_token: "expired".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at: 1030,
+        };
+        let out = refresh_if_due(&flow, &FakeClock(1000), &sample_cfg(), &entry, 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            Some(CredentialEntry::Oauth {
+                access_token: "gho_access".into(),
+                refresh_token: "ghr_refresh".into(),
+                expires_at: 1000 + 3600,
+            }),
+            "a refreshed entry carries the new tokens and an absolute expiry off the clock"
+        );
+        assert_eq!(
+            flow.seen_refresh.lock().unwrap().as_slice(),
+            &["old-refresh".to_string()],
+            "the stored refresh token must be the one sent to the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_surfaces_a_failed_refresh_as_an_error() {
+        let flow = FakeDeviceFlow::refreshing(Err(anyhow!("invalid_grant")));
+        let entry = CredentialEntry::Oauth {
+            access_token: "expired".into(),
+            refresh_token: "revoked".into(),
+            expires_at: 0,
+        };
+        let err = refresh_if_due(&flow, &FakeClock(1000), &sample_cfg(), &entry, 60)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid_grant"), "got: {err}");
+    }
+}

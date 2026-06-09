@@ -12,8 +12,16 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CredentialEntry {
     HostDetect,
-    Stored { value: String },
+    Stored {
+        value: String,
+    },
     Deny,
+    /// A device-flow grant: the access token armed at the boundary, the refresh token to renew it, and the access token's wall-clock expiry (unix seconds).
+    Oauth {
+        access_token: String,
+        refresh_token: String,
+        expires_at: u64,
+    },
 }
 
 pub type CredentialStateFile = HashMap<String, CredentialEntry>;
@@ -123,11 +131,35 @@ mod tests {
     }
 
     #[test]
+    fn oauth_serializes_with_token_set_alongside_kind() {
+        let entry = CredentialEntry::Oauth {
+            access_token: "gho_access".into(),
+            refresh_token: "ghr_refresh".into(),
+            expires_at: 1_900_000_000,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "kind": "oauth",
+                "access_token": "gho_access",
+                "refresh_token": "ghr_refresh",
+                "expires_at": 1_900_000_000u64
+            })
+        );
+    }
+
+    #[test]
     fn each_variant_round_trips_through_json() {
         for entry in [
             CredentialEntry::HostDetect,
             CredentialEntry::Stored { value: "x".into() },
             CredentialEntry::Deny,
+            CredentialEntry::Oauth {
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                expires_at: 42,
+            },
         ] {
             let s = serde_json::to_string(&entry).unwrap();
             let parsed: CredentialEntry = serde_json::from_str(&s).unwrap();
