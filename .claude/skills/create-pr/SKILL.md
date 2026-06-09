@@ -94,6 +94,26 @@ Rules:
 - If multiple commits with mixed types, use the most significant prefix
 - If a single commit, reuse its message as the PR title
 
+### 3b. Determine Label
+
+Every PR gets exactly one type label, derived directly from the title prefix chosen above. The mapping:
+
+| Title prefix | Label |
+|--------------|-------|
+| `feat` | `enhancement` |
+| `fix` | `bug` |
+| `docs` | `documentation` |
+| `chore` | `chore` |
+| `refactor` | `refactor` |
+| `test` | `test` |
+| `ci` | `ci` |
+
+Rules:
+- The label always matches the title prefix — pick the prefix first, the label follows.
+- For mixed-type PRs, the label tracks the same "most significant prefix" used for the title, so title and label never disagree.
+- `chore(deps):` dependency bumps stay `chore` — the `dependencies` label exists but is applied only when the user explicitly asks.
+- These labels are expected to already exist in the repo. If `gh pr create` rejects a missing label, create it with `gh label create "<name>"` and retry.
+
 ### 4. Write PR Body
 
 Scale the description to match the complexity of the changes. A one-commit typo fix needs one sentence. A multi-commit feature needs a thorough write-up.
@@ -169,7 +189,7 @@ Example:
 ### 5. Create PR
 
 ```bash
-gh pr create --title "feat(scope): Title here" --body "$(cat <<'EOF'
+gh pr create --title "feat(scope): Title here" --label "enhancement" --body "$(cat <<'EOF'
 ## Summary
 
 <narrative or bullet points — scale to complexity>
@@ -208,7 +228,7 @@ Show the user the PR URL returned by `gh pr create`.
 
 - **Don't create PR if on main** - ask user to create a branch first
 - **Don't force push** - just regular push
-- **Don't add labels** unless the user explicitly asks
+- **Don't add more than one type label** - exactly one, derived from the title prefix (see step 3b). Add extra labels (e.g. `dependencies`) only when the user explicitly asks.
 - **Don't auto-merge** - just create the PR
 - **Don't add "Generated with Claude Code"** or any AI attribution to the PR body
 - **Don't add Co-Authored-By trailers** to commits or PR body
