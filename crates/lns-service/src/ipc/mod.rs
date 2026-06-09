@@ -120,6 +120,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::ExecImage must be dispatched via handle_exec, not handle_request"
             )
         }
+        Request::BeginIntegrationSignIn { .. } => {
+            unreachable!(
+                "Request::BeginIntegrationSignIn must be dispatched via handle_integration_sign_in, not handle_request"
+            )
+        }
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(*run_id) {
                 Response::CancelAccepted
@@ -319,6 +324,20 @@ mod tests {
                 published_ports: vec![],
                 volumes: vec![],
             }),
+            Instant::now(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "BeginIntegrationSignIn must be dispatched via handle_integration_sign_in"
+    )]
+    async fn begin_integration_sign_in_via_handle_request_panics() {
+        let _ = handle_request(
+            &Request::BeginIntegrationSignIn {
+                id: "github_oauth".into(),
+            },
             Instant::now(),
         )
         .await;

@@ -17,6 +17,7 @@ pub enum Request {
     ExecImage(ExecImageArgs),
     Kill { run_id: u32, signal: SignalKind },
     ListRuns,
+    BeginIntegrationSignIn { id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +55,15 @@ pub enum Response {
     Acknowledged,
     RunList {
         runs: Vec<RunSummary>,
+    },
+    OauthVerification {
+        verification_uri: String,
+        user_code: String,
+        expires_in_secs: u64,
+    },
+    OauthSignInComplete,
+    OauthSignInFailed {
+        reason: String,
     },
 }
 
@@ -344,6 +354,35 @@ mod tests {
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, args);
+    }
+
+    #[test]
+    fn begin_integration_sign_in_survives_a_request_round_trip() {
+        let req = Request::BeginIntegrationSignIn {
+            id: "github_oauth".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn oauth_sign_in_responses_survive_round_trips() {
+        for resp in [
+            Response::OauthVerification {
+                verification_uri: "https://github.com/login/device".into(),
+                user_code: "WDJB-MJHT".into(),
+                expires_in_secs: 900,
+            },
+            Response::OauthSignInComplete,
+            Response::OauthSignInFailed {
+                reason: "access_denied".into(),
+            },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     #[test]
