@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,6 +8,18 @@ const TARGET: &str = "aarch64-unknown-linux-musl";
 const PROFILE: &str = "release-init";
 
 const STATIC_NFT_VERSION: &str = "1.1.5";
+
+fn static_nft_sha256(arch: &str) -> &'static str {
+    match arch {
+        "amd64" => "975b614c82bd2042a6118a29275faa239ea02646cf45829f490f0e195156e3e9",
+        "arm64" => "1981fd2f1d1440c91672f94fbd9a47ac92a36fff9c16248a534210154c71540c",
+        other => panic!("static-nft embed: no pinned sha256 for arch=\"{other}\""),
+    }
+}
+
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
 
 #[derive(Deserialize)]
 struct KernelManifest {
@@ -139,6 +152,25 @@ fn stage_static_nft(workspace: &Path, out_dir: &Path) {
             dst.display(),
             dst_size,
             MIN_NFT_BYTES,
+        );
+    }
+
+    let bytes = std::fs::read(&dst).unwrap_or_else(|e| {
+        panic!(
+            "reading staged static-nft at {} for sha256: {e}",
+            dst.display()
+        )
+    });
+    let actual = hex_encode(Sha256::digest(&bytes));
+    let expected = static_nft_sha256(arch);
+    if actual != expected {
+        panic!(
+            "static-nft embed: {} sha256 mismatch.\n  expected (pinned in build.rs): {expected}\n  \
+             actual (staged blob):          {actual}\n\
+             The embedded nft binary programs the egress firewall; refusing to ship an \
+             unverified one. If you intentionally updated the binary, update the pinned \
+             sha256 in build.rs to match — do NOT copy it from the .sha256 companion file.",
+            dst.display(),
         );
     }
 

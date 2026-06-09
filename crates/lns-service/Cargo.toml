@@ -153,10 +153,12 @@ name    = "behaviours"
 harness = false
 
 # build.rs parses crates/lns-service/kernels.toml to derive
-# KERNEL_VERSION / KERNEL_SHA256 at compile time.
+# KERNEL_VERSION / KERNEL_SHA256 at compile time, and verifies the
+# embedded static-nft blob against a sha256 pinned in build.rs.
 [build-dependencies]
 serde      = { version = "1", features = ["derive"] }
 toml       = "0.8"
+sha2       = "0.10"
 
 [lints.clippy]
 cognitive_complexity = { level = "deny", priority = 1 }
