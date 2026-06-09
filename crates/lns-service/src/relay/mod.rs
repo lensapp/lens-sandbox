@@ -116,6 +116,30 @@ pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::aud
     write_chain_line(&bytes, chain, audit_file, anchor_sink).await
 }
 
+const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
+
+fn stamp_guest_audit_event(
+    mut obj: serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let event = obj.get("event").and_then(Value::as_str);
+    if let Some(event) = event
+        && HOST_RESERVED_EVENTS.contains(&event)
+    {
+        crate::log::warn!(
+            reserved_event = event,
+            "rejected guest audit_event with a host-reserved event value"
+        );
+        return None;
+    }
+    obj.remove("source");
+    obj.remove("origin");
+    obj.insert(
+        "origin".to_string(),
+        Value::String("guest-proxy".to_string()),
+    );
+    Some(obj)
+}
+
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     msg: Message,
     session: &Arc<ApprovalSession>,
@@ -136,7 +160,10 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     let ty = obj.get("type").and_then(Value::as_str);
     match ty {
         Some("audit_event") => {
-            let bytes = chain.augment_obj(obj);
+            let Some(stamped) = stamp_guest_audit_event(obj) else {
+                return Ok(false);
+            };
+            let bytes = chain.augment_obj(stamped);
             write_chain_line(&bytes, chain, audit_file, anchor_sink).await?;
         }
         Some("request_pending") => {
@@ -564,6 +591,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_inbound_audit_event_stamps_guest_proxy_origin_and_strips_guest_provenance() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        let stop = handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","route":"deny","source":"host","origin":"host"}"#.into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut chain,
+            &mut log,
+            &mut anchor,
+        )
+        .await
+        .expect("handle_inbound");
+        assert!(!stop);
+        let written = String::from_utf8(log.bytes).unwrap();
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(
+            obj.get("origin").and_then(Value::as_str),
+            Some("guest-proxy"),
+            "host must stamp every guest audit_event with the guest-proxy origin: {written}"
+        );
+        assert!(
+            obj.get("source").is_none(),
+            "guest-supplied `source` provenance must be stripped: {written}"
+        );
+        assert_eq!(
+            anchor.anchors.len(),
+            1,
+            "a stamped guest event is still written to the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_audit_event_with_reserved_run_env_event_is_rejected_and_warns() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        let stop = handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","event":"run_env","env":{"GITHUB_TOKEN":"forged"}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut chain,
+            &mut log,
+            &mut anchor,
+        )
+        .await
+        .expect("handle_inbound");
+        assert!(!stop, "a rejected forgery must not kill the relay");
+        assert!(
+            log.bytes.is_empty(),
+            "a guest event claiming the reserved `run_env` type must not reach the chain"
+        );
+        assert!(
+            anchor.anchors.is_empty(),
+            "a rejected forgery must not advance the anchor"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_audit_event_with_non_reserved_event_value_is_stamped_and_written() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(r#"{"type":"audit_event","event":"net_connect","host":"x"}"#.into()),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut chain,
+            &mut log,
+            &mut anchor,
+        )
+        .await
+        .expect("handle_inbound");
+        let written = String::from_utf8(log.bytes).unwrap();
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(
+            obj.get("event").and_then(Value::as_str),
+            Some("net_connect")
+        );
+        assert_eq!(
+            obj.get("origin").and_then(Value::as_str),
+            Some("guest-proxy"),
+            "a guest event whose `event` value is not host-reserved is still stamped and written: {written}"
+        );
+        assert_eq!(anchor.anchors.len(), 1);
+    }
+
+    #[tokio::test]
     async fn write_run_env_event_records_injected_env_as_a_chain_entry() {
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
@@ -581,6 +705,12 @@ mod tests {
         assert!(
             written.contains("CLAUDE_CODE_USE_BEDROCK"),
             "got: {written}"
+        );
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(
+            obj.get("origin").and_then(Value::as_str),
+            Some("host"),
+            "the host-authored run_env event must carry the host origin: {written}"
         );
         assert!(written.contains("prev_hash"), "must chain: {written}");
         assert!(written.ends_with('\n'));

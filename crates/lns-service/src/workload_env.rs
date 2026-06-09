@@ -23,6 +23,7 @@ pub fn injected_env_audit(user_env: &[String]) -> Option<Map<String, Value>> {
     }
     let mut obj = Map::new();
     obj.insert("type".to_string(), Value::String("audit_event".to_string()));
+    obj.insert("origin".to_string(), Value::String("host".to_string()));
     obj.insert("event".to_string(), Value::String("run_env".to_string()));
     obj.insert("env".to_string(), Value::Object(env));
     Some(obj)
@@ -207,6 +208,16 @@ mod tests {
         assert_eq!(obj.get("event").unwrap(), "run_env");
         let env = obj.get("env").unwrap().as_object().unwrap();
         assert_eq!(env.get("CLAUDE_CODE_USE_BEDROCK").unwrap(), "1");
+    }
+
+    #[test]
+    fn injected_env_audit_stamps_host_origin() {
+        let obj = injected_env_audit(&["A=1".into()]).expect("event built");
+        assert_eq!(
+            obj.get("origin").unwrap(),
+            "host",
+            "the host-authored run_env event must be distinguishable from guest-proxied events"
+        );
     }
 
     #[test]
