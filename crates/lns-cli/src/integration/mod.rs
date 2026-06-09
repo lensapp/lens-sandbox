@@ -80,6 +80,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
             placeholder,
             injections: args.inject.clone(),
         }),
+        oauth: None,
     });
     catalog
         .save_atomic(catalog_path)
@@ -225,6 +226,7 @@ mod tests {
                 rules: Vec::new(),
             }],
             credential: None,
+            oauth: None,
         }
     }
 
@@ -334,6 +336,7 @@ mod tests {
                     placeholder: "lns-evil".into(),
                     injections: Vec::new(),
                 }),
+                oauth: None,
             }],
         );
         let mut out = Vec::new();

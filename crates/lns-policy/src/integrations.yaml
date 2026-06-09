@@ -23,3 +23,22 @@ integrations:
       injections:
         - kind: bearer_header
           domain: huggingface.co
+  - id: github_oauth
+    authKind: oauth
+    routes:
+      - match: api.github.com
+      - match: github.com
+    oauth:
+      clientId: Iv1.LNSPLACEHOLDER0
+      scopes:
+        - repo
+        - read:org
+      deviceAuthorizationEndpoint: https://github.com/login/device/code
+      tokenEndpoint: https://github.com/login/oauth/access_token
+      envVar: GH_TOKEN
+      placeholder: gho_LNSPLACEHOLDER0000000000000000000000
+      injections:
+        - kind: token_header
+          domain: api.github.com
+        - kind: basic_x_access_token
+          domain: github.com

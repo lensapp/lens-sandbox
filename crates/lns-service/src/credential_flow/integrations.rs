@@ -1,35 +1,45 @@
 use std::collections::{HashMap, HashSet};
 
-use lns_policy::integrations::{AuthKind, Integration};
+use lns_policy::integrations::{AuthKind, Integration, OauthAuth};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule};
 
 use crate::credential_flow::providers::DefProvider;
 
-/// The wire providers and routes a run's applied integrations contribute.
+/// The wire providers, routes, and (for oauth entries) device-flow configs a run's applied integrations contribute.
 #[derive(Default)]
 pub struct AppliedIntegrations {
     pub providers: Vec<DefProvider>,
     pub routes: Vec<RouteRule>,
+    pub oauth_configs: HashMap<String, OauthAuth>,
 }
 
-/// Catalog credential-integrations that aren't yet connected: seeded unarmed for detection, with their routes held ready to allow live on connect.
+/// Catalog integrations that aren't yet connected: seeded unarmed for detection, with their routes held ready to allow live on connect, and oauth configs for a sign-in dance on connect.
 #[derive(Default)]
 pub struct ConnectableIntegrations {
     pub providers: Vec<DefProvider>,
     pub routes: HashMap<String, Vec<RouteRule>>,
+    pub oauth_configs: HashMap<String, OauthAuth>,
 }
 
-fn def_provider_from(
-    integ: &Integration,
-    cred: &lns_policy::integrations::CredentialAuth,
-) -> DefProvider {
-    DefProvider::new(ProviderDef {
+/// The env/placeholder/injection wiring an integration seeds, taken from whichever block its authKind carries.
+fn wire_provider(integ: &Integration) -> Option<DefProvider> {
+    let (env_var, placeholder, injections) = match integ.auth_kind {
+        AuthKind::Credential => {
+            let c = integ.credential.as_ref()?;
+            (&c.env_var, &c.placeholder, &c.injections)
+        }
+        AuthKind::Oauth => {
+            let o = integ.oauth.as_ref()?;
+            (&o.env_var, &o.placeholder, &o.injections)
+        }
+    };
+    Some(DefProvider::new(ProviderDef {
         id: integ.id.clone(),
-        env_var: cred.env_var.clone(),
-        placeholder: cred.placeholder.clone(),
-        injections: cred.injections.clone(),
-    })
+        env_var: env_var.clone(),
+        placeholder: placeholder.clone(),
+        injections: injections.clone(),
+    }))
 }
 
 /// Resolves the policy's applied integration ids against the effective catalog, skipping any id already owned by a built-in or a declared custom provider so the greenfield path never double-handles a service.
@@ -58,16 +68,17 @@ pub fn resolve_applied_integrations(
         }
         out.routes
             .extend(integ.routes.iter().map(|r| r.to_route_rule()));
-        if integ.auth_kind == AuthKind::Credential
-            && let Some(cred) = &integ.credential
-        {
-            out.providers.push(def_provider_from(integ, cred));
+        if let Some(p) = wire_provider(integ) {
+            out.providers.push(p);
+        }
+        if let Some(o) = &integ.oauth {
+            out.oauth_configs.insert(integ.id.clone(), o.clone());
         }
     }
     out
 }
 
-/// The catalog credential-integrations a run can offer to connect: every credential-kind entry not already owned by a built-in, a custom provider, or an applied integration.
+/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already owned by a built-in, a custom provider, or an applied integration.
 pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
@@ -87,15 +98,18 @@ pub fn resolve_connectable_integrations(
 
     let mut out = ConnectableIntegrations::default();
     for integ in catalog {
-        if owned.contains(integ.id.as_str()) || integ.auth_kind != AuthKind::Credential {
+        if owned.contains(integ.id.as_str()) {
             continue;
         }
-        if let Some(cred) = &integ.credential {
-            out.providers.push(def_provider_from(integ, cred));
+        if let Some(p) = wire_provider(integ) {
+            out.providers.push(p);
             out.routes.insert(
                 integ.id.clone(),
                 integ.routes.iter().map(|r| r.to_route_rule()).collect(),
             );
+            if let Some(o) = &integ.oauth {
+                out.oauth_configs.insert(integ.id.clone(), o.clone());
+            }
         }
     }
     out
@@ -105,7 +119,7 @@ pub fn resolve_connectable_integrations(
 mod tests {
     use super::*;
     use crate::credential_flow::providers::Provider;
-    use lns_policy::integrations::{CredentialAuth, IntegrationRoute};
+    use lns_policy::integrations::{CredentialAuth, IntegrationRoute, OauthAuth};
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
     fn cred_integration(id: &str, env_var: &str, domain: &str) -> Integration {
@@ -128,6 +142,7 @@ mod tests {
                     header: None,
                 }],
             }),
+            oauth: None,
         }
     }
 
@@ -184,29 +199,56 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_applied_oauth_integration_contributes_routes_but_no_provider() {
-        let catalog = vec![Integration {
-            id: "somesaas".into(),
+    fn oauth_integration(id: &str, env_var: &str, domain: &str) -> Integration {
+        Integration {
+            id: id.into(),
             auth_kind: AuthKind::Oauth,
             routes: vec![IntegrationRoute {
-                match_pattern: "api.somesaas.com".into(),
+                match_pattern: domain.into(),
                 transport: None,
                 scheme: None,
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
             credential: None,
-        }];
+            oauth: Some(OauthAuth {
+                client_id: format!("Iv1.{id}"),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: format!("https://{domain}/login/device/code"),
+                token_endpoint: format!("https://{domain}/login/oauth/access_token"),
+                env_var: env_var.into(),
+                placeholder: format!("lns-{id}-placeholder"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: domain.into(),
+                    header: None,
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn an_applied_oauth_integration_contributes_a_provider_routes_and_its_oauth_config() {
+        let catalog = vec![oauth_integration(
+            "somesaas",
+            "SOMESAAS_TOKEN",
+            "api.somesaas.com",
+        )];
         let out = resolve_applied_integrations(&policy_applying(&["somesaas"]), &catalog);
-        assert!(
-            out.providers.is_empty(),
-            "oauth has no static credential to inject yet"
+        let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            ["somesaas"],
+            "an oauth integration seeds its placeholder like any provider"
         );
         assert_eq!(
             out.routes.len(),
             1,
             "an integration's routes apply regardless of auth kind"
+        );
+        assert!(
+            out.oauth_configs.contains_key("somesaas"),
+            "the device-flow config must be surfaced for the sign-in dance"
         );
     }
 
@@ -262,23 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn connectable_excludes_an_oauth_integration() {
-        let catalog = vec![Integration {
-            id: "somesaas".into(),
-            auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
-                match_pattern: "api.somesaas.com".into(),
-                transport: None,
-                scheme: None,
-                tls_terminate: false,
-                rules: Vec::new(),
-            }],
-            credential: None,
-        }];
+    fn connectable_includes_an_unconnected_oauth_integration_with_its_config() {
+        let catalog = vec![oauth_integration(
+            "somesaas",
+            "SOMESAAS_TOKEN",
+            "api.somesaas.com",
+        )];
         let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+        assert_eq!(
+            c.providers.len(),
+            1,
+            "an unconnected oauth integration is offerable"
+        );
+        assert_eq!(c.providers[0].id(), "somesaas");
+        assert_eq!(c.routes.get("somesaas").map(|r| r.len()), Some(1));
         assert!(
-            c.providers.is_empty(),
-            "oauth can't be connected via the credential flow yet"
+            c.oauth_configs.contains_key("somesaas"),
+            "its device-flow config must be held ready for connect"
         );
     }
 }
