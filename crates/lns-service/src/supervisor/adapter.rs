@@ -621,6 +621,7 @@ mod tests {
                     placeholder: "acme_LNSPLACEHOLDER".into(),
                     injections: Vec::new(),
                 }),
+                oauth: None,
             }],
         }
         .save_atomic(&path)

@@ -56,6 +56,21 @@ pub struct CredentialAuth {
     pub injections: Vec<InjectionDef>,
 }
 
+/// Device-flow (RFC 8628) configuration for an `oauth` integration: how to sign in, plus the same env/placeholder/injection wiring a credential carries for reaching the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OauthAuth {
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    pub device_authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub env_var: String,
+    pub placeholder: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injections: Vec<InjectionDef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Integration {
@@ -65,14 +80,20 @@ pub struct Integration {
     pub routes: Vec<IntegrationRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialAuth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OauthAuth>,
 }
 
 impl Integration {
-    /// A `credential` integration must carry its `credential:` block; `oauth` is recognized but inert until that work lands.
+    /// Each authKind must carry its matching block — `credential:` for credential, `oauth:` for oauth.
     pub fn validate(&self) -> Result<(), String> {
         match self.auth_kind {
             AuthKind::Credential if self.credential.is_none() => Err(format!(
                 "integration {:?} declares authKind credential but has no `credential:` block",
+                self.id
+            )),
+            AuthKind::Oauth if self.oauth.is_none() => Err(format!(
+                "integration {:?} declares authKind oauth but has no `oauth:` block",
                 self.id
             )),
             _ => Ok(()),
@@ -205,6 +226,22 @@ mod tests {
         }
     }
 
+    fn oauth_auth(env_var: &str, placeholder: &str, domain: &str) -> OauthAuth {
+        OauthAuth {
+            client_id: "Iv1.example0000".into(),
+            scopes: vec!["repo".into()],
+            device_authorization_endpoint: "https://example.com/login/device/code".into(),
+            token_endpoint: "https://example.com/login/oauth/access_token".into(),
+            env_var: env_var.into(),
+            placeholder: placeholder.into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: domain.into(),
+                header: None,
+            }],
+        }
+    }
+
     fn route(host: &str) -> IntegrationRoute {
         IntegrationRoute {
             match_pattern: host.into(),
@@ -225,6 +262,7 @@ mod tests {
                 "acme_LNSPLACEHOLDER0000",
                 "api.acme.corp",
             )),
+            oauth: None,
         }
     }
 
@@ -234,6 +272,11 @@ mod tests {
             auth_kind: AuthKind::Oauth,
             routes: vec![route("api.examplehub.com")],
             credential: None,
+            oauth: Some(oauth_auth(
+                "EXAMPLEHUB_TOKEN",
+                "examplehub_LNSPLACEHOLDER0000",
+                "api.examplehub.com",
+            )),
         }
     }
 
@@ -333,13 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn an_oauth_integration_round_trips_without_a_credential_block() {
+    fn an_oauth_integration_round_trips_with_an_oauth_block_and_no_credential_block() {
         let i = oauth_integration();
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("authKind: oauth"), "got: {yaml}");
+        assert!(yaml.contains("oauth:"), "got: {yaml}");
+        assert!(yaml.contains("clientId:"), "got: {yaml}");
+        assert!(yaml.contains("deviceAuthorizationEndpoint:"), "got: {yaml}");
         assert!(
-            !yaml.contains("credential"),
-            "an oauth entry must not carry credential fields: {yaml}"
+            !yaml.contains("credential:"),
+            "an oauth entry must not carry a credential block: {yaml}"
         );
         let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
@@ -352,6 +398,7 @@ mod tests {
             auth_kind: AuthKind::Credential,
             routes: Vec::new(),
             credential: None,
+            oauth: None,
         };
         let err = bad.validate().unwrap_err();
         assert!(err.contains("credential"), "got: {err}");
@@ -363,7 +410,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_an_oauth_integration_with_no_block() {
+    fn validate_rejects_an_oauth_integration_missing_its_block() {
+        let bad = Integration {
+            id: "x".into(),
+            auth_kind: AuthKind::Oauth,
+            routes: Vec::new(),
+            credential: None,
+            oauth: None,
+        };
+        let err = bad.validate().unwrap_err();
+        assert!(err.contains("oauth"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_oauth_integration() {
         assert!(oauth_integration().validate().is_ok());
     }
 
@@ -430,22 +490,22 @@ mod tests {
     }
 
     #[test]
-    fn every_bundled_integration_is_a_valid_credential_with_self_identifying_placeholder_and_routes()
-     {
+    fn every_bundled_integration_is_valid_with_a_self_identifying_placeholder_and_routes() {
         for i in bundled_integrations() {
             assert!(i.validate().is_ok(), "{} is inconsistent", i.id);
-            assert_eq!(
-                i.auth_kind,
-                AuthKind::Credential,
-                "{} ships as credential kind until oauth lands",
-                i.id
-            );
-            let cred = i.credential.as_ref().expect("credential block present");
+            let placeholder = match i.auth_kind {
+                AuthKind::Credential => {
+                    &i.credential
+                        .as_ref()
+                        .expect("credential block present")
+                        .placeholder
+                }
+                AuthKind::Oauth => &i.oauth.as_ref().expect("oauth block present").placeholder,
+            };
             assert!(
-                crate::providers::is_self_identifying(&cred.placeholder),
-                "{} placeholder must self-identify: {}",
+                crate::providers::is_self_identifying(placeholder),
+                "{} placeholder must self-identify: {placeholder}",
                 i.id,
-                cred.placeholder
             );
             assert!(
                 !i.routes.is_empty(),
@@ -453,6 +513,49 @@ mod tests {
                 i.id
             );
         }
+    }
+
+    #[test]
+    fn bundled_catalog_ships_github_oauth_as_an_oauth_integration() {
+        let gh = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "github_oauth")
+            .expect("github_oauth is bundled");
+        assert_eq!(gh.auth_kind, AuthKind::Oauth);
+        let oauth = gh.oauth.as_ref().expect("oauth block present");
+        assert_eq!(oauth.env_var, "GH_TOKEN");
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::TokenHeader && i.domain == "api.github.com"),
+            "gh/API use `Authorization: token`, got: {:?}",
+            oauth.injections
+        );
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BasicXAccessToken && i.domain == "github.com"),
+            "git-over-HTTPS uses basic x-access-token, got: {:?}",
+            oauth.injections
+        );
+    }
+
+    #[test]
+    fn github_oauth_coexists_with_the_static_github_builtin_provider() {
+        assert!(
+            bundled_integrations()
+                .iter()
+                .any(|i| i.id == "github_oauth"),
+            "github_oauth must ship as a distinct integration id"
+        );
+        assert!(
+            crate::providers::builtins()
+                .iter()
+                .any(|p| p.id == "github"),
+            "the static github credential provider must remain a built-in"
+        );
     }
 
     #[test]
