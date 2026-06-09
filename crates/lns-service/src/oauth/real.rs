@@ -43,19 +43,33 @@ struct TokenResp {
 }
 
 /// reqwest here is built without the `json` feature, so bodies are read as bytes and parsed with serde_json (the crate-wide pattern).
-async fn post_form_json<T: DeserializeOwned>(url: &str, form: &[(&str, &str)]) -> Result<T> {
-    let bytes = reqwest::Client::new()
+async fn post_form_bytes(
+    url: &str,
+    form: &[(&str, &str)],
+) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+    let resp = reqwest::Client::new()
         .post(url)
         .header("accept", "application/json")
         .form(form)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let bytes = resp
         .bytes()
         .await
         .with_context(|| format!("reading body from {url}"))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing JSON from {url}"))
+    Ok((status, bytes.to_vec()))
+}
+
+fn parse_json<T: DeserializeOwned>(
+    url: &str,
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> Result<T> {
+    serde_json::from_slice(bytes)
+        .with_context(|| format!("parsing response from {url} (HTTP {status})"))
 }
 
 impl DeviceFlow for RealDeviceFlow {
@@ -65,11 +79,19 @@ impl DeviceFlow for RealDeviceFlow {
     ) -> BoxFuture<'a, Result<DeviceCode>> {
         Box::pin(async move {
             let scope = cfg.scopes.join(" ");
-            let d: DeviceCodeResp = post_form_json(
+            let (status, bytes) = post_form_bytes(
                 &cfg.device_authorization_endpoint,
                 &[("client_id", cfg.client_id.as_str()), ("scope", &scope)],
             )
             .await?;
+            if !status.is_success() {
+                bail!(
+                    "device authorization endpoint {} returned HTTP {status}: {}",
+                    cfg.device_authorization_endpoint,
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            let d: DeviceCodeResp = parse_json(&cfg.device_authorization_endpoint, status, &bytes)?;
             Ok(DeviceCode {
                 device_code: d.device_code,
                 user_code: d.user_code,
@@ -86,7 +108,7 @@ impl DeviceFlow for RealDeviceFlow {
         device_code: &'a str,
     ) -> BoxFuture<'a, Result<PollOutcome>> {
         Box::pin(async move {
-            let t: TokenResp = post_form_json(
+            let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
                 &[
                     ("client_id", cfg.client_id.as_str()),
@@ -95,6 +117,7 @@ impl DeviceFlow for RealDeviceFlow {
                 ],
             )
             .await?;
+            let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
             if let Some(access_token) = t.access_token {
                 return Ok(PollOutcome::Token(TokenSet {
                     access_token,
@@ -121,7 +144,7 @@ impl DeviceFlow for RealDeviceFlow {
         refresh_token: &'a str,
     ) -> BoxFuture<'a, Result<TokenSet>> {
         Box::pin(async move {
-            let t: TokenResp = post_form_json(
+            let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
                 &[
                     ("client_id", cfg.client_id.as_str()),
@@ -130,6 +153,7 @@ impl DeviceFlow for RealDeviceFlow {
                 ],
             )
             .await?;
+            let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
             match t.access_token {
                 Some(access_token) => Ok(TokenSet {
                     access_token,
