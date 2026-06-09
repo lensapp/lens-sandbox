@@ -289,6 +289,7 @@ async fn start_credential_subsystem(
     connectable_ids: HashSet<String>,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
+    oauth_display_names: HashMap<String, String>,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = default_credentials_path();
@@ -334,7 +335,8 @@ async fn start_credential_subsystem(
             oauth_configs,
             Arc::new(crate::oauth::RealDeviceFlow),
             Arc::new(crate::oauth::RealClock),
-        ),
+        )
+        .with_oauth_display_names(oauth_display_names),
     );
 
     tokio::spawn(credential_delivery_loop(
@@ -420,6 +422,11 @@ pub(super) async fn start(
         .chain(connectable.oauth_configs.iter())
         .map(|(id, auth)| (id.clone(), crate::oauth::OauthConfig::from(auth)))
         .collect();
+    let oauth_display_names: HashMap<String, String> = catalog
+        .iter()
+        .filter(|i| i.oauth.is_some())
+        .map(|i| (i.id.clone(), i.display_name().to_string()))
+        .collect();
     let (credential_session, credential_watcher) = start_credential_subsystem(
         session.clone(),
         credential_frame_tx,
@@ -427,6 +434,7 @@ pub(super) async fn start(
         connectable_ids,
         connectable_routes,
         oauth_configs,
+        oauth_display_names,
     )
     .await?;
 
@@ -651,6 +659,7 @@ mod tests {
         Catalog {
             integrations: vec![Integration {
                 id: "acme".into(),
+                name: None,
                 auth_kind: AuthKind::Credential,
                 routes: Vec::new(),
                 credential: Some(CredentialAuth {

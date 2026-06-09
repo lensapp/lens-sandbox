@@ -10,7 +10,7 @@ use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::approval_flow::window::{self, CredentialCardPrompt, Snapshot, WindowState};
+use crate::approval_flow::window::{self, CredentialCardPrompt, SignInCard, Snapshot, WindowState};
 use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
@@ -182,6 +182,14 @@ impl eframe::App for TrayApp {
                 self.window_state.dismiss_first_inform();
                 ui.ctx().request_repaint();
             }
+            Some(CardAction::OpenBrowser { url }) => {
+                crate::browser::open(&url);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::CancelSignIn { credential_id }) => {
+                self.window_state.cancel_sign_in(&credential_id);
+                ui.ctx().request_repaint();
+            }
             None => {}
         }
     }
@@ -202,6 +210,12 @@ enum CardAction {
         request: CredentialDecisionRequest,
     },
     DismissInform,
+    OpenBrowser {
+        url: String,
+    },
+    CancelSignIn {
+        credential_id: String,
+    },
 }
 
 fn render_card(
@@ -213,6 +227,7 @@ fn render_card(
 
     if snapshot.pending.is_empty()
         && snapshot.pending_credentials.is_empty()
+        && snapshot.sign_ins.is_empty()
         && snapshot.informs.is_empty()
     {
         return None;
@@ -231,6 +246,10 @@ fn render_card(
             // Network cards take precedence over credential cards when both are pending (S8).
             if let Some(prompt) = snapshot.pending.first() {
                 return render_network_card(ui, prompt, snapshot.pending.len());
+            }
+            // An in-flight device sign-in is the live action the user must finish next.
+            if let Some(card) = snapshot.sign_ins.first() {
+                return render_sign_in_card(ui, card, snapshot.sign_ins.len());
             }
             if let Some(prompt) = snapshot.pending_credentials.first() {
                 let input = credential_inputs.entry(prompt.id.clone()).or_default();
@@ -336,6 +355,10 @@ fn render_credential_card(
 
     let id = prompt.id.clone();
 
+    if let Some(display_name) = &prompt.oauth_display_name {
+        return render_oauth_consent_card(ui, &id, display_name, pending_count);
+    }
+
     render_card_header(ui, "CREDENTIAL NEEDED", pending_count);
 
     ui.add_space(6.0);
@@ -415,6 +438,108 @@ fn render_credential_card(
     });
 
     chosen.map(|request| CardAction::DecideCredential { id, request })
+}
+
+fn render_oauth_consent_card(
+    ui: &mut egui::Ui,
+    id: &str,
+    display_name: &str,
+    pending_count: usize,
+) -> Option<CardAction> {
+    use egui::RichText;
+
+    render_card_header(ui, "CONNECT", pending_count);
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!("Connect to {display_name}?"))
+            .size(22.0)
+            .strong()
+            .color(window::TEXT_ACCENT),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(format!(
+            "A workload wants to use your {display_name} access."
+        ))
+        .size(12.0)
+        .color(window::TEXT_MUTED),
+    );
+
+    ui.add_space(18.0);
+    ui.add(egui::Separator::default().spacing(0.0));
+    ui.add_space(16.0);
+
+    let mut chosen: Option<CredentialDecisionRequest> = None;
+    ui.horizontal(|ui| {
+        if primary_button(ui, "Connect").clicked() {
+            chosen = Some(CredentialDecisionRequest::Allow(
+                CredentialEntry::HostDetect,
+            ));
+        }
+        ui.add_space(BTN_GAP);
+        if deny_button(ui, "Deny").clicked() {
+            chosen = Some(CredentialDecisionRequest::Deny);
+        }
+    });
+
+    chosen.map(|request| CardAction::DecideCredential {
+        id: id.to_string(),
+        request,
+    })
+}
+
+fn render_sign_in_card(
+    ui: &mut egui::Ui,
+    card: &SignInCard,
+    pending_count: usize,
+) -> Option<CardAction> {
+    use egui::RichText;
+
+    render_card_header(ui, "CONNECT", pending_count);
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!("Connect to {}", card.display_name))
+            .size(22.0)
+            .strong()
+            .color(window::TEXT_ACCENT),
+    );
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Enter this code on the page that opens:")
+            .size(12.0)
+            .color(window::TEXT_MUTED),
+    );
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(&card.user_code)
+            .size(28.0)
+            .strong()
+            .monospace()
+            .color(window::TEXT_ACCENT),
+    );
+
+    ui.add_space(18.0);
+    ui.add(egui::Separator::default().spacing(0.0));
+    ui.add_space(16.0);
+
+    let mut action: Option<CardAction> = None;
+    ui.horizontal(|ui| {
+        if primary_button(ui, &format!("Open {}", card.display_name)).clicked() {
+            action = Some(CardAction::OpenBrowser {
+                url: card.verification_uri.clone(),
+            });
+        }
+        ui.add_space(BTN_GAP);
+        if deny_button(ui, "Cancel").clicked() {
+            action = Some(CardAction::CancelSignIn {
+                credential_id: card.credential_id.clone(),
+            });
+        }
+    });
+
+    action
 }
 
 fn render_card_header(ui: &mut egui::Ui, label: &str, pending_count: usize) {
@@ -563,6 +688,7 @@ mod tests {
             credential_id: "cred".to_string(),
             action: "read".to_string(),
             host_value_available: false,
+            oauth_display_name: None,
         }
     }
 
@@ -571,6 +697,7 @@ mod tests {
         let snapshot = Snapshot {
             pending: Vec::new(),
             pending_credentials: vec![credential_prompt("keep")],
+            sign_ins: Vec::new(),
             informs: Vec::new(),
         };
         let mut inputs = HashMap::new();

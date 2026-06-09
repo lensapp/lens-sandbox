@@ -125,6 +125,7 @@ mod tests {
     fn cred_integration(id: &str, env_var: &str, domain: &str) -> Integration {
         Integration {
             id: id.into(),
+            name: None,
             auth_kind: AuthKind::Credential,
             routes: vec![IntegrationRoute {
                 match_pattern: domain.into(),
@@ -202,6 +203,7 @@ mod tests {
     fn oauth_integration(id: &str, env_var: &str, domain: &str) -> Integration {
         Integration {
             id: id.into(),
+            name: None,
             auth_kind: AuthKind::Oauth,
             routes: vec![IntegrationRoute {
                 match_pattern: domain.into(),

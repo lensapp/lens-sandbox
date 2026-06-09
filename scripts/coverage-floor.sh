@@ -47,6 +47,7 @@ crates/lns-service/src/composefs/vendor/                 vendored upstream compo
 crates/lns-service/build.rs                              host cross-build glue (parses kernels.toml)
 
 # Production-wiring adapters — thin pass-throughs; if logic is added, write a unit test and drop the entry.
+crates/lns-service/src/browser.rs                        process-spawn leaf (`open`/`xdg-open`); only caller is the tray's sign-in card (itself IGNORES'd GUI). Pinned by manual `lns integration connect github_oauth` smoke.
 crates/lns-service/src/kernel/real.rs                    production wiring over reqwest + tokio::fs; pinned by wiremock tests in kernel.rs
 crates/lns-service/src/kernel/traits.rs                  trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/image/real.rs                     production wiring over oci_client::Client + linux/host-arch resolver; pinned by fake-Registry tests in image/mod.rs

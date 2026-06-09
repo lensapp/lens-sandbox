@@ -24,12 +24,13 @@ integrations:
         - kind: bearer_header
           domain: huggingface.co
   - id: github_oauth
+    name: GitHub
     authKind: oauth
     routes:
       - match: api.github.com
       - match: github.com
     oauth:
-      clientId: Iv1.LNSPLACEHOLDER0
+      clientId: 8211c9e2ce69b44ace79
       scopes:
         - repo
         - read:org
