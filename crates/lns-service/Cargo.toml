@@ -119,6 +119,9 @@ dispatch2             = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# Behaviours rig fakes implement the oauth DeviceFlow port (BoxFuture, anyhow::Result).
+anyhow = "1"
+futures-util = "0.3"
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `#[serial]` for tests that mutate process-wide env state. Without
 # serialization, concurrent set_var / remove_var races make env-driven

@@ -54,10 +54,6 @@ pub enum Command {
     Credential(CredentialArgs),
     #[command(about = "Manage the credential-integration catalog (connectable services).")]
     Integration(IntegrationArgs),
-    #[command(about = "Connect an integration to this directory's policy.")]
-    Connect(ConnectArgs),
-    #[command(about = "Disconnect an integration from this directory's policy.")]
-    Disconnect(DisconnectArgs),
 }
 
 #[derive(clap::Args)]
@@ -74,6 +70,12 @@ pub enum IntegrationCommand {
     List,
     #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
     Remove(IntegrationRemoveArgs),
+    #[command(
+        about = "Connect an integration to this directory's policy (oauth integrations sign in)."
+    )]
+    Connect(ConnectArgs),
+    #[command(about = "Disconnect an integration from this directory's policy.")]
+    Disconnect(DisconnectArgs),
 }
 
 #[derive(clap::Args)]

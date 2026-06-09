@@ -373,6 +373,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn capturing_store_load_is_empty() {
+        // refresh_due_entries operates on the passed-in state and never reloads, so the fixture store's `load` is pinned directly.
+        assert!(CapturingStore::new().load().unwrap().is_empty());
+    }
+
     fn oauth_entry(access: &str, refresh: &str, expires_at: u64) -> CredentialEntry {
         CredentialEntry::Oauth {
             access_token: access.into(),

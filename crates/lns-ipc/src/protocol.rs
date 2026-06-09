@@ -142,13 +142,11 @@ pub struct VolumeMount {
 
 impl VolumeMount {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let (body, read_only) = if let Some(b) = spec.strip_suffix(":ro") {
-            (b, true)
-        } else if let Some(b) = spec.strip_suffix(":rw") {
-            (b, false)
-        } else {
-            (spec, false)
-        };
+        let read_only = spec.ends_with(":ro");
+        let body = spec
+            .strip_suffix(":ro")
+            .or_else(|| spec.strip_suffix(":rw"))
+            .unwrap_or(spec);
         let (name, target) = body
             .split_once(':')
             .ok_or_else(|| format!("invalid volume {spec:?}: expected name:/path[:ro]"))?;
@@ -192,12 +190,12 @@ pub fn validate_volume_name(name: &str) -> Result<(), String> {
     if name == "." || name == ".." {
         return Err(format!("invalid volume name {name:?}: reserved"));
     }
-    if let Some(bad) = name.chars().find(|c| !name_char_allowed(*c)) {
-        return Err(format!(
+    match name.chars().find(|c| !name_char_allowed(*c)) {
+        Some(bad) => Err(format!(
             "invalid volume name {name:?}: character {bad:?} not allowed"
-        ));
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn name_char_allowed(c: char) -> bool {
