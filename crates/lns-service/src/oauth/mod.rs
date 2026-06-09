@@ -3,11 +3,12 @@
 mod real;
 pub mod traits;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::credential_flow::store::CredentialEntry;
+use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 pub use real::{RealClock, RealDeviceFlow};
 pub use traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
 
@@ -73,6 +74,36 @@ pub async fn refresh_if_due(
     }
     let token = flow.refresh(cfg, refresh_token).await?;
     Ok(Some(entry_from_token(clock, &token)))
+}
+
+/// Refreshes every due oauth grant in `state` (persisting through `store` if any changed) before a run's session begins serving; a grant that can no longer be refreshed is left in place for the next held request to re-prompt (scenario C).
+pub async fn refresh_due_entries(
+    state: &mut CredentialStateFile,
+    oauth_configs: &HashMap<String, OauthConfig>,
+    flow: &dyn DeviceFlow,
+    clock: &dyn Clock,
+    store: &dyn CredentialStore,
+    skew_secs: u64,
+) {
+    let mut changed = false;
+    for (id, cfg) in oauth_configs {
+        let Some(entry) = state.get(id).cloned() else {
+            continue;
+        };
+        match refresh_if_due(flow, clock, cfg, &entry, skew_secs).await {
+            Ok(Some(refreshed)) => {
+                state.insert(id.clone(), refreshed);
+                changed = true;
+            }
+            Ok(None) => {}
+            Err(e) => crate::log::warn!(
+                "oauth refresh for {id} failed ({e:#}); leaving the stale grant for re-sign-in on next use"
+            ),
+        }
+    }
+    if changed && let Err(e) = store.save(state) {
+        crate::log::warn!("persisting refreshed oauth tokens failed: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +335,159 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid_grant"), "got: {err}");
+    }
+
+    struct CapturingStore {
+        saved: Mutex<Vec<CredentialStateFile>>,
+        fail: bool,
+    }
+    impl CapturingStore {
+        fn new() -> Self {
+            Self {
+                saved: Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                saved: Mutex::new(Vec::new()),
+                fail: true,
+            }
+        }
+    }
+    impl CredentialStore for CapturingStore {
+        fn load(&self) -> std::io::Result<CredentialStateFile> {
+            Ok(CredentialStateFile::new())
+        }
+        fn save(&self, state: &CredentialStateFile) -> std::io::Result<()> {
+            if self.fail {
+                return Err(std::io::Error::other("simulated write failure"));
+            }
+            self.saved.lock().unwrap().push(state.clone());
+            Ok(())
+        }
+    }
+
+    fn oauth_entry(access: &str, refresh: &str, expires_at: u64) -> CredentialEntry {
+        CredentialEntry::Oauth {
+            access_token: access.into(),
+            refresh_token: refresh.into(),
+            expires_at,
+        }
+    }
+
+    fn configs_for(id: &str) -> HashMap<String, OauthConfig> {
+        HashMap::from([(id.to_string(), sample_cfg())])
+    }
+
+    #[tokio::test]
+    async fn refresh_due_entries_renews_a_due_grant_and_persists_once() {
+        let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
+        let store = CapturingStore::new();
+        let mut state = CredentialStateFile::new();
+        state.insert("github_oauth".into(), oauth_entry("expired", "old", 0));
+        refresh_due_entries(
+            &mut state,
+            &configs_for("github_oauth"),
+            &flow,
+            &FakeClock(1000),
+            &store,
+            60,
+        )
+        .await;
+        assert_eq!(
+            state.get("github_oauth"),
+            Some(&oauth_entry("gho_access", "ghr_refresh", 1000 + 3600))
+        );
+        assert_eq!(
+            store.saved.lock().unwrap().len(),
+            1,
+            "a changed state is persisted exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_due_entries_leaves_a_fresh_grant_untouched_without_persisting() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let store = CapturingStore::new();
+        let mut state = CredentialStateFile::new();
+        state.insert("github_oauth".into(), oauth_entry("good", "r", 99_999));
+        refresh_due_entries(
+            &mut state,
+            &configs_for("github_oauth"),
+            &flow,
+            &FakeClock(1000),
+            &store,
+            60,
+        )
+        .await;
+        assert!(
+            store.saved.lock().unwrap().is_empty(),
+            "nothing due means nothing written"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_due_entries_keeps_an_unrefreshable_grant_in_place() {
+        let flow = FakeDeviceFlow::refreshing(Err(anyhow!("invalid_grant")));
+        let store = CapturingStore::new();
+        let stale = oauth_entry("expired", "revoked", 0);
+        let mut state = CredentialStateFile::new();
+        state.insert("github_oauth".into(), stale.clone());
+        refresh_due_entries(
+            &mut state,
+            &configs_for("github_oauth"),
+            &flow,
+            &FakeClock(1000),
+            &store,
+            60,
+        )
+        .await;
+        assert_eq!(
+            state.get("github_oauth"),
+            Some(&stale),
+            "a failed refresh leaves the grant for the next held request to re-prompt"
+        );
+        assert!(store.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_due_entries_ignores_a_config_with_no_stored_entry() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let store = CapturingStore::new();
+        let mut state = CredentialStateFile::new();
+        refresh_due_entries(
+            &mut state,
+            &configs_for("github_oauth"),
+            &flow,
+            &FakeClock(1000),
+            &store,
+            60,
+        )
+        .await;
+        assert!(state.is_empty());
+        assert!(store.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_due_entries_updates_memory_even_when_the_persist_write_fails() {
+        let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
+        let store = CapturingStore::failing();
+        let mut state = CredentialStateFile::new();
+        state.insert("github_oauth".into(), oauth_entry("expired", "old", 0));
+        refresh_due_entries(
+            &mut state,
+            &configs_for("github_oauth"),
+            &flow,
+            &FakeClock(1000),
+            &store,
+            60,
+        )
+        .await;
+        assert_eq!(
+            state.get("github_oauth"),
+            Some(&oauth_entry("gho_access", "ghr_refresh", 1000 + 3600)),
+            "the refreshed token is live in memory even if the disk write failed"
+        );
     }
 }

@@ -269,19 +269,33 @@ type CredentialSubsystem = (
     crate::credential_flow::watcher::CredentialWatcher,
 );
 
-fn start_credential_subsystem(
+/// A device-flow access token within this many seconds of expiry is refreshed at run start rather than served stale.
+const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
+
+async fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
     connectable_ids: HashSet<String>,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
+    oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = default_credentials_path();
     let credential_store: Arc<dyn CredentialStore> =
         Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
-    let initial_credential_state =
+    let mut initial_credential_state =
         load_credentials_or_warn(credential_store.as_ref(), &credentials_path);
+    // Renew any oauth grant that expired since last use before the session arms it (the dominant case; a mid-run expiry falls back to the held-request re-prompt).
+    crate::oauth::refresh_due_entries(
+        &mut initial_credential_state,
+        &oauth_configs,
+        &crate::oauth::RealDeviceFlow,
+        &crate::oauth::RealClock,
+        credential_store.as_ref(),
+        OAUTH_REFRESH_SKEW_SECS,
+    )
+    .await;
 
     let (credential_decision_tx, credential_decision_rx) = tokio::sync::mpsc::unbounded_channel();
     let credential_notifier = Arc::new(build_credential_notifier(
@@ -385,13 +399,21 @@ pub(super) async fn start(
     let watcher = PolicyWatcher::spawn(policy_path.to_path_buf(), session.clone())
         .with_context(|| format!("watching policy {}", policy_path.display()))?;
 
+    let oauth_configs: HashMap<String, crate::oauth::OauthConfig> = applied
+        .oauth_configs
+        .iter()
+        .chain(connectable.oauth_configs.iter())
+        .map(|(id, auth)| (id.clone(), crate::oauth::OauthConfig::from(auth)))
+        .collect();
     let (credential_session, credential_watcher) = start_credential_subsystem(
         session.clone(),
         credential_frame_tx,
         custom_providers,
         connectable_ids,
         connectable_routes,
-    )?;
+        oauth_configs,
+    )
+    .await?;
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(run_id, session, credential_session, frame_rx, user_env)?;
