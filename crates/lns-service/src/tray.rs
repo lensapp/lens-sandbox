@@ -18,9 +18,16 @@ use lns_policy::integrations::TokenFallback;
 
 const WINDOW_WIDTH: f32 = 460.0;
 const WINDOW_HEIGHT: f32 = 300.0;
-/// Used when a token-fallback field is revealed, which adds an input, a help link, and a Save button below the primary action — taller than the standard card.
-const WINDOW_HEIGHT_EXPANDED: f32 = 460.0;
 const SCREEN_EDGE_MARGIN: f32 = 20.0;
+
+const MIN_WINDOW_HEIGHT: f32 = 140.0;
+const FALLBACK_MAX_HEIGHT: f32 = 720.0;
+const INFORM_ITEM_HEIGHT: f32 = 56.0;
+const CARD_ITEM_HEIGHT: f32 = 250.0;
+/// Added per card whose token-fallback field is revealed: an input, a help link, and a Save button below the primary action.
+const TOKEN_REVEAL_EXTRA: f32 = 150.0;
+const STACK_ITEM_GAP: f32 = 14.0;
+const STACK_CHROME: f32 = 60.0;
 
 pub fn run_tray(
     shutdown: Arc<Shutdown>,
@@ -71,7 +78,7 @@ struct TrayApp {
     _tray: tray_icon::TrayIcon,
     last_visible: bool,
     positioned: bool,
-    /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_card`] stays immutable.
+    /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
     credential_inputs: HashMap<String, String>,
     /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
@@ -147,14 +154,14 @@ impl TrayApp {
             self.positioned = true;
         }
 
-        let should_show = self.window_state.pending_count() > 0
-            || !self.window_state.snapshot().informs.is_empty();
+        let items = stack_items(&self.window_state.snapshot());
+        let should_show = !items.is_empty();
         match visibility_transition(should_show, self.last_visible) {
             VisibilityTransition::Show => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its card.
+                // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its cards.
                 ctx.request_repaint();
                 self.last_visible = true;
             }
@@ -166,12 +173,10 @@ impl TrayApp {
             VisibilityTransition::Unchanged => {}
         }
 
-        let target = if self.token_drafts.values().any(|d| d.revealed) {
-            WINDOW_HEIGHT_EXPANDED
-        } else {
-            WINDOW_HEIGHT
-        };
-        if self.current_height != target {
+        let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
+        let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
+        let target = target_height(&items, revealed, monitor_height);
+        if (self.current_height - target).abs() > 0.5 {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 WINDOW_WIDTH,
                 target,
@@ -199,7 +204,7 @@ impl eframe::App for TrayApp {
         prune_credential_inputs(&mut self.credential_inputs, &snapshot);
         prune_token_drafts(&mut self.token_drafts, &snapshot);
 
-        match render_card(
+        match render_stack(
             ui,
             &snapshot,
             &mut self.credential_inputs,
@@ -214,8 +219,8 @@ impl eframe::App for TrayApp {
                 self.window_state.decide_credential(&id, request);
                 ui.ctx().request_repaint();
             }
-            Some(CardAction::DismissInform) => {
-                self.window_state.dismiss_first_inform();
+            Some(CardAction::DismissInform { index }) => {
+                self.window_state.dismiss_inform(index);
                 ui.ctx().request_repaint();
             }
             Some(CardAction::OpenBrowser { url }) => {
@@ -264,7 +269,9 @@ enum CardAction {
         id: String,
         request: CredentialDecisionRequest,
     },
-    DismissInform,
+    DismissInform {
+        index: usize,
+    },
     OpenBrowser {
         url: String,
     },
@@ -293,7 +300,47 @@ enum TokenFallbackEvent {
     OpenHelp(String),
 }
 
-fn render_card(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackItem {
+    Inform(usize),
+    Network(usize),
+    SignIn(usize),
+    Credential(usize),
+}
+
+/// Every pending entry, in the order it stacks down the window: passive informs on top, then network/connect cards, in-flight sign-ins, and credential prompts. Returning all of them — not just the first of each — is what keeps concurrent notifications from one service hiding another's.
+fn stack_items(snapshot: &Snapshot) -> Vec<StackItem> {
+    let mut items = Vec::new();
+    items.extend((0..snapshot.informs.len()).map(StackItem::Inform));
+    items.extend((0..snapshot.pending.len()).map(StackItem::Network));
+    items.extend((0..snapshot.sign_ins.len()).map(StackItem::SignIn));
+    items.extend((0..snapshot.pending_credentials.len()).map(StackItem::Credential));
+    items
+}
+
+fn item_height(item: &StackItem) -> f32 {
+    match item {
+        StackItem::Inform(_) => INFORM_ITEM_HEIGHT,
+        _ => CARD_ITEM_HEIGHT,
+    }
+}
+
+/// Window height that fits the whole stack, capped at the usable monitor height so a long stack scrolls inside the window rather than running off-screen.
+fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f32>) -> f32 {
+    if items.is_empty() {
+        return MIN_WINDOW_HEIGHT;
+    }
+    let content = items.iter().map(item_height).sum::<f32>()
+        + STACK_ITEM_GAP * (items.len() - 1) as f32
+        + revealed as f32 * TOKEN_REVEAL_EXTRA
+        + STACK_CHROME;
+    let cap = monitor_height
+        .map(|h| (h - 2.0 * SCREEN_EDGE_MARGIN).max(MIN_WINDOW_HEIGHT))
+        .unwrap_or(FALLBACK_MAX_HEIGHT);
+    content.clamp(MIN_WINDOW_HEIGHT, cap)
+}
+
+fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
@@ -301,11 +348,8 @@ fn render_card(
 ) -> Option<CardAction> {
     use egui::{CornerRadius, Frame, Margin, Stroke};
 
-    if snapshot.pending.is_empty()
-        && snapshot.pending_credentials.is_empty()
-        && snapshot.sign_ins.is_empty()
-        && snapshot.informs.is_empty()
-    {
+    let items = stack_items(snapshot);
+    if items.is_empty() {
         return None;
     }
 
@@ -316,49 +360,62 @@ fn render_card(
         .inner_margin(Margin::same(22))
         .outer_margin(Margin::same(8))
         .show(ui, |ui| {
-            if let Some(action) = render_inform_banner(ui, snapshot) {
-                return Some(action);
-            }
-            // Network cards take precedence over credential cards when both are pending (S8).
-            if let Some(prompt) = snapshot.pending.first() {
-                // An integration domain offers a connect before the bare allow/deny; declining falls back to the network card.
-                if let Some(display_name) = &prompt.offer {
-                    let draft = token_drafts.entry(prompt.id.clone()).or_default();
-                    return render_offer_card(
-                        ui,
-                        prompt,
-                        display_name,
-                        draft,
-                        snapshot.pending.len(),
-                    );
-                }
-                return render_network_card(ui, prompt, snapshot.pending.len());
-            }
-            // An in-flight device sign-in is the live action the user must finish next.
-            if let Some(card) = snapshot.sign_ins.first() {
-                let draft = token_drafts.entry(card.credential_id.clone()).or_default();
-                return render_sign_in_card(ui, card, draft, snapshot.sign_ins.len());
-            }
-            if let Some(prompt) = snapshot.pending_credentials.first() {
-                let input = credential_inputs.entry(prompt.id.clone()).or_default();
-                let draft = token_drafts.entry(prompt.id.clone()).or_default();
-                return render_credential_card(
-                    ui,
-                    prompt,
-                    input,
-                    draft,
-                    snapshot.pending_credentials.len(),
-                );
-            }
-            None
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut action = None;
+                    for (idx, item) in items.iter().enumerate() {
+                        if idx > 0 {
+                            ui.add_space(STACK_ITEM_GAP);
+                            ui.add(egui::Separator::default().spacing(0.0));
+                            ui.add_space(STACK_ITEM_GAP);
+                        }
+                        let fired =
+                            render_item(ui, item, snapshot, credential_inputs, token_drafts);
+                        action = action.or(fired);
+                    }
+                    action
+                })
+                .inner
         })
         .inner
 }
 
-fn render_inform_banner(ui: &mut egui::Ui, snapshot: &Snapshot) -> Option<CardAction> {
+fn render_item(
+    ui: &mut egui::Ui,
+    item: &StackItem,
+    snapshot: &Snapshot,
+    credential_inputs: &mut HashMap<String, String>,
+    token_drafts: &mut HashMap<String, TokenDraft>,
+) -> Option<CardAction> {
+    match *item {
+        StackItem::Inform(i) => render_inform_banner(ui, &snapshot.informs[i], i),
+        StackItem::Network(i) => {
+            let prompt = &snapshot.pending[i];
+            if let Some(display_name) = &prompt.offer {
+                let draft = token_drafts.entry(prompt.id.clone()).or_default();
+                render_offer_card(ui, prompt, display_name, draft)
+            } else {
+                render_network_card(ui, prompt)
+            }
+        }
+        StackItem::SignIn(i) => {
+            let card = &snapshot.sign_ins[i];
+            let draft = token_drafts.entry(card.credential_id.clone()).or_default();
+            render_sign_in_card(ui, card, draft)
+        }
+        StackItem::Credential(i) => {
+            let prompt = &snapshot.pending_credentials[i];
+            let input = credential_inputs.entry(prompt.id.clone()).or_default();
+            let draft = token_drafts.entry(prompt.id.clone()).or_default();
+            render_credential_card(ui, prompt, input, draft)
+        }
+    }
+}
+
+fn render_inform_banner(ui: &mut egui::Ui, msg: &str, index: usize) -> Option<CardAction> {
     use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke};
 
-    let msg = snapshot.informs.first()?;
     let banner = Frame::new()
         .fill(window::BG_TERTIARY)
         .stroke(Stroke::new(1.0, window::STATUS_WARNING))
@@ -373,24 +430,19 @@ fn render_inform_banner(ui: &mut egui::Ui, snapshot: &Snapshot) -> Option<CardAc
                 });
             });
         });
-    ui.add_space(14.0);
     if banner.response.interact(Sense::click()).clicked() {
-        Some(CardAction::DismissInform)
+        Some(CardAction::DismissInform { index })
     } else {
         None
     }
 }
 
-fn render_network_card(
-    ui: &mut egui::Ui,
-    prompt: &PendingPrompt,
-    pending_count: usize,
-) -> Option<CardAction> {
+fn render_network_card(ui: &mut egui::Ui, prompt: &PendingPrompt) -> Option<CardAction> {
     use egui::RichText;
 
     let id = prompt.id.clone();
 
-    render_card_header(ui, "APPROVAL NEEDED", pending_count);
+    render_card_header(ui, "APPROVAL NEEDED");
 
     ui.add_space(6.0);
     ui.label(
@@ -440,13 +492,12 @@ fn render_offer_card(
     prompt: &PendingPrompt,
     display_name: &str,
     draft: &mut TokenDraft,
-    pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
 
     let id = prompt.id.clone();
 
-    render_card_header(ui, "CONNECT", pending_count);
+    render_card_header(ui, "CONNECT");
 
     ui.add_space(6.0);
     ui.label(
@@ -498,17 +549,16 @@ fn render_credential_card(
     prompt: &CredentialCardPrompt,
     input: &mut String,
     draft: &mut TokenDraft,
-    pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
 
     let id = prompt.id.clone();
 
     if let Some(display_name) = &prompt.oauth_display_name {
-        return render_oauth_consent_card(ui, prompt, display_name, draft, pending_count);
+        return render_oauth_consent_card(ui, prompt, display_name, draft);
     }
 
-    render_card_header(ui, "CREDENTIAL NEEDED", pending_count);
+    render_card_header(ui, "CREDENTIAL NEEDED");
 
     ui.add_space(6.0);
     ui.label(
@@ -585,11 +635,10 @@ fn render_oauth_consent_card(
     prompt: &CredentialCardPrompt,
     display_name: &str,
     draft: &mut TokenDraft,
-    pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
 
-    render_card_header(ui, "CONNECT", pending_count);
+    render_card_header(ui, "CONNECT");
 
     ui.add_space(6.0);
     ui.label(
@@ -650,11 +699,10 @@ fn render_sign_in_card(
     ui: &mut egui::Ui,
     card: &SignInCard,
     draft: &mut TokenDraft,
-    pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
 
-    render_card_header(ui, "CONNECT", pending_count);
+    render_card_header(ui, "CONNECT");
 
     ui.add_space(6.0);
     ui.label(
@@ -766,26 +814,15 @@ fn render_token_fallback(
     event
 }
 
-fn render_card_header(ui: &mut egui::Ui, label: &str, pending_count: usize) {
-    use egui::{Align, Layout, RichText};
+fn render_card_header(ui: &mut egui::Ui, label: &str) {
+    use egui::RichText;
 
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(label)
-                .size(10.5)
-                .strong()
-                .color(window::ACCENT_GREEN),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if pending_count > 1 {
-                ui.label(
-                    RichText::new(format!("1 of {pending_count}"))
-                        .size(10.5)
-                        .color(window::TEXT_MUTED),
-                );
-            }
-        });
-    });
+    ui.label(
+        RichText::new(label)
+            .size(10.5)
+            .strong()
+            .color(window::ACCENT_GREEN),
+    );
 }
 
 fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
@@ -968,6 +1005,101 @@ mod tests {
             !inputs.contains_key("stale"),
             "stale buffer must be dropped"
         );
+    }
+
+    fn net_prompt(id: &str) -> PendingPrompt {
+        PendingPrompt {
+            id: id.to_string(),
+            host: "api.example.test".to_string(),
+            action: "CONNECT api.example.test:443".to_string(),
+            offer: None,
+            token_fallback: None,
+        }
+    }
+
+    fn sign_in(credential_id: &str) -> SignInCard {
+        SignInCard {
+            credential_id: credential_id.to_string(),
+            display_name: "Some Service".to_string(),
+            user_code: "WXYZ-1234".to_string(),
+            verification_uri: "https://some-oauth.example/device".to_string(),
+            token_fallback: None,
+        }
+    }
+
+    #[test]
+    fn stack_items_includes_every_pending_entry_so_none_is_hidden() {
+        let snapshot = Snapshot {
+            pending: vec![net_prompt("n1"), net_prompt("n2")],
+            pending_credentials: vec![credential_prompt("c1")],
+            sign_ins: vec![sign_in("s1")],
+            informs: vec!["one".into(), "two".into()],
+        };
+        assert_eq!(
+            stack_items(&snapshot),
+            vec![
+                StackItem::Inform(0),
+                StackItem::Inform(1),
+                StackItem::Network(0),
+                StackItem::Network(1),
+                StackItem::SignIn(0),
+                StackItem::Credential(0),
+            ],
+            "two concurrent services plus warnings all stack; nothing is dropped to a hidden queue"
+        );
+    }
+
+    #[test]
+    fn stack_items_is_empty_when_nothing_pends() {
+        let snapshot = Snapshot {
+            pending: Vec::new(),
+            pending_credentials: Vec::new(),
+            sign_ins: Vec::new(),
+            informs: Vec::new(),
+        };
+        assert!(stack_items(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn target_height_is_the_floor_when_the_stack_is_empty() {
+        assert_eq!(target_height(&[], 0, Some(1080.0)), MIN_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn target_height_grows_with_each_additional_card() {
+        let one = target_height(&[StackItem::Network(0)], 0, Some(2000.0));
+        let two = target_height(
+            &[StackItem::Network(0), StackItem::Credential(0)],
+            0,
+            Some(2000.0),
+        );
+        assert!(
+            two > one,
+            "a second concurrent card makes the window taller rather than hiding the first"
+        );
+    }
+
+    #[test]
+    fn target_height_adds_room_for_a_revealed_token_field() {
+        let collapsed = target_height(&[StackItem::Network(0)], 0, Some(2000.0));
+        let revealed = target_height(&[StackItem::Network(0)], 1, Some(2000.0));
+        assert!(revealed > collapsed);
+    }
+
+    #[test]
+    fn target_height_caps_a_long_stack_at_the_usable_monitor_height() {
+        let many: Vec<StackItem> = (0..40).map(StackItem::Network).collect();
+        assert_eq!(
+            target_height(&many, 0, Some(900.0)),
+            900.0 - 2.0 * SCREEN_EDGE_MARGIN,
+            "a long stack scrolls inside a screen-bounded window instead of running off-screen"
+        );
+    }
+
+    #[test]
+    fn target_height_falls_back_to_a_fixed_cap_without_a_known_monitor() {
+        let many: Vec<StackItem> = (0..40).map(StackItem::Network).collect();
+        assert_eq!(target_height(&many, 0, None), FALLBACK_MAX_HEIGHT);
     }
 
     #[test]
