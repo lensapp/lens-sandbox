@@ -197,12 +197,13 @@ jobs:
           URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
           echo "Fetching $URL (~670 MB)"
           curl -L --fail --output kata.tar.zst "$URL"
-          if [ -n "$BUNDLE_SHA" ]; then
-            echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
-            echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
-          else
-            echo "::warning::No kata_bundle_sha256 pinned for ${KATA_ARCH}; skipping bundle integrity check (kernel was pinned before bundle verification existed)."
+          if [ -z "$BUNDLE_SHA" ]; then
+            echo "::error::No kata_bundle_sha256 pinned for ${KATA_ARCH} in kernels.toml — refusing to process an unverified Kata bundle."
+            echo "::error::Re-run the bump via 'cargo run -p bump-kernel -- --kata-version <ver>' (it pins the bundle shas in-stream), or back-fill [current.kata_bundle_sha256] per runbooks/kernel-bump.md."
+            exit 1
           fi
+          echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
+          echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
           zstd -d kata.tar.zst -o kata.tar
 
       - name: Resolve kernel filename (auto-detect when pending)
@@ -441,12 +442,13 @@ jobs:
           set -euo pipefail
           URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${KATA_ARCH}.tar.zst"
           curl -L --fail --output kata.tar.zst "$URL"
-          if [ -n "$BUNDLE_SHA" ]; then
-            echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
-            echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
-          else
-            echo "::warning::No kata_bundle_sha256 pinned for ${KATA_ARCH}; skipping bundle integrity check (kernel was pinned before bundle verification existed)."
+          if [ -z "$BUNDLE_SHA" ]; then
+            echo "::error::No kata_bundle_sha256 pinned for ${KATA_ARCH} in kernels.toml — refusing to publish an unverified Kata bundle."
+            echo "::error::Back-fill [current.kata_bundle_sha256] for this pin per runbooks/kernel-bump.md, or re-run the bump via bump-kernel (it pins the bundle shas in-stream)."
+            exit 1
           fi
+          echo "${BUNDLE_SHA}  kata.tar.zst" | sha256sum -c -
+          echo "Bundle verified against pinned kata_bundle_sha256 (${KATA_ARCH})."
           zstd -d kata.tar.zst -o kata.tar
           tar -xf kata.tar "./opt/kata/share/kata-containers/${FILENAME}"
           ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"

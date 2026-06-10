@@ -92,8 +92,10 @@ overwrite-refusal guard). Then the `compute` job runs per-arch:
    contract).
 3. Downloads Kata's `kata-static-<tag>-<arch>.tar.zst` and verifies it
    against the `kata_bundle_sha256` you pinned in Step 1 before
-   extracting (a bundle pinned before this check existed is skipped
-   with a warning).
+   extracting. A missing pin is a hard failure (both compute and
+   publish): back-fill `[current.kata_bundle_sha256]` for the pin per
+   [Back-filling a legacy pin](#back-filling-a-legacy-kata_bundle_sha256)
+   before publishing.
 4. Resolves the kernel filename for the requested variant.
 5. Extracts, conditionally gunzips (aarch64 only), computes sha256.
 
@@ -318,6 +320,36 @@ manifest says. Possible causes:
 
 Investigate via `git log -p crates/lns-service/kernels.toml` and run
 `bump-kernel` again to reset.
+
+### CI: `No kata_bundle_sha256 pinned for <arch> in kernels.toml`
+
+The bundle-integrity check is mandatory on both the compute and
+publish jobs — a missing `[current.kata_bundle_sha256]` entry is a
+hard failure, not a skipped warning. A `bump-kernel`-driven bump
+always pins these, so this only fires for a legacy pin made before
+the check existed (or a hand-edited manifest). Back-fill it per the
+section below, then re-run.
+
+## Back-filling a legacy kata_bundle_sha256
+
+Pins made before bundle verification existed have no
+`[current.kata_bundle_sha256]` table and will now hard-fail any
+re-publish. To back-fill one in place without otherwise re-bumping:
+
+```sh
+KATA=$(cargo run -q -p bump-kernel -- show | sed -n 's/^kata_version=//p')
+for arch in arm64 amd64; do
+  url="https://github.com/kata-containers/kata-containers/releases/download/${KATA}/kata-static-${KATA}-${arch}.tar.zst"
+  printf '%s = "%s"\n' "$arch" \
+    "$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)"
+done
+```
+
+Add the two printed lines under a `[current.kata_bundle_sha256]` table
+in `crates/lns-service/kernels.toml` (same arch keys `arm64` / `amd64`
+the `bump` subcommand writes), open a PR, and let CI verify. Kata
+publishes no checksum of its own, so these are operator-computed from
+the upstream bytes — exactly what a real bump does in-stream.
 
 ## References
 
