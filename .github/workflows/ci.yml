@@ -68,7 +68,6 @@ jobs:
               - 'scripts/static-nft.Dockerfile'
               - 'scripts/build-static-nft.sh'
               - 'scripts/verify-static-nft.sh'
-              - 'crates/lns-service/build.rs'
 
       # On a pure label add/remove the diff is unchanged, so the heavy jobs
       # have nothing new to prove — force their gates off and let only the
@@ -326,8 +325,9 @@ jobs:
 
   # Re-derive the embedded static nft from sha-pinned source and prove the
   # committed vendor/static-nft/ blob is byte-identical to a fresh build, so a
-  # blob+sha-pin swap can't pass review-blind. Gated to the rare PRs that touch
-  # the blob, its Dockerfile/build script, or build.rs's pin.
+  # blob swap can't pass review-blind. Gated to the rare PRs that touch the
+  # blob or its pinned source (Dockerfile / build script); build.rs's own sha
+  # pin is validated against the blob by check-release-build.
   verify-static-nft:
     needs: changes
     if: needs.changes.outputs['static-nft'] == 'true'
