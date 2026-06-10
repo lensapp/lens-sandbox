@@ -105,9 +105,32 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
+        Request::RunLogs { run_id, follow } => handle_logs(stream, run_id, follow).await,
+        Request::AttachRun { run_id } => handle_attach(stream, run_id).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
+}
+
+async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyhow::Result<()> {
+    let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
+        let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
+        return Ok(());
+    };
+    let started = encode_frame(&Response::RunStarted { run_id })?;
+    stream.write_all(&started).await?;
+    crate::run_log::stream_to(&buffer, &mut stream, follow, 0).await
+}
+
+async fn handle_attach(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+    let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
+        let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
+        return Ok(());
+    };
+    let started = encode_frame(&Response::RunStarted { run_id })?;
+    stream.write_all(&started).await?;
+    let tail = buffer.tail_seq();
+    crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
 /// Drives an oauth integration's device sign-in host-side, streaming the verification prompt to the client and persisting the obtained token set for the next run to arm.
