@@ -133,6 +133,48 @@ fn record_frame(buffer: &RunLogBuffer, frame: &WireFrame) {
     }
 }
 
+pub async fn stream_to<W>(
+    buffer: &RunLogBuffer,
+    writer: &mut W,
+    follow: bool,
+    mut cursor: u64,
+) -> anyhow::Result<()>
+where
+    W: tokio::io::AsyncWriteExt + Unpin,
+{
+    let mut version = buffer.subscribe();
+    loop {
+        version.mark_unchanged();
+        let batch = buffer.read_from(cursor);
+        cursor = batch.next_seq;
+        for chunk in &batch.chunks {
+            let wire = match chunk.kind {
+                StreamKind::Stdout => WireFrame::Stdout(chunk.bytes.clone()),
+                StreamKind::Stderr => WireFrame::Stderr(chunk.bytes.clone()),
+            };
+            writer
+                .write_all(&lns_ipc::encode_wire_frame(&wire)?)
+                .await?;
+        }
+        if let Some(code) = batch.exit {
+            let exit = WireFrame::Json(Response::RunExit { code });
+            writer
+                .write_all(&lns_ipc::encode_wire_frame(&exit)?)
+                .await?;
+            return Ok(());
+        }
+        if !follow {
+            let end = WireFrame::Json(Response::Acknowledged);
+            writer.write_all(&lns_ipc::encode_wire_frame(&end)?).await?;
+            return Ok(());
+        }
+        version
+            .changed()
+            .await
+            .expect("version sender lives inside the borrowed buffer");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +356,108 @@ mod tests {
         tee_frames(in_rx, buf.clone(), out_tx).await;
 
         assert_eq!(buf.read_from(0).exit, Some(ABORTED_EXIT_CODE));
+    }
+
+    fn decode_frames(mut buf: &[u8]) -> Vec<WireFrame> {
+        let mut out = Vec::new();
+        while !buf.is_empty() {
+            out.push(lns_ipc::decode_wire_frame_sync(&mut buf).expect("decode wire frame"));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn stream_without_follow_dumps_buffered_output_and_ends_with_acknowledged() {
+        let buf = RunLogBuffer::new(1024);
+        buf.append(StreamKind::Stdout, b"hello ");
+        buf.append(StreamKind::Stderr, b"oops");
+
+        let mut sink: Vec<u8> = Vec::new();
+        stream_to(&buf, &mut sink, false, 0).await.unwrap();
+
+        let frames = decode_frames(&sink);
+        assert_eq!(frames.len(), 3);
+        assert!(matches!(&frames[0], WireFrame::Stdout(b) if b == b"hello "));
+        assert!(matches!(&frames[1], WireFrame::Stderr(b) if b == b"oops"));
+        assert!(matches!(frames[2], WireFrame::Json(Response::Acknowledged)));
+    }
+
+    #[tokio::test]
+    async fn stream_of_an_exited_buffer_ends_with_the_runs_exit_code() {
+        let buf = RunLogBuffer::new(1024);
+        buf.append(StreamKind::Stdout, b"bye");
+        buf.close(7);
+
+        let mut sink: Vec<u8> = Vec::new();
+        stream_to(&buf, &mut sink, false, 0).await.unwrap();
+
+        let frames = decode_frames(&sink);
+        assert!(matches!(
+            frames.last(),
+            Some(WireFrame::Json(Response::RunExit { code: 7 }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn follow_streams_chunks_appended_after_the_subscription() {
+        let buf = Arc::new(RunLogBuffer::new(1024));
+        buf.append(StreamKind::Stdout, b"early");
+
+        let (mut client, server) = tokio::io::duplex(8192);
+        let streamer = {
+            let buf = buf.clone();
+            tokio::spawn(async move {
+                let mut server = server;
+                stream_to(&buf, &mut server, true, 0).await
+            })
+        };
+
+        buf.append(StreamKind::Stdout, b"late");
+        buf.close(0);
+
+        streamer.await.unwrap().unwrap();
+
+        let mut received = Vec::new();
+        use tokio::io::AsyncReadExt;
+        client.read_to_end(&mut received).await.unwrap();
+        let frames = decode_frames(&received);
+        assert!(matches!(&frames[0], WireFrame::Stdout(b) if b == b"early"));
+        assert!(matches!(&frames[1], WireFrame::Stdout(b) if b == b"late"));
+        assert!(matches!(
+            frames.last(),
+            Some(WireFrame::Json(Response::RunExit { code: 0 }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn follow_from_the_tail_skips_history_the_way_attach_expects() {
+        let buf = RunLogBuffer::new(1024);
+        buf.append(StreamKind::Stdout, b"history");
+        let cursor = buf.tail_seq();
+        buf.append(StreamKind::Stdout, b"fresh");
+        buf.close(3);
+
+        let mut sink: Vec<u8> = Vec::new();
+        stream_to(&buf, &mut sink, true, cursor).await.unwrap();
+
+        let frames = decode_frames(&sink);
+        assert_eq!(frames.len(), 2, "history must not be replayed");
+        assert!(matches!(&frames[0], WireFrame::Stdout(b) if b == b"fresh"));
+        assert!(matches!(
+            frames[1],
+            WireFrame::Json(Response::RunExit { code: 3 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_a_write_failure() {
+        let buf = RunLogBuffer::new(1024);
+        buf.append(StreamKind::Stdout, vec![0u8; 1024].as_slice());
+
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        let err = stream_to(&buf, &mut server, false, 0).await;
+        assert!(err.is_err(), "closed peer must surface as an error");
     }
 
     #[tokio::test]
