@@ -189,20 +189,21 @@ impl ApprovalSession {
         }
     }
 
-    /// Connects an integration live: records it under `integrations:`, allows its routes, persists, and emits so a held request sees the routes (and, once the credential is valued, the injection) without a relaunch.
+    /// Connects an integration live: records the id under `integrations:` and persists only that, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
     pub fn connect_integration(&self, id: &str, routes: Vec<RouteRule>) {
-        let snapshot = {
+        let (to_persist, live_network) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             policy.connect(id);
+            let to_persist = policy.clone();
             policy.network.allowed_routes.extend(routes);
-            policy.clone()
+            (to_persist, policy.network.clone())
         };
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(snapshot.network.clone()),
+            network: Some(live_network),
             credentials,
         }));
-        if let Err(e) = self.store.save(&snapshot) {
+        if let Err(e) = self.store.save(&to_persist) {
             self.notifier.inform(&format!(
                 "integration connected in-memory but not persisted: {e}"
             ));
@@ -762,26 +763,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connect_integration_records_the_id_allows_routes_emits_and_persists() {
+    fn connect_integration_persists_only_the_id_but_emits_the_route_live() {
         let (s, _n, store, mut rx) = fixture();
         s.connect_integration("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
         let saves = store.saves.lock().unwrap();
         assert_eq!(saves.len(), 1, "the connection is persisted once");
         assert_eq!(saves[0].integrations, ["gitlab"]);
         assert!(
-            saves[0]
+            !saves[0]
                 .network
                 .allowed_routes
                 .iter()
                 .any(|r| r.match_pattern == "gitlab.com"),
-            "the integration's route is allowed"
+            "the route must not be baked into the file — boot re-derives it from the catalog, so persisting it would survive `disconnect`"
         );
         drop(saves);
         let v = serde_json::to_value(rx.try_recv().expect("policy frame")).unwrap();
         assert_eq!(v["type"], "policy");
         assert_eq!(
             v["network"]["allowedRoutes"][0]["match"], "gitlab.com",
-            "the live frame carries the route so a held request can proceed"
+            "the live frame still carries the route so a held request can proceed"
         );
     }
 
