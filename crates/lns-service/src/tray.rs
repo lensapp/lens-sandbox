@@ -552,16 +552,7 @@ fn render_credential_card(
         ui.add_space(BTN_GAP);
     }
 
-    ui.label(
-        RichText::new("Or enter a value")
-            .size(11.0)
-            .color(window::TEXT_MUTED),
-    );
-    ui.add_space(4.0);
-    let text_edit = egui::TextEdit::singleline(input)
-        .password(true)
-        .desired_width(BTN_WIDTH * 2.0 + BTN_GAP);
-    ui.add(text_edit);
+    secret_input(ui, input, "Enter a value");
     ui.add_space(BTN_GAP);
     ui.horizontal(|ui| {
         let submit_enabled = !input.trim().is_empty();
@@ -748,13 +739,7 @@ fn render_token_fallback(
     }
 
     ui.add_space(6.0);
-    ui.add(
-        egui::TextEdit::singleline(&mut draft.value)
-            .password(true)
-            .hint_text("Paste a token")
-            .margin(egui::Margin::symmetric(10, 9))
-            .desired_width(f32::INFINITY),
-    );
+    secret_input(ui, &mut draft.value, "Paste a token");
 
     let mut event = None;
     if let Some(help) = &fallback.help {
@@ -801,6 +786,16 @@ fn render_card_header(ui: &mut egui::Ui, label: &str, pending_count: usize) {
             }
         });
     });
+}
+
+fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .password(true)
+            .hint_text(hint)
+            .margin(egui::Margin::symmetric(10, 9))
+            .desired_width(f32::INFINITY),
+    )
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
