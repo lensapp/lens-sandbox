@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileMeta {
     pub size_bytes: u64,
+    pub allocated_bytes: u64,
     pub created_unix_secs: u64,
 }
 

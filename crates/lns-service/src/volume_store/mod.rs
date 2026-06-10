@@ -182,6 +182,7 @@ async fn info_for<F: Fs>(
     Ok(lns_ipc::VolumeInfo {
         name: name.to_string(),
         size_bytes: meta.size_bytes,
+        disk_bytes: meta.allocated_bytes,
         created: crate::time_fmt::rfc3339_from_unix(meta.created_unix_secs),
         in_use_by: registry.holder(name),
     })
@@ -274,7 +275,7 @@ pub async fn prune_with<F: Fs>(
         fs.remove_file(&image_path_in(store_root, &info.name))
             .await?;
         report.removed.push(info.name);
-        report.reclaimed_bytes += info.size_bytes;
+        report.reclaimed_bytes += info.disk_bytes;
     }
     Ok(report)
 }
@@ -306,12 +307,13 @@ mod tests {
     use std::io;
 
     const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
+    const FAKE_ALLOCATED_BYTES: u64 = 4 * 1024 * 1024;
 
     #[derive(Default)]
     struct FakeFs {
         existing: Mutex<HashSet<PathBuf>>,
         created: Mutex<Vec<PathBuf>>,
-        sizes: Mutex<HashMap<PathBuf, u64>>,
+        allocated: Mutex<HashMap<PathBuf, u64>>,
         fail_create: bool,
         fail_read_dir: bool,
         read_dir_missing: bool,
@@ -329,8 +331,11 @@ mod tests {
         fn created_images(&self) -> Vec<PathBuf> {
             self.created.lock().unwrap().clone()
         }
-        fn set_size(&self, p: &str, size: u64) {
-            self.sizes.lock().unwrap().insert(PathBuf::from(p), size);
+        fn set_allocated(&self, p: &str, bytes: u64) {
+            self.allocated
+                .lock()
+                .unwrap()
+                .insert(PathBuf::from(p), bytes);
         }
     }
 
@@ -366,9 +371,10 @@ mod tests {
             if self.fail_metadata {
                 return Err(io::Error::other("metadata boom"));
             }
-            let size = self.sizes.lock().unwrap().get(p).copied();
+            let allocated = self.allocated.lock().unwrap().get(p).copied();
             Ok(FileMeta {
-                size_bytes: size.unwrap_or(VOLUME_DEFAULT_SIZE_BYTES),
+                size_bytes: VOLUME_DEFAULT_SIZE_BYTES,
+                allocated_bytes: allocated.unwrap_or(FAKE_ALLOCATED_BYTES),
                 created_unix_secs: FAKE_CREATED_UNIX_SECS,
             })
         }
@@ -630,7 +636,7 @@ mod tests {
     async fn list_reports_size_created_and_holder() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
-        fs.set_size("/store/prism-data.img", 1024);
+        fs.set_allocated("/store/prism-data.img", 1024);
         let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
             .await
             .unwrap();
@@ -638,7 +644,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].size_bytes, 1024);
+        assert_eq!(got[0].size_bytes, VOLUME_DEFAULT_SIZE_BYTES);
+        assert_eq!(got[0].disk_bytes, 1024);
         assert_eq!(got[0].created, "2025-12-06T12:00:00Z");
         assert_eq!(got[0].in_use_by, Some(7));
     }
@@ -805,7 +812,7 @@ mod tests {
     async fn prune_skips_held_volumes_and_reports_reclaimed_bytes() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/held.img", "/store/idle.img"]);
-        fs.set_size("/store/idle.img", 2048);
+        fs.set_allocated("/store/idle.img", 2048);
         let _held = acquire_with(&fs, &registry, Path::new("/store"), "held", 7)
             .await
             .unwrap();
@@ -863,6 +870,7 @@ mod tests {
         assert_eq!(listed, vec![path.clone()]);
         let meta = real::RealFs.metadata(&path).await.unwrap();
         assert_eq!(meta.size_bytes, 10);
+        assert!(meta.allocated_bytes > 0);
         assert!(meta.created_unix_secs > 0);
         real::RealFs.remove_file(&path).await.unwrap();
         assert!(!real::RealFs.exists(&path).await);

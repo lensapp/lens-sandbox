@@ -144,7 +144,7 @@ fn render_volume_table<W: Write>(out: &mut W, rows: &[VolumeInfo]) -> std::io::R
         .map(|v| {
             (
                 v.name.clone(),
-                format_size(v.size_bytes),
+                format_size(v.disk_bytes),
                 crate::service::friendly_started(&v.created),
                 in_use_str(v.in_use_by),
             )
@@ -156,18 +156,18 @@ fn render_volume_table<W: Write>(out: &mut W, rows: &[VolumeInfo]) -> std::io::R
             .max(cells.iter().map(|c| pick(c).len()).max().unwrap_or(0))
     };
     let name_w = width("NAME", |c| &c.0);
-    let size_w = width("SIZE", |c| &c.1);
+    let disk_w = width("ON DISK", |c| &c.1);
     let created_w = width("CREATED", |c| &c.2);
 
     writeln!(
         out,
-        "{:<name_w$}  {:<size_w$}  {:<created_w$}  IN USE",
-        "NAME", "SIZE", "CREATED",
+        "{:<name_w$}  {:<disk_w$}  {:<created_w$}  IN USE",
+        "NAME", "ON DISK", "CREATED",
     )?;
-    for (name, size, created, in_use) in &cells {
+    for (name, disk, created, in_use) in &cells {
         writeln!(
             out,
-            "{name:<name_w$}  {size:<size_w$}  {created:<created_w$}  {in_use}",
+            "{name:<name_w$}  {disk:<disk_w$}  {created:<created_w$}  {in_use}",
         )?;
     }
     Ok(())
@@ -229,7 +229,8 @@ mod tests {
     fn volume(name: &str) -> VolumeInfo {
         VolumeInfo {
             name: name.to_string(),
-            size_bytes: 32 * 1024 * 1024,
+            size_bytes: 10 * 1024_u64.pow(3),
+            disk_bytes: 32 * 1024 * 1024,
             created: "2026-06-01T12:00:00Z".to_string(),
             in_use_by: None,
         }
@@ -303,7 +304,7 @@ mod tests {
         })]);
         let (code, out) = run_cmd(&VolumeCommand::Ls, &svc).await.unwrap();
         assert_eq!(code, 0);
-        for header in ["NAME", "SIZE", "CREATED", "IN USE"] {
+        for header in ["NAME", "ON DISK", "CREATED", "IN USE"] {
             assert!(out.contains(header), "missing {header} in {out:?}");
         }
     }
@@ -330,7 +331,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["name"], "prism-data");
-        assert_eq!(parsed["size_bytes"], 33_554_432);
+        assert_eq!(parsed["size_bytes"], 10_737_418_240_u64);
+        assert_eq!(parsed["disk_bytes"], 33_554_432);
     }
 
     #[test]

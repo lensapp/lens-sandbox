@@ -23,17 +23,18 @@ Feature: managing named volumes from the CLI
     Then the exit code is 2
     And the output contains "invalid volume name"
 
-  Scenario: listing volumes renders a table with size and holder
-    Given the service reports a volume "prism-data" of 33554432 bytes held by run 7
+  Scenario: listing volumes renders a table with disk usage and holder
+    Given the service reports a volume "prism-data" using 33554432 bytes on disk held by run 7
     When the user runs volume command "ls"
     Then the exit code is 0
     And the output contains "NAME"
+    And the output contains "ON DISK"
     And the output contains "prism-data"
     And the output contains "32 MiB"
     And the output contains "run #7"
 
   Scenario: listing volumes marks an unattached volume as idle
-    Given the service reports an idle volume "prism-data" of 33554432 bytes
+    Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
     When the user runs volume command "ls"
     Then the exit code is 0
     And the listed row for "prism-data" ends with "-"
@@ -44,10 +45,10 @@ Feature: managing named volumes from the CLI
     And the output contains "prism-data"
 
   Scenario: inspecting a volume prints its details as JSON
-    Given the service reports an idle volume "prism-data" of 33554432 bytes
+    Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
     When the user runs volume command "inspect prism-data"
     Then the exit code is 0
-    And the output is JSON describing the idle volume "prism-data" of 33554432 bytes
+    And the output is JSON describing the idle volume "prism-data" using 33554432 bytes on disk
 
   Scenario: removing an idle volume confirms it by name
     When the user runs volume command "rm prism-data"

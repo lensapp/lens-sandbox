@@ -6,6 +6,7 @@ use lns_service::vm::VolumeAttachment;
 use lns_service::volume_store::{FileMeta, Fs, LeaseRegistry, PruneReport, VolumeLease};
 
 pub const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
+pub const FAKE_ALLOCATED_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone)]
 pub struct TrackingFs {
@@ -56,6 +57,7 @@ impl Fs for TrackingFs {
         }
         Ok(FileMeta {
             size_bytes: lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES,
+            allocated_bytes: FAKE_ALLOCATED_BYTES,
             created_unix_secs: FAKE_CREATED_UNIX_SECS,
         })
     }
