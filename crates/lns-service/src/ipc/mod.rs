@@ -201,6 +201,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 message: format!("no active run with id {run_id}"),
             },
         },
+        Request::RunLogs { .. } => {
+            unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
+        }
+        Request::AttachRun { .. } => {
+            unreachable!(
+                "Request::AttachRun must be dispatched via handle_attach, not handle_request"
+            )
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -1133,6 +1141,25 @@ mod tests {
             std::future::ready(Response::Acknowledged)
         };
         (sent, sender)
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Request::RunLogs must be dispatched via handle_logs")]
+    async fn run_logs_via_handle_request_panics() {
+        let _ = handle_request(
+            &Request::RunLogs {
+                run_id: 1,
+                follow: false,
+            },
+            Instant::now(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Request::AttachRun must be dispatched via handle_attach")]
+    async fn attach_run_via_handle_request_panics() {
+        let _ = handle_request(&Request::AttachRun { run_id: 1 }, Instant::now()).await;
     }
 
     #[tokio::test]

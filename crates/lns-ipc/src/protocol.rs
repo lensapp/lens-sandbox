@@ -19,6 +19,8 @@ pub enum Request {
     ListRuns,
     StopRun { run_id: u32, timeout_secs: u64 },
     InspectRun { run_id: u32 },
+    RunLogs { run_id: u32, follow: bool },
+    AttachRun { run_id: u32 },
     BeginIntegrationSignIn { id: String },
     ListVolumes,
     CreateVolume { name: String },
@@ -598,6 +600,24 @@ mod tests {
     #[test]
     fn inspect_run_survives_a_request_round_trip() {
         let req = Request::InspectRun { run_id: 3 };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_logs_survives_a_request_round_trip() {
+        for follow in [false, true] {
+            let req = Request::RunLogs { run_id: 3, follow };
+            let frame = crate::encode_frame(&req).unwrap();
+            let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, req);
+        }
+    }
+
+    #[test]
+    fn attach_run_survives_a_request_round_trip() {
+        let req = Request::AttachRun { run_id: 3 };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
