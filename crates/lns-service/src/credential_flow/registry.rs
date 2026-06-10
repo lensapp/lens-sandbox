@@ -218,6 +218,31 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
+    fn expand_credentials_for_wire_arms_oauth_with_the_access_token() {
+        let _g = EnvVarGuard::unset("GITHUB_TOKEN");
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "github".into(),
+            CredentialEntry::Oauth {
+                access_token: "gho_device".into(),
+                refresh_token: "ghr_refresh".into(),
+                expires_at: 0,
+            },
+        );
+        let creds = expand_credentials_for_wire(&state);
+        let github = creds.iter().find(|c| c.id == "github").unwrap();
+        assert!(
+            github.injections.iter().any(|i| matches!(
+                i,
+                CredentialInjection::Header { domain, value, .. }
+                    if domain == "api.github.com" && value == "token gho_device"
+            )),
+            "an oauth entry arms the injection with its device-flow access token"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
     fn expand_credentials_for_wire_resolves_host_detect_via_provider_detector() {
         let _g = EnvVarGuard::set("OPENAI_API_KEY", "sk-from-env");
         let mut state = CredentialStateFile::new();
