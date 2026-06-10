@@ -25,6 +25,19 @@ make dev    # debug build of lns + lns-service, skips cross-builds
 make test   # cargo test --workspace --exclude e2e-tests (uninstrumented)
 ```
 
+### Testing OAuth integrations locally
+
+The official OAuth app ids are baked into release binaries from CI and are deliberately absent from the source tree, so a local build ships an empty `clientId` and OAuth integrations fall back to a pasted personal access token — enough to exercise the connect/inject path without any setup.
+
+To test the live browser device flow, register your own throwaway GitHub OAuth app and point the build-time var at it before building:
+
+```bash
+export LNS_OAUTH_CLIENT_ID_GITHUB=<your-app-id>   # or a gitignored .envrc via direnv
+make dev
+```
+
+The build script re-bakes when this var changes, so a rebuild picks it up.
+
 ## The Verification Gate
 
 Run the full pre-push gate from the workspace root before opening a pull request:

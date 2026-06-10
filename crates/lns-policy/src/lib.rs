@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod credentials;
+mod env_subst;
 pub mod integrations;
 pub mod providers;
 #[cfg(test)]

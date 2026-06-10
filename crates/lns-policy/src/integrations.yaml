@@ -30,7 +30,7 @@ integrations:
       - match: api.github.com
       - match: github.com
     oauth:
-      clientId: 8211c9e2ce69b44ace79
+      clientId: "${LNS_OAUTH_CLIENT_ID_GITHUB}"
       scopes:
         - repo
         - read:org

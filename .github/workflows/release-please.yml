@@ -150,6 +150,10 @@ jobs:
       # dev-override branch that would ship a 0-byte placeholder.
       LNS_INIT_BIN: ""
       LNS_SESSION_BROKER_BIN: ""
+      # The GitHub OAuth app id (a public device-flow identifier, not a
+      # true secret) is baked into the official binary; fork builds ship
+      # without it and fall back to a pasted PAT.
+      LNS_OAUTH_CLIENT_ID_GITHUB: ${{ secrets.OAUTH_CLIENT_ID_GITHUB }}
       # build.rs already defaults to rust-lld; pinning here documents
       # intent and survives an org-level env override that picks a
       # nonexistent toolchain like `aarch64-linux-musl-gcc`.

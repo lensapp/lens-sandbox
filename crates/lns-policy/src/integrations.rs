@@ -163,8 +163,17 @@ impl Catalog {
     }
 }
 
-static BUNDLED: LazyLock<Vec<Integration>> =
-    LazyLock::new(|| parse_catalog(include_str!("integrations.yaml")).integrations);
+mod build_env {
+    include!(concat!(env!("OUT_DIR"), "/env_substitutions.rs"));
+}
+
+static BUNDLED: LazyLock<Vec<Integration>> = LazyLock::new(|| {
+    let resolved = crate::env_subst::apply_substitutions(
+        include_str!("integrations.yaml"),
+        build_env::ENV_SUBSTITUTIONS,
+    );
+    parse_catalog(&resolved).integrations
+});
 
 /// Panics on a malformed or inconsistent manifest; the shipped catalog is test-proven well-formed, so the production caller never hits those arms.
 fn parse_catalog(yaml_src: &str) -> Catalog {
@@ -722,6 +731,29 @@ mod tests {
                 .is_some_and(|h| h.starts_with("https://")),
             "the fallback should point at a token-creation URL, got: {:?}",
             fallback.help
+        );
+    }
+
+    #[test]
+    fn no_bundled_integration_commits_a_literal_oauth_client_id() {
+        let raw = include_str!("integrations.yaml");
+        for line in raw.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("clientId:") {
+                let value = rest.trim();
+                assert!(
+                    value.starts_with("\"${") && value.ends_with("}\""),
+                    "clientId must be a build-time env reference, never a committed literal: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_github_oauth_client_id_is_sourced_from_the_build_env() {
+        let raw = include_str!("integrations.yaml");
+        assert!(
+            raw.contains("clientId: \"${LNS_OAUTH_CLIENT_ID_GITHUB}\""),
+            "the github oauth client_id must come from the LNS_OAUTH_CLIENT_ID_GITHUB build var, not a committed literal"
         );
     }
 

@@ -16,6 +16,10 @@ bin/
 .vscode/
 .idea/
 
+# Per-developer environment (direnv; local build-time OAuth client ids)
+.envrc
+.env.local
+
 # Worktrees
 .claude/worktrees/
 
