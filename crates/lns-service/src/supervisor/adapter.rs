@@ -134,6 +134,10 @@ async fn decision_delivery_loop(
             RequestAction::ConnectIntegration => {
                 session.connect_offer(&delivery.id).await;
             }
+            // A pasted token connects the integration without the interactive sign-in.
+            RequestAction::UseToken { value } => {
+                session.connect_offer_with_token(&delivery.id, value).await;
+            }
         }
     }
 }
@@ -147,12 +151,20 @@ async fn credential_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        // Accepting an oauth prompt drives a device sign-in (async) instead of arming a static value.
+        // A pasted token is an Allow(Stored) — it arms the slot directly via record_decision; only the browser-consent Allow drives the device sign-in.
+        let pasted_token = matches!(
+            delivery.request,
+            crate::credential_flow::session::CredentialDecisionRequest::Allow(
+                crate::credential_flow::store::CredentialEntry::Stored { .. }
+            )
+        );
+        // Accepting an oauth prompt via the browser consent drives a device sign-in (async) instead of arming a static value.
         if session.is_oauth_prompt(&delivery.id)
             && matches!(
                 delivery.request,
                 crate::credential_flow::session::CredentialDecisionRequest::Allow(_)
             )
+            && !pasted_token
         {
             session.connect_oauth(&delivery.id).await;
         } else {
@@ -298,10 +310,15 @@ fn build_offerable(
                 .find(|i| &i.id == id)
                 .map(|i| i.display_name().to_string())
                 .unwrap_or_else(|| id.clone());
+            let token_fallback = catalog
+                .iter()
+                .find(|i| &i.id == id)
+                .and_then(|i| i.token_fallback.clone());
             crate::approval_flow::session::OfferableIntegration {
                 id: id.clone(),
                 display_name,
                 patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
+                token_fallback,
             }
         })
         .collect()
@@ -321,6 +338,18 @@ impl crate::approval_flow::session::IntegrationConnector for CredentialConnector
             }
         })
     }
+    fn connect_with_token<'a>(
+        &'a self,
+        id: &'a str,
+        value: String,
+    ) -> futures_util::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            match self.credential_session.upgrade() {
+                Some(cs) => cs.connect_integration_with_token(id, value),
+                None => false,
+            }
+        })
+    }
 }
 
 type CredentialSubsystem = (
@@ -331,14 +360,20 @@ type CredentialSubsystem = (
 /// A device-flow access token within this many seconds of expiry is refreshed at run start rather than served stale.
 const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
+/// The per-integration oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by integration id.
+struct OauthWiring {
+    configs: HashMap<String, crate::oauth::OauthConfig>,
+    display_names: HashMap<String, String>,
+    token_fallbacks: HashMap<String, lns_policy::integrations::TokenFallback>,
+}
+
 async fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
     connectable_ids: HashSet<String>,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
-    oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
-    oauth_display_names: HashMap<String, String>,
+    oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = default_credentials_path();
@@ -349,7 +384,7 @@ async fn start_credential_subsystem(
     // Renew any oauth grant that expired since last use before the session arms it (the dominant case; a mid-run expiry falls back to the held-request re-prompt).
     crate::oauth::refresh_due_entries(
         &mut initial_credential_state,
-        &oauth_configs,
+        &oauth.configs,
         &crate::oauth::RealDeviceFlow,
         &crate::oauth::RealClock,
         credential_store.as_ref(),
@@ -381,11 +416,12 @@ async fn start_credential_subsystem(
         .with_custom_providers(custom_providers)
         .with_connect_emitter(connectable_ids, connect_emitter)
         .with_oauth(
-            oauth_configs,
+            oauth.configs,
             Arc::new(crate::oauth::RealDeviceFlow),
             Arc::new(crate::oauth::RealClock),
         )
-        .with_oauth_display_names(oauth_display_names),
+        .with_oauth_display_names(oauth.display_names)
+        .with_token_fallbacks(oauth.token_fallbacks),
     );
 
     tokio::spawn(credential_delivery_loop(
@@ -474,14 +510,21 @@ pub(super) async fn start(
         .filter(|i| i.oauth.is_some())
         .map(|i| (i.id.clone(), i.display_name().to_string()))
         .collect();
+    let token_fallbacks: HashMap<String, lns_policy::integrations::TokenFallback> = catalog
+        .iter()
+        .filter_map(|i| i.token_fallback.clone().map(|tf| (i.id.clone(), tf)))
+        .collect();
     let (credential_session, credential_watcher) = start_credential_subsystem(
         session.clone(),
         credential_frame_tx,
         custom_providers,
         connectable_ids,
         connectable_routes,
-        oauth_configs,
-        oauth_display_names,
+        OauthWiring {
+            configs: oauth_configs,
+            display_names: oauth_display_names,
+            token_fallbacks,
+        },
     )
     .await?;
 
@@ -569,6 +612,13 @@ mod tests {
             fn connect<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
                 Box::pin(async { true })
             }
+            fn connect_with_token<'a>(
+                &'a self,
+                _id: &'a str,
+                _value: String,
+            ) -> futures_util::future::BoxFuture<'a, bool> {
+                Box::pin(async { true })
+            }
         }
 
         let notifier = Arc::new(RecordingNotifier::default());
@@ -586,6 +636,7 @@ mod tests {
                 id: "github_oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.github.com".into()],
+                token_fallback: None,
             }]),
         );
         session.set_connector(Arc::new(OkConnector));
@@ -616,6 +667,89 @@ mod tests {
                     Decision::AllowOnce,
                     "a connected offer releases the held request"
                 );
+            }
+            other => panic!("expected RequestDecision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_delivery_loop_routes_a_use_token_action_to_connect_offer_with_token() {
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
+        use crate::approval_flow::session::{IntegrationConnector, OfferableIntegration};
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingConnector {
+            tokens: StdMutex<Vec<(String, String)>>,
+        }
+        impl IntegrationConnector for RecordingConnector {
+            fn connect<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+                Box::pin(async { panic!("the interactive connect must not run for a token paste") })
+            }
+            fn connect_with_token<'a>(
+                &'a self,
+                id: &'a str,
+                value: String,
+            ) -> futures_util::future::BoxFuture<'a, bool> {
+                Box::pin(async move {
+                    self.tokens.lock().unwrap().push((id.to_string(), value));
+                    true
+                })
+            }
+        }
+
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let session = Arc::new(
+            ApprovalSession::new(
+                Policy::default(),
+                notifier,
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_offers(vec![OfferableIntegration {
+                id: "github_oauth".into(),
+                display_name: "GitHub".into(),
+                patterns: vec!["api.github.com".into()],
+                token_fallback: None,
+            }]),
+        );
+        let connector = Arc::new(RecordingConnector {
+            tokens: StdMutex::new(Vec::new()),
+        });
+        session.set_connector(connector.clone());
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.github.com".into(),
+                action: "CONNECT api.github.com:443".into(),
+                reason: "policy-ambiguous".into(),
+            },
+            std::time::Instant::now(),
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::UseToken {
+                value: "ghp_pasted".into(),
+            },
+        })
+        .unwrap();
+        drop(tx);
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert_eq!(
+            connector.tokens.lock().unwrap().as_slice(),
+            &[("github_oauth".to_string(), "ghp_pasted".to_string())],
+            "a UseToken action drives the token connect with the pasted value"
+        );
+        match frame_rx.try_recv().expect("decision frame") {
+            HostFrame::RequestDecision(d) => {
+                assert_eq!(d.id, "r1");
+                assert_eq!(d.decision, Decision::AllowOnce);
             }
             other => panic!("expected RequestDecision, got {other:?}"),
         }
@@ -783,6 +917,7 @@ mod tests {
                     injections: Vec::new(),
                 }),
                 oauth: None,
+                token_fallback: None,
             }],
         }
         .save_atomic(&path)
@@ -923,8 +1058,10 @@ mod tests {
     }
 
     #[test]
-    fn build_offerable_pairs_id_display_name_and_route_patterns() {
-        use lns_policy::integrations::{AuthKind, Integration, IntegrationRoute, OauthAuth};
+    fn build_offerable_pairs_id_display_name_route_patterns_and_token_fallback() {
+        use lns_policy::integrations::{
+            AuthKind, Integration, IntegrationRoute, OauthAuth, TokenFallback,
+        };
         let catalog = vec![Integration {
             id: "github_oauth".into(),
             name: Some("GitHub".into()),
@@ -946,6 +1083,9 @@ mod tests {
                 placeholder: "gho_LNSPLACEHOLDER".into(),
                 injections: Vec::new(),
             }),
+            token_fallback: Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
         }];
         let connectable = resolve_connectable_integrations(&Policy::default(), &catalog);
         let offerable = build_offerable(&connectable, &catalog);
@@ -953,6 +1093,13 @@ mod tests {
         assert_eq!(offerable[0].id, "github_oauth");
         assert_eq!(offerable[0].display_name, "GitHub", "uses the catalog name");
         assert_eq!(offerable[0].patterns, vec!["api.github.com".to_string()]);
+        assert_eq!(
+            offerable[0].token_fallback,
+            Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "the offer carries the integration's token fallback to the network card"
+        );
     }
 
     #[test]
@@ -1011,6 +1158,58 @@ mod tests {
         };
         drop(session);
         assert!(!connector.connect("gitlab").await);
+    }
+
+    #[tokio::test]
+    async fn credential_connector_connect_with_token_delegates_to_the_session_while_alive() {
+        use crate::approval_flow::session::IntegrationConnector;
+        use crate::credential_flow::notification::NoopCredentialNotifier;
+        use crate::credential_flow::store::CredentialEntry;
+        use std::collections::HashSet;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_connect_emitter(HashSet::from(["gitlab".to_string()]), Box::new(|_| {})),
+        );
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+        assert!(
+            connector
+                .connect_with_token("gitlab", "glpat_pasted".into())
+                .await,
+            "a pasted token connects through the live session"
+        );
+        assert_eq!(
+            session.current_state().get("gitlab"),
+            Some(&CredentialEntry::Stored {
+                value: "glpat_pasted".into(),
+            }),
+            "the token is armed in the session's state"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_connector_connect_with_token_returns_false_when_the_session_is_dropped() {
+        use crate::approval_flow::session::IntegrationConnector;
+        let (session, _frame_rx) = fixture_credential_session();
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+        drop(session);
+        assert!(
+            !connector
+                .connect_with_token("gitlab", "glpat_x".into())
+                .await
+        );
     }
 
     #[test]
@@ -1223,6 +1422,83 @@ mod tests {
             ),
             "the device sign-in must arm the oauth token set"
         );
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_routes_an_oauth_token_paste_to_record_decision_not_a_sign_in()
+    {
+        use crate::approval_flow::protocol::{CredentialDecisionKind, CredentialPending};
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Mutex as StdMutex;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let configs = HashMap::from([(
+            "acme".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.acme".into(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let connected = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let connected_cb = connected.clone();
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(crate::credential_flow::notification::NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_oauth(configs, Arc::new(LoopFakeFlow), Arc::new(LoopClock))
+            .with_connect_emitter(
+                HashSet::from(["acme".to_string()]),
+                Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
+            ),
+        );
+        session.submit_pending(
+            CredentialPending {
+                id: "c1".into(),
+                credential_id: "acme".into(),
+                action: "use of acme placeholder".into(),
+                reason: "placeholder-unauthorized".into(),
+            },
+            std::time::Instant::now(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
+        tx.send(CredentialDecisionDelivery {
+            id: "c1".into(),
+            request: CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "ghp_pasted".into(),
+            }),
+        })
+        .unwrap();
+        drop(tx);
+        credential_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert_eq!(
+            session.current_state().get("acme"),
+            Some(&CredentialEntry::Stored {
+                value: "ghp_pasted".into(),
+            }),
+            "a token paste arms the Stored value directly rather than running the device sign-in"
+        );
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["acme".to_string()],
+            "the connectable integration is still connected live"
+        );
+        let mut allowed = false;
+        while let Ok(frame) = frame_rx.try_recv() {
+            if let HostFrame::CredentialDecision(d) = frame {
+                allowed |= d.decision == CredentialDecisionKind::Allow;
+            }
+        }
+        assert!(allowed, "the held request is released on the token paste");
     }
 
     #[tokio::test]

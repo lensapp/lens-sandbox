@@ -96,6 +96,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
             injections: args.inject.clone(),
         }),
         oauth: None,
+        token_fallback: None,
     });
     catalog
         .save_atomic(catalog_path)
@@ -264,6 +265,7 @@ mod tests {
                     header: None,
                 }],
             }),
+            token_fallback: None,
         }
     }
 
@@ -375,6 +377,7 @@ mod tests {
                     injections: Vec::new(),
                 }),
                 oauth: None,
+                token_fallback: None,
             }],
         );
         let mut out = Vec::new();

@@ -11,6 +11,7 @@ use crate::approval_flow::protocol::{
 };
 use crate::credential_flow::providers::{self, DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
+use lns_policy::integrations::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -27,6 +28,8 @@ pub struct CredentialPendingPrompt {
     pub action: String,
     /// Some(display name) when this is an oauth integration to connect via a browser sign-in, so the card offers "Connect to <name>" instead of a value field.
     pub oauth_display_name: Option<String>,
+    /// Some when the integration declares a token fallback, so the consent card can also reveal "use a token instead".
+    pub token_fallback: Option<TokenFallback>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +38,8 @@ pub struct SignInPrompt {
     pub display_name: String,
     pub user_code: String,
     pub verification_uri: String,
+    /// Some when the integration declares a token fallback, so the sign-in card can offer "use a token instead" to a user blocked from the browser dance.
+    pub token_fallback: Option<TokenFallback>,
 }
 
 /// Abstracts the desktop notification surface so tests can drive prompts without the real system.
@@ -43,8 +48,12 @@ pub trait CredentialNotifier: Send + Sync {
     fn dismiss(&self, id: &str);
     fn inform(&self, message: &str);
     fn clear_informs(&self);
-    /// Presents the device-flow verification step; firing `cancel` aborts the in-flight sign-in. The default renders it as an inform and drops `cancel`, so notifiers without a sign-in card still surface the code.
-    fn present_sign_in(&self, prompt: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+    /// Presents the device-flow verification step; firing `cancel` aborts the in-flight sign-in (or pivots it to a pasted token). The default renders it as an inform and drops `cancel`, so notifiers without a sign-in card still surface the code.
+    fn present_sign_in(
+        &self,
+        prompt: &SignInPrompt,
+        cancel: tokio::sync::oneshot::Sender<crate::oauth::SignInPivot>,
+    ) {
         let _ = cancel;
         self.inform(&format!(
             "To connect {}, open {} and enter code {}",
@@ -90,6 +99,7 @@ pub struct CredentialSession {
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
+    token_fallbacks: HashMap<String, TokenFallback>,
     device_flow: Option<Arc<dyn crate::oauth::DeviceFlow>>,
     clock: Option<Arc<dyn crate::oauth::Clock>>,
 }
@@ -126,6 +136,7 @@ impl CredentialSession {
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
+            token_fallbacks: HashMap::new(),
             device_flow: None,
             clock: None,
         }
@@ -147,6 +158,12 @@ impl CredentialSession {
     /// Per-id user-facing labels (e.g. `github_oauth` → "GitHub") for connect prompts and the sign-in card; ids absent here fall back to the id itself.
     pub fn with_oauth_display_names(mut self, display_names: HashMap<String, String>) -> Self {
         self.oauth_display_names = display_names;
+        self
+    }
+
+    /// Per-id token fallbacks so a consent or sign-in card for an integration that declares one can offer "use a token instead".
+    pub fn with_token_fallbacks(mut self, token_fallbacks: HashMap<String, TokenFallback>) -> Self {
+        self.token_fallbacks = token_fallbacks;
         self
     }
 
@@ -214,6 +231,7 @@ impl CredentialSession {
             .oauth_configs
             .contains_key(&req.credential_id)
             .then(|| self.display_name_for(&req.credential_id));
+        let token_fallback = self.token_fallbacks.get(&req.credential_id).cloned();
         let action = if self.connectable.contains(&req.credential_id) {
             format!("connect to {}", req.credential_id)
         } else {
@@ -223,6 +241,7 @@ impl CredentialSession {
             id: req.id,
             credential_id: req.credential_id,
             action,
+            token_fallback,
             oauth_display_name,
         });
     }
@@ -334,6 +353,13 @@ impl CredentialSession {
         false
     }
 
+    /// Connects integration `id` from a network offer using a pasted token instead of the interactive sign-in: arms the value in its slot, allows its routes (if connectable), and releases any placeholder card already held for it. Always reports connected.
+    pub fn connect_integration_with_token(&self, id: &str, value: String) -> bool {
+        self.arm_connected(id, CredentialEntry::Stored { value });
+        self.release_armed_holds(id);
+        true
+    }
+
     /// Allows and dismisses a held credential prompt for `credential_id` once another surface (a network offer) has armed the integration; a no-op when nothing is held for it.
     fn release_armed_holds(&self, credential_id: &str) {
         let entry = self
@@ -360,7 +386,8 @@ impl CredentialSession {
             return false;
         };
         let display_name = self.display_name_for(credential_id);
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let token_fallback = self.token_fallbacks.get(credential_id).cloned();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
         let card_id = credential_id.to_string();
         let present = move |code: &crate::oauth::DeviceCode| {
             self.notifier.present_sign_in(
@@ -369,14 +396,16 @@ impl CredentialSession {
                     display_name,
                     user_code: code.user_code.clone(),
                     verification_uri: code.verification_uri.clone(),
+                    token_fallback,
                 },
                 cancel_tx,
             );
         };
         let cancel = async move {
-            // Only a sent value is a real cancel; a dropped sender means the notifier has no cancel surface, so the sign-in runs to its natural end.
-            if cancel_rx.await.is_err() {
-                std::future::pending::<()>().await;
+            // A dropped sender means the notifier has no cancel surface, so the sign-in runs to its natural end.
+            match cancel_rx.await {
+                Ok(pivot) => pivot,
+                Err(_) => std::future::pending().await,
             }
         };
         let result = crate::oauth::run_device_flow(flow.as_ref(), cfg, present, cancel).await;
@@ -384,10 +413,12 @@ impl CredentialSession {
         match result {
             Ok(crate::oauth::SignIn::Completed(token)) => {
                 let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
-                if self.connectable.contains(credential_id) {
-                    (self.connect)(credential_id);
-                }
-                self.apply_persistent_entry(credential_id.to_string(), entry);
+                self.arm_connected(credential_id, entry);
+                true
+            }
+            // Pivoting to a pasted token mid-flow arms it in the same credential slot, exactly as a completed sign-in would.
+            Ok(crate::oauth::SignIn::Token(value)) => {
+                self.arm_connected(credential_id, CredentialEntry::Stored { value });
                 true
             }
             Ok(
@@ -401,6 +432,14 @@ impl CredentialSession {
                 false
             }
         }
+    }
+
+    /// Connects the integration live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token.
+    fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
+        if self.connectable.contains(credential_id) {
+            (self.connect)(credential_id);
+        }
+        self.apply_persistent_entry(credential_id.to_string(), entry);
     }
 
     fn fail_held(&self, request_ids: &[String]) {
@@ -531,7 +570,7 @@ mod tests {
         presented: StdMutex<Vec<CredentialPendingPrompt>>,
         sign_ins: StdMutex<Vec<SignInPrompt>>,
         dismissed_sign_ins: StdMutex<Vec<String>>,
-        cancel_next: std::sync::atomic::AtomicBool,
+        pivot_next: StdMutex<Option<crate::oauth::SignInPivot>>,
         dismissed: StdMutex<Vec<String>>,
         informed: StdMutex<Vec<String>>,
         informs_cleared: StdMutex<usize>,
@@ -539,8 +578,11 @@ mod tests {
 
     impl RecordingNotifier {
         fn cancel_next_sign_in(&self) {
-            self.cancel_next
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            *self.pivot_next.lock().unwrap() = Some(crate::oauth::SignInPivot::Cancel);
+        }
+        fn use_token_next_sign_in(&self, value: &str) {
+            *self.pivot_next.lock().unwrap() =
+                Some(crate::oauth::SignInPivot::UseToken(value.to_string()));
         }
     }
 
@@ -557,10 +599,14 @@ mod tests {
         fn clear_informs(&self) {
             *self.informs_cleared.lock().unwrap() += 1;
         }
-        fn present_sign_in(&self, p: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+        fn present_sign_in(
+            &self,
+            p: &SignInPrompt,
+            cancel: tokio::sync::oneshot::Sender<crate::oauth::SignInPivot>,
+        ) {
             self.sign_ins.lock().unwrap().push(p.clone());
-            if self.cancel_next.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = cancel.send(());
+            if let Some(pivot) = self.pivot_next.lock().unwrap().take() {
+                let _ = cancel.send(pivot);
             }
             // Otherwise drop the sender: connect_oauth treats that as "no cancel surface" and runs to completion.
         }
@@ -1280,6 +1326,26 @@ mod tests {
     }
 
     #[test]
+    fn submit_pending_surfaces_the_token_fallback_on_the_consent_prompt() {
+        let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].token_fallback,
+            Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "a consent card for an integration with a token fallback offers the pivot"
+        );
+    }
+
+    #[test]
+    fn submit_pending_carries_no_token_fallback_for_an_id_that_declares_none() {
+        let (s, n, _store, _rx, _connected) = fixture_connectable(&["gitlab"]);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        assert_eq!(n.presented.lock().unwrap()[0].token_fallback, None);
+    }
+
+    #[test]
     fn submit_pending_for_an_oauth_id_without_a_configured_name_falls_back_to_the_id() {
         let notifier = Arc::new(RecordingNotifier::default());
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1483,6 +1549,12 @@ mod tests {
         .with_oauth_display_names(HashMap::from([(
             "github_oauth".to_string(),
             "GitHub".to_string(),
+        )]))
+        .with_token_fallbacks(HashMap::from([(
+            "github_oauth".to_string(),
+            TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            },
         )]));
         (session, notifier, store, rx, connected)
     }
@@ -1548,6 +1620,65 @@ mod tests {
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
             &["github_oauth".to_string()],
             "the sign-in card is dismissed once the flow resolves"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_pivots_to_a_pasted_token_arms_stored_connects_and_releases_held_requests()
+     {
+        let (s, n, store, mut rx, connected) = oauth_fixture(FakeFlow::polling(vec![]));
+        n.use_token_next_sign_in("ghp_pasted");
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c2", "github_oauth"), Instant::now());
+
+        let outcome = s.connect_oauth("c1").await;
+
+        assert_eq!(outcome, DecisionOutcome::Resolved);
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "pivoting to a token still connects the integration live"
+        );
+        assert_eq!(
+            store
+                .saves
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .get("github_oauth"),
+            Some(&CredentialEntry::Stored {
+                value: "ghp_pasted".into(),
+            }),
+            "the pasted token is armed as a Stored value in the integration's slot"
+        );
+        let f1 = decision_frame(&mut rx);
+        let f2 = decision_frame(&mut rx);
+        assert_eq!(f1.decision, CredentialDecisionKind::Allow);
+        assert_eq!(f2.decision, CredentialDecisionKind::Allow);
+        assert_eq!(vec![f1.id, f2.id], vec!["c1".to_string(), "c2".to_string()]);
+        assert_eq!(
+            n.dismissed_sign_ins.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "the sign-in card is dismissed once the pivot resolves the flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sign_in_card_carries_the_integrations_declared_token_fallback() {
+        let (s, n, _store, _rx, _connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        let sign_ins = n.sign_ins.lock().unwrap();
+        assert_eq!(
+            sign_ins[0].token_fallback,
+            Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "a sign-in card for an integration with a token fallback offers the pivot"
         );
     }
 
@@ -1730,6 +1861,37 @@ mod tests {
             n.dismissed.lock().unwrap().contains(&"cred1".to_string()),
             "and dismisses the duplicate placeholder card"
         );
+    }
+
+    #[test]
+    fn connect_integration_with_token_arms_stored_connects_live_and_releases_held_requests() {
+        let (s, n, store, mut rx, connected) = fixture_connectable(&["gitlab"]);
+        // A placeholder card for gitlab is already held.
+        s.submit_pending(pending("cred1", "gitlab"), Instant::now());
+
+        let ok = s.connect_integration_with_token("gitlab", "glpat_pasted".into());
+
+        assert!(ok, "a pasted token connects the integration");
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["gitlab".to_string()],
+            "the integration's routes are allowed live"
+        );
+        assert_eq!(
+            store.saves.lock().unwrap().last().unwrap().get("gitlab"),
+            Some(&CredentialEntry::Stored {
+                value: "glpat_pasted".into(),
+            }),
+            "the pasted token is armed as a Stored value"
+        );
+        let frame = decision_frame(&mut rx);
+        assert_eq!(frame.id, "cred1");
+        assert_eq!(
+            frame.decision,
+            CredentialDecisionKind::Allow,
+            "the held placeholder request is released once the token arms the slot"
+        );
+        assert!(n.dismissed.lock().unwrap().contains(&"cred1".to_string()));
     }
 
     fn armed_session(

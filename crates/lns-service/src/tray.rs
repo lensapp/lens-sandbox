@@ -14,9 +14,12 @@ use crate::approval_flow::window::{self, CredentialCardPrompt, SignInCard, Snaps
 use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
+use lns_policy::integrations::TokenFallback;
 
 const WINDOW_WIDTH: f32 = 460.0;
 const WINDOW_HEIGHT: f32 = 300.0;
+/// Used when a token-fallback field is revealed, which adds an input, a help link, and a Save button below the primary action — taller than the standard card.
+const WINDOW_HEIGHT_EXPANDED: f32 = 460.0;
 const SCREEN_EDGE_MARGIN: f32 = 20.0;
 
 pub fn run_tray(
@@ -29,7 +32,8 @@ pub fn run_tray(
         .with_position([0.0, 0.0])
         .with_visible(false)
         .with_decorations(false)
-        .with_resizable(false)
+        // Resizable so the card can grow programmatically when a token field is revealed; with no decorations there are no user-facing resize handles.
+        .with_resizable(true)
         .with_always_on_top()
         .with_transparent(true)
         .with_mouse_passthrough(true)
@@ -69,6 +73,17 @@ struct TrayApp {
     positioned: bool,
     /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_card`] stays immutable.
     credential_inputs: HashMap<String, String>,
+    /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
+    token_drafts: HashMap<String, TokenDraft>,
+    /// The viewport inner height last applied; grows to fit a revealed token field and shrinks back when none is open.
+    current_height: f32,
+}
+
+/// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
+#[derive(Default)]
+struct TokenDraft {
+    revealed: bool,
+    value: String,
 }
 
 impl TrayApp {
@@ -119,6 +134,8 @@ impl TrayApp {
             last_visible: false,
             positioned: false,
             credential_inputs: HashMap::new(),
+            token_drafts: HashMap::new(),
+            current_height: WINDOW_HEIGHT,
         })
     }
 
@@ -148,6 +165,19 @@ impl TrayApp {
             }
             VisibilityTransition::Unchanged => {}
         }
+
+        let target = if self.token_drafts.values().any(|d| d.revealed) {
+            WINDOW_HEIGHT_EXPANDED
+        } else {
+            WINDOW_HEIGHT
+        };
+        if self.current_height != target {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                WINDOW_WIDTH,
+                target,
+            )));
+            self.current_height = target;
+        }
     }
 }
 
@@ -167,8 +197,14 @@ impl eframe::App for TrayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let snapshot = self.window_state.snapshot();
         prune_credential_inputs(&mut self.credential_inputs, &snapshot);
+        prune_token_drafts(&mut self.token_drafts, &snapshot);
 
-        match render_card(ui, &snapshot, &mut self.credential_inputs) {
+        match render_card(
+            ui,
+            &snapshot,
+            &mut self.credential_inputs,
+            &mut self.token_drafts,
+        ) {
             Some(CardAction::Decide { id, decision }) => {
                 self.window_state.decide(&id, decision);
                 ui.ctx().request_repaint();
@@ -196,6 +232,17 @@ impl eframe::App for TrayApp {
             }
             Some(CardAction::DeclineOffer { id }) => {
                 self.window_state.decline_offer(&id);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::UseOfferToken { id, value }) => {
+                self.window_state.use_offer_token(&id, value);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::UseTokenSignIn {
+                credential_id,
+                value,
+            }) => {
+                self.window_state.pivot_sign_in(&credential_id, value);
                 ui.ctx().request_repaint();
             }
             None => {}
@@ -230,12 +277,27 @@ enum CardAction {
     DeclineOffer {
         id: String,
     },
+    UseOfferToken {
+        id: String,
+        value: String,
+    },
+    UseTokenSignIn {
+        credential_id: String,
+        value: String,
+    },
+}
+
+/// What the user did in the token-fallback affordance shared by every connect card.
+enum TokenFallbackEvent {
+    Save(String),
+    OpenHelp(String),
 }
 
 fn render_card(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
+    token_drafts: &mut HashMap<String, TokenDraft>,
 ) -> Option<CardAction> {
     use egui::{CornerRadius, Frame, Margin, Stroke};
 
@@ -261,20 +323,30 @@ fn render_card(
             if let Some(prompt) = snapshot.pending.first() {
                 // An integration domain offers a connect before the bare allow/deny; declining falls back to the network card.
                 if let Some(display_name) = &prompt.offer {
-                    return render_offer_card(ui, prompt, display_name, snapshot.pending.len());
+                    let draft = token_drafts.entry(prompt.id.clone()).or_default();
+                    return render_offer_card(
+                        ui,
+                        prompt,
+                        display_name,
+                        draft,
+                        snapshot.pending.len(),
+                    );
                 }
                 return render_network_card(ui, prompt, snapshot.pending.len());
             }
             // An in-flight device sign-in is the live action the user must finish next.
             if let Some(card) = snapshot.sign_ins.first() {
-                return render_sign_in_card(ui, card, snapshot.sign_ins.len());
+                let draft = token_drafts.entry(card.credential_id.clone()).or_default();
+                return render_sign_in_card(ui, card, draft, snapshot.sign_ins.len());
             }
             if let Some(prompt) = snapshot.pending_credentials.first() {
                 let input = credential_inputs.entry(prompt.id.clone()).or_default();
+                let draft = token_drafts.entry(prompt.id.clone()).or_default();
                 return render_credential_card(
                     ui,
                     prompt,
                     input,
+                    draft,
                     snapshot.pending_credentials.len(),
                 );
             }
@@ -367,6 +439,7 @@ fn render_offer_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
     display_name: &str,
+    draft: &mut TokenDraft,
     pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
@@ -404,6 +477,19 @@ fn render_offer_card(
         }
     });
 
+    if action.is_none()
+        && let Some(fallback) = &prompt.token_fallback
+    {
+        action = match render_token_fallback(ui, fallback, draft) {
+            Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseOfferToken {
+                id: prompt.id.clone(),
+                value,
+            }),
+            Some(TokenFallbackEvent::OpenHelp(url)) => Some(CardAction::OpenBrowser { url }),
+            None => None,
+        };
+    }
+
     action
 }
 
@@ -411,6 +497,7 @@ fn render_credential_card(
     ui: &mut egui::Ui,
     prompt: &CredentialCardPrompt,
     input: &mut String,
+    draft: &mut TokenDraft,
     pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
@@ -418,7 +505,7 @@ fn render_credential_card(
     let id = prompt.id.clone();
 
     if let Some(display_name) = &prompt.oauth_display_name {
-        return render_oauth_consent_card(ui, &id, display_name, pending_count);
+        return render_oauth_consent_card(ui, prompt, display_name, draft, pending_count);
     }
 
     render_card_header(ui, "CREDENTIAL NEEDED", pending_count);
@@ -504,8 +591,9 @@ fn render_credential_card(
 
 fn render_oauth_consent_card(
     ui: &mut egui::Ui,
-    id: &str,
+    prompt: &CredentialCardPrompt,
     display_name: &str,
+    draft: &mut TokenDraft,
     pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
@@ -545,8 +633,24 @@ fn render_oauth_consent_card(
         }
     });
 
+    if chosen.is_none()
+        && let Some(fallback) = &prompt.token_fallback
+    {
+        match render_token_fallback(ui, fallback, draft) {
+            Some(TokenFallbackEvent::Save(value)) => {
+                chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                    value,
+                }));
+            }
+            Some(TokenFallbackEvent::OpenHelp(url)) => {
+                return Some(CardAction::OpenBrowser { url });
+            }
+            None => {}
+        }
+    }
+
     chosen.map(|request| CardAction::DecideCredential {
-        id: id.to_string(),
+        id: prompt.id.clone(),
         request,
     })
 }
@@ -554,6 +658,7 @@ fn render_oauth_consent_card(
 fn render_sign_in_card(
     ui: &mut egui::Ui,
     card: &SignInCard,
+    draft: &mut TokenDraft,
     pending_count: usize,
 ) -> Option<CardAction> {
     use egui::RichText;
@@ -601,7 +706,79 @@ fn render_sign_in_card(
         }
     });
 
+    if action.is_none()
+        && let Some(fallback) = &card.token_fallback
+    {
+        action = match render_token_fallback(ui, fallback, draft) {
+            Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseTokenSignIn {
+                credential_id: card.credential_id.clone(),
+                value,
+            }),
+            Some(TokenFallbackEvent::OpenHelp(url)) => Some(CardAction::OpenBrowser { url }),
+            None => None,
+        };
+    }
+
     action
+}
+
+/// Progressive disclosure shared by every connect card: a muted "Use a token instead" that, once clicked, reveals a password field + "Save token" and (when declared) a help link. Returns the user's action without performing it.
+fn render_token_fallback(
+    ui: &mut egui::Ui,
+    fallback: &TokenFallback,
+    draft: &mut TokenDraft,
+) -> Option<TokenFallbackEvent> {
+    use egui::{RichText, Sense};
+
+    ui.add_space(BTN_GAP);
+    if !draft.revealed {
+        let link = ui.add(
+            egui::Label::new(
+                RichText::new("Use a token instead")
+                    .size(11.5)
+                    .underline()
+                    .color(window::TEXT_MUTED),
+            )
+            .sense(Sense::click()),
+        );
+        if link.clicked() {
+            draft.revealed = true;
+        }
+        return None;
+    }
+
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut draft.value)
+            .password(true)
+            .hint_text("Paste a token")
+            .margin(egui::Margin::symmetric(10, 9))
+            .desired_width(f32::INFINITY),
+    );
+
+    let mut event = None;
+    if let Some(help) = &fallback.help {
+        ui.add_space(6.0);
+        let link = ui.add(
+            egui::Label::new(
+                RichText::new("How do I create a token?")
+                    .size(10.5)
+                    .underline()
+                    .color(window::TEXT_MUTED),
+            )
+            .sense(Sense::click()),
+        );
+        if link.clicked() {
+            event = Some(TokenFallbackEvent::OpenHelp(help.clone()));
+        }
+    }
+
+    ui.add_space(BTN_GAP);
+    let enabled = !draft.value.trim().is_empty();
+    if wide_primary_button(ui, "Save token", enabled).clicked() && enabled {
+        event = Some(TokenFallbackEvent::Save(draft.value.trim().to_string()));
+    }
+    event
 }
 
 fn render_card_header(ui: &mut egui::Ui, label: &str, pending_count: usize) {
@@ -632,6 +809,19 @@ fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .strong()
         .size(13.0);
     ui.add_sized([BTN_WIDTH, BTN_HEIGHT], egui::Button::new(text))
+}
+
+/// A primary button that spans the card and can be disabled — for a lone action (no paired Deny) like "Save token". Same centered fill/typography as [`primary_button`], full width.
+fn wide_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .color(window::BG_PRIMARY)
+        .strong()
+        .size(13.0);
+    let width = ui.available_width();
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized([width, BTN_HEIGHT], egui::Button::new(text))
+    })
+    .inner
 }
 
 fn deny_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -668,6 +858,15 @@ fn prune_credential_inputs(inputs: &mut HashMap<String, String>, snapshot: &Snap
         .map(|p| p.id.as_str())
         .collect();
     inputs.retain(|id, _| still_pending.contains(id.as_str()));
+}
+
+/// Token drafts are keyed by the shown card's id — a network request id, a credential prompt id, or a sign-in credential id — so a draft survives only while its card is still on screen.
+fn prune_token_drafts(drafts: &mut HashMap<String, TokenDraft>, snapshot: &Snapshot) {
+    let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    live.extend(snapshot.pending.iter().map(|p| p.id.as_str()));
+    live.extend(snapshot.pending_credentials.iter().map(|p| p.id.as_str()));
+    live.extend(snapshot.sign_ins.iter().map(|c| c.credential_id.as_str()));
+    drafts.retain(|key, _| live.contains(key.as_str()));
 }
 
 fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
@@ -751,6 +950,7 @@ mod tests {
             action: "read".to_string(),
             host_value_available: false,
             oauth_display_name: None,
+            token_fallback: None,
         }
     }
 

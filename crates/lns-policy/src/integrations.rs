@@ -71,6 +71,14 @@ pub struct OauthAuth {
     pub injections: Vec<InjectionDef>,
 }
 
+/// An offer-time fallback letting the user paste a token into the integration's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL or hint for creating one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Integration {
@@ -84,6 +92,8 @@ pub struct Integration {
     pub credential: Option<CredentialAuth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OauthAuth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_fallback: Option<TokenFallback>,
 }
 
 impl Integration {
@@ -153,10 +163,8 @@ impl Catalog {
     }
 }
 
-const BUNDLED_YAML: &str = include_str!("integrations.yaml");
-
 static BUNDLED: LazyLock<Vec<Integration>> =
-    LazyLock::new(|| parse_catalog(BUNDLED_YAML).integrations);
+    LazyLock::new(|| parse_catalog(include_str!("integrations.yaml")).integrations);
 
 /// Panics on a malformed or inconsistent manifest; the shipped catalog is test-proven well-formed, so the production caller never hits those arms.
 fn parse_catalog(yaml_src: &str) -> Catalog {
@@ -270,6 +278,7 @@ mod tests {
                 "api.acme.corp",
             )),
             oauth: None,
+            token_fallback: None,
         }
     }
 
@@ -285,6 +294,7 @@ mod tests {
                 "examplehub_LNSPLACEHOLDER0000",
                 "api.examplehub.com",
             )),
+            token_fallback: None,
         }
     }
 
@@ -431,6 +441,45 @@ mod tests {
     }
 
     #[test]
+    fn an_integration_round_trips_its_optional_token_fallback_with_a_help_url() {
+        let mut i = oauth_integration();
+        i.token_fallback = Some(TokenFallback {
+            help: Some("https://example.com/tokens/new".into()),
+        });
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(yaml.contains("tokenFallback:"), "got: {yaml}");
+        assert!(
+            yaml.contains("help: https://example.com/tokens/new"),
+            "got: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn a_token_fallback_round_trips_with_no_help() {
+        let mut i = oauth_integration();
+        i.token_fallback = Some(TokenFallback { help: None });
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(yaml.contains("tokenFallback:"), "got: {yaml}");
+        assert!(
+            !yaml.contains("help:"),
+            "an absent help must not serialize: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_integration_without_a_token_fallback_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        assert!(
+            !yaml.contains("tokenFallback"),
+            "an absent token fallback must not serialize: {yaml}"
+        );
+    }
+
+    #[test]
     fn validate_rejects_a_credential_integration_missing_its_block() {
         let bad = Integration {
             id: "x".into(),
@@ -439,6 +488,7 @@ mod tests {
             routes: Vec::new(),
             credential: None,
             oauth: None,
+            token_fallback: None,
         };
         let err = bad.validate().unwrap_err();
         assert!(err.contains("credential"), "got: {err}");
@@ -458,6 +508,7 @@ mod tests {
             routes: Vec::new(),
             credential: None,
             oauth: None,
+            token_fallback: None,
         };
         let err = bad.validate().unwrap_err();
         assert!(err.contains("oauth"), "got: {err}");
@@ -580,6 +631,26 @@ mod tests {
                 .any(|i| i.kind == InjectionKind::BasicXAccessToken && i.domain == "github.com"),
             "git-over-HTTPS uses basic x-access-token, got: {:?}",
             oauth.injections
+        );
+    }
+
+    #[test]
+    fn bundled_github_oauth_declares_a_token_fallback_so_a_blocked_oauth_can_pivot_to_a_pat() {
+        let gh = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "github_oauth")
+            .expect("github_oauth is bundled");
+        let fallback = gh
+            .token_fallback
+            .as_ref()
+            .expect("github_oauth must offer a token fallback for SSO/approval-gated orgs");
+        assert!(
+            fallback
+                .help
+                .as_deref()
+                .is_some_and(|h| h.starts_with("https://")),
+            "the fallback should point at a token-creation URL, got: {:?}",
+            fallback.help
         );
     }
 

@@ -87,13 +87,18 @@ impl CredentialNotifier for WindowCredentialNotifier {
         self.wake();
     }
 
-    fn present_sign_in(&self, prompt: &SignInPrompt, cancel: tokio::sync::oneshot::Sender<()>) {
+    fn present_sign_in(
+        &self,
+        prompt: &SignInPrompt,
+        cancel: tokio::sync::oneshot::Sender<crate::oauth::SignInPivot>,
+    ) {
         self.state.insert_sign_in(
             SignInCard {
                 credential_id: prompt.credential_id.clone(),
                 display_name: prompt.display_name.clone(),
                 user_code: prompt.user_code.clone(),
                 verification_uri: prompt.verification_uri.clone(),
+                token_fallback: prompt.token_fallback.clone(),
             },
             cancel,
         );
@@ -116,6 +121,7 @@ mod tests {
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
+            token_fallback: None,
         }
     }
 
@@ -230,6 +236,9 @@ mod tests {
             display_name: "GitHub".into(),
             user_code: "WXYZ-1234".into(),
             verification_uri: "https://github.com/login/device".into(),
+            token_fallback: Some(lns_policy::integrations::TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
         }
     }
 
@@ -242,6 +251,13 @@ mod tests {
         assert_eq!(snap.sign_ins.len(), 1);
         assert_eq!(snap.sign_ins[0].display_name, "GitHub");
         assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(
+            snap.sign_ins[0].token_fallback,
+            Some(lns_policy::integrations::TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "the card carries the prompt's token fallback so the UI can offer the pivot"
+        );
     }
 
     #[test]
