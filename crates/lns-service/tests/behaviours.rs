@@ -4,6 +4,8 @@ mod approval_rig;
 mod credential_rig;
 #[path = "behaviours/forward_rig.rs"]
 mod forward_rig;
+#[path = "behaviours/image_rig.rs"]
+mod image_rig;
 #[path = "behaviours/runner.rs"]
 mod runner;
 #[path = "behaviours/steps/mod.rs"]

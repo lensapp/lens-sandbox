@@ -10,6 +10,7 @@ pub mod credential_flow;
 pub mod forward;
 pub mod guest_tools;
 pub mod image;
+pub mod image_store;
 pub mod ingest;
 pub mod initramfs;
 pub mod ipc;

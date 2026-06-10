@@ -70,5 +70,9 @@ impl Registry for RealRegistry {
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
     let manifests = crate::cache::root()?.join("manifests");
     let registry = CachingRegistry::new(RealRegistry::new(), ManifestCache::new(manifests));
-    pull_inner(&registry, image, layer_cache).await
+    let pulled = pull_inner(&registry, image, layer_cache).await?;
+    if let Err(e) = crate::image_store::record(&pulled).await {
+        crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
+    }
+    Ok(pulled)
 }

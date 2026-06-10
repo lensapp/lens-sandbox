@@ -154,6 +154,34 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }))
         }
+        Request::PullImage { image } => image_response(
+            crate::image_store::pull(image)
+                .await
+                .map(|image| Response::ImagePulled { image }),
+        ),
+        Request::ListImages => image_response(
+            crate::image_store::list()
+                .await
+                .map(|images| Response::ImageList { images }),
+        ),
+        Request::RemoveImage { image } => {
+            image_response(crate::image_store::remove(image).await.map(|removed| {
+                Response::ImageRemoved {
+                    reference: removed.reference,
+                    reclaimed_bytes: removed.reclaimed_bytes,
+                }
+            }))
+        }
+        Request::PruneImages => {
+            image_response(
+                crate::image_store::prune()
+                    .await
+                    .map(|report| Response::ImagesPruned {
+                        removed: report.removed,
+                        reclaimed_bytes: report.reclaimed_bytes,
+                    }),
+            )
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -161,6 +189,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
 }
 
 fn volume_response(result: anyhow::Result<Response>) -> Response {
+    result.unwrap_or_else(|e| Response::Error {
+        message: format!("{e:#}"),
+    })
+}
+
+fn image_response(result: anyhow::Result<Response>) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
@@ -1041,5 +1075,132 @@ mod tests {
     fn build_session_params_leaves_winsize_unset_when_absent() {
         let params = build_session_params(exec_args(vec!["echo".into()], false, false));
         assert!(params.initial_winsize.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_request_pull_of_an_invalid_reference_surfaces_the_parse_error() {
+        let resp = as_json(
+            handle_request(
+                &Request::PullImage {
+                    image: "###".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(
+            message.contains("invalid image reference"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_remove_of_an_unknown_image_surfaces_the_store_error() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let resp = as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: "registry.example.test/cov/absent:1".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(message.contains("no such image"), "got: {message}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_image_lifecycle_round_trips_offline_via_the_caches() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+
+        use sha2::Digest;
+        let layer_bytes = b"offline layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer_bytes));
+
+        let manifest = oci_client::manifest::OciImageManifest {
+            layers: vec![oci_client::manifest::OciDescriptor {
+                digest: layer_digest.clone(),
+                size: layer_bytes.len() as i64,
+                media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let manifest_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+        );
+        let reference = format!("registry.example.test/cov/pinned@{manifest_digest}");
+
+        let cache_root = crate::cache::root().unwrap();
+        let layer_cache = crate::oci_layer_cache::LayerCache::new(cache_root.join("layers"));
+        layer_cache
+            .install_from_bytes(&layer_digest, &layer_bytes)
+            .unwrap();
+        let config = format!(
+            r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
+        );
+        crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"))
+            .put(
+                &reference,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest,
+                    manifest_digest: manifest_digest.clone(),
+                    config,
+                },
+            )
+            .unwrap();
+
+        let pulled = as_json(
+            handle_request(
+                &Request::PullImage {
+                    image: reference.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(pulled["type"], "ImagePulled", "got {pulled}");
+        assert_eq!(pulled["image"]["reference"], reference);
+        assert_eq!(pulled["image"]["digest"], manifest_digest);
+        assert_eq!(pulled["image"]["layers"], 1);
+        assert_eq!(pulled["image"]["size_bytes"], layer_bytes.len() as u64);
+
+        let listed = as_json(handle_request(&Request::ListImages, now).await);
+        assert_eq!(listed["type"], "ImageList", "got {listed}");
+        assert_eq!(listed["images"][0]["reference"], reference);
+
+        let removed = as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: reference.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(removed["type"], "ImageRemoved", "got {removed}");
+        assert_eq!(removed["reference"], reference);
+        assert_eq!(removed["reclaimed_bytes"], layer_bytes.len() as u64);
+        assert!(
+            !layer_cache.contains(&layer_digest).unwrap(),
+            "the last image's layer blob must be swept with it"
+        );
+
+        let pruned = as_json(handle_request(&Request::PruneImages, now).await);
+        assert_eq!(pruned["type"], "ImagesPruned", "got {pruned}");
+        assert_eq!(pruned["removed"], serde_json::json!([]));
+        assert_eq!(pruned["reclaimed_bytes"], 0);
     }
 }

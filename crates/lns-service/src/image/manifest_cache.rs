@@ -38,6 +38,15 @@ impl ManifestCache {
         let bytes = serde_json::to_vec(entry).context("serializing cached manifest")?;
         std::fs::write(self.path_for(reference), bytes).context("writing manifest cache entry")
     }
+
+    pub fn remove(&self, reference: &str) -> Result<()> {
+        match std::fs::remove_file(self.path_for(reference)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).context("removing manifest cache entry")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 pub(crate) struct CachingRegistry<R: Registry> {
@@ -143,6 +152,34 @@ mod tests {
             "sha256:manifest"
         );
         assert_eq!(cache.get("img:b").unwrap().manifest_digest, "sha256:other");
+    }
+
+    #[test]
+    fn remove_deletes_a_stored_entry() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        cache.put("img:a", &entry()).unwrap();
+        cache.remove("img:a").unwrap();
+        assert!(cache.get("img:a").is_none());
+    }
+
+    #[test]
+    fn remove_of_an_absent_entry_is_benign() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        cache.remove("img:never-stored").unwrap();
+    }
+
+    #[test]
+    fn remove_surfaces_a_non_not_found_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        std::fs::create_dir_all(cache.path_for("img:a").join("nested")).unwrap();
+        let err = cache.remove("img:a").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("removing manifest cache entry"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
