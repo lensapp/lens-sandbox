@@ -12,10 +12,9 @@ use tokio::time::timeout;
 
 use crate::log;
 use crate::shutdown::Shutdown;
+use crate::time_fmt::rfc3339_now;
 
-use super::{
-    PostPumpAction, PumpOutcome, handle_request, post_pump_action, pump_responses, rfc3339_now,
-};
+use super::{PostPumpAction, PumpOutcome, handle_request, post_pump_action, pump_responses};
 #[cfg(target_os = "macos")]
 use super::{build_session_params, validate_exec};
 

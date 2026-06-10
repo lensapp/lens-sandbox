@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lns_service::vm::VolumeAttachment;
-use lns_service::volume_store::{Fs, LeaseRegistry, VolumeLease};
+use lns_service::volume_store::{FileMeta, Fs, LeaseRegistry, PruneReport, VolumeLease};
+
+pub const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
 
 #[derive(Debug, Default, Clone)]
 pub struct TrackingFs {
@@ -22,11 +24,14 @@ impl TrackingFs {
     pub fn touched(&self) -> Vec<PathBuf> {
         self.touched.lock().unwrap().clone()
     }
+    pub fn has(&self, p: &Path) -> bool {
+        self.existing.lock().unwrap().contains(p)
+    }
 }
 
 impl Fs for TrackingFs {
     async fn exists(&self, p: &Path) -> bool {
-        self.existing.lock().unwrap().contains(p)
+        self.has(p)
     }
     async fn create_dir_all(&self, p: &Path) -> std::io::Result<()> {
         self.touched.lock().unwrap().push(p.to_path_buf());
@@ -36,6 +41,29 @@ impl Fs for TrackingFs {
         self.touched.lock().unwrap().push(p.to_path_buf());
         self.existing.lock().unwrap().insert(p.to_path_buf());
         self.created.lock().unwrap().push(p.to_path_buf());
+        Ok(())
+    }
+    async fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        let g = self.existing.lock().unwrap();
+        Ok(g.iter()
+            .filter(|p| p.parent() == Some(dir))
+            .cloned()
+            .collect())
+    }
+    async fn metadata(&self, p: &Path) -> std::io::Result<FileMeta> {
+        if !self.has(p) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        Ok(FileMeta {
+            size_bytes: lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES,
+            created_unix_secs: FAKE_CREATED_UNIX_SECS,
+        })
+    }
+    async fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+        if !self.existing.lock().unwrap().remove(p) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        self.touched.lock().unwrap().push(p.to_path_buf());
         Ok(())
     }
 }
@@ -53,6 +81,9 @@ pub struct VolumeRig {
     pub last_error: Option<String>,
     next_run_id: u32,
     pub holder_run_id: Option<u32>,
+    pub last_list: Option<Vec<lns_ipc::VolumeInfo>>,
+    pub last_inspect: Option<lns_ipc::VolumeInfo>,
+    pub last_prune: Option<PruneReport>,
 }
 
 impl VolumeRig {
@@ -72,6 +103,9 @@ impl VolumeRig {
             last_error: None,
             next_run_id: 1,
             holder_run_id: None,
+            last_list: None,
+            last_inspect: None,
+            last_prune: None,
         }
     }
 
@@ -142,6 +176,78 @@ impl VolumeRig {
                 self.last_leases.clear();
             }
         }
+    }
+
+    pub async fn list(&mut self) {
+        match lns_service::volume_store::list_with(&self.fs, &self.registry, &self.store_root).await
+        {
+            Ok(volumes) => {
+                self.last_list = Some(volumes);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub async fn create(&mut self, name: &str) {
+        match lns_service::volume_store::create_with(
+            &self.fs,
+            &self.registry,
+            &self.store_root,
+            name,
+        )
+        .await
+        {
+            Ok(_) => self.last_error = None,
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub async fn inspect(&mut self, name: &str) {
+        match lns_service::volume_store::inspect_with(
+            &self.fs,
+            &self.registry,
+            &self.store_root,
+            name,
+        )
+        .await
+        {
+            Ok(info) => {
+                self.last_inspect = Some(info);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub async fn remove(&mut self, name: &str) {
+        match lns_service::volume_store::remove_with(
+            &self.fs,
+            &self.registry,
+            &self.store_root,
+            name,
+        )
+        .await
+        {
+            Ok(()) => self.last_error = None,
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub async fn prune(&mut self) {
+        match lns_service::volume_store::prune_with(&self.fs, &self.registry, &self.store_root)
+            .await
+        {
+            Ok(report) => {
+                self.last_prune = Some(report);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub fn image_in_store(&self, name: &str) -> bool {
+        self.fs.has(&self.image_path(name))
     }
 
     pub fn record_attach(&self, name: &str, target: &str) {

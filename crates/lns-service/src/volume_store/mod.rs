@@ -1,7 +1,7 @@
 mod real;
 mod traits;
 
-pub use traits::Fs;
+pub use traits::{FileMeta, Fs};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,14 @@ impl LeaseRegistry {
             .lock()
             .expect("lease registry poisoned")
             .remove(name);
+    }
+
+    fn holder(&self, name: &str) -> Option<u32> {
+        self.active
+            .lock()
+            .expect("lease registry poisoned")
+            .get(name)
+            .copied()
     }
 }
 
@@ -133,23 +141,162 @@ pub async fn acquire_with<F: Fs>(
     run_id: u32,
 ) -> Result<Acquired> {
     validate_name(name)?;
+    let lease = take_lease(registry, name, run_id)?;
+    let image_path = ensure_image(fs, store_root, name).await?;
+    Ok(Acquired { image_path, lease })
+}
 
+fn image_path_in(store_root: &Path, name: &str) -> PathBuf {
+    store_root.join(format!("{name}.img"))
+}
+
+fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: u32) -> Result<VolumeLease> {
     if let Err(holder) = registry.try_acquire(name, run_id) {
         bail!("volume {name:?} in use by run #{holder}");
     }
-    let lease = VolumeLease {
+    Ok(VolumeLease {
         registry: registry.clone(),
         name: name.to_string(),
-    };
+    })
+}
 
-    let image_path = store_root.join(format!("{name}.img"));
+const MAINTENANCE_HOLDER_RUN_ID: u32 = 0;
+
+async fn ensure_image<F: Fs>(fs: &F, store_root: &Path, name: &str) -> Result<PathBuf> {
+    let image_path = image_path_in(store_root, name);
     if !fs.exists(&image_path).await {
         fs.create_dir_all(store_root).await?;
         fs.create_ext4_image(&image_path, VOLUME_DEFAULT_SIZE_BYTES)
             .await?;
     }
+    Ok(image_path)
+}
 
-    Ok(Acquired { image_path, lease })
+async fn info_for<F: Fs>(
+    fs: &F,
+    registry: &LeaseRegistry,
+    image_path: &Path,
+    name: &str,
+) -> Result<lns_ipc::VolumeInfo> {
+    let meta = fs.metadata(image_path).await?;
+    Ok(lns_ipc::VolumeInfo {
+        name: name.to_string(),
+        size_bytes: meta.size_bytes,
+        created: crate::time_fmt::rfc3339_from_unix(meta.created_unix_secs),
+        in_use_by: registry.holder(name),
+    })
+}
+
+fn volume_name_of(path: &Path) -> Option<String> {
+    let file = path.file_name()?.to_str()?;
+    file.strip_suffix(".img").map(str::to_string)
+}
+
+pub async fn list_with<F: Fs>(
+    fs: &F,
+    registry: &Arc<LeaseRegistry>,
+    store_root: &Path,
+) -> Result<Vec<lns_ipc::VolumeInfo>> {
+    let entries = match fs.read_dir(store_root).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut names: Vec<String> = entries.iter().filter_map(|p| volume_name_of(p)).collect();
+    names.sort();
+    let mut out = Vec::with_capacity(names.len());
+    for name in &names {
+        out.push(info_for(fs, registry, &image_path_in(store_root, name), name).await?);
+    }
+    Ok(out)
+}
+
+pub async fn create_with<F: Fs>(
+    fs: &F,
+    registry: &Arc<LeaseRegistry>,
+    store_root: &Path,
+    name: &str,
+) -> Result<lns_ipc::VolumeInfo> {
+    validate_name(name)?;
+    let image_path = ensure_image(fs, store_root, name).await?;
+    info_for(fs, registry, &image_path, name).await
+}
+
+pub async fn inspect_with<F: Fs>(
+    fs: &F,
+    registry: &Arc<LeaseRegistry>,
+    store_root: &Path,
+    name: &str,
+) -> Result<lns_ipc::VolumeInfo> {
+    validate_name(name)?;
+    let image_path = image_path_in(store_root, name);
+    if !fs.exists(&image_path).await {
+        bail!("no such volume: {name}");
+    }
+    info_for(fs, registry, &image_path, name).await
+}
+
+pub async fn remove_with<F: Fs>(
+    fs: &F,
+    registry: &Arc<LeaseRegistry>,
+    store_root: &Path,
+    name: &str,
+) -> Result<()> {
+    validate_name(name)?;
+    let _guard = take_lease(registry, name, MAINTENANCE_HOLDER_RUN_ID)?;
+    let image_path = image_path_in(store_root, name);
+    if !fs.exists(&image_path).await {
+        bail!("no such volume: {name}");
+    }
+    fs.remove_file(&image_path).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    pub removed: Vec<String>,
+    pub reclaimed_bytes: u64,
+}
+
+pub async fn prune_with<F: Fs>(
+    fs: &F,
+    registry: &Arc<LeaseRegistry>,
+    store_root: &Path,
+) -> Result<PruneReport> {
+    let mut report = PruneReport {
+        removed: Vec::new(),
+        reclaimed_bytes: 0,
+    };
+    for info in list_with(fs, registry, store_root).await? {
+        let Ok(_guard) = take_lease(registry, &info.name, MAINTENANCE_HOLDER_RUN_ID) else {
+            continue;
+        };
+        fs.remove_file(&image_path_in(store_root, &info.name))
+            .await?;
+        report.removed.push(info.name);
+        report.reclaimed_bytes += info.size_bytes;
+    }
+    Ok(report)
+}
+
+pub async fn list() -> Result<Vec<lns_ipc::VolumeInfo>> {
+    list_with(&real::RealFs, &global(), &store_root()?).await
+}
+
+pub async fn create(name: &str) -> Result<lns_ipc::VolumeInfo> {
+    create_with(&real::RealFs, &global(), &store_root()?, name).await
+}
+
+pub async fn inspect(name: &str) -> Result<lns_ipc::VolumeInfo> {
+    inspect_with(&real::RealFs, &global(), &store_root()?, name).await
+}
+
+pub async fn remove(name: &str) -> Result<()> {
+    remove_with(&real::RealFs, &global(), &store_root()?, name).await
+}
+
+pub async fn prune() -> Result<PruneReport> {
+    prune_with(&real::RealFs, &global(), &store_root()?).await
 }
 
 #[cfg(test)]
@@ -158,11 +305,18 @@ mod tests {
     use std::collections::HashSet;
     use std::io;
 
+    const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
+
     #[derive(Default)]
     struct FakeFs {
         existing: Mutex<HashSet<PathBuf>>,
         created: Mutex<Vec<PathBuf>>,
+        sizes: Mutex<HashMap<PathBuf, u64>>,
         fail_create: bool,
+        fail_read_dir: bool,
+        read_dir_missing: bool,
+        fail_metadata: bool,
+        fail_remove: bool,
     }
 
     impl FakeFs {
@@ -174,6 +328,9 @@ mod tests {
         }
         fn created_images(&self) -> Vec<PathBuf> {
             self.created.lock().unwrap().clone()
+        }
+        fn set_size(&self, p: &str, size: u64) {
+            self.sizes.lock().unwrap().insert(PathBuf::from(p), size);
         }
     }
 
@@ -190,6 +347,41 @@ mod tests {
             }
             self.existing.lock().unwrap().insert(p.to_path_buf());
             self.created.lock().unwrap().push(p.to_path_buf());
+            Ok(())
+        }
+        async fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+            if self.fail_read_dir {
+                return Err(io::Error::other("read_dir boom"));
+            }
+            if self.read_dir_missing {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            let g = self.existing.lock().unwrap();
+            Ok(g.iter()
+                .filter(|p| p.parent() == Some(dir))
+                .cloned()
+                .collect())
+        }
+        async fn metadata(&self, p: &Path) -> io::Result<FileMeta> {
+            if self.fail_metadata {
+                return Err(io::Error::other("metadata boom"));
+            }
+            if !self.existing.lock().unwrap().contains(p) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            let size = self.sizes.lock().unwrap().get(p).copied();
+            Ok(FileMeta {
+                size_bytes: size.unwrap_or(VOLUME_DEFAULT_SIZE_BYTES),
+                created_unix_secs: FAKE_CREATED_UNIX_SECS,
+            })
+        }
+        async fn remove_file(&self, p: &Path) -> io::Result<()> {
+            if self.fail_remove {
+                return Err(io::Error::other("remove boom"));
+            }
+            if !self.existing.lock().unwrap().remove(p) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
             Ok(())
         }
     }
@@ -384,7 +576,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(cache_root)]
+    #[serial_test::serial(env)]
     async fn store_root_lives_under_the_cache_root() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
@@ -393,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(cache_root)]
+    #[serial_test::serial(env)]
     async fn acquire_production_wrapper_creates_under_store_and_releases_on_drop() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
@@ -409,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(cache_root)]
+    #[serial_test::serial(env)]
     async fn resolve_production_wrapper_maps_mounts_to_attachments() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
@@ -424,5 +616,292 @@ mod tests {
         assert_eq!(attachments[0].target, "/data");
         assert!(attachments[0].read_only);
         drop(leases);
+    }
+
+    #[tokio::test]
+    async fn list_skips_non_image_files_and_sorts_by_name() {
+        let fs = FakeFs::with(&[
+            "/store/zeta.img",
+            "/store/alpha.img",
+            "/store/notes.txt",
+            "/store",
+        ]);
+        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn list_reports_size_created_and_holder() {
+        let registry = reg();
+        let fs = FakeFs::with(&["/store/prism-data.img"]);
+        fs.set_size("/store/prism-data.img", 1024);
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+            .await
+            .unwrap();
+        let got = list_with(&fs, &registry, Path::new("/store"))
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].size_bytes, 1024);
+        assert_eq!(got[0].created, "2025-12-06T12:00:00Z");
+        assert_eq!(got[0].in_use_by, Some(7));
+    }
+
+    #[tokio::test]
+    async fn list_of_a_missing_store_root_is_empty_not_an_error() {
+        let fs = FakeFs {
+            read_dir_missing: true,
+            ..Default::default()
+        };
+        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_propagates_a_read_dir_failure() {
+        let fs = FakeFs {
+            fail_read_dir: true,
+            ..Default::default()
+        };
+        let err = list_with(&fs, &reg(), Path::new("/store"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("read_dir boom"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn list_propagates_a_metadata_failure() {
+        let fs = FakeFs {
+            existing: Mutex::new(
+                [PathBuf::from("/store/prism-data.img")]
+                    .into_iter()
+                    .collect(),
+            ),
+            fail_metadata: true,
+            ..Default::default()
+        };
+        let err = list_with(&fs, &reg(), Path::new("/store"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("metadata boom"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn create_reports_an_already_held_volume_as_in_use_without_recreating_it() {
+        let registry = reg();
+        let fs = FakeFs::default();
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+            .await
+            .unwrap();
+        let info = create_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .unwrap();
+        assert_eq!(info.in_use_by, Some(7));
+        assert_eq!(fs.created_images().len(), 1, "no second image");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_invalid_name_without_touching_disk() {
+        let fs = FakeFs::default();
+        let err = create_with(&fs, &reg(), Path::new("/store"), "../etc")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid volume name"), "got: {err}");
+        assert!(fs.created_images().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inspect_of_an_unknown_volume_names_it() {
+        let fs = FakeFs::default();
+        let err = inspect_with(&fs, &reg(), Path::new("/store"), "prism-data")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such volume: prism-data"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn inspect_rejects_an_invalid_name() {
+        let fs = FakeFs::default();
+        let err = inspect_with(&fs, &reg(), Path::new("/store"), "a/b")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid volume name"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn remove_rejects_an_invalid_name() {
+        let fs = FakeFs::default();
+        let err = remove_with(&fs, &reg(), Path::new("/store"), "a b")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid volume name"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn remove_of_an_in_use_volume_is_refused_naming_the_holder() {
+        let registry = reg();
+        let fs = FakeFs::default();
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+            .await
+            .unwrap();
+        let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("in use by run #7"), "got: {err}");
+        assert!(fs.exists(Path::new("/store/prism-data.img")).await);
+    }
+
+    #[tokio::test]
+    async fn remove_of_an_unknown_volume_errors_and_releases_the_maintenance_lease() {
+        let registry = reg();
+        let fs = FakeFs::default();
+        let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such volume"), "got: {err}");
+        registry
+            .try_acquire("prism-data", 2)
+            .expect("a failed remove must not strand the maintenance lease");
+    }
+
+    #[tokio::test]
+    async fn remove_failure_releases_the_maintenance_lease() {
+        let registry = reg();
+        let fs = FakeFs {
+            existing: Mutex::new(
+                [PathBuf::from("/store/prism-data.img")]
+                    .into_iter()
+                    .collect(),
+            ),
+            fail_remove: true,
+            ..Default::default()
+        };
+        remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .expect_err("remove should fail");
+        registry
+            .try_acquire("prism-data", 2)
+            .expect("a failed remove must not strand the maintenance lease");
+    }
+
+    #[tokio::test]
+    async fn remove_frees_the_name_for_an_immediate_reattach() {
+        let registry = reg();
+        let fs = FakeFs::with(&["/store/prism-data.img"]);
+        remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .unwrap();
+        assert!(!fs.exists(Path::new("/store/prism-data.img")).await);
+        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 3)
+            .await
+            .expect("the name must be free right after remove");
+    }
+
+    #[tokio::test]
+    async fn prune_skips_held_volumes_and_reports_reclaimed_bytes() {
+        let registry = reg();
+        let fs = FakeFs::with(&["/store/held.img", "/store/idle.img"]);
+        fs.set_size("/store/idle.img", 2048);
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "held", 7)
+            .await
+            .unwrap();
+        let report = prune_with(&fs, &registry, Path::new("/store"))
+            .await
+            .unwrap();
+        assert_eq!(report.removed, vec!["idle".to_string()]);
+        assert_eq!(report.reclaimed_bytes, 2048);
+        assert!(fs.exists(Path::new("/store/held.img")).await);
+        assert!(!fs.exists(Path::new("/store/idle.img")).await);
+    }
+
+    #[tokio::test]
+    async fn prune_releases_its_maintenance_leases() {
+        let registry = reg();
+        let fs = FakeFs::with(&["/store/idle.img"]);
+        prune_with(&fs, &registry, Path::new("/store"))
+            .await
+            .unwrap();
+        registry
+            .try_acquire("idle", 2)
+            .expect("prune must not strand maintenance leases");
+    }
+
+    #[tokio::test]
+    async fn prune_propagates_a_remove_failure() {
+        let fs = FakeFs {
+            existing: Mutex::new([PathBuf::from("/store/idle.img")].into_iter().collect()),
+            fail_remove: true,
+            ..Default::default()
+        };
+        let err = prune_with(&fs, &reg(), Path::new("/store"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("remove boom"), "got: {err}");
+    }
+
+    #[test]
+    fn volume_name_of_extracts_only_img_file_names() {
+        assert_eq!(
+            volume_name_of(Path::new("/store/prism-data.img")),
+            Some("prism-data".to_string())
+        );
+        assert_eq!(volume_name_of(Path::new("/store/notes.txt")), None);
+        assert_eq!(volume_name_of(Path::new("/")), None);
+    }
+
+    #[tokio::test]
+    async fn real_fs_read_dir_metadata_and_remove_file_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.img");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let listed = real::RealFs.read_dir(dir.path()).await.unwrap();
+        assert_eq!(listed, vec![path.clone()]);
+        let meta = real::RealFs.metadata(&path).await.unwrap();
+        assert_eq!(meta.size_bytes, 10);
+        assert!(meta.created_unix_secs > 0);
+        real::RealFs.remove_file(&path).await.unwrap();
+        assert!(!real::RealFs.exists(&path).await);
+    }
+
+    #[tokio::test]
+    async fn real_fs_read_dir_of_a_missing_dir_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = real::RealFs
+            .read_dir(&dir.path().join("absent"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn lifecycle_production_wrappers_round_trip_under_the_cache_root() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let info = create("cov-lifecycle").await.unwrap();
+        assert_eq!(info.name, "cov-lifecycle");
+        assert!(
+            list()
+                .await
+                .unwrap()
+                .iter()
+                .any(|v| v.name == "cov-lifecycle")
+        );
+        assert_eq!(inspect("cov-lifecycle").await.unwrap().in_use_by, None);
+        remove("cov-lifecycle").await.unwrap();
+        drop(create("cov-prune").await.unwrap());
+        let report = prune().await.unwrap();
+        assert!(report.removed.contains(&"cov-prune".to_string()));
     }
 }
