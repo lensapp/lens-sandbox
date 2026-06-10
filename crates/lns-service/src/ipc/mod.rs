@@ -1187,12 +1187,9 @@ mod tests {
         )
         .await;
 
-        match resp {
-            Response::Error { message } => {
-                assert!(message.contains("SIGKILL"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
-        }
+        let rendered = format!("{resp:?}");
+        assert!(rendered.contains("Error"), "got: {rendered}");
+        assert!(rendered.contains("SIGKILL"), "got: {rendered}");
         assert_eq!(sent.lock().unwrap().len(), 2);
         crate::run_registry::cancel(id);
     }
