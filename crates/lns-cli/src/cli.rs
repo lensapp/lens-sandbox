@@ -107,7 +107,7 @@ pub struct VolumeArgs {
 
 #[derive(Subcommand)]
 pub enum VolumeCommand {
-    #[command(about = "List named volumes with their size, age, and holder.")]
+    #[command(about = "List named volumes with their on-disk size, age, and holder.")]
     Ls,
     #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
     Create(VolumeNameArg),
