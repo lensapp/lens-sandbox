@@ -80,6 +80,24 @@ List active runs (`docker ps`-style).
 lns ls
 ```
 
+## `lns volume`
+
+Manage the named volumes used with `lns run -v` (`docker volume`-style).
+
+```bash
+lns volume ls | create <NAME> | inspect <NAME> | rm <NAME> | prune [-f]
+```
+
+| Subcommand       | Meaning                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------ |
+| `ls`             | List named volumes with their on-disk size, age, and the run holding them (if any).  |
+| `create <NAME>`  | Create a named volume ahead of its first `lns run -v` attach. No-op if it exists.    |
+| `inspect <NAME>` | Show a volume's details as JSON (capacity, on-disk bytes, created, holder).          |
+| `rm <NAME>`      | Remove a volume and its data; refused while a run holds it.                          |
+| `prune`          | Remove every volume not attached to a running sandbox. Prompts unless `-f`/`--force`.|
+
+See [Running workloads — volumes](running-workloads.md#volumes).
+
 ## `lns audit`
 
 Verify the audit chain of a run.

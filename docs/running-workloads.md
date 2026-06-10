@@ -97,6 +97,21 @@ The format is `name:/absolute/path[:ro]`. The volume `name` may contain letters,
 digits, `_`, `.`, and `-`; the target must be an absolute path with no `.`/`..`
 segments. Volume contents are stored by the service and survive between runs.
 
+Manage the store with `lns volume`:
+
+```bash
+lns volume ls                  # list volumes: on-disk size, age, holding run
+lns volume create build-cache  # provision a volume before its first run
+lns volume inspect build-cache # full details as JSON
+lns volume rm build-cache      # delete one volume (refused while a run holds it)
+lns volume prune               # delete every volume no running sandbox holds
+```
+
+`rm` and `prune` never touch a volume that a live run has attached, and `prune`
+asks for confirmation unless you pass `-f`/`--force`. Everything else in a
+sandbox is ephemeral by design — volumes are the one place data persists, so
+removing one is permanent.
+
 ### Publishing ports
 
 Expose a guest port on the host with `-p` (repeatable):
