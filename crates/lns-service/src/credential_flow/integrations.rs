@@ -42,6 +42,11 @@ fn wire_provider(integ: &Integration) -> Option<DefProvider> {
     }))
 }
 
+/// The oauth block usable for a sign-in dance: present only when a client_id was baked in (community builds ship none, so they fall back to the token paste).
+fn signin_oauth(integ: &Integration) -> Option<&OauthAuth> {
+    integ.oauth.as_ref().filter(|o| !o.client_id.is_empty())
+}
+
 /// Resolves the policy's applied integration ids against the effective catalog.
 pub fn resolve_applied_integrations(
     policy: &Policy,
@@ -60,7 +65,7 @@ pub fn resolve_applied_integrations(
         if let Some(p) = wire_provider(integ) {
             out.providers.push(p);
         }
-        if let Some(o) = &integ.oauth {
+        if let Some(o) = signin_oauth(integ) {
             out.oauth_configs.insert(integ.id.clone(), o.clone());
         }
     }
@@ -85,7 +90,7 @@ pub fn resolve_connectable_integrations(
                 integ.id.clone(),
                 integ.routes.iter().map(|r| r.to_route_rule()).collect(),
             );
-            if let Some(o) = &integ.oauth {
+            if let Some(o) = signin_oauth(integ) {
                 out.oauth_configs.insert(integ.id.clone(), o.clone());
             }
         }
@@ -257,6 +262,55 @@ mod tests {
         assert!(
             c.oauth_configs.contains_key("somesaas"),
             "its device-flow config must be held ready for connect"
+        );
+    }
+
+    fn oauth_integration_without_client_id(id: &str, env_var: &str, domain: &str) -> Integration {
+        let mut i = oauth_integration(id, env_var, domain);
+        i.oauth.as_mut().unwrap().client_id = String::new();
+        i
+    }
+
+    #[test]
+    fn an_applied_oauth_integration_with_no_client_id_seeds_a_provider_but_withholds_the_device_flow()
+     {
+        let catalog = vec![oauth_integration_without_client_id(
+            "somesaas",
+            "SOMESAAS_TOKEN",
+            "api.somesaas.com",
+        )];
+        let out = resolve_applied_integrations(&policy_applying(&["somesaas"]), &catalog);
+        let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            ["somesaas"],
+            "the placeholder is still seeded so a pasted token can arm it"
+        );
+        assert_eq!(out.routes.len(), 1, "its routes still apply");
+        assert!(
+            out.oauth_configs.is_empty(),
+            "an empty client_id can't drive a device flow, so no oauth config is surfaced"
+        );
+    }
+
+    #[test]
+    fn a_connectable_oauth_integration_with_no_client_id_is_offerable_without_a_device_flow() {
+        let catalog = vec![oauth_integration_without_client_id(
+            "somesaas",
+            "SOMESAAS_TOKEN",
+            "api.somesaas.com",
+        )];
+        let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+        assert_eq!(
+            c.providers.len(),
+            1,
+            "still offerable via its token fallback when no client_id is baked in"
+        );
+        assert_eq!(c.providers[0].id(), "somesaas");
+        assert_eq!(c.routes.get("somesaas").map(|r| r.len()), Some(1));
+        assert!(
+            c.oauth_configs.is_empty(),
+            "no client_id means there is no device flow to hold ready"
         );
     }
 }
