@@ -239,6 +239,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         .unwrap_or_else(|| "<imageless>".to_string());
     let command_label = args.cmd.join(" ");
     let started_label = rfc3339_now();
+    let config = lns_ipc::RunConfig::from_run_args(&args);
 
     let logs = Arc::new(crate::run_log::RunLogBuffer::default());
     let (task_frame_tx, tee_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
@@ -273,6 +274,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             started: started_label,
             status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
             logs,
+            config,
         },
     );
 

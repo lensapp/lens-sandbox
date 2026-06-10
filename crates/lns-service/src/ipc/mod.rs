@@ -168,6 +168,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             )
             .await
         }
+        Request::InspectRun { run_id } => match crate::run_registry::inspect(*run_id) {
+            Some(details) => Response::RunInspect { details },
+            None => Response::Error {
+                message: format!("no active run with id {run_id}"),
+            },
+        },
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -633,6 +639,7 @@ mod tests {
                 started: String::new(),
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+                config: lns_ipc::RunConfig::default(),
             },
         );
 
@@ -846,6 +853,7 @@ mod tests {
             started: "1970-01-01T00:00:00Z".into(),
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            config: lns_ipc::RunConfig::default(),
         };
         crate::run_registry::register(run_id, handle);
         let resp = handle_request(&Request::CancelRun { run_id }, Instant::now()).await;
@@ -873,6 +881,7 @@ mod tests {
             started: "1970-01-01T00:00:00Z".into(),
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            config: lns_ipc::RunConfig::default(),
         };
         crate::run_registry::register(run_id, handle);
 
@@ -988,6 +997,7 @@ mod tests {
                 started: "1970-01-01T00:00:00Z".into(),
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+                config: lns_ipc::RunConfig::default(),
             },
         );
     }
@@ -1009,6 +1019,35 @@ mod tests {
             std::future::ready(Response::Acknowledged)
         };
         (sent, sender)
+    }
+
+    #[tokio::test]
+    async fn handle_request_inspect_run_for_unknown_run_returns_error() {
+        let resp = handle_request(&Request::InspectRun { run_id: 999_998 }, Instant::now()).await;
+        match resp {
+            Response::Error { message } => {
+                assert!(message.contains("no active run"), "got: {message}");
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_inspect_run_returns_details_for_a_registered_run() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+
+        let resp = handle_request(&Request::InspectRun { run_id: id }, Instant::now()).await;
+
+        match resp {
+            Response::RunInspect { details } => {
+                assert_eq!(details.summary.id, id);
+                assert_eq!(details.summary.image, "stop-test");
+                assert_eq!(details.summary.status, lns_ipc::RunStatus::Running);
+            }
+            other => unreachable!("expected RunInspect, got {other:?}"),
+        }
+        crate::run_registry::deregister(id);
     }
 
     #[tokio::test]
@@ -1200,6 +1239,7 @@ mod tests {
                 started: String::new(),
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+                config: lns_ipc::RunConfig::default(),
             },
         );
 

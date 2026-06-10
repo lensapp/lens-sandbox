@@ -18,6 +18,7 @@ pub enum Request {
     Kill { run_id: u32, signal: SignalKind },
     ListRuns,
     StopRun { run_id: u32, timeout_secs: u64 },
+    InspectRun { run_id: u32 },
     BeginIntegrationSignIn { id: String },
 }
 
@@ -60,6 +61,9 @@ pub enum Response {
     RunStopped {
         forced: bool,
     },
+    RunInspect {
+        details: RunDetails,
+    },
     OauthVerification {
         verification_uri: String,
         user_code: String,
@@ -85,6 +89,41 @@ pub struct RunSummary {
 pub enum RunStatus {
     Running,
     Exited { code: i32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunDetails {
+    pub summary: RunSummary,
+    pub config: RunConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunConfig {
+    pub cpus: u8,
+    pub mem_mib: usize,
+    pub policy_path: Option<String>,
+    pub sandbox_user: Option<String>,
+    pub sandbox_uid: Option<u32>,
+    pub env: Vec<String>,
+    pub published_ports: Vec<PortPublish>,
+    pub volumes: Vec<VolumeMount>,
+    pub detached: bool,
+}
+
+impl RunConfig {
+    pub fn from_run_args(args: &RunImageArgs) -> Self {
+        Self {
+            cpus: args.cpus,
+            mem_mib: args.mem,
+            policy_path: args.policy_path.clone(),
+            sandbox_user: args.sandbox_user.clone(),
+            sandbox_uid: args.sandbox_uid,
+            env: args.env.clone(),
+            published_ports: args.published_ports.clone(),
+            volumes: args.volumes.clone(),
+            detached: args.detached,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +406,77 @@ mod tests {
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    fn sample_run_args() -> RunImageArgs {
+        RunImageArgs {
+            image: Some("some-image:1".into()),
+            cpus: 2,
+            mem: 1024,
+            policy_path: Some("/work/lns-policy.yaml".into()),
+            sandbox_user: Some("sandbox".into()),
+            sandbox_uid: Some(65534),
+            cmd: vec!["echo".into(), "hi".into()],
+            env: vec!["FOO=bar".into()],
+            debug: false,
+            tty: false,
+            stdin: false,
+            initial_winsize: None,
+            detached: true,
+            published_ports: vec![PortPublish {
+                host_ip: "127.0.0.1".parse().unwrap(),
+                host_port: 8080,
+                container_port: 3003,
+                protocol: Protocol::Tcp,
+            }],
+            volumes: vec![VolumeMount {
+                name: "prism-data".into(),
+                target: "/data".into(),
+                read_only: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn run_config_from_run_args_carries_the_launch_configuration() {
+        let args = sample_run_args();
+        let config = RunConfig::from_run_args(&args);
+        assert_eq!(config.cpus, 2);
+        assert_eq!(config.mem_mib, 1024);
+        assert_eq!(config.policy_path.as_deref(), Some("/work/lns-policy.yaml"));
+        assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
+        assert_eq!(config.sandbox_uid, Some(65534));
+        assert_eq!(config.env, vec!["FOO=bar".to_string()]);
+        assert_eq!(config.published_ports, args.published_ports);
+        assert_eq!(config.volumes, args.volumes);
+        assert!(config.detached);
+    }
+
+    #[test]
+    fn inspect_run_survives_a_request_round_trip() {
+        let req = Request::InspectRun { run_id: 3 };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_inspect_survives_a_response_round_trip() {
+        let resp = Response::RunInspect {
+            details: RunDetails {
+                summary: RunSummary {
+                    id: 3,
+                    image: "some-image:1".into(),
+                    command: "echo hi".into(),
+                    status: RunStatus::Running,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: RunConfig::from_run_args(&sample_run_args()),
+            },
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]
