@@ -192,10 +192,10 @@ impl WindowState {
         self.lock().informs.clear();
     }
 
-    pub fn dismiss_first_inform(&self) {
+    pub fn dismiss_inform(&self, index: usize) {
         let mut g = self.lock();
-        if !g.informs.is_empty() {
-            g.informs.remove(0);
+        if index < g.informs.len() {
+            g.informs.remove(index);
         }
     }
 
@@ -213,7 +213,7 @@ impl WindowState {
         }
     }
 
-    /// Total pending across every flow; drives `tray::sync_viewport_visibility`.
+    /// Total pending across every flow.
     pub fn pending_count(&self) -> usize {
         let g = self.lock();
         g.pending.len() + g.pending_credentials.len() + g.pending_sign_ins.len()
@@ -459,18 +459,31 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_first_inform_removes_oldest_and_preserves_rest() {
+    fn dismiss_inform_removes_the_indexed_entry_and_preserves_the_rest() {
         let s = WindowState::new();
         s.push_inform("first".into());
         s.push_inform("second".into());
-        s.dismiss_first_inform();
-        assert_eq!(s.snapshot().informs, vec!["second".to_string()]);
+        s.push_inform("third".into());
+        s.dismiss_inform(1);
+        assert_eq!(
+            s.snapshot().informs,
+            vec!["first".to_string(), "third".into()],
+            "dismissing a stacked banner drops that banner, not the oldest"
+        );
     }
 
     #[test]
-    fn dismiss_first_inform_when_empty_is_a_noop() {
+    fn dismiss_inform_out_of_bounds_is_a_noop() {
         let s = WindowState::new();
-        s.dismiss_first_inform();
+        s.push_inform("only".into());
+        s.dismiss_inform(5);
+        assert_eq!(s.snapshot().informs, vec!["only".to_string()]);
+    }
+
+    #[test]
+    fn dismiss_inform_when_empty_is_a_noop() {
+        let s = WindowState::new();
+        s.dismiss_inform(0);
         assert!(s.snapshot().informs.is_empty());
     }
 
