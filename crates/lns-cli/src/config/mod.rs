@@ -2,9 +2,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use lns_ipc::{PortPublish, VolumeMount};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{ConfigCommand, ConfigSetArgs};
+use crate::cli::{ConfigCommand, ConfigSetArgs, RunArgs};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigKey {
@@ -251,6 +252,104 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RunDefaults {
+    pub cpus: Option<u8>,
+    pub mem: Option<usize>,
+    pub env: Vec<String>,
+    pub volumes: Vec<VolumeMount>,
+    pub publish: Vec<PortPublish>,
+}
+
+pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
+    let cfg = load(path)?;
+    Ok(RunDefaults {
+        cpus: cfg.run.cpus,
+        mem: cfg.run.mem,
+        env: parsed_defaults(
+            ConfigKey::RunEnv,
+            &cfg.run.env,
+            path,
+            crate::cli::parse_env_kv,
+        )?,
+        volumes: parsed_defaults(
+            ConfigKey::RunVolume,
+            &cfg.run.volume,
+            path,
+            VolumeMount::parse,
+        )?,
+        publish: parsed_defaults(
+            ConfigKey::RunPublish,
+            &cfg.run.publish,
+            path,
+            crate::cli::parse_publish_arg,
+        )?,
+    })
+}
+
+fn parsed_defaults<T>(
+    key: ConfigKey,
+    raw: &[String],
+    path: &Path,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> Result<Vec<T>> {
+    raw.iter()
+        .map(|v| {
+            parse(v).map_err(|e| {
+                anyhow!(
+                    "invalid {} default {v:?} in {}: {e}",
+                    key.name(),
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
+    args.cpus = args.cpus.or(defaults.cpus);
+    args.mem = args.mem.or(defaults.mem);
+    args.env = merged_env(defaults.env, args.env);
+    args.volumes = merged_volumes(defaults.volumes, args.volumes);
+    args.publish = merged_publish(defaults.publish, args.publish);
+    args
+}
+
+fn merged_env(defaults: Vec<String>, flags: Vec<String>) -> Vec<String> {
+    let mut merged: Vec<String> = defaults
+        .into_iter()
+        .filter(|d| !flags.iter().any(|f| env_key(f) == env_key(d)))
+        .collect();
+    merged.extend(flags);
+    merged
+}
+
+fn env_key(entry: &str) -> &str {
+    entry.split_once('=').map_or(entry, |(key, _)| key)
+}
+
+fn merged_volumes(defaults: Vec<VolumeMount>, flags: Vec<VolumeMount>) -> Vec<VolumeMount> {
+    let mut merged: Vec<VolumeMount> = defaults
+        .into_iter()
+        .filter(|d| !flags.iter().any(|f| f.target == d.target))
+        .collect();
+    merged.extend(flags);
+    merged
+}
+
+fn merged_publish(defaults: Vec<PortPublish>, flags: Vec<PortPublish>) -> Vec<PortPublish> {
+    let mut merged: Vec<PortPublish> = defaults
+        .into_iter()
+        .filter(|d| {
+            !flags.iter().any(|f| {
+                f.host_ip == d.host_ip && f.host_port == d.host_port && f.protocol == d.protocol
+            })
+        })
+        .collect();
+    merged.extend(flags);
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +566,103 @@ mod tests {
         let path = default_config_path().unwrap();
         assert!(path.ends_with("lns/config.yaml"), "got: {path:?}");
         assert!(path.is_absolute(), "got: {path:?}");
+    }
+
+    fn bare_run_args() -> RunArgs {
+        RunArgs {
+            image: Some("alpine".to_string()),
+            cpus: None,
+            mem: None,
+            policy: None,
+            sandbox_user: None,
+            sandbox_uid: None,
+            interactive: true,
+            tty: true,
+            detach: false,
+            detach_keys: crate::cli::DetachChord(vec![0x10, 0x11]),
+            env: Vec::new(),
+            publish: Vec::new(),
+            volumes: Vec::new(),
+            cmd: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn load_run_defaults_parses_volume_and_publish_entries_into_typed_mounts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "run:\n  volume:\n    - cache:/var/cache:ro\n  publish:\n    - 8080:80\n",
+        )
+        .unwrap();
+        let defaults = load_run_defaults(&path).unwrap();
+        assert_eq!(defaults.volumes[0].target, "/var/cache");
+        assert!(defaults.volumes[0].read_only);
+        assert_eq!(defaults.publish[0].host_port, 8080);
+        assert_eq!(defaults.publish[0].container_port, 80);
+    }
+
+    #[test]
+    fn load_run_defaults_names_the_key_and_file_for_a_malformed_volume_entry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  volume:\n    - data:relative\n").unwrap();
+        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
+        assert!(err.contains("run.volume"), "got: {err}");
+        assert!(err.contains("config.yaml"), "got: {err}");
+    }
+
+    #[test]
+    fn load_run_defaults_names_the_key_and_file_for_a_malformed_publish_entry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  publish:\n    - nonsense\n").unwrap();
+        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
+        assert!(err.contains("run.publish"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_run_defaults_keeps_explicit_resources_over_configured_ones() {
+        let mut args = bare_run_args();
+        args.cpus = Some(2);
+        args.mem = Some(1024);
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                cpus: Some(8),
+                mem: Some(4096),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.cpus, Some(2));
+        assert_eq!(resolved.mem, Some(1024));
+    }
+
+    #[test]
+    fn merged_env_keeps_configured_entries_first_and_flags_last() {
+        let merged = merged_env(vec!["TZ=UTC".into(), "CI=1".into()], vec!["DEBUG=1".into()]);
+        assert_eq!(merged, vec!["TZ=UTC", "CI=1", "DEBUG=1"]);
+    }
+
+    #[test]
+    fn merged_volumes_keeps_the_same_volume_mounted_at_two_different_targets() {
+        let mount = |spec: &str| VolumeMount::parse(spec).unwrap();
+        let merged = merged_volumes(vec![mount("cache:/a")], vec![mount("cache:/b")]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "same name at distinct targets is not a conflict"
+        );
+    }
+
+    #[test]
+    fn merged_publish_keeps_the_same_host_port_on_two_different_binds() {
+        let publish = |spec: &str| crate::cli::parse_publish_arg(spec).unwrap();
+        let merged = merged_publish(
+            vec![publish("127.0.0.1:8080:80")],
+            vec![publish("0.0.0.0:8080:90")],
+        );
+        assert_eq!(merged.len(), 2, "distinct host ips are distinct binds");
     }
 }

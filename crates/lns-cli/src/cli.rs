@@ -340,11 +340,17 @@ pub struct RunArgs {
     )]
     pub image: Option<String>,
 
-    #[arg(long, default_value_t = 1, help = "Number of vCPUs.")]
-    pub cpus: u8,
+    #[arg(
+        long,
+        help = "Number of vCPUs; falls back to the `run.cpus` config default, then 1."
+    )]
+    pub cpus: Option<u8>,
 
-    #[arg(long, default_value_t = 512, help = "RAM in MiB.")]
-    pub mem: usize,
+    #[arg(
+        long,
+        help = "RAM in MiB; falls back to the `run.mem` config default, then 512."
+    )]
+    pub mem: Option<usize>,
 
     #[arg(
         long,
@@ -427,6 +433,19 @@ pub struct RunArgs {
         help = "Override entrypoint+cmd. Everything after `--` is the command."
     )]
     pub cmd: Vec<String>,
+}
+
+pub const DEFAULT_CPUS: u8 = 1;
+pub const DEFAULT_MEM_MIB: usize = 512;
+
+impl RunArgs {
+    pub fn effective_cpus(&self) -> u8 {
+        self.cpus.unwrap_or(DEFAULT_CPUS)
+    }
+
+    pub fn effective_mem(&self) -> usize {
+        self.mem.unwrap_or(DEFAULT_MEM_MIB)
+    }
 }
 
 #[derive(clap::Args)]

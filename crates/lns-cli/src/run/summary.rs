@@ -77,7 +77,13 @@ pub fn format_summary(
     for vol in &args.volumes {
         writeln!(s, "  Volume:    {}", volume_line(vol)).unwrap();
     }
-    writeln!(s, "  Resources: {} vCPU · {} MiB", args.cpus, args.mem).unwrap();
+    writeln!(
+        s,
+        "  Resources: {} vCPU · {} MiB",
+        args.effective_cpus(),
+        args.effective_mem()
+    )
+    .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
     s.push_str("  Policy:\n");
@@ -182,8 +188,8 @@ mod tests {
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
             image: image.map(str::to_string),
-            cpus: 1,
-            mem: 512,
+            cpus: None,
+            mem: None,
             policy: None,
             sandbox_user: None,
             sandbox_uid: None,
@@ -367,10 +373,21 @@ mod tests {
     }
 
     #[test]
+    fn resources_line_falls_back_to_one_vcpu_and_512_mib_when_nothing_is_requested() {
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(s.contains("1 vCPU · 512 MiB"), "resources line wrong: {s}");
+    }
+
+    #[test]
     fn resources_line_renders_cpu_and_memory_with_units() {
         let mut args = run_args(Some("ubuntu"));
-        args.cpus = 4;
-        args.mem = 2048;
+        args.cpus = Some(4);
+        args.mem = Some(2048);
         let s = format_summary(
             &args,
             &Policy::default(),
