@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod chord;
 pub mod cli;
+pub mod config;
 pub mod integration;
 pub mod log;
 pub mod policy;
@@ -63,6 +64,10 @@ pub async fn run(cli: Cli) -> Result<i32> {
                 &mut std::io::stdout(),
             )
             .await?
+        }
+        Command::Config(args) => {
+            let path = config::default_config_path()?;
+            config::run(&args.command, &path, &mut std::io::stdout())?
         }
     };
     Ok(code)

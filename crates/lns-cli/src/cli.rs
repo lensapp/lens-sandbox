@@ -52,6 +52,49 @@ pub enum Command {
     Policy(PolicyArgs),
     #[command(about = "Manage the credential-integration catalog (connectable services).")]
     Integration(IntegrationArgs),
+    #[command(
+        about = "Get and set persistent defaults, applied to `lns run` when the matching flag is absent."
+    )]
+    Config(ConfigArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    #[command(
+        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
+    )]
+    Set(ConfigSetArgs),
+    #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
+    Get(ConfigKeyArgs),
+    #[command(about = "Remove a default.")]
+    Unset(ConfigKeyArgs),
+    #[command(about = "List every configured default.")]
+    List,
+}
+
+const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.env, run.volume, or run.publish.";
+
+#[derive(clap::Args)]
+pub struct ConfigSetArgs {
+    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: crate::config::ConfigKey,
+    #[arg(
+        required = true,
+        help = "Value(s) to store; each is validated like the matching `lns run` flag."
+    )]
+    pub values: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct ConfigKeyArgs {
+    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: crate::config::ConfigKey,
 }
 
 #[derive(clap::Args)]
@@ -445,7 +488,7 @@ fn parse_detach_keys_arg(s: &str) -> Result<DetachChord, String> {
         .map_err(|e| e.to_string())
 }
 
-fn parse_env_kv(s: &str) -> Result<String, String> {
+pub(crate) fn parse_env_kv(s: &str) -> Result<String, String> {
     let (key, _) = s
         .split_once('=')
         .ok_or_else(|| format!("expected KEY=VALUE form, got `{s}`"))?;
@@ -455,7 +498,7 @@ fn parse_env_kv(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-fn parse_publish_arg(s: &str) -> Result<PortPublish, String> {
+pub(crate) fn parse_publish_arg(s: &str) -> Result<PortPublish, String> {
     let (addr_ports, protocol) = match s.rsplit_once('/') {
         Some((rest, proto)) => (rest, parse_protocol(proto, s)?),
         None => (s, Protocol::Tcp),

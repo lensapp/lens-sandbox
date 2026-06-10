@@ -1,0 +1,471 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::cli::{ConfigCommand, ConfigSetArgs};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigKey {
+    RunCpus,
+    RunMem,
+    RunEnv,
+    RunVolume,
+    RunPublish,
+}
+
+impl ConfigKey {
+    pub const ALL: [ConfigKey; 5] = [
+        ConfigKey::RunCpus,
+        ConfigKey::RunMem,
+        ConfigKey::RunEnv,
+        ConfigKey::RunVolume,
+        ConfigKey::RunPublish,
+    ];
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "run.cpus" => Ok(ConfigKey::RunCpus),
+            "run.mem" => Ok(ConfigKey::RunMem),
+            "run.env" => Ok(ConfigKey::RunEnv),
+            "run.volume" => Ok(ConfigKey::RunVolume),
+            "run.publish" => Ok(ConfigKey::RunPublish),
+            other => Err(format!(
+                "unknown config key {other:?}; expected run.cpus, run.mem, run.env, run.volume, or run.publish"
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfigKey::RunCpus => "run.cpus",
+            ConfigKey::RunMem => "run.mem",
+            ConfigKey::RunEnv => "run.env",
+            ConfigKey::RunVolume => "run.volume",
+            ConfigKey::RunPublish => "run.publish",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigFile {
+    #[serde(default, skip_serializing_if = "RunSection::is_empty")]
+    pub run: RunSection,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volume: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish: Vec<String>,
+}
+
+impl RunSection {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+pub fn default_config_path() -> Result<PathBuf> {
+    config_path_with(
+        |k| std::env::var_os(k).map(PathBuf::from),
+        dirs::config_dir(),
+    )
+}
+
+pub fn config_path_with(
+    env: impl Fn(&str) -> Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(p) = env("LNS_CONFIG_PATH") {
+        return Ok(p);
+    }
+    let dir = config_dir.context("could not determine the user config directory")?;
+    Ok(dir.join("lns").join("config.yaml"))
+}
+
+pub fn load(path: &Path) -> Result<ConfigFile> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ConfigFile::default()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading config from {}", path.display()));
+        }
+    };
+    serde_yaml::from_str(&raw).with_context(|| format!("parsing config at {}", path.display()))
+}
+
+fn save_atomic(cfg: &ConfigFile, path: &Path) -> Result<()> {
+    let body = serde_yaml::to_string(cfg).context("serializing config")?;
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config directory {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, body).with_context(|| format!("writing config to {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("installing config at {}", path.display()))?;
+    Ok(())
+}
+
+pub fn run(cmd: &ConfigCommand, path: &Path, writer: &mut impl Write) -> Result<i32> {
+    match cmd {
+        ConfigCommand::Set(args) => set(args, path, writer),
+        ConfigCommand::Get(args) => get(args.key, path, writer),
+        ConfigCommand::Unset(args) => unset(args.key, path, writer),
+        ConfigCommand::List => list(path, writer),
+    }
+}
+
+fn set(args: &ConfigSetArgs, path: &Path, writer: &mut impl Write) -> Result<i32> {
+    let mut cfg = load(path)?;
+    store(&mut cfg, args.key, &args.values)?;
+    save_atomic(&cfg, path)?;
+    writeln!(
+        writer,
+        "Set {} to {} in {}",
+        args.key.name(),
+        args.values.join(", "),
+        path.display()
+    )?;
+    Ok(0)
+}
+
+fn get(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
+    let cfg = load(path)?;
+    let values = values_of(&cfg, key);
+    if values.is_empty() {
+        return Ok(1);
+    }
+    for v in &values {
+        writeln!(writer, "{v}")?;
+    }
+    Ok(0)
+}
+
+fn unset(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
+    let mut cfg = load(path)?;
+    if values_of(&cfg, key).is_empty() {
+        bail!("{} is not set in {}", key.name(), path.display());
+    }
+    clear(&mut cfg, key);
+    save_atomic(&cfg, path)?;
+    writeln!(writer, "Unset {} in {}", key.name(), path.display())?;
+    Ok(0)
+}
+
+fn list(path: &Path, writer: &mut impl Write) -> Result<i32> {
+    let cfg = load(path)?;
+    let lines: Vec<String> = ConfigKey::ALL
+        .iter()
+        .flat_map(|&key| {
+            values_of(&cfg, key)
+                .into_iter()
+                .map(move |v| format!("{} = {v}", key.name()))
+        })
+        .collect();
+    if lines.is_empty() {
+        writeln!(writer, "No defaults set in {}", path.display())?;
+        return Ok(0);
+    }
+    for line in &lines {
+        writeln!(writer, "{line}")?;
+    }
+    Ok(0)
+}
+
+fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> {
+    match key {
+        ConfigKey::RunCpus => cfg.run.cpus = Some(parse_number(key, single(key, values)?)?),
+        ConfigKey::RunMem => cfg.run.mem = Some(parse_number(key, single(key, values)?)?),
+        ConfigKey::RunEnv => {
+            cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
+        }
+        ConfigKey::RunVolume => {
+            cfg.run.volume =
+                validated(key, values, |s| lns_ipc::VolumeMount::parse(s).map(|_| ()))?;
+        }
+        ConfigKey::RunPublish => {
+            cfg.run.publish = validated(key, values, |s| {
+                crate::cli::parse_publish_arg(s).map(|_| ())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn single(key: ConfigKey, values: &[String]) -> Result<&str> {
+    match values {
+        [v] => Ok(v.as_str()),
+        _ => bail!("{} takes a single value", key.name()),
+    }
+}
+
+fn parse_number<N: std::str::FromStr<Err = std::num::ParseIntError>>(
+    key: ConfigKey,
+    value: &str,
+) -> Result<N> {
+    value
+        .parse()
+        .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))
+}
+
+fn validated(
+    key: ConfigKey,
+    values: &[String],
+    check: impl Fn(&str) -> Result<(), String>,
+) -> Result<Vec<String>> {
+    for v in values {
+        check(v).map_err(|e| anyhow!("invalid {} value {v:?}: {e}", key.name()))?;
+    }
+    Ok(values.to_vec())
+}
+
+fn values_of(cfg: &ConfigFile, key: ConfigKey) -> Vec<String> {
+    match key {
+        ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()).into_iter().collect(),
+        ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()).into_iter().collect(),
+        ConfigKey::RunEnv => cfg.run.env.clone(),
+        ConfigKey::RunVolume => cfg.run.volume.clone(),
+        ConfigKey::RunPublish => cfg.run.publish.clone(),
+    }
+}
+
+fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
+    match key {
+        ConfigKey::RunCpus => cfg.run.cpus = None,
+        ConfigKey::RunMem => cfg.run.mem = None,
+        ConfigKey::RunEnv => cfg.run.env.clear(),
+        ConfigKey::RunVolume => cfg.run.volume.clear(),
+        ConfigKey::RunPublish => cfg.run.publish.clear(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ConfigKeyArgs;
+    use tempfile::TempDir;
+
+    fn set_cmd(key: ConfigKey, values: &[&str]) -> ConfigCommand {
+        ConfigCommand::Set(ConfigSetArgs {
+            key,
+            values: values.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    fn run_ok(cmd: &ConfigCommand, path: &Path) -> (i32, String) {
+        let mut buf = Vec::new();
+        let code = run(cmd, path, &mut buf).expect("command succeeds");
+        (code, String::from_utf8(buf).unwrap())
+    }
+
+    #[test]
+    fn config_key_parse_accepts_every_documented_key_and_round_trips_its_name() {
+        for key in ConfigKey::ALL {
+            assert_eq!(ConfigKey::parse(key.name()).unwrap(), key);
+        }
+    }
+
+    #[test]
+    fn config_key_parse_rejects_an_unknown_key_listing_the_valid_ones() {
+        let err = ConfigKey::parse("run.bogus").unwrap_err();
+        assert!(err.contains("unknown config key"), "got: {err}");
+        assert!(err.contains("run.cpus"), "must list valid keys: {err}");
+    }
+
+    #[test]
+    fn load_returns_an_empty_config_when_the_file_does_not_exist() {
+        let dir = TempDir::new().unwrap();
+        let cfg = load(&dir.path().join("config.yaml")).unwrap();
+        assert_eq!(cfg, ConfigFile::default());
+    }
+
+    #[test]
+    fn load_names_the_file_when_the_yaml_is_malformed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run: [not, a, map]\n").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("config.yaml"), "got: {err:#}");
+    }
+
+    #[test]
+    fn load_rejects_an_unknown_field_so_a_hand_edit_typo_cannot_be_silently_ignored() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  cpu: 2\n").unwrap();
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("cpu"), "got: {err}");
+    }
+
+    #[test]
+    fn load_surfaces_a_read_error_that_is_not_file_absence() {
+        let dir = TempDir::new().unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading config from"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn set_creates_missing_parent_directories_and_leaves_no_tmp_sibling() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested").join("lns").join("config.yaml");
+        let (code, out) = run_ok(&set_cmd(ConfigKey::RunCpus, &["4"]), &path);
+        assert_eq!(code, 0);
+        assert!(out.contains("Set run.cpus to 4"), "got: {out}");
+        assert_eq!(load(&path).unwrap().run.cpus, Some(4));
+        assert!(!path.with_extension("tmp").exists(), "tmp file left behind");
+    }
+
+    #[test]
+    fn save_fails_when_the_config_parent_is_a_file() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let err = save_atomic(&ConfigFile::default(), &blocker.join("config.yaml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("creating config directory"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn set_fails_when_the_tmp_path_is_occupied_by_a_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("config.tmp")).unwrap();
+        let mut buf = Vec::new();
+        let err = run(
+            &set_cmd(ConfigKey::RunCpus, &["4"]),
+            &dir.path().join("config.yaml"),
+            &mut buf,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("writing config to"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn save_fails_when_the_config_path_is_a_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("config.yaml")).unwrap();
+        let err = save_atomic(&ConfigFile::default(), &dir.path().join("config.yaml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("installing config at"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn set_rejects_an_empty_value_list_for_a_single_value_key() {
+        let mut cfg = ConfigFile::default();
+        let err = store(&mut cfg, ConfigKey::RunMem, &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("a single value"));
+    }
+
+    #[test]
+    fn set_rejects_an_out_of_range_mem_value() {
+        let mut cfg = ConfigFile::default();
+        let err = store(&mut cfg, ConfigKey::RunMem, &["lots".to_string()]).unwrap_err();
+        assert!(format!("{err:#}").contains("run.mem"), "got: {err:#}");
+    }
+
+    #[test]
+    fn every_key_survives_a_set_get_list_unset_lifecycle() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        let seeds: [(ConfigKey, &[&str]); 5] = [
+            (ConfigKey::RunCpus, &["4"]),
+            (ConfigKey::RunMem, &["2048"]),
+            (ConfigKey::RunEnv, &["TZ=UTC", "CI=1"]),
+            (ConfigKey::RunVolume, &["cache:/var/cache:ro"]),
+            (ConfigKey::RunPublish, &["8080:80"]),
+        ];
+        for (key, values) in seeds {
+            let (code, _) = run_ok(&set_cmd(key, values), &path);
+            assert_eq!(code, 0, "set {} failed", key.name());
+        }
+        let (_, listing) = run_ok(&ConfigCommand::List, &path);
+        for needle in [
+            "run.cpus = 4",
+            "run.mem = 2048",
+            "run.env = TZ=UTC",
+            "run.env = CI=1",
+            "run.volume = cache:/var/cache:ro",
+            "run.publish = 8080:80",
+        ] {
+            assert!(
+                listing.lines().any(|l| l == needle),
+                "missing {needle}: {listing}"
+            );
+        }
+        for (key, values) in seeds {
+            let (code, out) = run_ok(&ConfigCommand::Get(ConfigKeyArgs { key }), &path);
+            assert_eq!(code, 0);
+            assert_eq!(out.lines().count(), values.len(), "get {}", key.name());
+            let (code, out) = run_ok(&ConfigCommand::Unset(ConfigKeyArgs { key }), &path);
+            assert_eq!(code, 0, "unset {} failed", key.name());
+            assert!(out.contains("Unset"), "got: {out}");
+        }
+        let (_, listing) = run_ok(&ConfigCommand::List, &path);
+        assert!(listing.starts_with("No defaults set in "), "got: {listing}");
+    }
+
+    #[test]
+    fn config_path_with_prefers_the_env_override() {
+        let path = config_path_with(
+            |k| (k == "LNS_CONFIG_PATH").then(|| PathBuf::from("/tmp/elsewhere.yaml")),
+            Some(PathBuf::from("/home/dev/.config")),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/elsewhere.yaml"));
+    }
+
+    #[test]
+    fn config_path_with_defaults_to_lns_config_yaml_under_the_config_dir() {
+        let path = config_path_with(|_| None, Some(PathBuf::from("/home/dev/.config"))).unwrap();
+        assert_eq!(path, PathBuf::from("/home/dev/.config/lns/config.yaml"));
+    }
+
+    #[test]
+    fn config_path_with_errors_when_no_config_dir_exists() {
+        let err = config_path_with(|_| None, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("config directory"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn default_config_path_honours_the_lns_config_path_override() {
+        let _guard = crate::test_env::EnvScope::set("LNS_CONFIG_PATH", "/tmp/override.yaml");
+        assert_eq!(
+            default_config_path().unwrap(),
+            PathBuf::from("/tmp/override.yaml")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn default_config_path_lands_under_the_user_config_dir() {
+        let _guard = crate::test_env::EnvScope::unset("LNS_CONFIG_PATH");
+        let path = default_config_path().unwrap();
+        assert!(path.ends_with("lns/config.yaml"), "got: {path:?}");
+        assert!(path.is_absolute(), "got: {path:?}");
+    }
+}
