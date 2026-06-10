@@ -42,6 +42,8 @@ pub enum Command {
     Kill(KillArgs),
     #[command(about = "List active runs (`docker ps`-style).")]
     Ls,
+    #[command(about = "Manage running sandboxes: stop, logs, attach, inspect, stats.")]
+    Sandbox(SandboxArgs),
     #[command(about = "Verify the audit chain of a completed run.")]
     Audit(AuditArgs),
     #[command(about = "Manage the Lens Sandbox background service.")]
@@ -52,6 +54,80 @@ pub enum Command {
     Policy(PolicyArgs),
     #[command(about = "Manage the credential-integration catalog (connectable services).")]
     Integration(IntegrationArgs),
+}
+
+#[derive(clap::Args)]
+pub struct SandboxArgs {
+    #[command(subcommand)]
+    pub command: SandboxCommand,
+}
+
+#[derive(Subcommand)]
+pub enum SandboxCommand {
+    #[command(about = "Stop a run gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
+    Stop(SandboxStopArgs),
+    #[command(about = "Print a run's captured output; `-f` streams until the run exits.")]
+    Logs(SandboxLogsArgs),
+    #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
+    Attach(SandboxAttachArgs),
+    #[command(about = "Print a run's state and launch configuration as JSON.")]
+    Inspect(SandboxInspectArgs),
+    #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
+    Stats(SandboxStatsArgs),
+}
+
+#[derive(clap::Args)]
+pub struct SandboxStopArgs {
+    #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
+
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Seconds to wait for a graceful exit before escalating to SIGKILL."
+    )]
+    pub timeout: u64,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxLogsArgs {
+    #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
+
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Keep streaming new output until the run exits."
+    )]
+    pub follow: bool,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxAttachArgs {
+    #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
+
+    #[arg(
+        long,
+        default_value = "ctrl-p,ctrl-q",
+        value_parser = parse_detach_keys_arg,
+        help = "Detach chord (same semantics as `lns run`); on match the CLI sends SIGHUP to the workload's foreground pgrp and detaches."
+    )]
+    pub detach_keys: DetachChord,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxInspectArgs {
+    #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxStatsArgs {
+    #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
 }
 
 #[derive(clap::Args)]

@@ -22,6 +22,17 @@ pub struct BehaviourWorld {
     pub attached_stdout_is_terminal: Option<bool>,
     pub uc: UpdateCheckRig,
     pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
+    pub sandbox: SandboxCliRig,
+}
+
+#[derive(Debug, Default)]
+pub struct SandboxCliRig {
+    pub response: Option<lns_ipc::Response>,
+    pub frames: Vec<Vec<u8>>,
+    pub unreachable: bool,
+    pub policy: Option<serde_json::Value>,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub workload_stdout: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
