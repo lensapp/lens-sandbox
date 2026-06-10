@@ -135,15 +135,15 @@ mod tests {
     fn api_key_header_provider_builds_the_named_header_with_the_raw_value() {
         let p = provider(vec![InjectionDef {
             kind: InjectionKind::ApiKeyHeader,
-            domain: "api.anthropic.com".into(),
+            domain: "api.example.test".into(),
             header: Some("x-api-key".into()),
         }]);
-        let inj = p.injections("sk-ant-real");
+        let inj = p.injections("some-secret");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.anthropic.com" && header == "x-api-key" && value == "sk-ant-real"
+                if domain == "api.example.test" && header == "x-api-key" && value == "some-secret"
         ));
     }
 
@@ -151,11 +151,11 @@ mod tests {
     fn api_key_header_without_a_header_name_injects_nothing() {
         let p = provider(vec![InjectionDef {
             kind: InjectionKind::ApiKeyHeader,
-            domain: "api.anthropic.com".into(),
+            domain: "api.example.test".into(),
             header: None,
         }]);
         assert!(
-            p.injections("sk-ant-real").is_empty(),
+            p.injections("some-secret").is_empty(),
             "a malformed api_key_header must fail closed, injecting nothing"
         );
         assert!(p.unarmed_injections().is_empty());
@@ -187,7 +187,7 @@ mod tests {
             },
             InjectionDef {
                 kind: InjectionKind::ApiKeyHeader,
-                domain: "api.anthropic.com".into(),
+                domain: "api.example.test".into(),
                 header: Some("x-api-key".into()),
             },
         ]);

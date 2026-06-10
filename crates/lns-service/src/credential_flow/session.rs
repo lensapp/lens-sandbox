@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::approval_flow::protocol::{
     CredentialDecision, CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame,
 };
-use crate::credential_flow::providers::{self, DefProvider, Provider};
+use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 use lns_policy::integrations::TokenFallback;
 
@@ -281,7 +281,6 @@ impl CredentialSession {
         self.custom_providers
             .iter()
             .map(|p| p as &dyn Provider)
-            .chain(providers::ALL.iter().map(|p| *p as &dyn Provider))
             .find(|p| p.id() == credential_id)
             .is_some_and(|p| {
                 p.unarmed_injections()
@@ -1935,6 +1934,20 @@ mod tests {
         })
     }
 
+    fn some_provider() -> DefProvider {
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+        DefProvider::new(ProviderDef {
+            id: "some-provider".into(),
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some-placeholder-0000".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.some-provider.example".into(),
+                header: None,
+            }],
+        })
+    }
+
     fn armed_oauth(access_token: &str) -> CredentialEntry {
         CredentialEntry::Oauth {
             access_token: access_token.into(),
@@ -1990,18 +2003,21 @@ mod tests {
     }
 
     #[test]
-    fn submit_pending_auto_allows_an_armed_builtin_stored_credential_on_its_host() {
+    fn submit_pending_auto_allows_an_armed_stored_credential_on_its_host() {
         let (s, n, mut rx) = armed_session(
             vec![(
-                "openai",
+                "some-provider",
                 CredentialEntry::Stored {
-                    value: "sk-real".into(),
+                    value: "some-real".into(),
                 },
             )],
-            vec![],
+            vec![some_provider()],
         );
         s.submit_pending(
-            gate("openai", "POST https://api.openai.com/issues"),
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
             Instant::now(),
         );
         assert!(n.presented.lock().unwrap().is_empty());

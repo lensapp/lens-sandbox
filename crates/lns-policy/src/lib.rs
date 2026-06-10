@@ -17,21 +17,6 @@ pub struct Policy {
     pub network: NetworkPolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations: Vec<String>,
-    #[serde(default, skip_serializing_if = "CredentialsSection::is_empty")]
-    pub credentials: CredentialsSection,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialsSection {
-    #[serde(default)]
-    pub custom_providers: Vec<crate::providers::ProviderDef>,
-}
-
-impl CredentialsSection {
-    fn is_empty(&self) -> bool {
-        self.custom_providers.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,41 +416,8 @@ network:
         assert_eq!(p.network.allowed_routes[1].verdict, Verdict::Deny);
     }
 
-    fn acme_provider() -> crate::providers::ProviderDef {
-        use crate::providers::{InjectionDef, InjectionKind, ProviderDef};
-        ProviderDef {
-            id: "acme".into(),
-            env_var: "ACME_API_KEY".into(),
-            placeholder: "acme_LNSPLACEHOLDER0000000000000000000000".into(),
-            injections: vec![InjectionDef {
-                kind: InjectionKind::BearerHeader,
-                domain: "api.acme.corp".into(),
-                header: None,
-            }],
-        }
-    }
-
     #[test]
-    fn policy_with_custom_providers_yaml_roundtrip_is_lossless() {
-        let mut p = Policy::default();
-        p.credentials.custom_providers.push(acme_provider());
-        let yaml = serde_yaml::to_string(&p).unwrap();
-        assert!(yaml.contains("customProviders"), "got:\n{yaml}");
-        let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(p, parsed);
-    }
-
-    #[test]
-    fn network_only_policy_omits_the_credentials_key() {
-        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
-        assert!(
-            !yaml.contains("credentials"),
-            "an empty credentials section must not clutter the shareable file:\n{yaml}"
-        );
-    }
-
-    #[test]
-    fn legacy_network_only_yaml_parses_with_empty_custom_providers_and_integrations() {
+    fn legacy_network_only_yaml_parses_with_empty_integrations() {
         let yaml = "\
 network:
   allowedRoutes: []
@@ -473,7 +425,6 @@ network:
   defaultTransport: direct
 ";
         let p: Policy = serde_yaml::from_str(yaml).unwrap();
-        assert!(p.credentials.custom_providers.is_empty());
         assert!(p.integrations.is_empty());
     }
 
@@ -498,7 +449,7 @@ network:
     }
 
     #[test]
-    fn existing_custom_providers_yaml_still_parses_with_empty_integrations() {
+    fn a_legacy_policy_carrying_the_removed_credentials_section_still_loads() {
         let yaml = "\
 network:
   allowedRoutes: []
@@ -514,8 +465,10 @@ credentials:
           domain: api.acme.corp
 ";
         let p: Policy = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(p.credentials.custom_providers.len(), 1);
-        assert!(p.integrations.is_empty());
+        assert!(
+            p.integrations.is_empty(),
+            "the now-unknown credentials section is ignored, not an error"
+        );
     }
 
     #[test]

@@ -42,28 +42,17 @@ fn wire_provider(integ: &Integration) -> Option<DefProvider> {
     }))
 }
 
-/// Resolves the policy's applied integration ids against the effective catalog, skipping any id already owned by a built-in or a declared custom provider so the greenfield path never double-handles a service.
+/// Resolves the policy's applied integration ids against the effective catalog.
 pub fn resolve_applied_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> AppliedIntegrations {
-    let already_owned: HashSet<&str> = lns_policy::providers::builtins()
-        .iter()
-        .map(|p| p.id.as_str())
-        .chain(
-            policy
-                .credentials
-                .custom_providers
-                .iter()
-                .map(|p| p.id.as_str()),
-        )
-        .collect();
     let applied: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
 
     let mut out = AppliedIntegrations::default();
     for integ in catalog {
         let id = integ.id.as_str();
-        if !applied.contains(id) || already_owned.contains(id) {
+        if !applied.contains(id) {
             continue;
         }
         out.routes
@@ -78,23 +67,12 @@ pub fn resolve_applied_integrations(
     out
 }
 
-/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already owned by a built-in, a custom provider, or an applied integration.
+/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied.
 pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
-    let owned: HashSet<&str> = lns_policy::providers::builtins()
-        .iter()
-        .map(|p| p.id.as_str())
-        .chain(
-            policy
-                .credentials
-                .custom_providers
-                .iter()
-                .map(|p| p.id.as_str()),
-        )
-        .chain(policy.integrations.iter().map(String::as_str))
-        .collect();
+    let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
 
     let mut out = ConnectableIntegrations::default();
     for integ in catalog {
@@ -173,36 +151,6 @@ mod tests {
         let out = resolve_applied_integrations(&policy_applying(&[]), &catalog);
         assert!(out.providers.is_empty());
         assert!(out.routes.is_empty());
-    }
-
-    #[test]
-    fn skips_an_applied_id_that_collides_with_a_builtin() {
-        // A catalog entry mis-id'd as a built-in must never be resolved — the built-in owns it.
-        let catalog = vec![cred_integration(
-            "openai",
-            "OPENAI_API_KEY",
-            "api.openai.com",
-        )];
-        let out = resolve_applied_integrations(&policy_applying(&["openai"]), &catalog);
-        assert!(out.providers.is_empty(), "built-in id must be skipped");
-        assert!(out.routes.is_empty());
-    }
-
-    #[test]
-    fn skips_an_applied_id_that_collides_with_a_declared_custom_provider() {
-        let catalog = vec![cred_integration("acme", "ACME_API_KEY", "api.acme.corp")];
-        let mut policy = policy_applying(&["acme"]);
-        policy.credentials.custom_providers.push(ProviderDef {
-            id: "acme".into(),
-            env_var: "ACME_API_KEY".into(),
-            placeholder: "acme_LNSPLACEHOLDER".into(),
-            injections: Vec::new(),
-        });
-        let out = resolve_applied_integrations(&policy, &catalog);
-        assert!(
-            out.providers.is_empty(),
-            "a declared custom provider owns the id; the integration path must defer"
-        );
     }
 
     fn oauth_integration(id: &str, env_var: &str, domain: &str) -> Integration {
@@ -289,26 +237,6 @@ mod tests {
             "an applied integration is not connectable"
         );
         assert!(c.routes.is_empty());
-    }
-
-    #[test]
-    fn connectable_excludes_builtin_and_custom_provider_ids() {
-        let catalog = vec![
-            cred_integration("openai", "OPENAI_API_KEY", "api.openai.com"),
-            cred_integration("acme", "ACME_API_KEY", "api.acme.corp"),
-        ];
-        let mut policy = policy_applying(&[]);
-        policy.credentials.custom_providers.push(ProviderDef {
-            id: "acme".into(),
-            env_var: "ACME_API_KEY".into(),
-            placeholder: "acme_LNSPLACEHOLDER".into(),
-            injections: Vec::new(),
-        });
-        let c = resolve_connectable_integrations(&policy, &catalog);
-        assert!(
-            c.providers.is_empty(),
-            "built-in and custom-provider ids are already owned"
-        );
     }
 
     #[test]

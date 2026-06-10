@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,27 +29,6 @@ pub enum InjectionKind {
     UriPlaceholder,
 }
 
-const MANIFEST_TOML: &str = include_str!("providers.toml");
-
-#[derive(Deserialize)]
-struct Manifest {
-    provider: Vec<ProviderDef>,
-}
-
-/// Panics on malformed TOML; the shipped manifest is test-proven well-formed, so the production caller never hits that arm.
-fn parse(toml_src: &str) -> Vec<ProviderDef> {
-    let manifest: Manifest =
-        toml::from_str(toml_src).expect("credential provider manifest must be valid TOML");
-    manifest.provider
-}
-
-static BUILTINS: LazyLock<Vec<ProviderDef>> = LazyLock::new(|| parse(MANIFEST_TOML));
-
-/// The compiled-in provider set, unioned with policy-declared custom providers at run start.
-pub fn builtins() -> &'static [ProviderDef] {
-    BUILTINS.as_slice()
-}
-
 /// A placeholder must self-identify as fake so no real credential can leak into the shipped or declared provider set.
 pub fn is_self_identifying(placeholder: &str) -> bool {
     let lower = placeholder.to_lowercase();
@@ -61,69 +38,6 @@ pub fn is_self_identifying(placeholder: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn builtins_expose_every_shipped_provider() {
-        let ids: HashSet<_> = builtins().iter().map(|p| p.id.as_str()).collect();
-        for expected in ["openai", "anthropic", "linear", "telegram"] {
-            assert!(ids.contains(expected), "missing built-in {expected}");
-        }
-    }
-
-    #[test]
-    fn telegram_built_in_uses_uri_placeholder_injection() {
-        let telegram = builtins().iter().find(|p| p.id == "telegram").unwrap();
-        assert_eq!(telegram.injections[0].kind, InjectionKind::UriPlaceholder);
-    }
-
-    #[test]
-    fn anthropic_built_in_uses_an_api_key_header_named_x_api_key() {
-        let anthropic = builtins().iter().find(|p| p.id == "anthropic").unwrap();
-        assert_eq!(anthropic.injections[0].kind, InjectionKind::ApiKeyHeader);
-        assert_eq!(anthropic.injections[0].domain, "api.anthropic.com");
-        assert_eq!(anthropic.injections[0].header.as_deref(), Some("x-api-key"));
-    }
-
-    #[test]
-    fn anthropic_built_in_also_covers_authorization_bearer_for_openai_compatible_clients() {
-        // OpenAI-compatible clients (e.g. hermes) hit api.anthropic.com with
-        // `Authorization: Bearer`; without a bearer injection the placeholder
-        // survives in that header and trips the proxy's leak gate.
-        let anthropic = builtins().iter().find(|p| p.id == "anthropic").unwrap();
-        let bearer = anthropic
-            .injections
-            .iter()
-            .find(|i| i.kind == InjectionKind::BearerHeader)
-            .expect("anthropic must inject a bearer header for OpenAI-compatible clients");
-        assert_eq!(bearer.domain, "api.anthropic.com");
-        assert!(
-            bearer.header.is_none(),
-            "bearer_header carries no header name"
-        );
-    }
-
-    #[test]
-    fn builtin_ids_and_env_vars_are_unique() {
-        let mut ids = HashSet::new();
-        let mut envs = HashSet::new();
-        for p in builtins() {
-            assert!(ids.insert(&p.id), "duplicate id {}", p.id);
-            assert!(envs.insert(&p.env_var), "duplicate env_var {}", p.env_var);
-        }
-    }
-
-    #[test]
-    fn every_builtin_placeholder_self_identifies() {
-        for p in builtins() {
-            assert!(
-                is_self_identifying(&p.placeholder),
-                "{} placeholder doesn't self-identify: {}",
-                p.id,
-                p.placeholder
-            );
-        }
-    }
 
     #[test]
     fn is_self_identifying_accepts_placeholder_or_lns_markers() {
@@ -135,12 +49,6 @@ mod tests {
     #[test]
     fn is_self_identifying_rejects_a_real_looking_token() {
         assert!(!is_self_identifying("acme_real_looking_token"));
-    }
-
-    #[test]
-    #[should_panic(expected = "credential provider manifest must be valid TOML")]
-    fn parse_panics_on_malformed_manifest() {
-        parse("this is definitely not valid toml ][");
     }
 
     #[test]
@@ -178,7 +86,7 @@ mod tests {
     fn api_key_header_injection_round_trips_with_its_header_name() {
         let def = InjectionDef {
             kind: InjectionKind::ApiKeyHeader,
-            domain: "api.anthropic.com".into(),
+            domain: "api.example.test".into(),
             header: Some("x-api-key".into()),
         };
         let yaml = serde_yaml::to_string(&def).unwrap();

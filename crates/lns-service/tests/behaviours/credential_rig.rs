@@ -8,9 +8,7 @@ use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
 use lns_service::approval_flow::window::WindowState;
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
 use lns_service::credential_flow::providers::DefProvider;
-use lns_service::credential_flow::registry::{
-    expand_credentials_with, expand_credentials_with_custom,
-};
+use lns_service::credential_flow::registry::expand_credentials_with_custom;
 use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
     CredentialStateFile, CredentialStore, JsonFileCredentialStore,
@@ -266,8 +264,9 @@ impl CredentialRig {
                 timeout,
                 Box::new(move |state| {
                     let values = host_values_for_emitter.lock().unwrap().clone();
-                    let credentials =
-                        expand_credentials_with(state, &|id: &str| values.get(id).cloned());
+                    let credentials = expand_credentials_with_custom(state, &[], &|id: &str| {
+                        values.get(id).cloned()
+                    });
                     let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
                         network: None,
                         credentials: Some(credentials),
