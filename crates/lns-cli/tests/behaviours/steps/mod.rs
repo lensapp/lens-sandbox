@@ -6,3 +6,4 @@ pub mod publish;
 pub mod run;
 pub mod run_config_defaults;
 pub mod update_check;
+pub mod volume_cli;

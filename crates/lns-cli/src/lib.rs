@@ -12,6 +12,7 @@ pub mod service;
 mod test_env;
 pub mod update;
 pub mod update_check;
+pub mod volume;
 
 use anyhow::Result;
 use cli::{Cli, Command, LogLevel};
@@ -44,6 +45,13 @@ pub async fn run(cli: Cli) -> Result<i32> {
             service::require_running().await;
             service::ls().await?;
             0
+        }
+        Command::Volume(args) => {
+            service::require_running().await;
+            let svc = volume::RealVolumeService::new(service::socket_path()?);
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            volume::run(&args.command, &svc, &mut input, &mut std::io::stdout()).await?
         }
         Command::Audit(args) => audit::run_verify(args)?,
         Command::Service(args) => {

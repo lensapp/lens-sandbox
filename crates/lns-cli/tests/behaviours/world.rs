@@ -23,6 +23,7 @@ pub struct BehaviourWorld {
     pub uc: UpdateCheckRig,
     pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
     pub resolved_run: Option<ResolvedRunView>,
+    pub volume: VolumeCliRig,
 }
 
 #[derive(Debug, Default)]
@@ -31,6 +32,17 @@ pub struct ResolvedRunView {
     pub env: Vec<String>,
     pub volumes: Vec<String>,
     pub publish: Vec<String>,
+}
+
+/// Scripted state for the fake volume service plus the user's prompt answer.
+#[derive(Debug, Default)]
+pub struct VolumeCliRig {
+    pub volumes: Vec<lns_ipc::VolumeInfo>,
+    pub prune_plan: Option<(Vec<String>, u64)>,
+    pub refuse_message: Option<String>,
+    pub unreachable: bool,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub prompt_answer: Option<String>,
 }
 
 #[derive(Debug, Default)]

@@ -64,7 +64,7 @@ impl RealServiceClient {
     }
 }
 
-pub(super) async fn send_request(socket: &Path, request: &Request) -> Option<Response> {
+pub(crate) async fn send_request(socket: &Path, request: &Request) -> Option<Response> {
     let attempt = async {
         let mut stream = UnixStream::connect(socket).await.ok()?;
         let frame = encode_frame(request).ok()?;

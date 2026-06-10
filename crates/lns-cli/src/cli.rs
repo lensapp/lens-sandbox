@@ -42,6 +42,8 @@ pub enum Command {
     Kill(KillArgs),
     #[command(about = "List active runs (`docker ps`-style).")]
     Ls,
+    #[command(about = "Manage the named volumes used with `lns run -v` (`docker volume`-style).")]
+    Volume(VolumeArgs),
     #[command(about = "Verify the audit chain of a completed run.")]
     Audit(AuditArgs),
     #[command(about = "Manage the Lens Sandbox background service.")]
@@ -95,6 +97,51 @@ pub struct ConfigSetArgs {
 pub struct ConfigKeyArgs {
     #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
     pub key: crate::config::ConfigKey,
+}
+
+#[derive(clap::Args)]
+pub struct VolumeArgs {
+    #[command(subcommand)]
+    pub command: VolumeCommand,
+}
+
+#[derive(Subcommand)]
+pub enum VolumeCommand {
+    #[command(about = "List named volumes with their size, age, and holder.")]
+    Ls,
+    #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
+    Create(VolumeNameArg),
+    #[command(about = "Show a volume's details as JSON.")]
+    Inspect(VolumeNameArg),
+    #[command(about = "Remove a named volume; refused while a run holds it.")]
+    Rm(VolumeNameArg),
+    #[command(about = "Remove every volume not attached to a running sandbox.")]
+    Prune(VolumePruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct VolumeNameArg {
+    #[arg(
+        value_parser = parse_volume_name,
+        help = "Volume name, as used with `lns run -v name:/path`."
+    )]
+    pub name: String,
+}
+
+#[derive(clap::Args)]
+pub struct VolumePruneArgs {
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Skip the confirmation prompt."
+    )]
+    pub force: bool,
+}
+
+fn parse_volume_name(s: &str) -> Result<String, String> {
+    lns_ipc::validate_volume_name(s)?;
+    Ok(s.to_string())
 }
 
 #[derive(clap::Args)]
