@@ -608,6 +608,7 @@ mod tests {
                 command: String::new(),
                 started: String::new(),
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+                logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             },
         );
 
@@ -893,6 +894,7 @@ mod tests {
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
             status: Mutex::new(lns_ipc::RunStatus::Running),
+            logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
         };
         crate::run_registry::register(run_id, handle);
         let resp = handle_request(&Request::CancelRun { run_id }, Instant::now()).await;
@@ -919,6 +921,7 @@ mod tests {
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
             status: Mutex::new(lns_ipc::RunStatus::Running),
+            logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
         };
         crate::run_registry::register(run_id, handle);
 
