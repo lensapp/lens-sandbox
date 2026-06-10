@@ -96,6 +96,14 @@ Scenarios that require booting a real microVM (`lns run <image>`). They need Vz/
 - Layer 2 features live under `crates/<prod>/tests/behaviours/`; Layer 1 features live under `crates/<prod>/e2e/` and are picked up by the `crates/e2e-tests/` harness.
 - Adding a new `.feature` to an existing layer doesn't require a new test bin — the layer's cucumber harness recursively globs its features dir. If a step phrasing doesn't exist yet, add it to the layer's `steps/` module alongside the existing ones.
 
+### Fixtures: synthetic test-values, not shipped ids
+
+Generic credential / integration / oauth tests (Layer 2 **and** Layer 3) exercise the *mechanism* against a clearly-synthetic fixture — never a real shipped provider or integration id. Use obvious test-values: `some-provider` (credential), `some-oauth` (oauth integration), `SOME_TOKEN` / `SOME_OAUTH_TOKEN`, `some-secret` / `some-access` / `some-refresh`, `api.some-provider.example` / `api.some-oauth.example`; injection-kind and parser sample data uses neutral hosts (`api.example.test`, `example.com`).
+
+Real shipped ids (`github`, `openai`, `anthropic`, `linear`, `telegram`, `gitlab`, …) belong in exactly two places: the manifest / catalog source of truth (`crates/lns-policy/src/providers.toml`, `crates/lns-policy/src/integrations.yaml`) and **one** lns-policy contract test per entry that pins what the shipped catalog ships (env var, placeholder shape, injection kinds, token fallback). Network-policy *user docs* may still use a recognizable host like `api.github.com` as a destination example — that's illustration, not provider coupling.
+
+The reason is the same one that motivates the builtins → integrations migration: the shipped set shrinks over time, so a test pinned to a real id churns every time one is removed. Re-pointing `github` → `openai` is not a fix — `openai` leaves too; only a synthetic fixture is durable. When a test names a real provider/integration as its example, replace it with a synthetic fixture unless the test's job is literally to validate the shipped manifest/catalog.
+
 ## Commands
 
 Run from the workspace root. For crate-scoped iteration, use cargo directly: `cd crates/foo && cargo test` (or `cargo test -p foo` from anywhere).
