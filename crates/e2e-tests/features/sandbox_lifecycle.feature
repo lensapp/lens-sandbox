@@ -13,6 +13,24 @@ Feature: sandbox lifecycle verbs reach the service end to end
     And the output contains "inspect"
     And the output contains "stats"
 
+  Scenario: sandbox ls answers with the runs table end to end
+    Given the Lens Sandbox service is running
+    When I run sandbox command "ls" against the service
+    Then the exit code is 0
+    And the output contains "ID"
+
+  Scenario: the flat ls alias still reaches the service
+    Given the Lens Sandbox service is running
+    When I run lns "ls" against the service
+    Then the exit code is 0
+    And the output contains "ID"
+
+  Scenario: sandbox kill of an unknown run reports the daemon's error
+    Given the Lens Sandbox service is running
+    When I run sandbox command "kill 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "4242"
+
   Scenario: stopping an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "stop 4242" against the service

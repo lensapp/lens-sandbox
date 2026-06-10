@@ -36,11 +36,11 @@ pub struct Cli {
 pub enum Command {
     #[command(about = "Run an OCI image in a microVM.")]
     Run(RunArgs),
-    #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
+    #[command(hide = true)]
     Exec(ExecArgs),
-    #[command(about = "Send a signal to a running run (`docker kill`-style).")]
+    #[command(hide = true)]
     Kill(KillArgs),
-    #[command(about = "List active runs (`docker ps`-style).")]
+    #[command(hide = true)]
     Ls,
     #[command(about = "Manage the named volumes used with `lns run -v` (`docker volume`-style).")]
     Volume(VolumeArgs),
@@ -48,7 +48,9 @@ pub enum Command {
         about = "Manage the cached OCI images that `lns run` boots from (`docker image`-style)."
     )]
     Image(ImageArgs),
-    #[command(about = "Manage running sandboxes: stop, logs, attach, inspect, stats.")]
+    #[command(
+        about = "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats."
+    )]
     Sandbox(SandboxArgs),
     #[command(about = "Verify the audit chain of a completed run.")]
     Audit(AuditArgs),
@@ -193,6 +195,12 @@ pub struct SandboxArgs {
 
 #[derive(Subcommand)]
 pub enum SandboxCommand {
+    #[command(about = "List active runs (`docker ps`-style).")]
+    Ls,
+    #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
+    Exec(ExecArgs),
+    #[command(about = "Send a signal to a running run (`docker kill`-style).")]
+    Kill(KillArgs),
     #[command(about = "Stop a run gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
     Stop(SandboxStopArgs),
     #[command(about = "Print a run's captured output; `-f` streams until the run exits.")]
