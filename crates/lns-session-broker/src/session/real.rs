@@ -8,8 +8,8 @@ use std::sync::mpsc::SyncSender;
 use lns_session::{ClientFrame, ServerFrame, Winsize, encode_frame};
 
 use super::{
-    LoopAction, SessionError, SessionOutcome, SharedFd, close, dispatch_frame, read_client_frame,
-    signal_target, validate_argv, validate_open_session,
+    LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close, dispatch_frame,
+    read_client_frame, signal_target, validate_argv, validate_open_session,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
@@ -59,6 +59,7 @@ pub fn handle_session(
     let ClientFrame::OpenSession {
         argv,
         env,
+        cwd,
         tty,
         stdin,
         winsize,
@@ -66,17 +67,17 @@ pub fn handle_session(
     else {
         unreachable!("validate_open_session guarantees OpenSession");
     };
+    let spec = WorkloadSpec { argv, env, cwd };
     if tty {
-        run_tty_session(conn, argv, env, winsize, stdin, pid_tx, forker)
+        run_tty_session(conn, spec, winsize, stdin, pid_tx, forker)
     } else {
-        run_pipe_session(conn, argv, env, stdin, pid_tx, forker)
+        run_pipe_session(conn, spec, stdin, pid_tx, forker)
     }
 }
 
 fn run_tty_session(
     conn: RawFd,
-    argv: Vec<String>,
-    env: Vec<String>,
+    spec: WorkloadSpec,
     winsize: Option<Winsize>,
     _stdin_enabled: bool,
     pid_tx: Option<SyncSender<libc::pid_t>>,
@@ -90,7 +91,7 @@ fn run_tty_session(
                 let _ = writeln_stderr(&format!("child_setup: {e}"));
                 child_exit(127);
             }
-            exec_child(&argv, &env);
+            exec_child(&spec);
         }
         Err(err) => {
             close(pty.master);
@@ -115,8 +116,7 @@ fn run_tty_session(
 
 fn run_pipe_session(
     conn: RawFd,
-    argv: Vec<String>,
-    env: Vec<String>,
+    spec: WorkloadSpec,
     stdin_enabled: bool,
     pid_tx: Option<SyncSender<libc::pid_t>>,
     forker: &dyn Forker,
@@ -143,7 +143,7 @@ fn run_pipe_session(
             close(stdin_r);
             close(stdout_w);
             close(stderr_w);
-            exec_child(&argv, &env);
+            exec_child(&spec);
         }
         Err(err) => {
             for fd in [stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w] {
@@ -369,7 +369,7 @@ fn make_pipe() -> Result<(RawFd, RawFd), SessionError> {
     Ok((fds[0], fds[1]))
 }
 
-fn exec_child(argv: &[String], env: &[String]) -> ! {
+fn exec_child(spec: &WorkloadSpec) -> ! {
     // SAFETY: post-dup2 child; raw close_range (no musl binding) drops every fd>=3 so conn/pty.master/listeners never survive execvp.
     unsafe {
         libc::syscall(
@@ -379,14 +379,15 @@ fn exec_child(argv: &[String], env: &[String]) -> ! {
             0 as c_long,
         )
     };
-    for kv in env {
+    enter_workdir(spec.cwd.as_deref());
+    for kv in &spec.env {
         if let Ok(c) = CString::new(kv.as_str()) {
             let raw = c.into_raw();
             // SAFETY: putenv keeps the pointer; child execs imminently, so the leak ends with the process image.
             unsafe { libc::putenv(raw) };
         }
     }
-    let Some(cargs) = validate_argv(argv) else {
+    let Some(cargs) = validate_argv(&spec.argv) else {
         let _ = writeln_stderr("argv contained interior NUL");
         child_exit(127);
     };
@@ -396,10 +397,19 @@ fn exec_child(argv: &[String], env: &[String]) -> ! {
     unsafe { libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr()) };
     let _ = writeln_stderr(&format!(
         "execvp({:?}): {}",
-        argv[0],
+        spec.argv[0],
         io::Error::last_os_error()
     ));
     child_exit(127);
+}
+
+fn enter_workdir(cwd: Option<&str>) {
+    let Some(dir) = cwd else { return };
+    let entered = std::fs::create_dir_all(dir).and_then(|()| std::env::set_current_dir(dir));
+    if let Err(e) = entered {
+        let _ = writeln_stderr(&format!("workdir {dir:?}: {e}"));
+        child_exit(126);
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +432,7 @@ mod tests {
         let frame = ClientFrame::OpenSession {
             argv,
             env: Vec::new(),
+            cwd: None,
             tty: false,
             stdin: false,
             winsize: None,

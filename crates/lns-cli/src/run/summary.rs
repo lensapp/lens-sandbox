@@ -77,6 +77,9 @@ pub fn format_summary(
     for vol in &args.volumes {
         writeln!(s, "  Volume:    {}", volume_line(vol)).unwrap();
     }
+    if let Some(dir) = &args.workdir {
+        writeln!(s, "  Workdir:   {dir}").unwrap();
+    }
     writeln!(
         s,
         "  Resources: {} vCPU · {} MiB",
@@ -197,7 +200,9 @@ mod tests {
             tty: true,
             detach: false,
             detach_keys: crate::cli::DetachChord(vec![0x10, 0x11]),
+            workdir: None,
             env: Vec::new(),
+            env_file: Vec::new(),
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
@@ -331,6 +336,30 @@ mod tests {
             s.contains("Volume:    ro-cfg → /cfg (ro)"),
             "missing ro volume line: {s}"
         );
+    }
+
+    #[test]
+    fn summary_lists_the_requested_workdir() {
+        let mut args = run_args(Some("ubuntu"));
+        args.workdir = Some("/app".into());
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(s.contains("Workdir:   /app"), "missing workdir line: {s}");
+    }
+
+    #[test]
+    fn summary_omits_workdir_line_when_unset() {
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(!s.contains("Workdir:"), "no workdir line expected: {s}");
     }
 
     #[test]

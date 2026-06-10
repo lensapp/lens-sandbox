@@ -26,10 +26,12 @@ run, which requires a `COMMAND` after `--`.
 
 | Option                       | Default          | Meaning                                                                 |
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
-| `--cpus <N>`                 | `1`              | Number of vCPUs; falls back to the `run.cpus` config default.           |
-| `--mem <MiB>`                | `512`            | RAM in MiB; falls back to the `run.mem` config default.                 |
+| `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
+| `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
+| `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
+| `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
 | `-v`, `--volume <SPEC>`      |                  | Attach a named volume as `name:/path[:ro]` (repeatable); persists across runs. |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. |
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload.                 |
@@ -41,7 +43,8 @@ run, which requires a `COMMAND` after `--`.
 | `-- <COMMAND...>`            |                  | Override the entrypoint and command. Everything after `--`.             |
 
 `--cpus`, `--mem`, `-e`, `-v`, and `-p` fall back to defaults stored with
-[`lns config`](#lns-config); a per-run flag overrides its configured default.
+[`lns config`](#lns-config); a per-run flag overrides its configured default. For
+the environment, the layering is `run.env` < `--env-file` < `-e`.
 
 See [Running workloads](running-workloads.md).
 

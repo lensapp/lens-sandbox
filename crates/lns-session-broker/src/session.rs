@@ -22,6 +22,12 @@ pub struct SessionOutcome {
     pub exit_code: i32,
 }
 
+pub(crate) struct WorkloadSpec {
+    pub(crate) argv: Vec<String>,
+    pub(crate) env: Vec<String>,
+    pub(crate) cwd: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum SessionError {
     Io(io::Error),
@@ -173,6 +179,7 @@ mod tests {
         let frame = ClientFrame::OpenSession {
             argv: vec!["/bin/sh".into()],
             env: vec!["A=1".into()],
+            cwd: Some("/app".into()),
             tty: true,
             stdin: false,
             winsize: None,
@@ -185,6 +192,7 @@ mod tests {
         let frame = ClientFrame::OpenSession {
             argv: Vec::new(),
             env: Vec::new(),
+            cwd: None,
             tty: false,
             stdin: false,
             winsize: None,
@@ -217,6 +225,7 @@ mod tests {
         let opener = ClientFrame::OpenSession {
             argv: Vec::new(),
             env: Vec::new(),
+            cwd: None,
             tty: false,
             stdin: false,
             winsize: None,

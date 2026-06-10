@@ -80,6 +80,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         sandbox_uid: args.sandbox_uid,
         cmd: args.cmd,
         env: args.env,
+        workdir: args.workdir,
         debug,
         tty,
         stdin,

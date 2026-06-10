@@ -49,6 +49,7 @@ pub(super) fn exec_env_strings(
     user_env: &[String],
     supervised: bool,
     extra_managed: &[String],
+    workdir: Option<&str>,
 ) -> crate::workload_env::WorkloadEnv {
     let agent_command = supervised.then(|| match image_config {
         Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
@@ -61,6 +62,7 @@ pub(super) fn exec_env_strings(
         image_env,
         user_env,
         agent_command.as_deref(),
+        workdir,
         extra_managed,
     )
 }
@@ -161,7 +163,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_derives_agent_command_from_the_override_cmd() {
-        let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[]);
+        let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[], None);
         assert!(
             env.env.contains(&"AGENT_COMMAND=echo hi".to_string()),
             "expected AGENT_COMMAND in supervised env, got: {env:?}"
@@ -181,6 +183,7 @@ mod tests {
             &[],
             true,
             &[],
+            None,
         );
         let agent = env
             .env
@@ -202,6 +205,7 @@ mod tests {
             &["FOO=bar".into()],
             false,
             &[],
+            None,
         );
         assert_eq!(
             env.env,
@@ -242,7 +246,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &[], true, &[]);
+        let env = exec_env_strings(Some(&cfg), &[], &[], true, &[], None);
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
@@ -258,7 +262,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &["PORT=4000".into()], true, &[]);
+        let env = exec_env_strings(Some(&cfg), &[], &["PORT=4000".into()], true, &[], None);
         assert!(
             env.env.contains(&"PORT=4000".to_string()),
             "user overrides image: {env:?}"

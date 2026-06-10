@@ -74,13 +74,26 @@ lns run -- /bin/sh
 
 ### Resources
 
-| Flag         | Default | Meaning            |
-| ------------ | ------- | ------------------ |
-| `--cpus <N>` | `1`     | Number of vCPUs.   |
-| `--mem <MiB>`| `512`   | RAM in mebibytes.  |
+| Flag                          | Default | Meaning            |
+| ----------------------------- | ------- | ------------------ |
+| `--cpus <N>`                  | `1`     | Number of vCPUs (at least 1). |
+| `-m`, `--mem`, `--memory <SIZE>` | `512` | RAM in mebibytes, or with a unit suffix. |
+
+Memory accepts Docker-style unit suffixes (`b`, `k`, `m`, `g`, plus `kb`/`kib`
+and friends), rounded up to a whole MiB:
 
 ```bash
-lns run --cpus 4 --mem 2048 ghcr.io/acme/builder
+lns run --cpus 4 -m 2g ghcr.io/acme/builder
+lns run --mem 2048 ghcr.io/acme/builder        # same thing, in MiB
+```
+
+### Working directory
+
+The workload starts in the image's `WORKDIR`, like `docker run`. Override it
+with `-w` (an absolute guest path, created inside the sandbox if missing):
+
+```bash
+lns run -w /workspace ghcr.io/acme/agent
 ```
 
 ### Persistent defaults
@@ -109,9 +122,20 @@ Set non-secret environment variables with `-e KEY=VALUE` (repeatable):
 lns run -e NODE_ENV=production -e LOG_LEVEL=debug ghcr.io/acme/agent
 ```
 
-Secrets do **not** belong here — `-e` values are plain environment variables
-visible to the workload. Use the [credential flow](credentials.md) so real secrets
-stay outside the sandbox.
+Load them in bulk from a file with `--env-file` (repeatable):
+
+```bash
+lns run --env-file app.env ghcr.io/acme/agent
+```
+
+An env file holds one `KEY=VALUE` per line; blank lines and `#` comments are
+skipped. When the same variable appears more than once, later files win and
+`-e` beats every file. A bare `KEY` line with no `=` is rejected — passing
+host variables through implicitly would be a silent leak channel.
+
+Secrets do **not** belong in either flag — `-e` and `--env-file` values are
+plain environment variables visible to the workload. Use the
+[credential flow](credentials.md) so real secrets stay outside the sandbox.
 
 ### Volumes
 

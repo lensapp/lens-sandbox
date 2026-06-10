@@ -16,6 +16,7 @@ pub enum ClientFrame {
     OpenSession {
         argv: Vec<String>,
         env: Vec<String>,
+        cwd: Option<String>,
         tty: bool,
         stdin: bool,
         winsize: Option<Winsize>,
@@ -120,6 +121,7 @@ mod tests {
         let frame = ClientFrame::OpenSession {
             argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
             env: vec!["FOO=bar".into()],
+            cwd: Some("/app".into()),
             tty: true,
             stdin: true,
             winsize: Some(Winsize { rows: 24, cols: 80 }),
@@ -127,6 +129,21 @@ mod tests {
         let bytes = encode_frame(&frame).expect("encode");
         let len = decode_length_prefix(&bytes[..4].try_into().unwrap()).expect("len");
         assert_eq!(len, bytes.len() - 4);
+        let back: ClientFrame = decode_frame(&bytes[4..]).expect("decode");
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn open_session_without_a_cwd_round_trips() {
+        let frame = ClientFrame::OpenSession {
+            argv: vec!["sh".into()],
+            env: Vec::new(),
+            cwd: None,
+            tty: false,
+            stdin: false,
+            winsize: None,
+        };
+        let bytes = encode_frame(&frame).expect("encode");
         let back: ClientFrame = decode_frame(&bytes[4..]).expect("decode");
         assert_eq!(back, frame);
     }

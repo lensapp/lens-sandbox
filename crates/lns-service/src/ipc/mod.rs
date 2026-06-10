@@ -286,6 +286,7 @@ pub(super) fn build_session_params(
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env: args.env,
+        cwd: None,
         tty: args.tty,
         stdin: args.stdin,
         initial_winsize: args
@@ -355,6 +356,7 @@ mod tests {
                 sandbox_uid: None,
                 cmd: vec![],
                 env: vec![],
+                workdir: None,
                 debug: false,
                 tty: true,
                 stdin: true,
@@ -1066,6 +1068,10 @@ mod tests {
         let params = build_session_params(args);
         assert_eq!(params.argv, vec!["echo".to_string()]);
         assert_eq!(params.env, vec!["A=B".to_string()]);
+        assert_eq!(
+            params.cwd, None,
+            "exec sessions run in the broker's default cwd"
+        );
         let ws = params.initial_winsize.expect("winsize should be mapped");
         assert_eq!((ws.rows, ws.cols), (24, 80));
     }

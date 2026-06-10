@@ -43,6 +43,7 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
         image_env.as_deref(),
         &user_env,
         None,
+        None,
         &managed,
     ));
     world.user_env = user_env;

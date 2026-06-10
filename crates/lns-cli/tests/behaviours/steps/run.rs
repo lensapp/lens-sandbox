@@ -177,6 +177,18 @@ async fn drive_canned_sequence(world: &mut BehaviourWorld) {
     }
 }
 
+#[then(regex = r"^the summary shows `([^`]+)`$")]
+fn summary_shows(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    if world.summary_output.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {needle:?} in summary:\n{}",
+            world.summary_output
+        ))
+    }
+}
+
 #[then(regex = r"^a run summary is printed before any service round-trip$")]
 fn summary_is_printed(world: &mut BehaviourWorld) -> Result<(), String> {
     if world.summary_output.is_empty() {

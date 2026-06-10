@@ -73,13 +73,17 @@ pub fn run_workload_env(
     image_env: Option<&[String]>,
     user_env: &[String],
     agent_command: Option<&str>,
+    workdir: Option<&str>,
     extra_managed: &[String],
 ) -> WorkloadEnv {
     const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
     if let Some(agent_command) = agent_command {
-        // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in or the command.
+        // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
+        if let Some(workdir) = workdir {
+            composed.env.push(format!("WORKSPACE_PATH={workdir}"));
+        }
         // nexus-agent-sandbox treats TERM unset or "linux" as "no PTY"; xterm-256color opts it into the PTY path needed for `lns run -it --policy`.
         composed
             .env
@@ -187,13 +191,13 @@ mod tests {
 
     #[test]
     fn run_workload_env_carries_user_env_for_an_unsupervised_run() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[]);
         assert_eq!(c.env, ["FOO=bar"], "user -e must reach a policy-less run");
     }
 
     #[test]
     fn run_workload_env_adds_no_supervisor_vars_when_unsupervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[]);
         assert!(
             !c.env
                 .iter()
@@ -205,7 +209,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_appends_agent_command_and_term_when_supervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], Some("echo hi"), &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], Some("echo hi"), None, &[]);
         assert!(c.env.contains(&"FOO=bar".to_string()), "got: {:?}", c.env);
         assert!(c.env.contains(&"AGENT_COMMAND=echo hi".to_string()));
         assert!(c.env.contains(&"TERM=xterm-256color".to_string()));
@@ -213,7 +217,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_keeps_supervisor_term_after_a_user_term_so_it_cannot_be_clobbered() {
-        let c = run_workload_env(None, &["TERM=dumb".into()], Some("sh"), &[]);
+        let c = run_workload_env(None, &["TERM=dumb".into()], Some("sh"), None, &[]);
         let last_term = c.env.iter().rposition(|e| e.starts_with("TERM=")).unwrap();
         assert_eq!(c.env[last_term], "TERM=xterm-256color");
     }
@@ -223,6 +227,7 @@ mod tests {
         let c = run_workload_env(
             None,
             &["SOME_TOKEN=x".into()],
+            None,
             None,
             &["SOME_TOKEN".to_string()],
         );
@@ -236,10 +241,62 @@ mod tests {
             None,
             &["GITLAB_TOKEN=real".into()],
             None,
+            None,
             &["GITLAB_TOKEN".to_string()],
         );
         assert_eq!(c.refused, ["GITLAB_TOKEN"]);
         assert!(c.env.is_empty());
+    }
+
+    #[test]
+    fn run_workload_env_pins_workspace_path_for_a_supervised_run() {
+        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &[]);
+        assert!(
+            c.env.contains(&"WORKSPACE_PATH=/app".to_string()),
+            "got: {:?}",
+            c.env
+        );
+    }
+
+    #[test]
+    fn run_workload_env_omits_workspace_path_without_a_workdir() {
+        let c = run_workload_env(None, &[], Some("sh"), None, &[]);
+        assert!(
+            !c.env.iter().any(|e| e.starts_with("WORKSPACE_PATH=")),
+            "got: {:?}",
+            c.env
+        );
+    }
+
+    #[test]
+    fn run_workload_env_keeps_the_workdir_workspace_path_after_a_user_override() {
+        let c = run_workload_env(
+            None,
+            &["WORKSPACE_PATH=/evil".into()],
+            Some("sh"),
+            Some("/app"),
+            &[],
+        );
+        let last = c
+            .env
+            .iter()
+            .rposition(|e| e.starts_with("WORKSPACE_PATH="))
+            .unwrap();
+        assert_eq!(
+            c.env[last], "WORKSPACE_PATH=/app",
+            "the broker's last-wins putenv must land on the -w dir: {:?}",
+            c.env
+        );
+    }
+
+    #[test]
+    fn run_workload_env_adds_no_workspace_path_when_unsupervised() {
+        let c = run_workload_env(None, &[], None, Some("/app"), &[]);
+        assert!(
+            c.env.is_empty(),
+            "an unsupervised run's cwd travels via the session, not env: {:?}",
+            c.env
+        );
     }
 
     #[test]

@@ -24,7 +24,9 @@ pub struct BehaviourWorld {
     pub oauth_id: Option<String>,
 
     pub image_env: Option<Vec<String>>,
+    pub image_workdir: Option<String>,
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
+    pub resolved_workdir: Option<Option<String>>,
     pub user_env: Vec<String>,
     /// Env vars a connected integration manages for the run; `-e` overrides of these are refused.
     pub managed_vars: Vec<String>,
