@@ -85,52 +85,52 @@ mod tests {
 
     #[test]
     fn bearer_header_uses_authorization_header_with_bearer_scheme_prefix() {
-        let inj = bearer_header("ghp_real", "api.github.com");
+        let inj = bearer_header("some-token", "api.example.test");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.github.com"
+                if domain == "api.example.test"
                     && header == "Authorization"
-                    && value == "Bearer ghp_real"
+                    && value == "Bearer some-token"
         ));
     }
 
     #[test]
     fn token_header_uses_the_git_token_scheme() {
-        let inj = token_header("ghp_real", "api.github.com");
+        let inj = token_header("some-token", "api.example.test");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.github.com"
+                if domain == "api.example.test"
                     && header == "Authorization"
-                    && value == "token ghp_real"
+                    && value == "token some-token"
         ));
     }
 
     #[test]
     fn token_header_unarmed_declares_domain_with_empty_value() {
-        let inj = token_header_unarmed("api.github.com");
+        let inj = token_header_unarmed("api.example.test");
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, value, .. }
-                if domain == "api.github.com" && value.is_empty()
+                if domain == "api.example.test" && value.is_empty()
         ));
     }
 
     #[test]
     fn basic_x_access_token_base64_encodes_the_x_access_token_userinfo() {
-        let inj = basic_x_access_token("ghp_real", "github.com");
+        let inj = basic_x_access_token("some-token", "example.test");
         assert_eq!(inj.len(), 1);
         let expected = format!(
             "Basic {}",
-            crate::base64::encode(b"x-access-token:ghp_real")
+            crate::base64::encode(b"x-access-token:some-token")
         );
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "github.com"
+                if domain == "example.test"
                     && header == "Authorization"
                     && *value == expected
         ));
@@ -138,11 +138,11 @@ mod tests {
 
     #[test]
     fn basic_x_access_token_unarmed_declares_domain_with_empty_value() {
-        let inj = basic_x_access_token_unarmed("github.com");
+        let inj = basic_x_access_token_unarmed("example.test");
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, value, .. }
-                if domain == "github.com" && value.is_empty()
+                if domain == "example.test" && value.is_empty()
         ));
     }
 
@@ -185,12 +185,12 @@ mod tests {
 
     #[test]
     fn bearer_header_unarmed_declares_domain_with_empty_value() {
-        let inj = bearer_header_unarmed("api.github.com");
+        let inj = bearer_header_unarmed("api.example.test");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.github.com"
+                if domain == "api.example.test"
                     && header == "Authorization"
                     && value.is_empty()
         ));

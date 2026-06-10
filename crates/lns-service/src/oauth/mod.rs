@@ -228,7 +228,7 @@ mod tests {
         DeviceCode {
             device_code: "dc-xyz".into(),
             user_code: "WDJB-MJHT".into(),
-            verification_uri: "https://github.com/login/device".into(),
+            verification_uri: "https://some-oauth.example/login/device".into(),
             interval: Duration::from_secs(5),
             expires_in: Duration::from_secs(900),
         }
@@ -245,8 +245,8 @@ mod tests {
 
     fn token(expires_in: u64) -> TokenSet {
         TokenSet {
-            access_token: "gho_access".into(),
-            refresh_token: "ghr_refresh".into(),
+            access_token: "some-access".into(),
+            refresh_token: "some-refresh".into(),
             expires_in: Duration::from_secs(expires_in),
         }
     }
@@ -274,7 +274,7 @@ mod tests {
             shown.lock().unwrap().as_slice(),
             &[(
                 "WDJB-MJHT".to_string(),
-                "https://github.com/login/device".to_string()
+                "https://some-oauth.example/login/device".to_string()
             )],
             "the user code and verification URL must be surfaced exactly once"
         );
@@ -352,13 +352,13 @@ mod tests {
             &flow,
             &sample_cfg(),
             |_| {},
-            std::future::ready(SignInPivot::UseToken("ghp_pasted".into())),
+            std::future::ready(SignInPivot::UseToken("some-pasted-token".into())),
         )
         .await
         .unwrap();
         assert_eq!(
             out,
-            SignIn::Token("ghp_pasted".into()),
+            SignIn::Token("some-pasted-token".into()),
             "pasting a token mid-flow resolves the device flow with the token, not by polling"
         );
         assert!(
@@ -435,8 +435,8 @@ mod tests {
         assert_eq!(
             out,
             Some(CredentialEntry::Oauth {
-                access_token: "gho_access".into(),
-                refresh_token: "ghr_refresh".into(),
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
             }),
             "a refreshed entry carries the new tokens and an absolute expiry off the clock"
@@ -516,10 +516,10 @@ mod tests {
         let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
         let store = CapturingStore::new();
         let mut state = CredentialStateFile::new();
-        state.insert("github_oauth".into(), oauth_entry("expired", "old", 0));
+        state.insert("some-oauth".into(), oauth_entry("expired", "old", 0));
         refresh_due_entries(
             &mut state,
-            &configs_for("github_oauth"),
+            &configs_for("some-oauth"),
             &flow,
             &FakeClock(1000),
             &store,
@@ -527,8 +527,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            state.get("github_oauth"),
-            Some(&oauth_entry("gho_access", "ghr_refresh", 1000 + 3600))
+            state.get("some-oauth"),
+            Some(&oauth_entry("some-access", "some-refresh", 1000 + 3600))
         );
         assert_eq!(
             store.saved.lock().unwrap().len(),
@@ -542,10 +542,10 @@ mod tests {
         let flow = FakeDeviceFlow::polling(vec![]);
         let store = CapturingStore::new();
         let mut state = CredentialStateFile::new();
-        state.insert("github_oauth".into(), oauth_entry("good", "r", 99_999));
+        state.insert("some-oauth".into(), oauth_entry("good", "r", 99_999));
         refresh_due_entries(
             &mut state,
-            &configs_for("github_oauth"),
+            &configs_for("some-oauth"),
             &flow,
             &FakeClock(1000),
             &store,
@@ -563,10 +563,10 @@ mod tests {
         let flow = FakeDeviceFlow::refreshing(Err(anyhow!("invalid_grant")));
         let store = CapturingStore::new();
         let mut state = CredentialStateFile::new();
-        state.insert("github_oauth".into(), oauth_entry("expired", "revoked", 0));
+        state.insert("some-oauth".into(), oauth_entry("expired", "revoked", 0));
         refresh_due_entries(
             &mut state,
-            &configs_for("github_oauth"),
+            &configs_for("some-oauth"),
             &flow,
             &FakeClock(1000),
             &store,
@@ -574,7 +574,7 @@ mod tests {
         )
         .await;
         assert!(
-            !state.contains_key("github_oauth"),
+            !state.contains_key("some-oauth"),
             "a dead grant is dropped so the placeholder unarms and the next use re-prompts"
         );
         assert_eq!(
@@ -591,7 +591,7 @@ mod tests {
         let mut state = CredentialStateFile::new();
         refresh_due_entries(
             &mut state,
-            &configs_for("github_oauth"),
+            &configs_for("some-oauth"),
             &flow,
             &FakeClock(1000),
             &store,
@@ -607,10 +607,10 @@ mod tests {
         let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
         let store = CapturingStore::failing();
         let mut state = CredentialStateFile::new();
-        state.insert("github_oauth".into(), oauth_entry("expired", "old", 0));
+        state.insert("some-oauth".into(), oauth_entry("expired", "old", 0));
         refresh_due_entries(
             &mut state,
-            &configs_for("github_oauth"),
+            &configs_for("some-oauth"),
             &flow,
             &FakeClock(1000),
             &store,
@@ -618,8 +618,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            state.get("github_oauth"),
-            Some(&oauth_entry("gho_access", "ghr_refresh", 1000 + 3600)),
+            state.get("some-oauth"),
+            Some(&oauth_entry("some-access", "some-refresh", 1000 + 3600)),
             "the refreshed token is live in memory even if the disk write failed"
         );
     }

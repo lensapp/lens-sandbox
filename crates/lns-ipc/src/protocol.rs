@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn begin_integration_sign_in_survives_a_request_round_trip() {
         let req = Request::BeginIntegrationSignIn {
-            id: "github_oauth".into(),
+            id: "some-oauth".into(),
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -368,7 +368,7 @@ mod tests {
     fn oauth_sign_in_responses_survive_round_trips() {
         for resp in [
             Response::OauthVerification {
-                verification_uri: "https://github.com/login/device".into(),
+                verification_uri: "https://example.com/login/device".into(),
                 user_code: "WDJB-MJHT".into(),
                 expires_in_secs: 900,
             },

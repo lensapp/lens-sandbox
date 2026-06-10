@@ -647,9 +647,9 @@ mod tests {
                 std::time::Duration::from_secs(30),
             )
             .with_offers(vec![OfferableIntegration {
-                id: "github_oauth".into(),
+                id: "some-oauth".into(),
                 display_name: "GitHub".into(),
-                patterns: vec!["api.github.com".into()],
+                patterns: vec!["api.some-oauth.example".into()],
                 token_fallback: None,
             }]),
         );
@@ -658,8 +658,8 @@ mod tests {
         session.submit_pending(
             RequestPending {
                 id: "r1".into(),
-                host: "api.github.com".into(),
-                action: "CONNECT api.github.com:443".into(),
+                host: "api.some-oauth.example".into(),
+                action: "CONNECT api.some-oauth.example:443".into(),
                 reason: "policy-ambiguous".into(),
             },
             std::time::Instant::now(),
@@ -676,7 +676,7 @@ mod tests {
 
         assert_eq!(
             connector.connects.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "accepting the offer drives the interactive connect"
         );
         match frame_rx.try_recv().expect("decision frame") {
@@ -710,9 +710,9 @@ mod tests {
                 std::time::Duration::from_secs(30),
             )
             .with_offers(vec![OfferableIntegration {
-                id: "github_oauth".into(),
+                id: "some-oauth".into(),
                 display_name: "GitHub".into(),
-                patterns: vec!["api.github.com".into()],
+                patterns: vec!["api.some-oauth.example".into()],
                 token_fallback: None,
             }]),
         );
@@ -721,8 +721,8 @@ mod tests {
         session.submit_pending(
             RequestPending {
                 id: "r1".into(),
-                host: "api.github.com".into(),
-                action: "CONNECT api.github.com:443".into(),
+                host: "api.some-oauth.example".into(),
+                action: "CONNECT api.some-oauth.example:443".into(),
                 reason: "policy-ambiguous".into(),
             },
             std::time::Instant::now(),
@@ -732,7 +732,7 @@ mod tests {
         tx.send(DecisionDelivery {
             id: "r1".into(),
             action: RequestAction::UseToken {
-                value: "ghp_pasted".into(),
+                value: "some-pasted-token".into(),
             },
         })
         .unwrap();
@@ -741,7 +741,7 @@ mod tests {
 
         assert_eq!(
             connector.token_connects.lock().unwrap().as_slice(),
-            &[("github_oauth".to_string(), "ghp_pasted".to_string())],
+            &[("some-oauth".to_string(), "some-pasted-token".to_string())],
             "a UseToken action drives the token connect with the pasted value"
         );
         assert!(
@@ -974,7 +974,7 @@ mod tests {
         state.insert(
             "some-provider".into(),
             CredentialEntry::Stored {
-                value: "ghp_real".into(),
+                value: "some-token".into(),
             },
         );
         emitter(&state);
@@ -1065,11 +1065,11 @@ mod tests {
             AuthKind, Integration, IntegrationRoute, OauthAuth, TokenFallback,
         };
         let catalog = vec![Integration {
-            id: "github_oauth".into(),
+            id: "some-oauth".into(),
             name: Some("GitHub".into()),
             auth_kind: AuthKind::Oauth,
             routes: vec![IntegrationRoute {
-                match_pattern: "api.github.com".into(),
+                match_pattern: "api.some-oauth.example".into(),
                 transport: None,
                 scheme: None,
                 tls_terminate: false,
@@ -1081,8 +1081,8 @@ mod tests {
                 scopes: vec![],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),
-                env_var: "GH_TOKEN".into(),
-                placeholder: "gho_LNSPLACEHOLDER".into(),
+                env_var: "SOME_OAUTH_TOKEN".into(),
+                placeholder: "some-oauth-placeholder".into(),
                 injections: Vec::new(),
             }),
             token_fallback: Some(TokenFallback {
@@ -1092,9 +1092,12 @@ mod tests {
         let connectable = resolve_connectable_integrations(&Policy::default(), &catalog);
         let offerable = build_offerable(&connectable, &catalog);
         assert_eq!(offerable.len(), 1);
-        assert_eq!(offerable[0].id, "github_oauth");
+        assert_eq!(offerable[0].id, "some-oauth");
         assert_eq!(offerable[0].display_name, "GitHub", "uses the catalog name");
-        assert_eq!(offerable[0].patterns, vec!["api.github.com".to_string()]);
+        assert_eq!(
+            offerable[0].patterns,
+            vec!["api.some-oauth.example".to_string()]
+        );
         assert_eq!(
             offerable[0].token_fallback,
             Some(TokenFallback {
@@ -1340,8 +1343,8 @@ mod tests {
         {
             Box::pin(async move {
                 Ok(crate::oauth::PollOutcome::Token(crate::oauth::TokenSet {
-                    access_token: "gho_access".into(),
-                    refresh_token: "ghr_refresh".into(),
+                    access_token: "some-access".into(),
+                    refresh_token: "some-refresh".into(),
                     expires_in: std::time::Duration::from_secs(3600),
                 }))
             })
@@ -1475,7 +1478,7 @@ mod tests {
         tx.send(CredentialDecisionDelivery {
             id: "c1".into(),
             request: CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                value: "ghp_pasted".into(),
+                value: "some-pasted-token".into(),
             }),
         })
         .unwrap();
@@ -1485,7 +1488,7 @@ mod tests {
         assert_eq!(
             session.current_state().get("acme"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_pasted".into(),
+                value: "some-pasted-token".into(),
             }),
             "a token paste arms the Stored value directly rather than running the device sign-in"
         );

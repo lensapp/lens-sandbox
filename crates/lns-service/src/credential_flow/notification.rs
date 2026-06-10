@@ -232,10 +232,10 @@ mod tests {
 
     fn sign_in_prompt() -> SignInPrompt {
         SignInPrompt {
-            credential_id: "github_oauth".into(),
+            credential_id: "some-oauth".into(),
             display_name: "GitHub".into(),
             user_code: "WXYZ-1234".into(),
-            verification_uri: "https://github.com/login/device".into(),
+            verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
             }),
@@ -265,7 +265,7 @@ mod tests {
         let (n, state, _rx) = fixture(false, false);
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(&sign_in_prompt(), cancel_tx);
-        n.dismiss_sign_in("github_oauth");
+        n.dismiss_sign_in("some-oauth");
         assert!(state.snapshot().sign_ins.is_empty());
     }
 

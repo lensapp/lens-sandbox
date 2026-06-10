@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_plain_route_omits_the_richness_keys() {
-        let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.github.com")).unwrap();
+        let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.example.com")).unwrap();
         assert!(
             !yaml.contains("scheme") && !yaml.contains("tlsTerminate") && !yaml.contains("rules"),
             "a plain allow rule must stay minimal:\n{yaml}"

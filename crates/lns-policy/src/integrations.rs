@@ -608,11 +608,11 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_ships_github_oauth_as_an_oauth_integration() {
+    fn bundled_catalog_ships_github_as_an_oauth_integration() {
         let gh = bundled_integrations()
             .iter()
-            .find(|i| i.id == "github_oauth")
-            .expect("github_oauth is bundled");
+            .find(|i| i.id == "github")
+            .expect("github is bundled");
         assert_eq!(gh.auth_kind, AuthKind::Oauth);
         let oauth = gh.oauth.as_ref().expect("oauth block present");
         assert_eq!(oauth.env_var, "GH_TOKEN");
@@ -635,15 +635,15 @@ mod tests {
     }
 
     #[test]
-    fn bundled_github_oauth_declares_a_token_fallback_so_a_blocked_oauth_can_pivot_to_a_pat() {
+    fn bundled_github_declares_a_token_fallback_so_a_blocked_oauth_can_pivot_to_a_pat() {
         let gh = bundled_integrations()
             .iter()
-            .find(|i| i.id == "github_oauth")
-            .expect("github_oauth is bundled");
+            .find(|i| i.id == "github")
+            .expect("github is bundled");
         let fallback = gh
             .token_fallback
             .as_ref()
-            .expect("github_oauth must offer a token fallback for SSO/approval-gated orgs");
+            .expect("github must offer a token fallback for SSO/approval-gated orgs");
         assert!(
             fallback
                 .help
@@ -657,16 +657,14 @@ mod tests {
     #[test]
     fn github_is_served_by_the_oauth_integration_not_a_builtin_provider() {
         assert!(
-            bundled_integrations()
-                .iter()
-                .any(|i| i.id == "github_oauth"),
-            "github_oauth must ship as a bundled integration"
+            bundled_integrations().iter().any(|i| i.id == "github"),
+            "github must ship as a bundled integration"
         );
         assert!(
             !crate::providers::builtins()
                 .iter()
                 .any(|p| p.id == "github"),
-            "the github credential provider is removed; github is served by the github_oauth integration"
+            "the github credential provider is removed; github is served by the github integration"
         );
     }
 

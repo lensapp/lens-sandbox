@@ -110,7 +110,7 @@ interactive **device sign-in** (RFC 8628) the background service drives for you:
 `lns integration connect <id>` prints a verification URL and a code, you authorize in
 a browser, and the obtained token is injected at the boundary like any credential —
 but it's short-lived and refreshed automatically, and a grant that can no longer be
-refreshed re-prompts the sign-in on next use. The bundled `github_oauth` integration
+refreshed re-prompts the sign-in on next use. The bundled `github` integration
 signs in this way. Its live token is stored per machine, never in `lns-policy.yaml`.
 An `oauth` entry carries an `oauth:` block (client id, scopes, the device-authorization
 and token endpoints) in place of `credential:`.
