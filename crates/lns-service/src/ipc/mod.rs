@@ -196,7 +196,9 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             .await
         }
         Request::InspectRun { run_id } => match crate::run_registry::inspect(*run_id) {
-            Some(details) => Response::RunInspect { details },
+            Some(details) => Response::RunInspect {
+                details: Box::new(details),
+            },
             None => Response::Error {
                 message: format!("no active run with id {run_id}"),
             },

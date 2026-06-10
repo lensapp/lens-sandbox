@@ -73,7 +73,7 @@ pub enum Response {
         forced: bool,
     },
     RunInspect {
-        details: RunDetails,
+        details: Box<RunDetails>,
     },
     OauthVerification {
         verification_uri: String,
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn run_inspect_survives_a_response_round_trip() {
         let resp = Response::RunInspect {
-            details: RunDetails {
+            details: Box::new(RunDetails {
                 summary: RunSummary {
                     id: 3,
                     image: "some-image:1".into(),
@@ -635,7 +635,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: RunConfig::from_run_args(&sample_run_args()),
-            },
+            }),
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
