@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -15,6 +15,18 @@ pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 /// Supplies the registry credentials bundled into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
 pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 
+/// A connectable integration whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
+pub struct OfferableIntegration {
+    pub id: String,
+    pub display_name: String,
+    pub patterns: Vec<String>,
+}
+
+/// Connects an integration interactively (oauth sign-in or a straight credential connect) and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery.
+pub trait IntegrationConnector: Send + Sync {
+    fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
+}
+
 pub trait Notifier: Send + Sync {
     fn present(&self, pending: &PendingPrompt);
     fn dismiss(&self, id: &str);
@@ -27,12 +39,15 @@ pub struct PendingPrompt {
     pub id: String,
     pub host: String,
     pub action: String,
+    /// Some(display name) when `host` matches a connectable integration, so the card offers to connect it before the plain allow/deny.
+    pub offer: Option<String>,
 }
 
 #[derive(Debug)]
 struct PendingEntry {
     host: String,
     deadline: Instant,
+    offer_integration_id: Option<String>,
 }
 
 pub struct ApprovalSession {
@@ -43,6 +58,9 @@ pub struct ApprovalSession {
     sink: FrameSink,
     timeout: Duration,
     credentials_provider: OnceLock<CredentialsProvider>,
+    offerable: Vec<OfferableIntegration>,
+    connector: OnceLock<Arc<dyn IntegrationConnector>>,
+    connecting: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +85,53 @@ impl ApprovalSession {
             sink,
             timeout,
             credentials_provider: OnceLock::new(),
+            offerable: Vec::new(),
+            connector: OnceLock::new(),
+            connecting: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Captures the run's connectable integrations so a held request to one of their domains offers to connect before the plain allow/deny.
+    pub fn with_offers(mut self, offerable: Vec<OfferableIntegration>) -> Self {
+        self.offerable = offerable;
+        self
     }
 
     /// Installs the credentials closure once at boot; idempotent, the first provider wins.
     pub fn set_credentials_provider(&self, provider: CredentialsProvider) {
         let _ = self.credentials_provider.set(provider);
+    }
+
+    /// Installs the integration connector once the credential subsystem exists; idempotent, the first wins.
+    pub fn set_connector(&self, connector: Arc<dyn IntegrationConnector>) {
+        let _ = self.connector.set(connector);
+    }
+
+    fn offer_for_host(&self, host: &str) -> Option<&OfferableIntegration> {
+        self.offerable
+            .iter()
+            .find(|i| i.patterns.iter().any(|p| host_matches_pattern(p, host)))
+    }
+
+    /// The (id, display name) to offer for `host`, or `None` when nothing matches or the integration is already connected this run.
+    fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String)> {
+        let integ = self.offer_for_host(host)?;
+        let (id, name) = (integ.id.clone(), integ.display_name.clone());
+        let already_connected = self
+            .policy
+            .lock()
+            .expect("policy mutex poisoned")
+            .integrations
+            .iter()
+            .any(|i| i == &id);
+        (!already_connected).then_some((id, name))
+    }
+
+    fn is_connecting(&self, id: &str) -> bool {
+        self.connecting
+            .lock()
+            .expect("connecting mutex poisoned")
+            .contains(id)
     }
 
     fn current_credentials(&self) -> Option<Vec<Credential>> {
@@ -84,6 +143,12 @@ impl ApprovalSession {
     }
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
+        let matched = self.offer_id_and_name_for(&req.host);
+        let offer_integration_id = matched.as_ref().map(|(id, _)| id.clone());
+        // While a connect for this integration is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
+        let coalesced = offer_integration_id
+            .as_deref()
+            .is_some_and(|id| self.is_connecting(id));
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         if pending.contains_key(&req.id) {
             return;
@@ -93,13 +158,18 @@ impl ApprovalSession {
             PendingEntry {
                 host: req.host.clone(),
                 deadline: now + self.timeout,
+                offer_integration_id,
             },
         );
         drop(pending);
+        if coalesced {
+            return;
+        }
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
             action: req.action,
+            offer: matched.map(|(_, name)| name),
         });
     }
 
@@ -123,12 +193,103 @@ impl ApprovalSession {
             .map(|entry| entry.host)
     }
 
+    /// Accepts a held request's integration offer: drives one connect and releases **every** held request for that integration — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same integration coalesces onto the in-flight connect instead of starting another sign-in.
+    pub async fn connect_offer(&self, id: &str) -> DecisionOutcome {
+        let Some(integration_id) = self.offer_integration_of(id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        if !self.begin_connecting(&integration_id) {
+            // Another card already started this connect; its batch will release this request too.
+            self.notifier.dismiss(id);
+            return DecisionOutcome::Resolved;
+        }
+        // Hide every offer card for this integration so the sign-in card isn't covered; the requests stay held for the batch release.
+        for request_id in self.offer_request_ids(&integration_id) {
+            self.notifier.dismiss(&request_id);
+        }
+        let connected = match self.connector.get() {
+            Some(connector) => connector.connect(&integration_id).await,
+            None => false,
+        };
+        self.finish_connecting(&integration_id);
+        let decision = if connected {
+            Decision::AllowOnce
+        } else {
+            Decision::DenyOnce
+        };
+        for request_id in self.drain_offer_requests(&integration_id) {
+            self.send_decision_frame(&request_id, decision);
+        }
+        DecisionOutcome::Resolved
+    }
+
+    /// The integration a held entry offers, if any; does not remove the entry.
+    fn offer_integration_of(&self, id: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .get(id)?
+            .offer_integration_id
+            .clone()
+    }
+
+    /// Marks `id` as connecting; returns false when a connect was already in flight.
+    fn begin_connecting(&self, id: &str) -> bool {
+        self.connecting
+            .lock()
+            .expect("connecting mutex poisoned")
+            .insert(id.to_string())
+    }
+
+    fn finish_connecting(&self, id: &str) {
+        self.connecting
+            .lock()
+            .expect("connecting mutex poisoned")
+            .remove(id);
+    }
+
+    fn offer_request_ids(&self, integration_id: &str) -> Vec<String> {
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .iter()
+            .filter(|(_, e)| e.offer_integration_id.as_deref() == Some(integration_id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Removes and returns every held request offering `integration_id`.
+    fn drain_offer_requests(&self, integration_id: &str) -> Vec<String> {
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, e)| e.offer_integration_id.as_deref() == Some(integration_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            pending.remove(id);
+        }
+        ids
+    }
+
     pub fn tick_timeouts(&self, now: Instant) -> usize {
+        let connecting = self
+            .connecting
+            .lock()
+            .expect("connecting mutex poisoned")
+            .clone();
         let expired: Vec<String> = {
             let pending = self.pending.lock().expect("pending mutex poisoned");
             pending
                 .iter()
                 .filter(|(_, entry)| entry.deadline <= now)
+                // A request offering an integration that's mid sign-in must not be swept; its connect releases it.
+                .filter(|(_, entry)| {
+                    entry
+                        .offer_integration_id
+                        .as_deref()
+                        .is_none_or(|id| !connecting.contains(id))
+                })
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -208,6 +369,14 @@ impl ApprovalSession {
                 "integration connected in-memory but not persisted: {e}"
             ));
         }
+    }
+}
+
+/// Matches a request host against an integration route pattern: exact, or a `*.suffix` wildcard covering the apex and any subdomain.
+fn host_matches_pattern(pattern: &str, host: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
+        None => pattern == host,
     }
 }
 
@@ -794,5 +963,310 @@ pub(crate) mod tests {
         let informed = n.informed.lock().unwrap();
         assert_eq!(informed.len(), 1);
         assert!(informed[0].contains("not persisted"), "got: {:?}", informed);
+    }
+
+    struct FakeConnector {
+        result: bool,
+        connected: StdMutex<Vec<String>>,
+    }
+
+    impl IntegrationConnector for FakeConnector {
+        fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.connected.lock().unwrap().push(id.to_string());
+                self.result
+            })
+        }
+    }
+
+    fn offerable(id: &str, name: &str, pattern: &str) -> OfferableIntegration {
+        OfferableIntegration {
+            id: id.into(),
+            display_name: name.into(),
+            patterns: vec![pattern.into()],
+        }
+    }
+
+    fn offer_session(
+        offers: Vec<OfferableIntegration>,
+        connector: Option<Arc<FakeConnector>>,
+    ) -> (
+        ApprovalSession,
+        Arc<RecordingNotifier>,
+        mpsc::UnboundedReceiver<HostFrame>,
+    ) {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let session =
+            ApprovalSession::new(Policy::default(), notifier.clone(), store, tx, TEST_TIMEOUT)
+                .with_offers(offers);
+        if let Some(c) = connector {
+            session.set_connector(c);
+        }
+        (session, notifier, rx)
+    }
+
+    #[test]
+    fn submit_pending_with_a_matching_offer_presents_the_integration_display_name() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].offer.as_deref(),
+            Some("GitHub"),
+            "a held request to an integration domain offers to connect it"
+        );
+    }
+
+    #[test]
+    fn submit_pending_without_a_matching_offer_presents_no_offer() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        s.submit_pending(pending("r1", "example.com"), Instant::now());
+        assert_eq!(n.presented.lock().unwrap()[0].offer, None);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_success_releases_the_held_request_with_allow_once() {
+        let connector = Arc::new(FakeConnector {
+            result: true,
+            connected: StdMutex::new(Vec::new()),
+        });
+        let (s, n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+
+        let outcome = s.connect_offer("r1").await;
+
+        assert_eq!(outcome, DecisionOutcome::Resolved);
+        assert_eq!(
+            connector.connected.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "accepting the offer drives a connect of the matched integration"
+        );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_failure_releases_the_held_request_deny_once_closed() {
+        let connector = Arc::new(FakeConnector {
+            result: false,
+            connected: StdMutex::new(Vec::new()),
+        });
+        let (s, _n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            Some(connector),
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            Decision::DenyOnce,
+            "a failed sign-in fails the held request closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_without_a_connector_fails_closed() {
+        let (s, _n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_for_an_id_that_carries_no_offer_is_unknownid() {
+        let connector = Arc::new(FakeConnector {
+            result: true,
+            connected: StdMutex::new(Vec::new()),
+        });
+        let (s, _n, mut rx) = offer_session(vec![], Some(connector.clone()));
+        s.submit_pending(pending("r1", "example.com"), Instant::now());
+
+        assert_eq!(s.connect_offer("r1").await, DecisionOutcome::UnknownId);
+        assert!(
+            connector.connected.lock().unwrap().is_empty(),
+            "a plain network request must not be treated as an offer"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no decision frame for a non-offer id"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_for_an_unknown_id_is_unknownid() {
+        let (s, _n, _rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        assert_eq!(s.connect_offer("never").await, DecisionOutcome::UnknownId);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_releases_every_held_request_for_the_integration() {
+        let connector = Arc::new(FakeConnector {
+            result: true,
+            connected: StdMutex::new(Vec::new()),
+        });
+        let (s, n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r2", "api.github.com"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(
+            connector.connected.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "one sign-in serves every held request for the integration"
+        );
+        let a = decision_frame(&mut rx);
+        let b = decision_frame(&mut rx);
+        assert_eq!(a.decision, Decision::AllowOnce);
+        assert_eq!(b.decision, Decision::AllowOnce);
+        let mut released = vec![a.id, b.id];
+        released.sort();
+        assert_eq!(released, vec!["r1".to_string(), "r2".to_string()]);
+        assert!(rx.try_recv().is_err(), "no third frame");
+        let dismissed = n.dismissed.lock().unwrap();
+        assert!(
+            dismissed.contains(&"r1".to_string()) && dismissed.contains(&"r2".to_string()),
+            "both cards are dismissed so no second offer is ever shown"
+        );
+    }
+
+    #[test]
+    fn submit_pending_coalesces_a_request_while_its_integration_is_connecting() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        s.begin_connecting("github_oauth");
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        assert!(
+            n.presented.lock().unwrap().is_empty(),
+            "a request arriving mid sign-in raises no new card"
+        );
+        assert_eq!(
+            s.offer_request_ids("github_oauth"),
+            vec!["r1".to_string()],
+            "but it is still held, to be released by the in-flight connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_for_a_sibling_while_connecting_does_not_start_a_second_connect() {
+        let connector = Arc::new(FakeConnector {
+            result: true,
+            connected: StdMutex::new(Vec::new()),
+        });
+        let (s, _n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            Some(connector.clone()),
+        );
+        s.begin_connecting("github_oauth");
+        s.submit_pending(pending("r2", "api.github.com"), Instant::now());
+
+        let outcome = s.connect_offer("r2").await;
+
+        assert_eq!(outcome, DecisionOutcome::Resolved);
+        assert!(
+            connector.connected.lock().unwrap().is_empty(),
+            "a second sign-in must not run while one is in flight"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the in-flight connect releases r2, not this duplicate click"
+        );
+        assert_eq!(
+            s.offer_request_ids("github_oauth"),
+            vec!["r2".to_string()],
+            "r2 stays held for the in-flight connect's batch"
+        );
+    }
+
+    #[test]
+    fn submit_pending_does_not_offer_an_already_connected_integration() {
+        let mut policy = Policy::default();
+        policy.connect("github_oauth");
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = ApprovalSession::new(policy, notifier.clone(), store, tx, TEST_TIMEOUT)
+            .with_offers(vec![offerable("github_oauth", "GitHub", "api.github.com")]);
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap()[0].offer,
+            None,
+            "a connected integration is not re-offered"
+        );
+    }
+
+    #[test]
+    fn an_offer_held_during_a_connect_is_not_swept_by_the_timeout_ticker() {
+        let (s, _n, mut rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        let t0 = Instant::now();
+        s.submit_pending(pending("r1", "api.github.com"), t0);
+        s.begin_connecting("github_oauth");
+        assert_eq!(
+            s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
+            0,
+            "a connecting offer must not time out under the sign-in"
+        );
+        s.finish_connecting("github_oauth");
+        assert_eq!(
+            s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
+            1,
+            "once the connect ends the request can time out"
+        );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
+    }
+
+    #[test]
+    fn host_matches_pattern_exact_matches_only_the_same_host() {
+        assert!(host_matches_pattern("api.github.com", "api.github.com"));
+        assert!(!host_matches_pattern("api.github.com", "github.com"));
+        assert!(!host_matches_pattern(
+            "api.github.com",
+            "evil-api.github.com"
+        ));
+    }
+
+    #[test]
+    fn host_matches_pattern_wildcard_covers_apex_and_subdomains_only() {
+        assert!(host_matches_pattern("*.huggingface.co", "huggingface.co"));
+        assert!(host_matches_pattern(
+            "*.huggingface.co",
+            "cdn.huggingface.co"
+        ));
+        assert!(!host_matches_pattern(
+            "*.huggingface.co",
+            "evilhuggingface.co"
+        ));
+        assert!(!host_matches_pattern(
+            "*.huggingface.co",
+            "huggingface.co.evil.com"
+        ));
     }
 }

@@ -13,7 +13,9 @@ use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::protocol::PolicyMessage;
 use crate::approval_flow::session::ApprovalSession;
 use crate::approval_flow::watcher::PolicyWatcher;
-use crate::approval_flow::window::{self, CredentialDecisionDelivery, DecisionDelivery};
+use crate::approval_flow::window::{
+    self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
+};
 use crate::credential_flow::integrations::{
     resolve_applied_integrations, resolve_connectable_integrations,
 };
@@ -124,7 +126,15 @@ async fn decision_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        session.record_decision(&delivery.id, delivery.decision);
+        match delivery.action {
+            RequestAction::Decide(decision) => {
+                session.record_decision(&delivery.id, decision);
+            }
+            // Accepting an integration offer drives a connect (async) rather than a per-request verdict.
+            RequestAction::ConnectIntegration => {
+                session.connect_offer(&delivery.id).await;
+            }
+        }
     }
 }
 
@@ -274,6 +284,45 @@ fn make_connect_emitter(
     })
 }
 
+/// Pairs each connectable integration's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
+fn build_offerable(
+    connectable: &crate::credential_flow::integrations::ConnectableIntegrations,
+    catalog: &[lns_policy::integrations::Integration],
+) -> Vec<crate::approval_flow::session::OfferableIntegration> {
+    connectable
+        .routes
+        .iter()
+        .map(|(id, routes)| {
+            let display_name = catalog
+                .iter()
+                .find(|i| &i.id == id)
+                .map(|i| i.display_name().to_string())
+                .unwrap_or_else(|| id.clone());
+            crate::approval_flow::session::OfferableIntegration {
+                id: id.clone(),
+                display_name,
+                patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Bridges an accepted network offer to the credential subsystem's connect; `Weak` so it never keeps the credential session alive past the run.
+struct CredentialConnector {
+    credential_session: Weak<CredentialSession>,
+}
+
+impl crate::approval_flow::session::IntegrationConnector for CredentialConnector {
+    fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            match self.credential_session.upgrade() {
+                Some(cs) => cs.connect_integration_now(id).await,
+                None => false,
+            }
+        })
+    }
+}
+
 type CredentialSubsystem = (
     Arc<CredentialSession>,
     crate::credential_flow::watcher::CredentialWatcher,
@@ -377,6 +426,7 @@ pub(super) async fn start(
         .iter()
         .map(|p| p.id().to_string())
         .collect();
+    let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let mut custom = providers::build_policy_providers(&policy);
     custom.extend(applied.providers);
@@ -398,13 +448,10 @@ pub(super) async fn start(
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
     let credential_frame_tx = frame_tx.clone();
-    let session = Arc::new(ApprovalSession::new(
-        policy,
-        notifier,
-        store,
-        frame_tx,
-        APPROVAL_TIMEOUT,
-    ));
+    let session = Arc::new(
+        ApprovalSession::new(policy, notifier, store, frame_tx, APPROVAL_TIMEOUT)
+            .with_offers(offerable),
+    );
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -437,6 +484,11 @@ pub(super) async fn start(
         oauth_display_names,
     )
     .await?;
+
+    // Back-reference (Weak so it never outlives the run) so accepting a network offer drives the credential subsystem's connect.
+    session.set_connector(Arc::new(CredentialConnector {
+        credential_session: Arc::downgrade(&credential_session),
+    }));
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(run_id, session, credential_session, frame_rx, user_env)?;
@@ -491,7 +543,7 @@ mod tests {
         );
         tx.send(DecisionDelivery {
             id: "r1".into(),
-            decision: Decision::AllowOnce,
+            action: RequestAction::Decide(Decision::AllowOnce),
         })
         .unwrap();
         drop(tx);
@@ -507,6 +559,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_delivery_loop_routes_a_connect_action_to_connect_offer() {
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
+        use crate::approval_flow::session::{IntegrationConnector, OfferableIntegration};
+
+        struct OkConnector;
+        impl IntegrationConnector for OkConnector {
+            fn connect<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+                Box::pin(async { true })
+            }
+        }
+
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let session = Arc::new(
+            ApprovalSession::new(
+                Policy::default(),
+                notifier,
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_offers(vec![OfferableIntegration {
+                id: "github_oauth".into(),
+                display_name: "GitHub".into(),
+                patterns: vec!["api.github.com".into()],
+            }]),
+        );
+        session.set_connector(Arc::new(OkConnector));
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.github.com".into(),
+                action: "CONNECT api.github.com:443".into(),
+                reason: "policy-ambiguous".into(),
+            },
+            std::time::Instant::now(),
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::ConnectIntegration,
+        })
+        .unwrap();
+        drop(tx);
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        match frame_rx.try_recv().expect("decision frame") {
+            HostFrame::RequestDecision(d) => {
+                assert_eq!(d.id, "r1");
+                assert_eq!(
+                    d.decision,
+                    Decision::AllowOnce,
+                    "a connected offer releases the held request"
+                );
+            }
+            other => panic!("expected RequestDecision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn decision_delivery_loop_breaks_when_upgrade_fails_with_buffered_delivery() {
         use crate::approval_flow::protocol::Decision;
         let (session, _frame_rx) = fixture_session();
@@ -516,7 +631,7 @@ mod tests {
         stale_clone
             .send(DecisionDelivery {
                 id: "r1".into(),
-                decision: Decision::AllowOnce,
+                action: RequestAction::Decide(Decision::AllowOnce),
             })
             .unwrap();
         drop(session);
@@ -805,6 +920,97 @@ mod tests {
         let connect = make_connect_emitter(session.clone(), Arc::new(HashMap::new()));
         connect("gitlab");
         assert_eq!(session.current_policy().integrations, ["gitlab"]);
+    }
+
+    #[test]
+    fn build_offerable_pairs_id_display_name_and_route_patterns() {
+        use lns_policy::integrations::{AuthKind, Integration, IntegrationRoute, OauthAuth};
+        let catalog = vec![Integration {
+            id: "github_oauth".into(),
+            name: Some("GitHub".into()),
+            auth_kind: AuthKind::Oauth,
+            routes: vec![IntegrationRoute {
+                match_pattern: "api.github.com".into(),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: None,
+            oauth: Some(OauthAuth {
+                client_id: "Iv1.x".into(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+                env_var: "GH_TOKEN".into(),
+                placeholder: "gho_LNSPLACEHOLDER".into(),
+                injections: Vec::new(),
+            }),
+        }];
+        let connectable = resolve_connectable_integrations(&Policy::default(), &catalog);
+        let offerable = build_offerable(&connectable, &catalog);
+        assert_eq!(offerable.len(), 1);
+        assert_eq!(offerable[0].id, "github_oauth");
+        assert_eq!(offerable[0].display_name, "GitHub", "uses the catalog name");
+        assert_eq!(offerable[0].patterns, vec!["api.github.com".to_string()]);
+    }
+
+    #[test]
+    fn build_offerable_falls_back_to_the_id_when_the_catalog_lacks_the_entry() {
+        use crate::credential_flow::integrations::ConnectableIntegrations;
+        let connectable = ConnectableIntegrations {
+            routes: HashMap::from([(
+                "stray".to_string(),
+                vec![lns_policy::RouteRule::allow_host("x.example")],
+            )]),
+            ..Default::default()
+        };
+        let offerable = build_offerable(&connectable, &[]);
+        assert_eq!(offerable.len(), 1);
+        assert_eq!(offerable[0].id, "stray");
+        assert_eq!(
+            offerable[0].display_name, "stray",
+            "no catalog entry → fall back to the id"
+        );
+        assert_eq!(offerable[0].patterns, vec!["x.example".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn credential_connector_delegates_to_the_session_while_alive() {
+        use crate::approval_flow::session::IntegrationConnector;
+        use crate::credential_flow::notification::NoopCredentialNotifier;
+        use std::collections::HashSet;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_connect_emitter(HashSet::from(["gitlab".to_string()]), Box::new(|_| {})),
+        );
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+        assert!(
+            connector.connect("gitlab").await,
+            "a connectable id connects through the live session"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_connector_returns_false_when_the_session_is_dropped() {
+        use crate::approval_flow::session::IntegrationConnector;
+        let (session, _frame_rx) = fixture_credential_session();
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+        drop(session);
+        assert!(!connector.connect("gitlab").await);
     }
 
     #[test]
