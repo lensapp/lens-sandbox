@@ -26,6 +26,35 @@ lns run ghcr.io/acme/agent:latest
 The image is pulled (and cached by the service) and its entrypoint starts inside
 the microVM.
 
+### Pinning an image by digest
+
+A tag like `:latest` is mutable — the registry can republish it at any time. To run
+exactly the bytes you vetted, pin the image by digest:
+
+```bash
+lns run ghcr.io/acme/agent@sha256:8a2c…
+```
+
+`lns image pull` resolves and prints the pinnable reference for you. Pinned
+manifests are cached, so reruns of a pinned image don't re-consult the registry.
+
+### Managing the image cache
+
+Every pull lands in the service's content-addressed cache so the next run boots
+without re-downloading. Manage it with `lns image`:
+
+```bash
+lns image pull ghcr.io/acme/agent:latest  # pre-warm + resolve a pinnable digest
+lns image ls                              # cached images: digest, size, pull time, user
+lns image rm ghcr.io/acme/agent:latest    # drop one image (refused while a run uses it)
+lns image prune                           # drop every image no running sandbox uses
+```
+
+`rm` and `prune` never touch an image a live run is using, and only delete layers
+that no remaining cached image shares. `prune` asks for confirmation unless you
+pass `-f`/`--force`. Removing a cached image is always safe in the durable sense —
+the next `lns run` simply pulls it again.
+
 ### Overriding the command
 
 Anything after `--` replaces the image's entrypoint and command:
