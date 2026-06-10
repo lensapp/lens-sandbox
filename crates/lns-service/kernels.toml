@@ -28,3 +28,11 @@ published_version = "6.18.15-192"
 [current.sha256]
 aarch64 = "c34f34b93598ddcd4235ae902f7a59bed95025340136dd84d8c0184b85414ba1"
 x86_64  = "2884cd8b108ba0910bb570cb2bb86698fd5fa9346951675ddb646f62a2e13486"
+
+# sha256 of each upstream `kata-static-<kata_version>-<arch>.tar.zst`.
+# Kata publishes no checksum of its own; the publish-kernel workflow now
+# hard-fails without these, so this pre-existing pin is back-filled from
+# the upstream bytes. New bumps pin them in-stream via bump-kernel.
+[current.kata_bundle_sha256]
+arm64 = "3f9df0cc898716caa3dd29315d1d5a1e9a6ad2b355ed6a4698eca81a8fbcdc41"
+amd64 = "e65aa5e5bd9f4d59bcd12a8c44a00966406e7329511dd3f756026b6eedc8ad26"
