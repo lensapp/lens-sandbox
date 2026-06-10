@@ -33,16 +33,19 @@ fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
 #[when(regex = r#"^I run "([^"]*)"$"#)]
 fn i_run(world: &mut E2eWorld, cmd_line: String) {
     let args = split_args(&cmd_line);
-    let result = match &world.home {
-        Some(home) => {
-            let envs = [
-                ("HOME", home.path().to_path_buf()),
-                ("XDG_CACHE_HOME", home.path().join(".cache")),
-                ("XDG_CONFIG_HOME", home.path().join(".config")),
-            ];
-            run_cli_with_env(args, envs)
-        }
-        None => run_cli(args),
+    let mut envs: Vec<(&str, std::ffi::OsString)> = Vec::new();
+    if let Some(home) = &world.home {
+        envs.push(("HOME", home.path().into()));
+        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
+        envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
+    }
+    if let Some(socket) = &world.service_socket {
+        envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
+    }
+    let result = if envs.is_empty() {
+        run_cli(args)
+    } else {
+        run_cli_with_env(args, envs)
     };
     world.result = Some(result);
 }
