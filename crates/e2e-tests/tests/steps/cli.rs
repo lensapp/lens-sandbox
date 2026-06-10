@@ -10,6 +10,26 @@ fn fresh_home(world: &mut E2eWorld) {
     world.home = Some(tempfile::TempDir::new().expect("tempdir"));
 }
 
+#[given(regex = r#"^the home config file declares a malformed run\.env entry "([^"]+)"$"#)]
+fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home first");
+    let config_dir = if cfg!(target_os = "macos") {
+        home.path().join("Library").join("Application Support")
+    } else {
+        home.path().join(".config")
+    };
+    let dir = config_dir.join("lns");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("run:\n  env:\n    - {entry}\n"),
+    )
+    .expect("write config");
+}
+
 #[when(regex = r#"^I run "([^"]*)"$"#)]
 fn i_run(world: &mut E2eWorld, cmd_line: String) {
     let args = split_args(&cmd_line);
@@ -18,6 +38,7 @@ fn i_run(world: &mut E2eWorld, cmd_line: String) {
             let envs = [
                 ("HOME", home.path().to_path_buf()),
                 ("XDG_CACHE_HOME", home.path().join(".cache")),
+                ("XDG_CONFIG_HOME", home.path().join(".config")),
             ];
             run_cli_with_env(args, envs)
         }
