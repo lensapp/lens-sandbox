@@ -118,6 +118,26 @@ lns image pull <IMAGE> | ls | rm <IMAGE> | prune [-f]
 
 See [Running workloads — images](running-workloads.md#managing-the-image-cache).
 
+## `lns sandbox`
+
+Manage running sandboxes: stop, logs, attach, inspect, stats.
+
+```bash
+lns sandbox stop <RUN_ID> [-t <SECONDS>]
+lns sandbox logs [-f] <RUN_ID>
+lns sandbox attach <RUN_ID> [--detach-keys <CHORD>]
+lns sandbox inspect <RUN_ID>
+lns sandbox stats <RUN_ID>
+```
+
+| Subcommand | Meaning |
+| ---------- | ------- |
+| `stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
+| `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, and only while the run is listed by `lns ls`. |
+| `attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) behaves exactly like `lns run`'s. Stdin reaches the workload only if the run was started with stdin open. |
+| `inspect`  | Print the run's state and launch configuration as JSON, with the policy file's parsed contents embedded when it is readable. |
+| `stats`    | Sample the sandbox's CPU share and memory over one second, via the guest's `/proc`. |
+
 ## `lns audit`
 
 Verify the audit chain of a run.
