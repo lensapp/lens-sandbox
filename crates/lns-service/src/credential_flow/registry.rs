@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_provider_set() {
         let ids: HashSet<_> = providers::ALL.iter().map(|p| p.id()).collect();
-        for expected in ["github", "openai", "anthropic", "linear"] {
+        for expected in ["openai", "anthropic", "linear"] {
             assert!(ids.contains(expected), "missing v1 provider {expected}");
         }
     }
@@ -125,8 +125,8 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn detect_for_returns_value_when_provider_env_var_is_set() {
-        let _g = EnvVarGuard::set("GITHUB_TOKEN", "ghp_real");
-        assert_eq!(detect_for("github").as_deref(), Some("ghp_real"));
+        let _g = EnvVarGuard::set("OPENAI_API_KEY", "sk-real");
+        assert_eq!(detect_for("openai").as_deref(), Some("sk-real"));
     }
 
     #[test]
@@ -145,14 +145,13 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn expand_credentials_for_wire_emits_every_provider_with_placeholder_and_env_var() {
-        let _g1 = EnvVarGuard::unset("GITHUB_TOKEN");
         let _g2 = EnvVarGuard::unset("OPENAI_API_KEY");
         let _g3 = EnvVarGuard::unset("ANTHROPIC_API_KEY");
         let _g4 = EnvVarGuard::unset("LINEAR_API_KEY");
         let state = CredentialStateFile::new();
         let creds = expand_credentials_for_wire(&state);
         let ids: HashSet<_> = creds.iter().map(|c| c.id.as_str()).collect();
-        for id in ["github", "openai", "anthropic", "linear"] {
+        for id in ["openai", "anthropic", "linear"] {
             assert!(ids.contains(id), "missing {id} in expanded credentials");
         }
         for c in &creds {
@@ -167,52 +166,49 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(env)]
-    fn expand_credentials_for_wire_unarmed_provider_declares_domain_with_empty_value() {
-        let _g = EnvVarGuard::unset("GITHUB_TOKEN");
-        let state = CredentialStateFile::new();
-        let creds = expand_credentials_for_wire(&state);
-        let github = creds.iter().find(|c| c.id == "github").unwrap();
-        assert_eq!(github.injections.len(), 2);
-        assert!(github.injections.iter().all(|i| matches!(
+    fn expand_for_wire_declares_each_domain_of_a_multi_injection_provider_unarmed() {
+        let custom = vec![DefProvider::new(token_and_basic_def())];
+        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
+        assert_eq!(p.injections.len(), 2);
+        assert!(p.injections.iter().all(|i| matches!(
             i,
             CredentialInjection::Header { value, .. } if value.is_empty()
         )));
-        assert!(github.injections.iter().any(|i| matches!(
-            i, CredentialInjection::Header { domain, .. } if domain == "api.github.com"
+        assert!(p.injections.iter().any(|i| matches!(
+            i, CredentialInjection::Header { domain, .. } if domain == "api.some-provider.example"
         )));
-        assert!(github.injections.iter().any(|i| matches!(
-            i, CredentialInjection::Header { domain, .. } if domain == "github.com"
+        assert!(p.injections.iter().any(|i| matches!(
+            i, CredentialInjection::Header { domain, .. } if domain == "some-provider.example"
         )));
     }
 
     #[test]
-    #[serial_test::serial(env)]
-    fn expand_credentials_for_wire_arms_stored_with_provider_specific_injection() {
-        let _g = EnvVarGuard::unset("GITHUB_TOKEN");
+    fn expand_arms_a_stored_multi_injection_provider_as_token_and_basic() {
         let mut state = CredentialStateFile::new();
         state.insert(
-            "github".into(),
+            "some-provider".into(),
             CredentialEntry::Stored {
-                value: "ghp_real".into(),
+                value: "some-secret".into(),
             },
         );
-        let creds = expand_credentials_for_wire(&state);
-        let github = creds.iter().find(|c| c.id == "github").unwrap();
-        assert_eq!(github.injections.len(), 2);
+        let custom = vec![DefProvider::new(token_and_basic_def())];
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom);
+        let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
+        assert_eq!(p.injections.len(), 2);
         let basic = format!(
             "Basic {}",
-            crate::base64::encode(b"x-access-token:ghp_real")
+            crate::base64::encode(b"x-access-token:some-secret")
         );
-        assert!(github.injections.iter().any(|i| matches!(
+        assert!(p.injections.iter().any(|i| matches!(
             i,
             CredentialInjection::Header { domain, value, .. }
-                if domain == "api.github.com" && value == "token ghp_real"
+                if domain == "api.some-provider.example" && value == "token some-secret"
         )));
-        assert!(github.injections.iter().any(|i| matches!(
+        assert!(p.injections.iter().any(|i| matches!(
             i,
             CredentialInjection::Header { domain, value, .. }
-                if domain == "github.com" && *value == basic
+                if domain == "some-provider.example" && *value == basic
         )));
     }
 
@@ -279,24 +275,23 @@ mod tests {
     #[serial_test::serial(env)]
     fn detect_for_uses_each_providers_own_env_var_binding() {
         let _g_linear = EnvVarGuard::set("LINEAR_API_KEY", "lin_real");
-        let _g_github = EnvVarGuard::unset("GITHUB_TOKEN");
+        let _g_openai = EnvVarGuard::unset("OPENAI_API_KEY");
         assert_eq!(detect_for("linear").as_deref(), Some("lin_real"));
-        assert_eq!(detect_for("github"), None);
+        assert_eq!(detect_for("openai"), None);
     }
 
     #[test]
     fn expand_credentials_with_resolves_host_detect_via_injected_source_not_env() {
         let mut state = CredentialStateFile::new();
-        state.insert("github".into(), CredentialEntry::HostDetect);
+        state.insert("openai".into(), CredentialEntry::HostDetect);
         let creds = expand_credentials_with(&state, &|id| {
-            (id == "github").then(|| "ghp_injected".to_string())
+            (id == "openai").then(|| "sk-injected".to_string())
         });
-        let github = creds.iter().find(|c| c.id == "github").unwrap();
-        assert_eq!(github.injections.len(), 2);
-        assert!(github.injections.iter().any(|i| matches!(
+        let openai = creds.iter().find(|c| c.id == "openai").unwrap();
+        assert!(openai.injections.iter().any(|i| matches!(
             i,
-            CredentialInjection::Header { domain, value, .. }
-                if domain == "api.github.com" && value == "token ghp_injected"
+            CredentialInjection::Header { value, .. }
+                if value == "Bearer sk-injected"
         )));
     }
 
@@ -314,12 +309,34 @@ mod tests {
         }
     }
 
+    /// A fixture exercising the `token_header` + `basic_x_access_token` kinds (no built-in carries them anymore).
+    fn token_and_basic_def() -> lns_policy::providers::ProviderDef {
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+        ProviderDef {
+            id: "some-provider".into(),
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some-placeholder-0000000000000000000000".into(),
+            injections: vec![
+                InjectionDef {
+                    kind: InjectionKind::TokenHeader,
+                    domain: "api.some-provider.example".into(),
+                    header: None,
+                },
+                InjectionDef {
+                    kind: InjectionKind::BasicXAccessToken,
+                    domain: "some-provider.example".into(),
+                    header: None,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn expand_for_wire_with_custom_emits_an_unarmed_custom_provider_alongside_builtins() {
         let custom = vec![DefProvider::new(acme_def())];
         let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
         assert!(
-            creds.iter().any(|c| c.id == "github"),
+            creds.iter().any(|c| c.id == "openai"),
             "built-ins must still be present"
         );
         let acme = creds
@@ -332,6 +349,30 @@ mod tests {
             CredentialInjection::Header { domain, value, .. }
                 if domain == "api.acme.corp" && value.is_empty()
         ));
+    }
+
+    #[test]
+    fn expand_arms_an_oauth_credential_with_its_access_token() {
+        let custom = vec![DefProvider::new(token_and_basic_def())];
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "some-provider".into(),
+            CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: 0,
+            },
+        );
+        let creds = expand_credentials_with_custom(&state, &custom, &|_| None);
+        let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
+        assert!(
+            p.injections.iter().any(|i| matches!(
+                i,
+                CredentialInjection::Header { value, .. } if value.contains("some-access")
+            )),
+            "an oauth credential arms with its access token, not its refresh token: {:?}",
+            p.injections
+        );
     }
 
     #[test]
@@ -368,8 +409,8 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn detect_for_with_resolves_a_builtin_through_the_registry() {
-        let _g = EnvVarGuard::set("GITHUB_TOKEN", "ghp_real");
-        assert_eq!(detect_for_with("github", &[]).as_deref(), Some("ghp_real"));
+        let _g = EnvVarGuard::set("OPENAI_API_KEY", "sk-real");
+        assert_eq!(detect_for_with("openai", &[]).as_deref(), Some("sk-real"));
     }
 
     #[test]

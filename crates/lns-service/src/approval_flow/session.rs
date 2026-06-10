@@ -871,9 +871,9 @@ pub(crate) mod tests {
         let (s, _n, _store, mut rx) = fixture();
         s.set_credentials_provider(Box::new(|| {
             vec![Credential {
-                id: "github".into(),
-                env_var: Some("GITHUB_TOKEN".into()),
-                placeholder: Some("ghp_LNSPLACEHOLDER0000000000000000000000".into()),
+                id: "some-provider".into(),
+                env_var: Some("SOME_TOKEN".into()),
+                placeholder: Some("some-placeholder-0000000000000000000000".into()),
                 injections: Vec::new(),
             }]
         }));
@@ -887,7 +887,7 @@ pub(crate) mod tests {
             .credentials
             .expect("Policy frame must carry credentials when provider is set");
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].id, "github");
+        assert_eq!(creds[0].id, "some-provider");
     }
 
     #[test]

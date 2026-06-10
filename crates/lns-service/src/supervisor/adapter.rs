@@ -601,25 +601,39 @@ mod tests {
         }
     }
 
+    /// Records both connect paths so the two delivery-loop tests together cover the whole `IntegrationConnector` surface.
+    #[derive(Default)]
+    struct RecordingConnector {
+        connects: std::sync::Mutex<Vec<String>>,
+        token_connects: std::sync::Mutex<Vec<(String, String)>>,
+    }
+    impl crate::approval_flow::session::IntegrationConnector for RecordingConnector {
+        fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.connects.lock().unwrap().push(id.to_string());
+                true
+            })
+        }
+        fn connect_with_token<'a>(
+            &'a self,
+            id: &'a str,
+            value: String,
+        ) -> futures_util::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.token_connects
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), value));
+                true
+            })
+        }
+    }
+
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_connect_action_to_connect_offer() {
         use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::session::OfferableIntegration;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
-        use crate::approval_flow::session::{IntegrationConnector, OfferableIntegration};
-
-        struct OkConnector;
-        impl IntegrationConnector for OkConnector {
-            fn connect<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
-                Box::pin(async { true })
-            }
-            fn connect_with_token<'a>(
-                &'a self,
-                _id: &'a str,
-                _value: String,
-            ) -> futures_util::future::BoxFuture<'a, bool> {
-                Box::pin(async { true })
-            }
-        }
 
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
@@ -639,7 +653,8 @@ mod tests {
                 token_fallback: None,
             }]),
         );
-        session.set_connector(Arc::new(OkConnector));
+        let connector = Arc::new(RecordingConnector::default());
+        session.set_connector(connector.clone());
         session.submit_pending(
             RequestPending {
                 id: "r1".into(),
@@ -659,6 +674,11 @@ mod tests {
         drop(tx);
         decision_delivery_loop(Arc::downgrade(&session), rx).await;
 
+        assert_eq!(
+            connector.connects.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()],
+            "a ConnectIntegration action drives the interactive connect for the offer"
+        );
         match frame_rx.try_recv().expect("decision frame") {
             HostFrame::RequestDecision(d) => {
                 assert_eq!(d.id, "r1");
@@ -675,28 +695,8 @@ mod tests {
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_use_token_action_to_connect_offer_with_token() {
         use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::session::OfferableIntegration;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
-        use crate::approval_flow::session::{IntegrationConnector, OfferableIntegration};
-        use std::sync::Mutex as StdMutex;
-
-        struct RecordingConnector {
-            tokens: StdMutex<Vec<(String, String)>>,
-        }
-        impl IntegrationConnector for RecordingConnector {
-            fn connect<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
-                Box::pin(async { panic!("the interactive connect must not run for a token paste") })
-            }
-            fn connect_with_token<'a>(
-                &'a self,
-                id: &'a str,
-                value: String,
-            ) -> futures_util::future::BoxFuture<'a, bool> {
-                Box::pin(async move {
-                    self.tokens.lock().unwrap().push((id.to_string(), value));
-                    true
-                })
-            }
-        }
 
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
@@ -716,9 +716,7 @@ mod tests {
                 token_fallback: None,
             }]),
         );
-        let connector = Arc::new(RecordingConnector {
-            tokens: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(RecordingConnector::default());
         session.set_connector(connector.clone());
         session.submit_pending(
             RequestPending {
@@ -742,7 +740,7 @@ mod tests {
         decision_delivery_loop(Arc::downgrade(&session), rx).await;
 
         assert_eq!(
-            connector.tokens.lock().unwrap().as_slice(),
+            connector.token_connects.lock().unwrap().as_slice(),
             &[("github_oauth".to_string(), "ghp_pasted".to_string())],
             "a UseToken action drives the token connect with the pasted value"
         );
@@ -880,10 +878,10 @@ mod tests {
         use crate::credential_flow::store::CredentialEntry;
         let (store, _dir) = tempfile_credential_store();
         let mut seeded = CredentialStateFile::new();
-        seeded.insert("github".into(), CredentialEntry::HostDetect);
+        seeded.insert("some-provider".into(), CredentialEntry::HostDetect);
         store.save(&seeded).unwrap();
         let state = load_credentials_or_warn(store.as_ref(), Path::new("/tmp/x"));
-        assert!(state.contains_key("github"));
+        assert!(state.contains_key("some-provider"));
     }
 
     #[test]
@@ -970,7 +968,7 @@ mod tests {
 
         let mut state = CredentialStateFile::new();
         state.insert(
-            "github".into(),
+            "some-provider".into(),
             CredentialEntry::Stored {
                 value: "ghp_real".into(),
             },
@@ -1267,8 +1265,8 @@ mod tests {
         session.submit_pending(
             CredentialPending {
                 id: "c1".into(),
-                credential_id: "github".into(),
-                action: "use of github placeholder".into(),
+                credential_id: "some-provider".into(),
+                action: "use of some-provider placeholder".into(),
                 reason: "placeholder-unauthorized".into(),
             },
             std::time::Instant::now(),
@@ -1421,6 +1419,70 @@ mod tests {
                 Some(CredentialEntry::Oauth { .. })
             ),
             "the device sign-in must arm the oauth token set"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_routes_an_oauth_deny_to_record_decision_not_a_sign_in() {
+        use crate::approval_flow::protocol::{CredentialDecisionKind, CredentialPending};
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        use std::collections::HashMap;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let configs = HashMap::from([(
+            "acme".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.acme".into(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(crate::credential_flow::notification::NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_oauth(configs, Arc::new(LoopFakeFlow), Arc::new(LoopClock)),
+        );
+        session.submit_pending(
+            CredentialPending {
+                id: "c1".into(),
+                credential_id: "acme".into(),
+                action: "use of acme placeholder".into(),
+                reason: "placeholder-unauthorized".into(),
+            },
+            std::time::Instant::now(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
+        tx.send(CredentialDecisionDelivery {
+            id: "c1".into(),
+            request: CredentialDecisionRequest::Deny,
+        })
+        .unwrap();
+        drop(tx);
+        credential_delivery_loop(Arc::downgrade(&session), rx).await;
+        let mut denied = false;
+        while let Ok(frame) = frame_rx.try_recv() {
+            if let HostFrame::CredentialDecision(d) = frame {
+                denied |= d.decision == CredentialDecisionKind::Deny;
+            }
+        }
+        assert!(
+            denied,
+            "denying an oauth prompt records a Deny rather than driving a device sign-in"
+        );
+        assert!(
+            !matches!(
+                session.current_state().get("acme"),
+                Some(CredentialEntry::Oauth { .. })
+            ),
+            "a denied oauth prompt must not arm a token set"
         );
     }
 

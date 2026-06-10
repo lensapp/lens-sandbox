@@ -148,9 +148,9 @@ mod tests {
 
     #[test]
     fn a_user_override_of_a_managed_credential_is_refused_and_dropped() {
-        let c = compose_workload_env(None, &["GITHUB_TOKEN=ghp_real".into()], &[]);
+        let c = compose_workload_env(None, &["OPENAI_API_KEY=sk-real".into()], &[]);
         assert!(c.env.is_empty(), "credential var must not reach workload");
-        assert_eq!(c.refused, ["GITHUB_TOKEN"]);
+        assert_eq!(c.refused, ["OPENAI_API_KEY"]);
     }
 
     #[test]
@@ -216,8 +216,8 @@ mod tests {
 
     #[test]
     fn run_workload_env_surfaces_refused_credentials() {
-        let c = run_workload_env(None, &["GITHUB_TOKEN=x".into()], None, &[]);
-        assert_eq!(c.refused, ["GITHUB_TOKEN"]);
+        let c = run_workload_env(None, &["OPENAI_API_KEY=x".into()], None, &[]);
+        assert_eq!(c.refused, ["OPENAI_API_KEY"]);
         assert!(c.env.is_empty());
     }
 
@@ -235,8 +235,8 @@ mod tests {
 
     #[test]
     fn refusal_warning_names_the_key_and_the_reason() {
-        let msg = refusal_warning("GITHUB_TOKEN");
-        assert!(msg.contains("GITHUB_TOKEN"));
+        let msg = refusal_warning("OPENAI_API_KEY");
+        assert!(msg.contains("OPENAI_API_KEY"));
         assert!(msg.contains("managed credential"));
     }
 
@@ -252,11 +252,11 @@ mod tests {
 
     #[test]
     fn injected_env_audit_omits_managed_credentials() {
-        let obj =
-            injected_env_audit(&["A=1".into(), "GITHUB_TOKEN=x".into()], &[]).expect("event built");
+        let obj = injected_env_audit(&["A=1".into(), "OPENAI_API_KEY=x".into()], &[])
+            .expect("event built");
         let env = obj.get("env").unwrap().as_object().unwrap();
         assert!(env.contains_key("A"));
-        assert!(!env.contains_key("GITHUB_TOKEN"));
+        assert!(!env.contains_key("OPENAI_API_KEY"));
     }
 
     #[test]
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn injected_env_audit_is_none_when_nothing_is_injected() {
         assert!(injected_env_audit(&[], &[]).is_none());
-        assert!(injected_env_audit(&["GITHUB_TOKEN=x".into()], &[]).is_none());
+        assert!(injected_env_audit(&["OPENAI_API_KEY=x".into()], &[]).is_none());
     }
 
     #[test]

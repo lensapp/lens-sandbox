@@ -66,17 +66,9 @@ mod tests {
     #[test]
     fn builtins_expose_every_shipped_provider() {
         let ids: HashSet<_> = builtins().iter().map(|p| p.id.as_str()).collect();
-        for expected in ["github", "openai", "anthropic", "linear", "telegram"] {
+        for expected in ["openai", "anthropic", "linear", "telegram"] {
             assert!(ids.contains(expected), "missing built-in {expected}");
         }
-        let github = builtins().iter().find(|p| p.id == "github").unwrap();
-        assert_eq!(github.env_var, "GITHUB_TOKEN");
-        assert!(github.placeholder.starts_with("ghp_"));
-        assert_eq!(github.injections.len(), 2);
-        assert_eq!(github.injections[0].kind, InjectionKind::TokenHeader);
-        assert_eq!(github.injections[0].domain, "api.github.com");
-        assert_eq!(github.injections[1].kind, InjectionKind::BasicXAccessToken);
-        assert_eq!(github.injections[1].domain, "github.com");
     }
 
     #[test]

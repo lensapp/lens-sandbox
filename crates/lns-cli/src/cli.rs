@@ -273,7 +273,7 @@ pub struct CredentialRemoveArgs {
 #[derive(clap::Args)]
 #[command(group(clap::ArgGroup::new("decision").required(true).args(["value", "value_stdin", "host", "deny"])))]
 pub struct CredentialSetArgs {
-    #[arg(help = "Provider id (built-in, e.g. github, or a declared custom provider).")]
+    #[arg(help = "Provider id (built-in, e.g. openai, or a declared custom provider).")]
     pub id: String,
     #[arg(
         long,

@@ -693,8 +693,8 @@ mod tests {
     fn insert_credential_pending_dedupes_by_id() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx.clone());
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
         assert_eq!(s.snapshot().pending_credentials.len(), 2);
     }
@@ -703,7 +703,7 @@ mod tests {
     fn insert_credential_pending_carries_host_value_flag() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx.clone());
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
         let snap = s.snapshot();
         assert!(snap.pending_credentials[0].host_value_available);
@@ -732,7 +732,7 @@ mod tests {
     fn remove_credential_pending_drops_only_matching_id() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx.clone());
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
         s.remove_credential_pending("c1");
         let snap = s.snapshot();
@@ -744,7 +744,7 @@ mod tests {
     fn remove_credential_unknown_id_is_a_noop() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx);
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
         s.remove_credential_pending("never-was");
         assert_eq!(s.snapshot().pending_credentials.len(), 1);
     }
@@ -755,7 +755,7 @@ mod tests {
         let (tx, _rx) = unbounded_channel();
         let (ctx, _crx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx);
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, ctx);
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, ctx);
         assert_eq!(s.pending_count(), 2);
     }
 
@@ -763,7 +763,7 @@ mod tests {
     fn snapshot_returns_pending_credentials_in_insertion_order() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx.clone());
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
         let snap = s.snapshot();
         assert_eq!(snap.pending_credentials.len(), 2);
@@ -775,7 +775,7 @@ mod tests {
     fn decide_credential_sends_delivery_on_matching_tx_and_removes_entry() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx);
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
         assert!(s.decide_credential(
             "c1",
             CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
@@ -794,7 +794,7 @@ mod tests {
         let s = WindowState::new();
         let (tx1, mut rx1) = unbounded_channel();
         let (tx2, mut rx2) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx1);
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx1);
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx2);
         assert!(s.decide_credential("c1", CredentialDecisionRequest::Deny));
         assert_eq!(
@@ -808,7 +808,7 @@ mod tests {
     fn decide_credential_returns_false_for_unknown_id_and_emits_no_delivery() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "github"), true, tx);
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
         assert!(!s.decide_credential("nope", CredentialDecisionRequest::Deny));
         assert_eq!(s.snapshot().pending_credentials.len(), 1);
         assert!(rx.try_recv().is_err());

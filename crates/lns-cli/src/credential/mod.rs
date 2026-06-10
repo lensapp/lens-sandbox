@@ -358,6 +358,22 @@ mod tests {
         policy.save_atomic(&dir.join("lns-policy.yaml")).unwrap();
     }
 
+    /// Declares an arbitrary `some-provider` so the value-decision tests have a known provider to target without pinning a shipped service.
+    fn some_provider_policy(dir: &Path) {
+        let mut policy = Policy::default();
+        policy.credentials.custom_providers.push(ProviderDef {
+            id: "some-provider".into(),
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some-placeholder-0000000000000000000000".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.some-provider.example".into(),
+                header: None,
+            }],
+        });
+        policy.save_atomic(&dir.join("lns-policy.yaml")).unwrap();
+    }
+
     fn load_state(creds: &Path) -> lns_policy::credentials::CredentialStateFile {
         JsonFileCredentialStore::new(creds.to_path_buf())
             .load()
@@ -368,8 +384,9 @@ mod tests {
     fn set_stored_writes_a_stored_entry() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
-        args.value = Some("ghp_real".into());
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
+        args.value = Some("some-secret".into());
         let mut out = Vec::new();
         run(
             &CredentialCommand::Set(args),
@@ -381,9 +398,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_real".into()
+                value: "some-secret".into()
             })
         );
     }
@@ -392,7 +409,8 @@ mod tests {
     fn set_host_writes_a_host_detect_entry() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.host = true;
         let mut out = Vec::new();
         set(
@@ -405,7 +423,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::HostDetect)
         );
     }
@@ -414,7 +432,8 @@ mod tests {
     fn set_deny_writes_a_deny_entry() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.deny = true;
         let mut out = Vec::new();
         set(
@@ -427,7 +446,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::Deny)
         );
     }
@@ -479,7 +498,8 @@ mod tests {
     fn clear_removes_an_existing_entry() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.host = true;
         set(
             &args,
@@ -494,13 +514,13 @@ mod tests {
         let mut out = Vec::new();
         clear(
             &CredentialClearArgs {
-                id: "github".into(),
+                id: "some-provider".into(),
             },
             &creds,
             &mut out,
         )
         .unwrap();
-        assert!(!load_state(&creds).contains_key("github"));
+        assert!(!load_state(&creds).contains_key("some-provider"));
     }
 
     #[test]
@@ -508,12 +528,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
         for (id, mut a) in [
-            ("github", set_args("github")),
+            ("anthropic", set_args("anthropic")),
             ("openai", set_args("openai")),
             ("linear", set_args("linear")),
         ] {
             match id {
-                "github" => a.host = true,
+                "anthropic" => a.host = true,
                 "openai" => a.value = Some("sk-real-token".into()),
                 _ => a.deny = true,
             }
@@ -536,14 +556,14 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("github  (built-in)  host value"), "{text}");
+        assert!(text.contains("anthropic  (built-in)  host value"), "{text}");
         assert!(
             text.contains("openai  (built-in)  stored (hidden)"),
             "{text}"
         );
         assert!(text.contains("linear  (built-in)  denied"), "{text}");
         assert!(
-            text.contains("anthropic  (built-in)  no decision yet"),
+            text.contains("telegram  (built-in)  no decision yet"),
             "{text}"
         );
         assert!(
@@ -653,10 +673,10 @@ mod tests {
         let creds = dir.path().join("creds.json");
         let mut policy = Policy::default();
         policy.credentials.custom_providers.push(ProviderDef {
-            id: "github".into(),
-            env_var: "GITHUB_TOKEN".into(),
+            id: "openai".into(),
+            env_var: "OPENAI_API_KEY".into(),
             placeholder: "lns-shadow".into(),
-            injections: vec![bearer("api.github.com")],
+            injections: vec![bearer("api.openai.com")],
         });
         policy
             .save_atomic(&dir.path().join("lns-policy.yaml"))
@@ -670,9 +690,9 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("github  (built-in)"), "{text}");
+        assert!(text.contains("openai  (built-in)"), "{text}");
         assert!(
-            !text.contains("github  (custom)"),
+            !text.contains("openai  (custom)"),
             "a custom id shadowing a built-in is inert at run start and must not be listed: {text}"
         );
     }
@@ -709,21 +729,22 @@ mod tests {
     fn set_value_stdin_stores_the_piped_secret_trimming_the_trailing_newline() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.value_stdin = true;
         set(
             &args,
             dir.path(),
             &creds,
             &no_catalog(),
-            &mut &b"ghp_real\n"[..],
+            &mut &b"some-secret\n"[..],
             &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_real".into()
+                value: "some-secret".into()
             })
         );
     }
@@ -732,21 +753,22 @@ mod tests {
     fn set_value_stdin_trims_a_crlf_line_ending() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.value_stdin = true;
         set(
             &args,
             dir.path(),
             &creds,
             &no_catalog(),
-            &mut &b"ghp_real\r\n"[..],
+            &mut &b"some-secret\r\n"[..],
             &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_real".into()
+                value: "some-secret".into()
             })
         );
     }
@@ -755,21 +777,22 @@ mod tests {
     fn set_value_stdin_accepts_a_value_with_no_trailing_newline() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.value_stdin = true;
         set(
             &args,
             dir.path(),
             &creds,
             &no_catalog(),
-            &mut &b"ghp_real"[..],
+            &mut &b"some-secret"[..],
             &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
-            load_state(&creds).get("github"),
+            load_state(&creds).get("some-provider"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_real".into()
+                value: "some-secret".into()
             })
         );
     }
@@ -778,7 +801,8 @@ mod tests {
     fn set_value_stdin_with_empty_input_errors_and_leaves_the_file_untouched() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.value_stdin = true;
         let err = set(
             &args,
@@ -800,7 +824,8 @@ mod tests {
     fn set_value_stdin_surfaces_non_utf8_input_as_an_error() {
         let dir = TempDir::new().unwrap();
         let creds = dir.path().join("creds.json");
-        let mut args = set_args("github");
+        some_provider_policy(dir.path());
+        let mut args = set_args("some-provider");
         args.value_stdin = true;
         let err = set(
             &args,

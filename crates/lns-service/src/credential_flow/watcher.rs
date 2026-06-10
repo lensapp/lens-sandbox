@@ -144,7 +144,7 @@ mod tests {
         let n = NoopNotifier;
         n.present(&CredentialPendingPrompt {
             id: "x".into(),
-            credential_id: "github".into(),
+            credential_id: "some-provider".into(),
             action: "use".into(),
             oauth_display_name: None,
             token_fallback: None,
@@ -152,7 +152,7 @@ mod tests {
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(
             &SignInPrompt {
-                credential_id: "github".into(),
+                credential_id: "some-provider".into(),
                 display_name: "GitHub".into(),
                 user_code: "WXYZ-1234".into(),
                 verification_uri: "https://example.com/device".into(),
@@ -160,7 +160,7 @@ mod tests {
             },
             cancel_tx,
         );
-        n.dismiss_sign_in("github");
+        n.dismiss_sign_in("some-provider");
         n.dismiss("x");
         n.inform("anything");
         n.clear_informs();
@@ -207,7 +207,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("creds.json");
         let mut updated = CredentialStateFile::new();
-        updated.insert("github".into(), CredentialEntry::HostDetect);
+        updated.insert("some-provider".into(), CredentialEntry::HostDetect);
         JsonFileCredentialStore::new(path.clone())
             .save(&updated)
             .unwrap();
@@ -220,7 +220,7 @@ mod tests {
         );
 
         assert_eq!(
-            session.current_state().get("github"),
+            session.current_state().get("some-provider"),
             Some(&CredentialEntry::HostDetect)
         );
     }
@@ -230,7 +230,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("creds.json");
         let mut updated = CredentialStateFile::new();
-        updated.insert("github".into(), CredentialEntry::HostDetect);
+        updated.insert("some-provider".into(), CredentialEntry::HostDetect);
         JsonFileCredentialStore::new(path.clone())
             .save(&updated)
             .unwrap();
@@ -240,7 +240,7 @@ mod tests {
         handler(Ok(evt(EventKind::Modify(ModifyKind::Any), &path)));
 
         assert_eq!(
-            session.current_state().get("github"),
+            session.current_state().get("some-provider"),
             Some(&CredentialEntry::HostDetect)
         );
     }
@@ -251,7 +251,7 @@ mod tests {
         let target = dir.path().join("creds.json");
         let sibling = dir.path().join("other.json");
         let mut state = CredentialStateFile::new();
-        state.insert("github".into(), CredentialEntry::HostDetect);
+        state.insert("some-provider".into(), CredentialEntry::HostDetect);
         JsonFileCredentialStore::new(target.clone())
             .save(&state)
             .unwrap();
@@ -286,7 +286,7 @@ mod tests {
         let path = dir.path().join("never-created.json");
         let session = make_session();
         let mut prior = CredentialStateFile::new();
-        prior.insert("github".into(), CredentialEntry::HostDetect);
+        prior.insert("some-provider".into(), CredentialEntry::HostDetect);
         session.apply_external_state(prior);
 
         handle_event(
@@ -309,7 +309,7 @@ mod tests {
         let session = make_session();
         // Malformed input must not clobber prior rules: silent revocation on a typo would be terrible UX.
         let mut prior = CredentialStateFile::new();
-        prior.insert("github".into(), CredentialEntry::HostDetect);
+        prior.insert("some-provider".into(), CredentialEntry::HostDetect);
         session.apply_external_state(prior.clone());
 
         handle_event(

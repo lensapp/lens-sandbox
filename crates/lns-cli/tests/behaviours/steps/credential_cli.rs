@@ -6,9 +6,11 @@ use lns_cli::cli::{
     Cli, Command, CredentialClearArgs, CredentialCommand, CredentialScopeArgs, CredentialSetArgs,
 };
 use lns_cli::credential;
+use lns_policy::Policy;
 use lns_policy::credentials::{
     CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
+use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
 use std::path::PathBuf;
 
 fn cwd(world: &mut BehaviourWorld) -> PathBuf {
@@ -170,6 +172,23 @@ fn rejected_two_value_sources(world: &mut BehaviourWorld) -> Result<(), String> 
     }
 }
 
+#[given(regex = r#"^the developer has declared the "([^"]+)" credential provider$"#)]
+fn given_declared_provider(world: &mut BehaviourWorld, id: String) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.credentials.custom_providers.push(ProviderDef {
+        id,
+        env_var: "SOME_TOKEN".into(),
+        placeholder: "some-placeholder-0000000000000000000000".into(),
+        injections: vec![InjectionDef {
+            kind: InjectionKind::BearerHeader,
+            domain: "api.some-provider.example".into(),
+            header: None,
+        }],
+    });
+    policy.save_atomic(&dir.join("lns-policy.yaml")).unwrap();
+}
+
 #[given(regex = r#"^no provider with id "([^"]+)" is registered as built-in or custom$"#)]
 fn no_provider_registered(world: &mut BehaviourWorld, _id: String) {
     let _ = cwd(world);
@@ -190,10 +209,10 @@ fn sandbox_running_no_rule(world: &mut BehaviourWorld, _seeded: String, _id: Str
 }
 
 #[given(
-    regex = r#"^"~/\.lns-credentials\.json" has entries: "github" host-detect, "openai" stored, "linear" deny$"#
+    regex = r#"^"~/\.lns-credentials\.json" has entries: "anthropic" host-detect, "openai" stored, "linear" deny$"#
 )]
 fn seed_three_entries(world: &mut BehaviourWorld) {
-    seed_entry(world, "github", CredentialEntry::HostDetect);
+    seed_entry(world, "anthropic", CredentialEntry::HostDetect);
     seed_entry(
         world,
         "openai",
@@ -219,7 +238,7 @@ fn seed_stored_rule(world: &mut BehaviourWorld, id: String) {
         world,
         &id,
         CredentialEntry::Stored {
-            value: "ghp_existing".into(),
+            value: "some-existing-secret".into(),
         },
     );
 }
@@ -290,7 +309,7 @@ fn output_shows_three(world: &mut BehaviourWorld) -> Result<(), String> {
         .map(|r| r.output.clone())
         .unwrap_or_default();
     for needle in [
-        "github",
+        "anthropic",
         "host value",
         "openai",
         "stored (hidden)",
