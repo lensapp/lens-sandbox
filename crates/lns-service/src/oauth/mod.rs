@@ -87,6 +87,10 @@ pub async fn refresh_if_due(
     else {
         return Ok(None);
     };
+    // A refresh-less grant can't be renewed (GitHub device-flow tokens are long-lived and ship no refresh token); leave it in place rather than attempting a refresh that fails and drops a still-valid token.
+    if refresh_token.is_empty() {
+        return Ok(None);
+    }
     if *expires_at > clock.now_unix().saturating_add(skew_secs) {
         return Ok(None);
     }
@@ -341,6 +345,27 @@ mod tests {
             "a token well before expiry must not be refreshed"
         );
         assert!(flow.seen_refresh.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_leaves_a_refreshless_grant_in_place_even_past_expiry() {
+        let flow = FakeDeviceFlow::refreshing(Err(anyhow!("must not be called")));
+        let entry = CredentialEntry::Oauth {
+            access_token: "long-lived".into(),
+            refresh_token: String::new(),
+            expires_at: 0,
+        };
+        let out = refresh_if_due(&flow, &FakeClock(1_000_000), &sample_cfg(), &entry, 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            out, None,
+            "a grant with no refresh token (e.g. a GitHub device-flow token) is kept, not refreshed-and-dropped"
+        );
+        assert!(
+            flow.seen_refresh.lock().unwrap().is_empty(),
+            "no refresh is attempted when there is no refresh token"
+        );
     }
 
     #[tokio::test]
