@@ -23,8 +23,9 @@ pub fn prepare_pristine_volume(
     }
     if image_seed.is_dir() {
         copy_dir_recursive(image_seed, vol_root)?;
+    } else {
+        chown_recursive(vol_root, uid, gid)?;
     }
-    chown_recursive(vol_root, uid, gid)?;
     Ok(true)
 }
 
@@ -110,18 +111,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_pristine_volume_seeds_then_chowns_when_the_image_ships_the_target() {
+    fn prepare_pristine_volume_preserves_image_ownership_when_seeding() {
         let img = tempfile::tempdir().unwrap();
         std::fs::write(img.path().join("seed.txt"), b"x").unwrap();
         let vol = tempfile::tempdir().unwrap();
-        let (uid, gid) = current_ids(img.path());
+        let (image_uid, image_gid) = current_ids(img.path());
+        let run_as_uid = image_uid + 1;
 
-        let seeded = prepare_pristine_volume(vol.path(), img.path(), uid, gid).unwrap();
+        let seeded =
+            prepare_pristine_volume(vol.path(), img.path(), run_as_uid, image_gid).unwrap();
 
         assert!(seeded);
         assert_eq!(std::fs::read(vol.path().join("seed.txt")).unwrap(), b"x");
         let md = std::fs::metadata(vol.path().join("seed.txt")).unwrap();
-        assert_eq!((md.uid(), md.gid()), (uid, gid));
+        assert_eq!(
+            md.uid(),
+            image_uid,
+            "seeded content keeps the image's owner, not the run-as identity"
+        );
     }
 
     #[test]
