@@ -33,7 +33,7 @@ impl IntegrationSignIn for FakeSignIn {
         Box::pin(async move {
             writeln!(
                 out,
-                "Open https://github.com/login/device and enter code WDJB-MJHT to connect {id}"
+                "Open https://example.com/login/device and enter code WDJB-MJHT to connect {id}"
             )?;
             Ok(outcome)
         })
@@ -76,6 +76,44 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
     world.result = Some(run);
 }
 
+#[given(regex = r#"^a user catalog declares the "([^"]+)" oauth integration$"#)]
+fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::integrations::{AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth};
+    use lns_policy::providers::{InjectionDef, InjectionKind};
+    let dir = cwd(world);
+    Catalog {
+        integrations: vec![Integration {
+            id,
+            name: None,
+            auth_kind: AuthKind::Oauth,
+            routes: vec![IntegrationRoute {
+                match_pattern: "api.some-oauth.example".into(),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: None,
+            oauth: Some(OauthAuth {
+                client_id: "Iv1.some-oauth".into(),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+                env_var: "SOME_OAUTH_TOKEN".into(),
+                placeholder: "some-oauth-placeholder-0000000000000000".into(),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: "api.some-oauth.example".into(),
+                    header: None,
+                }],
+            }),
+            token_fallback: None,
+        }],
+    }
+    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .unwrap();
+}
+
 #[given("the background service is available to sign in")]
 fn service_available(world: &mut BehaviourWorld) {
     world.signin_outcome = Some(SignInOutcome::Completed);
@@ -104,7 +142,7 @@ fn shows_verification(world: &mut BehaviourWorld) {
         .expect("a run must have happened")
         .output;
     assert!(
-        out.contains("https://github.com/login/device"),
+        out.contains("https://example.com/login/device"),
         "expected a verification URL, got: {out}"
     );
     assert!(

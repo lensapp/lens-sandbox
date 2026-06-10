@@ -241,8 +241,8 @@ impl CredentialRig {
         let connected_cb = connected.clone();
         let poll = match outcome {
             RigSignIn::Completes => PollOutcome::Token(TokenSet {
-                access_token: "gho_access".into(),
-                refresh_token: "ghr_refresh".into(),
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
                 expires_in: Duration::from_secs(3600),
             }),
             RigSignIn::Expires => PollOutcome::Expired,

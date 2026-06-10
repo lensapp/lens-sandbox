@@ -450,7 +450,7 @@ mod tests {
     fn policy_block_shows_file_path_default_verdict_and_rule_summary() {
         let mut policy = Policy::default();
         policy.add_rule(allow("api.linear.app"));
-        policy.add_rule(allow("api.github.com"));
+        policy.add_rule(allow("api.example.com"));
         policy.add_rule(allow("registry.npmjs.org"));
         policy.add_rule(deny("evil.example"));
         let s = format_summary(

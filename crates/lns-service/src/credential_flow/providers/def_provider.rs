@@ -107,27 +107,27 @@ mod tests {
 
     #[test]
     fn token_header_provider_builds_the_git_token_scheme() {
-        let inj = single(InjectionKind::TokenHeader, "api.github.com").injections("ghp_real");
+        let inj = single(InjectionKind::TokenHeader, "api.example.test").injections("some-token");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.github.com" && header == "Authorization" && value == "token ghp_real"
+                if domain == "api.example.test" && header == "Authorization" && value == "token some-token"
         ));
     }
 
     #[test]
     fn basic_x_access_token_provider_base64_encodes_the_userinfo() {
-        let inj = single(InjectionKind::BasicXAccessToken, "github.com").injections("ghp_real");
+        let inj = single(InjectionKind::BasicXAccessToken, "example.test").injections("some-token");
         assert_eq!(inj.len(), 1);
         let expected = format!(
             "Basic {}",
-            crate::base64::encode(b"x-access-token:ghp_real")
+            crate::base64::encode(b"x-access-token:some-token")
         );
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "github.com" && header == "Authorization" && *value == expected
+                if domain == "example.test" && header == "Authorization" && *value == expected
         ));
     }
 
@@ -177,12 +177,12 @@ mod tests {
         let p = provider(vec![
             InjectionDef {
                 kind: InjectionKind::TokenHeader,
-                domain: "api.github.com".into(),
+                domain: "api.example.test".into(),
                 header: None,
             },
             InjectionDef {
                 kind: InjectionKind::BasicXAccessToken,
-                domain: "github.com".into(),
+                domain: "example.test".into(),
                 header: None,
             },
             InjectionDef {
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn bearer_header_unarmed_declares_domain_with_empty_value() {
-        let inj = single(InjectionKind::BearerHeader, "api.github.com").unarmed_injections();
+        let inj = single(InjectionKind::BearerHeader, "api.example.test").unarmed_injections();
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],

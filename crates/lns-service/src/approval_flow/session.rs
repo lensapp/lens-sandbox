@@ -1076,10 +1076,10 @@ pub(crate) mod tests {
     #[test]
     fn submit_pending_with_a_matching_offer_presents_the_integration_display_name() {
         let (s, n, _rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert_eq!(
             n.presented.lock().unwrap()[0].offer.as_deref(),
             Some("GitHub"),
@@ -1090,7 +1090,7 @@ pub(crate) mod tests {
     #[test]
     fn submit_pending_without_a_matching_offer_presents_no_offer() {
         let (s, n, _rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
         s.submit_pending(pending("r1", "example.com"), Instant::now());
@@ -1101,13 +1101,13 @@ pub(crate) mod tests {
     fn submit_pending_surfaces_the_offered_integrations_token_fallback() {
         let (s, n, _rx) = offer_session(
             vec![offerable_with_fallback(
-                "github_oauth",
+                "some-oauth",
                 "GitHub",
-                "api.github.com",
+                "api.some-oauth.example",
             )],
             None,
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         let presented = n.presented.lock().unwrap();
         assert_eq!(presented[0].offer.as_deref(), Some("GitHub"));
         assert_eq!(
@@ -1122,10 +1122,10 @@ pub(crate) mod tests {
     #[test]
     fn submit_pending_carries_no_token_fallback_for_an_offer_that_declares_none() {
         let (s, n, _rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert_eq!(n.presented.lock().unwrap()[0].token_fallback, None);
     }
 
@@ -1135,20 +1135,22 @@ pub(crate) mod tests {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
             vec![offerable_with_fallback(
-                "github_oauth",
+                "some-oauth",
                 "GitHub",
-                "api.github.com",
+                "api.some-oauth.example",
             )],
             Some(connector.clone()),
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        let outcome = s.connect_offer_with_token("r1", "ghp_pasted".into()).await;
+        let outcome = s
+            .connect_offer_with_token("r1", "some-pasted-token".into())
+            .await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert_eq!(
             connector.connected_with_token.lock().unwrap().as_slice(),
-            &[("github_oauth".to_string(), "ghp_pasted".to_string())],
+            &[("some-oauth".to_string(), "some-pasted-token".to_string())],
             "the pasted token drives the token connect, not the interactive one"
         );
         assert!(
@@ -1165,7 +1167,8 @@ pub(crate) mod tests {
         let (s, _n, _rx) = offer_session(vec![], Some(connector.clone()));
         s.submit_pending(pending("r1", "example.com"), Instant::now());
         assert_eq!(
-            s.connect_offer_with_token("r1", "ghp_pasted".into()).await,
+            s.connect_offer_with_token("r1", "some-pasted-token".into())
+                .await,
             DecisionOutcome::UnknownId
         );
         assert!(connector.connected_with_token.lock().unwrap().is_empty());
@@ -1175,17 +1178,17 @@ pub(crate) mod tests {
     async fn connect_offer_success_releases_the_held_request_with_allow_once() {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             Some(connector.clone()),
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
         let outcome = s.connect_offer("r1").await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert_eq!(
             connector.connected.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "accepting the offer drives a connect of the matched integration"
         );
         assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
@@ -1196,10 +1199,10 @@ pub(crate) mod tests {
     async fn connect_offer_failure_releases_the_held_request_deny_once_closed() {
         let connector = Arc::new(FakeConnector::new(false));
         let (s, _n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             Some(connector),
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
         s.connect_offer("r1").await;
 
@@ -1213,10 +1216,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn connect_offer_without_a_connector_fails_closed() {
         let (s, _n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
         s.connect_offer("r1").await;
 
@@ -1243,7 +1246,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn connect_offer_for_an_unknown_id_is_unknownid() {
         let (s, _n, _rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
         assert_eq!(s.connect_offer("never").await, DecisionOutcome::UnknownId);
@@ -1253,17 +1256,17 @@ pub(crate) mod tests {
     async fn connect_offer_releases_every_held_request_for_the_integration() {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             Some(connector.clone()),
         );
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
-        s.submit_pending(pending("r2", "api.github.com"), Instant::now());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+        s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
 
         s.connect_offer("r1").await;
 
         assert_eq!(
             connector.connected.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "one sign-in serves every held request for the integration"
         );
         let a = decision_frame(&mut rx);
@@ -1284,17 +1287,17 @@ pub(crate) mod tests {
     #[test]
     fn submit_pending_coalesces_a_request_while_its_integration_is_connecting() {
         let (s, n, _rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
-        s.begin_connecting("github_oauth");
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        s.begin_connecting("some-oauth");
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert!(
             n.presented.lock().unwrap().is_empty(),
             "a request arriving mid sign-in raises no new card"
         );
         assert_eq!(
-            s.offer_request_ids("github_oauth"),
+            s.offer_request_ids("some-oauth"),
             vec!["r1".to_string()],
             "but it is still held, to be released by the in-flight connect"
         );
@@ -1304,11 +1307,11 @@ pub(crate) mod tests {
     async fn connect_offer_for_a_sibling_while_connecting_does_not_start_a_second_connect() {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, _n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             Some(connector.clone()),
         );
-        s.begin_connecting("github_oauth");
-        s.submit_pending(pending("r2", "api.github.com"), Instant::now());
+        s.begin_connecting("some-oauth");
+        s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
 
         let outcome = s.connect_offer("r2").await;
 
@@ -1322,7 +1325,7 @@ pub(crate) mod tests {
             "the in-flight connect releases r2, not this duplicate click"
         );
         assert_eq!(
-            s.offer_request_ids("github_oauth"),
+            s.offer_request_ids("some-oauth"),
             vec!["r2".to_string()],
             "r2 stays held for the in-flight connect's batch"
         );
@@ -1331,13 +1334,15 @@ pub(crate) mod tests {
     #[test]
     fn submit_pending_does_not_offer_an_already_connected_integration() {
         let mut policy = Policy::default();
-        policy.connect("github_oauth");
+        policy.connect("some-oauth");
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let s = ApprovalSession::new(policy, notifier.clone(), store, tx, TEST_TIMEOUT)
-            .with_offers(vec![offerable("github_oauth", "GitHub", "api.github.com")]);
-        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        let s =
+            ApprovalSession::new(policy, notifier.clone(), store, tx, TEST_TIMEOUT).with_offers(
+                vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert_eq!(
             notifier.presented.lock().unwrap()[0].offer,
             None,
@@ -1348,18 +1353,18 @@ pub(crate) mod tests {
     #[test]
     fn an_offer_held_during_a_connect_is_not_swept_by_the_timeout_ticker() {
         let (s, _n, mut rx) = offer_session(
-            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
         let t0 = Instant::now();
-        s.submit_pending(pending("r1", "api.github.com"), t0);
-        s.begin_connecting("github_oauth");
+        s.submit_pending(pending("r1", "api.some-oauth.example"), t0);
+        s.begin_connecting("some-oauth");
         assert_eq!(
             s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
             0,
             "a connecting offer must not time out under the sign-in"
         );
-        s.finish_connecting("github_oauth");
+        s.finish_connecting("some-oauth");
         assert_eq!(
             s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
             1,
@@ -1370,11 +1375,17 @@ pub(crate) mod tests {
 
     #[test]
     fn host_matches_pattern_exact_matches_only_the_same_host() {
-        assert!(host_matches_pattern("api.github.com", "api.github.com"));
-        assert!(!host_matches_pattern("api.github.com", "github.com"));
+        assert!(host_matches_pattern(
+            "api.some-oauth.example",
+            "api.some-oauth.example"
+        ));
         assert!(!host_matches_pattern(
-            "api.github.com",
-            "evil-api.github.com"
+            "api.some-oauth.example",
+            "some-oauth.example"
+        ));
+        assert!(!host_matches_pattern(
+            "api.some-oauth.example",
+            "evil-api.some-oauth.example"
         ));
     }
 

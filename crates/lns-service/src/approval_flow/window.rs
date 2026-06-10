@@ -542,7 +542,7 @@ mod tests {
     fn connect_offer_drops_the_card_and_routes_a_connect_action() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
         assert!(s.connect_offer("r1"));
         assert_eq!(s.pending_count(), 0, "accepting the offer clears the card");
         let got = rx.try_recv().expect("delivery");
@@ -554,8 +554,11 @@ mod tests {
     fn connect_offer_hides_every_sibling_offer_card_synchronously() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
-        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
+        s.insert_pending(
+            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
+            tx.clone(),
+        );
+        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
         assert!(s.connect_offer("r1"));
         assert_eq!(
             s.pending_count(),
@@ -575,7 +578,10 @@ mod tests {
     fn connect_offer_leaves_unrelated_cards_pending() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
+        s.insert_pending(
+            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
+            tx.clone(),
+        );
         s.insert_pending(prompt("r2", "example.com"), tx);
         assert!(s.connect_offer("r1"));
         let snap = s.snapshot();
@@ -590,7 +596,7 @@ mod tests {
     fn connect_offer_returns_false_for_unknown_id() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
         assert!(!s.connect_offer("nope"));
         assert!(rx.try_recv().is_err());
     }
@@ -599,9 +605,12 @@ mod tests {
     fn use_offer_token_routes_a_use_token_action_and_drops_sibling_offer_cards() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
-        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
-        assert!(s.use_offer_token("r1", "ghp_pasted".into()));
+        s.insert_pending(
+            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
+            tx.clone(),
+        );
+        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
+        assert!(s.use_offer_token("r1", "some-pasted-token".into()));
         assert_eq!(
             s.pending_count(),
             0,
@@ -612,7 +621,7 @@ mod tests {
         assert_eq!(
             got.action,
             RequestAction::UseToken {
-                value: "ghp_pasted".into()
+                value: "some-pasted-token".into()
             }
         );
         assert!(rx.try_recv().is_err(), "only one connect is routed");
@@ -622,8 +631,8 @@ mod tests {
     fn use_offer_token_returns_false_for_unknown_id() {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
-        assert!(!s.use_offer_token("nope", "ghp_pasted".into()));
+        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
+        assert!(!s.use_offer_token("nope", "some-pasted-token".into()));
         assert!(rx.try_recv().is_err());
     }
 
@@ -631,7 +640,7 @@ mod tests {
     fn decline_offer_clears_the_offer_and_keeps_the_request_pending() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
         assert!(s.decline_offer("r1"));
         let snap = s.snapshot();
         assert_eq!(
@@ -649,8 +658,11 @@ mod tests {
     fn decline_offer_clears_every_card_for_the_same_integration() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
-        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
+        s.insert_pending(
+            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
+            tx.clone(),
+        );
+        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
         assert!(s.decline_offer("r1"));
         let snap = s.snapshot();
         assert!(
@@ -714,7 +726,7 @@ mod tests {
     fn insert_credential_pending_carries_the_token_fallback() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        let mut prompt = cred_prompt("c1", "github_oauth");
+        let mut prompt = cred_prompt("c1", "some-oauth");
         prompt.token_fallback = Some(TokenFallback {
             help: Some("https://example.com/pat".into()),
         });
@@ -819,7 +831,7 @@ mod tests {
             credential_id: credential_id.into(),
             display_name: "GitHub".into(),
             user_code: "WXYZ-1234".into(),
-            verification_uri: "https://github.com/login/device".into(),
+            verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: None,
         }
     }
@@ -828,7 +840,7 @@ mod tests {
     fn insert_sign_in_shows_in_snapshot_and_counts_toward_pending() {
         let s = WindowState::new();
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
+        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
         let snap = s.snapshot();
         assert_eq!(snap.sign_ins.len(), 1);
         assert_eq!(snap.sign_ins[0].display_name, "GitHub");
@@ -841,8 +853,8 @@ mod tests {
         let s = WindowState::new();
         let (tx1, _r1) = tokio::sync::oneshot::channel();
         let (tx2, _r2) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("github_oauth"), tx1);
-        s.insert_sign_in(sign_in_card("github_oauth"), tx2);
+        s.insert_sign_in(sign_in_card("some-oauth"), tx1);
+        s.insert_sign_in(sign_in_card("some-oauth"), tx2);
         assert_eq!(s.snapshot().sign_ins.len(), 1);
     }
 
@@ -850,8 +862,8 @@ mod tests {
     fn remove_sign_in_drops_the_card_without_firing_cancel() {
         let s = WindowState::new();
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
-        s.remove_sign_in("github_oauth");
+        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
+        s.remove_sign_in("some-oauth");
         assert!(s.snapshot().sign_ins.is_empty());
         // remove drops the sender without sending a cancel, so the receiver observes a closed channel.
         let recv = cancel_rx.try_recv();
@@ -862,8 +874,8 @@ mod tests {
     fn cancel_sign_in_drops_the_card_and_fires_cancel() {
         let s = WindowState::new();
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
-        assert!(s.cancel_sign_in("github_oauth"));
+        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
+        assert!(s.cancel_sign_in("some-oauth"));
         assert!(s.snapshot().sign_ins.is_empty());
         assert_eq!(cancel_rx.try_recv(), Ok(SignInPivot::Cancel));
     }
@@ -878,12 +890,12 @@ mod tests {
     fn pivot_sign_in_drops_the_card_and_fires_the_pasted_token() {
         let s = WindowState::new();
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
-        assert!(s.pivot_sign_in("github_oauth", "ghp_pasted".into()));
+        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
+        assert!(s.pivot_sign_in("some-oauth", "some-pasted-token".into()));
         assert!(s.snapshot().sign_ins.is_empty());
         assert_eq!(
             cancel_rx.try_recv(),
-            Ok(SignInPivot::UseToken("ghp_pasted".into())),
+            Ok(SignInPivot::UseToken("some-pasted-token".into())),
             "the in-flight device flow receives the pasted token, not a cancel"
         );
     }
@@ -891,7 +903,7 @@ mod tests {
     #[test]
     fn pivot_sign_in_for_unknown_id_is_false() {
         let s = WindowState::new();
-        assert!(!s.pivot_sign_in("nope", "ghp_x".into()));
+        assert!(!s.pivot_sign_in("nope", "some-x-token".into()));
     }
 
     #[test]

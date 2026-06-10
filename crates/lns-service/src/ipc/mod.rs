@@ -336,7 +336,7 @@ mod tests {
     async fn begin_integration_sign_in_via_handle_request_panics() {
         let _ = handle_request(
             &Request::BeginIntegrationSignIn {
-                id: "github_oauth".into(),
+                id: "some-oauth".into(),
             },
             Instant::now(),
         )

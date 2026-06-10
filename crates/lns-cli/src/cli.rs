@@ -341,7 +341,7 @@ pub enum TransportArg {
 
 #[derive(clap::Args)]
 pub struct PolicyRuleArgs {
-    #[arg(help = "Destination pattern: host, wildcard (*.github.com), CIDR, or host:port.")]
+    #[arg(help = "Destination pattern: host, wildcard (*.example.com), CIDR, or host:port.")]
     pub pattern: String,
     #[arg(long, help = "Human-readable note stored alongside the rule.")]
     pub description: Option<String>,
@@ -689,18 +689,18 @@ mod tests {
     #[test]
     fn parse_injection_accepts_token_header() {
         use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("token_header:api.github.com").unwrap();
+        let inj = parse_injection("token_header:api.example.com").unwrap();
         assert_eq!(inj.kind, InjectionKind::TokenHeader);
-        assert_eq!(inj.domain, "api.github.com");
+        assert_eq!(inj.domain, "api.example.com");
         assert_eq!(inj.header, None);
     }
 
     #[test]
     fn parse_injection_accepts_basic_x_access_token() {
         use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("basic_x_access_token:github.com").unwrap();
+        let inj = parse_injection("basic_x_access_token:example.com").unwrap();
         assert_eq!(inj.kind, InjectionKind::BasicXAccessToken);
-        assert_eq!(inj.domain, "github.com");
+        assert_eq!(inj.domain, "example.com");
         assert_eq!(inj.header, None);
     }
 
