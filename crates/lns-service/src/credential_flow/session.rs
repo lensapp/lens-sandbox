@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
-    CredentialDecision, CredentialDecisionKind, CredentialPending, HostFrame,
+    CredentialDecision, CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame,
 };
-use crate::credential_flow::providers::DefProvider;
+use crate::credential_flow::providers::{self, DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -189,6 +189,11 @@ impl CredentialSession {
             self.send_decision_frame(&req.id, CredentialDecisionKind::Deny);
             return;
         }
+        // Already armed for this host: the gate is a propagation race (the guest released the connection before applying the armed injection), not a fresh consent. Allow it — the guest re-injects on Allow — instead of re-prompting (and re-running a sign-in).
+        if self.is_armed_for_request(&req.credential_id, &req.action) {
+            self.send_decision_frame(&req.id, CredentialDecisionKind::Allow);
+            return;
+        }
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         if let Some(entry) = pending.get_mut(&req.credential_id) {
             if !entry.request_ids.contains(&req.id) {
@@ -232,6 +237,40 @@ impl CredentialSession {
         )
     }
 
+    /// True when `credential_id` already holds a usable value and injects into the host named in `action`, so a gate for it is a propagation race the host can safely allow rather than re-prompt. A request to a host the credential does not inject into (a real leak attempt) returns false and still prompts.
+    fn is_armed_for_request(&self, credential_id: &str, action: &str) -> bool {
+        if !self.has_armed_value(credential_id) {
+            return false;
+        }
+        request_host(action).is_some_and(|host| self.injects_for_host(credential_id, host))
+    }
+
+    fn has_armed_value(&self, credential_id: &str) -> bool {
+        match self
+            .state
+            .lock()
+            .expect("state mutex poisoned")
+            .get(credential_id)
+        {
+            Some(CredentialEntry::Oauth { access_token, .. }) => !access_token.is_empty(),
+            Some(CredentialEntry::Stored { value }) => !value.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn injects_for_host(&self, credential_id: &str, host: &str) -> bool {
+        self.custom_providers
+            .iter()
+            .map(|p| p as &dyn Provider)
+            .chain(providers::ALL.iter().map(|p| *p as &dyn Provider))
+            .find(|p| p.id() == credential_id)
+            .is_some_and(|p| {
+                p.unarmed_injections()
+                    .iter()
+                    .any(|inj| injection_targets_host(inj, host))
+            })
+    }
+
     /// Emits the armed `Policy` frame before the `CredentialDecision`s so the MITM has the injection in hand before it releases each held request.
     pub fn record_decision(&self, id: &str, request: CredentialDecisionRequest) -> DecisionOutcome {
         let Some((credential_id, request_ids)) = self.remove_pending(id) else {
@@ -268,17 +307,61 @@ impl CredentialSession {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(prompt_id);
+        if self.run_oauth_connect(&credential_id).await {
+            for request_id in &request_ids {
+                self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
+            }
+        } else {
+            self.fail_held(&request_ids);
+        }
+        DecisionOutcome::Resolved
+    }
+
+    /// Connects integration `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
+    pub async fn connect_integration_now(&self, id: &str) -> bool {
+        if self.oauth_configs.contains_key(id) {
+            let ok = self.run_oauth_connect(id).await;
+            if ok {
+                // The same connect arms the token, so any placeholder card already held for this integration is satisfied too — don't ask for it separately.
+                self.release_armed_holds(id);
+            }
+            return ok;
+        }
+        if self.connectable.contains(id) {
+            (self.connect)(id);
+            return true;
+        }
+        false
+    }
+
+    /// Allows and dismisses a held credential prompt for `credential_id` once another surface (a network offer) has armed the integration; a no-op when nothing is held for it.
+    fn release_armed_holds(&self, credential_id: &str) {
+        let entry = self
+            .pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .remove(credential_id);
+        let Some(entry) = entry else {
+            return;
+        };
+        self.notifier.dismiss(&entry.prompt_id);
+        for request_id in &entry.request_ids {
+            self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
+        }
+    }
+
+    /// Runs the device sign-in for an oauth integration and, on success, arms the token set and connects it live; returns whether a token was obtained. A missing config, denial, expiry, cancel, or error yields false.
+    async fn run_oauth_connect(&self, credential_id: &str) -> bool {
         let (Some(cfg), Some(flow), Some(clock)) = (
-            self.oauth_configs.get(&credential_id),
+            self.oauth_configs.get(credential_id),
             self.device_flow.as_ref(),
             self.clock.as_ref(),
         ) else {
-            self.fail_held(&request_ids);
-            return DecisionOutcome::Resolved;
+            return false;
         };
-        let display_name = self.display_name_for(&credential_id);
+        let display_name = self.display_name_for(credential_id);
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let card_id = credential_id.clone();
+        let card_id = credential_id.to_string();
         let present = move |code: &crate::oauth::DeviceCode| {
             self.notifier.present_sign_in(
                 &SignInPrompt {
@@ -297,32 +380,27 @@ impl CredentialSession {
             }
         };
         let result = crate::oauth::run_device_flow(flow.as_ref(), cfg, present, cancel).await;
-        self.notifier.dismiss_sign_in(&credential_id);
+        self.notifier.dismiss_sign_in(credential_id);
         match result {
             Ok(crate::oauth::SignIn::Completed(token)) => {
                 let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
-                if self.connectable.contains(&credential_id) {
-                    (self.connect)(&credential_id);
+                if self.connectable.contains(credential_id) {
+                    (self.connect)(credential_id);
                 }
-                self.apply_persistent_entry(credential_id, entry);
-                for request_id in &request_ids {
-                    self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
-                }
+                self.apply_persistent_entry(credential_id.to_string(), entry);
+                true
             }
             Ok(
                 crate::oauth::SignIn::Denied
                 | crate::oauth::SignIn::Expired
                 | crate::oauth::SignIn::Cancelled,
-            ) => {
-                self.fail_held(&request_ids);
-            }
+            ) => false,
             Err(e) => {
                 self.notifier
                     .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
-                self.fail_held(&request_ids);
+                false
             }
         }
-        DecisionOutcome::Resolved
     }
 
     fn fail_held(&self, request_ids: &[String]) {
@@ -425,6 +503,20 @@ fn persistent_entry(request: CredentialDecisionRequest) -> Option<CredentialEntr
         CredentialDecisionRequest::Allow(entry) => Some(entry),
         CredentialDecisionRequest::Deny => Some(CredentialEntry::Deny),
         CredentialDecisionRequest::Timeout => None,
+    }
+}
+
+/// The host an outbound request targets, parsed from a gate `action` like `GET api.github.com/x` or `CONNECT api.github.com:443`.
+fn request_host(action: &str) -> Option<&str> {
+    let target = action.split_whitespace().nth(1)?;
+    let host = target.split(['/', ':']).next()?;
+    (!host.is_empty()).then_some(host)
+}
+
+fn injection_targets_host(inj: &CredentialInjection, host: &str) -> bool {
+    match inj {
+        CredentialInjection::Header { domain, .. } => domain == host,
+        CredentialInjection::UriPlaceholder { domain, .. } => domain == host,
     }
 }
 
@@ -1547,5 +1639,264 @@ mod tests {
             CredentialDecisionKind::Deny
         );
         assert!(store.saves.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_integration_now_completes_an_oauth_sign_in_arms_and_connects() {
+        let (s, n, _store, _rx, connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+
+        let ok = s.connect_integration_now("github_oauth").await;
+
+        assert!(ok, "a completed sign-in reports connected");
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()]
+        );
+        assert_eq!(
+            s.current_state().get("github_oauth"),
+            Some(&CredentialEntry::Oauth {
+                access_token: "gho_access".into(),
+                refresh_token: "ghr_refresh".into(),
+                expires_at: 1000 + 3600,
+            }),
+            "the obtained token set is armed"
+        );
+        assert_eq!(n.sign_ins.lock().unwrap().len(), 1);
+        assert_eq!(
+            n.dismissed_sign_ins.lock().unwrap().as_slice(),
+            &["github_oauth".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_integration_now_returns_false_when_the_oauth_sign_in_is_denied() {
+        let (s, _n, store, _rx, connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
+
+        let ok = s.connect_integration_now("github_oauth").await;
+
+        assert!(!ok);
+        assert!(connected.lock().unwrap().is_empty());
+        assert!(store.saves.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_integration_now_connects_a_plain_credential_integration_without_a_sign_in() {
+        let (s, n, _store, _rx, connected) = fixture_connectable(&["gitlab"]);
+
+        let ok = s.connect_integration_now("gitlab").await;
+
+        assert!(ok);
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["gitlab".to_string()]
+        );
+        assert!(
+            n.sign_ins.lock().unwrap().is_empty(),
+            "a credential connect shows no device sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_integration_now_returns_false_for_an_unknown_id() {
+        let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        assert!(!s.connect_integration_now("nope").await);
+    }
+
+    #[tokio::test]
+    async fn connect_integration_now_also_releases_a_held_credential_prompt_for_the_same_integration()
+     {
+        let (s, n, _store, mut rx, _connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        // A placeholder card for github_oauth is already held (the "use your GitHub access" prompt).
+        s.submit_pending(pending("cred1", "github_oauth"), Instant::now());
+
+        let ok = s.connect_integration_now("github_oauth").await;
+
+        assert!(ok);
+        let frame = decision_frame(&mut rx);
+        assert_eq!(frame.id, "cred1");
+        assert_eq!(
+            frame.decision,
+            CredentialDecisionKind::Allow,
+            "arming the integration via a network offer also releases its held placeholder request"
+        );
+        assert!(
+            n.dismissed.lock().unwrap().contains(&"cred1".to_string()),
+            "and dismisses the duplicate placeholder card"
+        );
+    }
+
+    fn armed_session(
+        entries: Vec<(&str, CredentialEntry)>,
+        custom: Vec<DefProvider>,
+    ) -> (
+        CredentialSession,
+        Arc<RecordingNotifier>,
+        mpsc::UnboundedReceiver<HostFrame>,
+    ) {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut state = CredentialStateFile::new();
+        for (id, entry) in entries {
+            state.insert(id.into(), entry);
+        }
+        let session = CredentialSession::new(state, notifier.clone(), store, tx, TEST_TIMEOUT)
+            .with_custom_providers(Arc::new(custom));
+        (session, notifier, rx)
+    }
+
+    fn gh_oauth_provider() -> DefProvider {
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+        DefProvider::new(ProviderDef {
+            id: "github_oauth".into(),
+            env_var: "GH_TOKEN".into(),
+            placeholder: "gho_LNSPLACEHOLDER".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::TokenHeader,
+                domain: "api.github.com".into(),
+                header: None,
+            }],
+        })
+    }
+
+    fn armed_oauth(access_token: &str) -> CredentialEntry {
+        CredentialEntry::Oauth {
+            access_token: access_token.into(),
+            refresh_token: String::new(),
+            expires_at: 9_999_999_999,
+        }
+    }
+
+    fn gate(credential_id: &str, action: &str) -> CredentialPending {
+        CredentialPending {
+            id: "c1".into(),
+            credential_id: credential_id.into(),
+            action: action.into(),
+            reason: "placeholder-unauthorized".into(),
+        }
+    }
+
+    #[test]
+    fn submit_pending_auto_allows_an_armed_credential_on_a_host_it_injects_into() {
+        let (s, n, mut rx) = armed_session(
+            vec![("github_oauth", armed_oauth("gho_real"))],
+            vec![gh_oauth_provider()],
+        );
+        s.submit_pending(gate("github_oauth", "GET api.github.com/"), Instant::now());
+        assert!(
+            n.presented.lock().unwrap().is_empty(),
+            "an armed credential gated on a host it injects into is a propagation race, not a fresh consent — auto-allow without re-prompting"
+        );
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Allow
+        );
+    }
+
+    #[test]
+    fn submit_pending_still_prompts_an_armed_credential_on_a_host_it_does_not_inject_into() {
+        let (s, n, _rx) = armed_session(
+            vec![("github_oauth", armed_oauth("gho_real"))],
+            vec![gh_oauth_provider()],
+        );
+        s.submit_pending(gate("github_oauth", "GET evil.example/"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap().len(),
+            1,
+            "sending the placeholder to a host with no injection is a real leak attempt and must still prompt"
+        );
+    }
+
+    #[test]
+    fn submit_pending_auto_allows_an_armed_builtin_stored_credential_on_its_host() {
+        let (s, n, mut rx) = armed_session(
+            vec![(
+                "github",
+                CredentialEntry::Stored {
+                    value: "ghp_real".into(),
+                },
+            )],
+            vec![],
+        );
+        s.submit_pending(gate("github", "GET api.github.com/"), Instant::now());
+        assert!(n.presented.lock().unwrap().is_empty());
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Allow
+        );
+    }
+
+    #[test]
+    fn submit_pending_prompts_when_the_armed_oauth_value_is_empty() {
+        let (s, n, _rx) = armed_session(
+            vec![("github_oauth", armed_oauth(""))],
+            vec![gh_oauth_provider()],
+        );
+        s.submit_pending(gate("github_oauth", "GET api.github.com/"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap().len(),
+            1,
+            "an empty token is not a usable armed value"
+        );
+    }
+
+    #[test]
+    fn submit_pending_prompts_when_the_action_has_no_parseable_host() {
+        let (s, n, _rx) = armed_session(
+            vec![("github_oauth", armed_oauth("gho_real"))],
+            vec![gh_oauth_provider()],
+        );
+        s.submit_pending(gate("github_oauth", "malformed"), Instant::now());
+        assert_eq!(n.presented.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn submit_pending_prompts_for_an_armed_credential_with_no_known_provider() {
+        let (s, n, _rx) = armed_session(
+            vec![("mystery", CredentialEntry::Stored { value: "v".into() })],
+            vec![],
+        );
+        s.submit_pending(gate("mystery", "GET api.mystery.com/"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap().len(),
+            1,
+            "without a provider we can't know its injection domains, so we prompt"
+        );
+    }
+
+    #[test]
+    fn request_host_parses_method_target_forms() {
+        assert_eq!(request_host("GET api.github.com/x"), Some("api.github.com"));
+        assert_eq!(
+            request_host("CONNECT api.github.com:443"),
+            Some("api.github.com")
+        );
+        assert_eq!(request_host("POST github.com/graphql"), Some("github.com"));
+        assert_eq!(request_host("malformed"), None);
+        assert_eq!(request_host("GET /onlypath"), None);
+    }
+
+    #[test]
+    fn injection_targets_host_matches_header_and_uri_placeholder_domains() {
+        let header = CredentialInjection::Header {
+            domain: "api.github.com".into(),
+            header: "Authorization".into(),
+            value: "token x".into(),
+        };
+        assert!(injection_targets_host(&header, "api.github.com"));
+        assert!(!injection_targets_host(&header, "evil.example"));
+        let uri = CredentialInjection::UriPlaceholder {
+            domain: "api.telegram.org".into(),
+            value: "v".into(),
+        };
+        assert!(injection_targets_host(&uri, "api.telegram.org"));
+        assert!(!injection_targets_host(&uri, "evil.example"));
     }
 }

@@ -10,7 +10,14 @@ use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendi
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
     pub id: String,
-    pub decision: Decision,
+    pub action: RequestAction,
+}
+
+/// What the user chose on a network card: one of the wire decisions, or accepting the integration offer (a host-only action that drives a connect rather than a per-request verdict).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestAction {
+    Decide(Decision),
+    ConnectIntegration,
 }
 
 /// Carries the full [`CredentialDecisionRequest`] rather than a bare enum so the typed credential value threads through to `record_decision`.
@@ -193,6 +200,29 @@ impl WindowState {
     }
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
+        self.deliver(id, RequestAction::Decide(decision))
+    }
+
+    /// Accepts the integration offer: routes one connect for the clicked request and immediately drops every other offer card for the same integration, so no sibling card flashes up before the in-flight connect releases them all.
+    pub fn connect_offer(&self, id: &str) -> bool {
+        let mut g = self.lock();
+        let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
+            return false;
+        };
+        let offer = g.pending[idx].prompt.offer.clone();
+        let entry = g.pending.remove(idx);
+        let _ = entry.decision_tx.send(DecisionDelivery {
+            id: id.to_string(),
+            action: RequestAction::ConnectIntegration,
+        });
+        if let Some(name) = offer {
+            g.pending
+                .retain(|e| e.prompt.offer.as_deref() != Some(name.as_str()));
+        }
+        true
+    }
+
+    fn deliver(&self, id: &str, action: RequestAction) -> bool {
         let mut g = self.lock();
         let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
             return false;
@@ -200,8 +230,29 @@ impl WindowState {
         let entry = g.pending.remove(idx);
         let _ = entry.decision_tx.send(DecisionDelivery {
             id: id.to_string(),
-            decision,
+            action,
         });
+        true
+    }
+
+    /// Declines the integration offer: clears the offer on every held request for that integration so each falls back to the plain allow/deny (rather than re-offering via a sibling card) without resolving them; returns whether an offer was present to clear.
+    pub fn decline_offer(&self, id: &str) -> bool {
+        let mut g = self.lock();
+        let Some(name) = g
+            .pending
+            .iter()
+            .find(|e| e.prompt.id == id)
+            .and_then(|e| e.prompt.offer.clone())
+        else {
+            return false;
+        };
+        for entry in g
+            .pending
+            .iter_mut()
+            .filter(|e| e.prompt.offer.as_deref() == Some(name.as_str()))
+        {
+            entry.prompt.offer = None;
+        }
         true
     }
 
@@ -314,6 +365,7 @@ mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
+            offer: None,
         }
     }
 
@@ -414,7 +466,7 @@ mod tests {
             got,
             DecisionDelivery {
                 id: "r1".into(),
-                decision: Decision::AllowOnce,
+                action: RequestAction::Decide(Decision::AllowOnce),
             }
         );
     }
@@ -427,7 +479,10 @@ mod tests {
         s.insert_pending(prompt("r1", "a.test"), tx1);
         s.insert_pending(prompt("r2", "b.test"), tx2);
         assert!(s.decide("r1", Decision::DenyAlways));
-        assert_eq!(rx1.try_recv().expect("rx1").decision, Decision::DenyAlways);
+        assert_eq!(
+            rx1.try_recv().expect("rx1").action,
+            RequestAction::Decide(Decision::DenyAlways)
+        );
         assert!(rx2.try_recv().is_err());
     }
 
@@ -439,6 +494,124 @@ mod tests {
         assert!(!s.decide("nope", Decision::AllowOnce));
         assert_eq!(s.pending_count(), 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    fn offer_prompt(id: &str, host: &str, name: &str) -> PendingPrompt {
+        PendingPrompt {
+            id: id.into(),
+            host: host.into(),
+            action: format!("CONNECT {host}:443"),
+            offer: Some(name.into()),
+        }
+    }
+
+    #[test]
+    fn connect_offer_drops_the_card_and_routes_a_connect_action() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        assert!(s.connect_offer("r1"));
+        assert_eq!(s.pending_count(), 0, "accepting the offer clears the card");
+        let got = rx.try_recv().expect("delivery");
+        assert_eq!(got.id, "r1");
+        assert_eq!(got.action, RequestAction::ConnectIntegration);
+    }
+
+    #[test]
+    fn connect_offer_hides_every_sibling_offer_card_synchronously() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
+        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
+        assert!(s.connect_offer("r1"));
+        assert_eq!(
+            s.pending_count(),
+            0,
+            "the clicked card and its siblings vanish on the same frame, so none flashes up"
+        );
+        let got = rx.try_recv().expect("delivery");
+        assert_eq!(got.id, "r1");
+        assert_eq!(got.action, RequestAction::ConnectIntegration);
+        assert!(
+            rx.try_recv().is_err(),
+            "only one connect is routed; the in-flight connect releases the siblings"
+        );
+    }
+
+    #[test]
+    fn connect_offer_leaves_unrelated_cards_pending() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
+        s.insert_pending(prompt("r2", "example.com"), tx);
+        assert!(s.connect_offer("r1"));
+        let snap = s.snapshot();
+        assert_eq!(snap.pending.len(), 1);
+        assert_eq!(
+            snap.pending[0].id, "r2",
+            "an unrelated plain request stays pending"
+        );
+    }
+
+    #[test]
+    fn connect_offer_returns_false_for_unknown_id() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        assert!(!s.connect_offer("nope"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn decline_offer_clears_the_offer_and_keeps_the_request_pending() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        assert!(s.decline_offer("r1"));
+        let snap = s.snapshot();
+        assert_eq!(
+            snap.pending.len(),
+            1,
+            "declining keeps the request for a plain decision"
+        );
+        assert_eq!(
+            snap.pending[0].offer, None,
+            "the offer is cleared so the network card shows next"
+        );
+    }
+
+    #[test]
+    fn decline_offer_clears_every_card_for_the_same_integration() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
+        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
+        assert!(s.decline_offer("r1"));
+        let snap = s.snapshot();
+        assert!(
+            snap.pending.iter().all(|p| p.offer.is_none()),
+            "declining the offer clears it for every held GitHub request, not just the clicked one"
+        );
+        assert_eq!(
+            snap.pending.len(),
+            2,
+            "the requests stay pending as plain cards"
+        );
+    }
+
+    #[test]
+    fn decline_offer_is_false_when_there_is_no_offer_to_clear() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "example.com"), tx);
+        assert!(
+            !s.decline_offer("r1"),
+            "a plain request has no offer to decline"
+        );
+        assert!(
+            !s.decline_offer("nope"),
+            "an unknown id has no offer to decline"
+        );
     }
 
     #[test]
