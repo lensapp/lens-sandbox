@@ -545,10 +545,11 @@ fn persistent_entry(request: CredentialDecisionRequest) -> Option<CredentialEntr
     }
 }
 
-/// The host an outbound request targets, parsed from a gate `action` like `GET api.github.com/x` or `CONNECT api.github.com:443`.
+/// The host an outbound request targets, parsed from a gate `action` like `POST https://api.github.com/x` or `CONNECT api.github.com:443`.
 fn request_host(action: &str) -> Option<&str> {
     let target = action.split_whitespace().nth(1)?;
-    let host = target.split(['/', ':']).next()?;
+    let authority = target.split_once("://").map_or(target, |(_, rest)| rest);
+    let host = authority.split(['/', ':']).next()?;
     (!host.is_empty()).then_some(host)
 }
 
@@ -1951,7 +1952,10 @@ mod tests {
             vec![("github_oauth", armed_oauth("gho_real"))],
             vec![gh_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "GET api.github.com/"), Instant::now());
+        s.submit_pending(
+            gate("github_oauth", "POST https://api.github.com/issues"),
+            Instant::now(),
+        );
         assert!(
             n.presented.lock().unwrap().is_empty(),
             "an armed credential gated on a host it injects into is a propagation race, not a fresh consent — auto-allow without re-prompting"
@@ -1968,7 +1972,10 @@ mod tests {
             vec![("github_oauth", armed_oauth("gho_real"))],
             vec![gh_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "GET evil.example/"), Instant::now());
+        s.submit_pending(
+            gate("github_oauth", "POST https://evil.example/exfil"),
+            Instant::now(),
+        );
         assert_eq!(
             n.presented.lock().unwrap().len(),
             1,
@@ -1987,7 +1994,10 @@ mod tests {
             )],
             vec![],
         );
-        s.submit_pending(gate("github", "GET api.github.com/"), Instant::now());
+        s.submit_pending(
+            gate("github", "POST https://api.github.com/issues"),
+            Instant::now(),
+        );
         assert!(n.presented.lock().unwrap().is_empty());
         assert_eq!(
             decision_frame(&mut rx).decision,
@@ -2035,6 +2045,15 @@ mod tests {
 
     #[test]
     fn request_host_parses_method_target_forms() {
+        // The proxy emits a credential gate as `METHOD <absolute-url>`, so the scheme must be stripped before the host.
+        assert_eq!(
+            request_host("POST https://api.github.com/issues"),
+            Some("api.github.com")
+        );
+        assert_eq!(
+            request_host("GET https://github.com/graphql"),
+            Some("github.com")
+        );
         assert_eq!(request_host("GET api.github.com/x"), Some("api.github.com"));
         assert_eq!(
             request_host("CONNECT api.github.com:443"),
