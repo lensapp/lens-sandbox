@@ -30,6 +30,7 @@ pub struct RunHandle {
     pub started: String,
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
+    pub config: lns_ipc::RunConfig,
 }
 
 pub fn allocate_run_id() -> u32 {
@@ -120,18 +121,28 @@ fn snapshot_from(map: Option<&HashMap<u32, RunHandle>>) -> Vec<lns_ipc::RunSumma
     let Some(map) = map else {
         return Vec::new();
     };
-    map.iter()
-        .map(|(id, h)| {
-            let status = h.status.lock().map(|s| *s).unwrap_or(RunStatus::Running);
-            lns_ipc::RunSummary {
-                id: *id,
-                image: h.image.clone(),
-                command: h.command.clone(),
-                status,
-                started: h.started.clone(),
-            }
+    map.iter().map(|(id, h)| summary_of(*id, h)).collect()
+}
+
+fn summary_of(id: u32, h: &RunHandle) -> lns_ipc::RunSummary {
+    let status = h.status.lock().map(|s| *s).unwrap_or(RunStatus::Running);
+    lns_ipc::RunSummary {
+        id,
+        image: h.image.clone(),
+        command: h.command.clone(),
+        status,
+        started: h.started.clone(),
+    }
+}
+
+pub fn inspect(run_id: u32) -> Option<lns_ipc::RunDetails> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(&run_id))
+        .map(|h| lns_ipc::RunDetails {
+            summary: summary_of(run_id, h),
+            config: h.config.clone(),
         })
-        .collect()
 }
 
 pub fn cancel(run_id: u32) -> bool {
@@ -167,6 +178,7 @@ mod tests {
                 started: String::new(),
                 status: std::sync::Mutex::new(RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+                config: lns_ipc::RunConfig::default(),
             },
             cancel_rx,
         )
@@ -365,6 +377,32 @@ mod tests {
     #[test]
     fn snapshot_from_none_returns_empty_vec() {
         assert!(snapshot_from(None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn inspect_returns_summary_and_launch_config_for_a_registered_run() {
+        let id = allocate_run_id();
+        let (mut handle, _rx) = make_handle();
+        handle.image = "some-image:1".to_string();
+        handle.command = "echo hi".to_string();
+        handle.config.cpus = 4;
+        handle.config.mem_mib = 2048;
+        register(id, handle);
+
+        let details = inspect(id).expect("registered run must be inspectable");
+        assert_eq!(details.summary.id, id);
+        assert_eq!(details.summary.image, "some-image:1");
+        assert_eq!(details.summary.status, RunStatus::Running);
+        assert_eq!(details.config.cpus, 4);
+        assert_eq!(details.config.mem_mib, 2048);
+
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn inspect_returns_none_for_unknown_run() {
+        let id = allocate_run_id() + 5_000_000;
+        assert!(inspect(id).is_none());
     }
 
     #[tokio::test]
