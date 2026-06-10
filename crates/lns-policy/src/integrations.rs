@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_parses_and_carries_no_builtin_id() {
+    fn bundled_catalog_parses_and_ships_services() {
         let ids: HashSet<&str> = bundled_integrations()
             .iter()
             .map(|i| i.id.as_str())
@@ -540,12 +540,83 @@ mod tests {
             !ids.is_empty(),
             "the bundled catalog should ship at least one service"
         );
-        for builtin in ["openai", "anthropic", "linear", "telegram"] {
-            assert!(
-                !ids.contains(builtin),
-                "bundled catalog must not shadow the compiled-in built-in {builtin}"
-            );
-        }
+    }
+
+    #[test]
+    fn bundled_openai_injects_a_bearer_header() {
+        let openai = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "openai")
+            .expect("openai is bundled");
+        let cred = openai.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "OPENAI_API_KEY");
+        assert!(
+            cred.injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "api.openai.com"),
+            "got: {:?}",
+            cred.injections
+        );
+    }
+
+    #[test]
+    fn bundled_anthropic_covers_both_x_api_key_and_bearer_for_openai_compatible_clients() {
+        let anthropic = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "anthropic")
+            .expect("anthropic is bundled");
+        let cred = anthropic.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "ANTHROPIC_API_KEY");
+        assert!(
+            cred.injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::ApiKeyHeader
+                    && i.domain == "api.anthropic.com"
+                    && i.header.as_deref() == Some("x-api-key")),
+            "native SDKs send x-api-key, got: {:?}",
+            cred.injections
+        );
+        assert!(
+            cred.injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "api.anthropic.com"),
+            "OpenAI-compatible clients send Authorization: Bearer, got: {:?}",
+            cred.injections
+        );
+    }
+
+    #[test]
+    fn bundled_linear_injects_a_bearer_header() {
+        let linear = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "linear")
+            .expect("linear is bundled");
+        let cred = linear.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "LINEAR_API_KEY");
+        assert!(
+            cred.injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "api.linear.app"),
+            "got: {:?}",
+            cred.injections
+        );
+    }
+
+    #[test]
+    fn bundled_telegram_injects_via_uri_placeholder() {
+        let telegram = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "telegram")
+            .expect("telegram is bundled");
+        let cred = telegram.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "TELEGRAM_BOT_TOKEN");
+        assert!(
+            cred.injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::UriPlaceholder && i.domain == "api.telegram.org"),
+            "telegram embeds the token in the URL path, got: {:?}",
+            cred.injections
+        );
     }
 
     #[test]
@@ -651,20 +722,6 @@ mod tests {
                 .is_some_and(|h| h.starts_with("https://")),
             "the fallback should point at a token-creation URL, got: {:?}",
             fallback.help
-        );
-    }
-
-    #[test]
-    fn github_is_served_by_the_oauth_integration_not_a_builtin_provider() {
-        assert!(
-            bundled_integrations().iter().any(|i| i.id == "github"),
-            "github must ship as a bundled integration"
-        );
-        assert!(
-            !crate::providers::builtins()
-                .iter()
-                .any(|p| p.id == "github"),
-            "the github credential provider is removed; github is served by the github integration"
         );
     }
 

@@ -148,25 +148,25 @@ mod tests {
 
     #[test]
     fn api_key_header_uses_the_named_header_with_the_raw_value_and_no_scheme_prefix() {
-        let inj = api_key_header("sk-ant-real", "api.anthropic.com", "x-api-key");
+        let inj = api_key_header("some-secret", "api.example.test", "x-api-key");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.anthropic.com"
+                if domain == "api.example.test"
                     && header == "x-api-key"
-                    && value == "sk-ant-real"
+                    && value == "some-secret"
         ));
     }
 
     #[test]
     fn api_key_header_unarmed_declares_named_header_with_empty_value() {
-        let inj = api_key_header_unarmed("api.anthropic.com", "x-api-key");
+        let inj = api_key_header_unarmed("api.example.test", "x-api-key");
         assert_eq!(inj.len(), 1);
         assert!(matches!(
             &inj[0],
             CredentialInjection::Header { domain, header, value }
-                if domain == "api.anthropic.com"
+                if domain == "api.example.test"
                     && header == "x-api-key"
                     && value.is_empty()
         ));

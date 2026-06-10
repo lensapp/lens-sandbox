@@ -288,6 +288,12 @@ mod tests {
     }
 
     fn credential_session_with_dummy_sink() -> Arc<CredentialSession> {
+        credential_session_seeding(Vec::new())
+    }
+
+    fn credential_session_seeding(
+        custom: Vec<crate::credential_flow::providers::DefProvider>,
+    ) -> Arc<CredentialSession> {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         use crate::credential_flow::store::{CredentialStateFile, JsonFileCredentialStore};
         // Real store (not an inline fake) keeps its trait impl out of the coverage gap.
@@ -296,13 +302,16 @@ mod tests {
         // Leak the tempdir to keep it alive for the session; fine in test-only code.
         Box::leak(Box::new(dir));
         let (tx, _rx) = mpsc::unbounded_channel();
-        Arc::new(CredentialSession::new(
-            CredentialStateFile::new(),
-            Arc::new(NoopCredentialNotifier),
-            store,
-            tx,
-            Duration::from_secs(30),
-        ))
+        Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(NoopCredentialNotifier),
+                store,
+                tx,
+                Duration::from_secs(30),
+            )
+            .with_custom_providers(Arc::new(custom)),
+        )
     }
 
     #[test]
@@ -489,17 +498,13 @@ mod tests {
 
     #[test]
     fn initial_policy_frame_carries_registry_credentials_so_supervisor_seeds_env_at_boot() {
-        use crate::credential_flow::providers;
         let p = Policy::default();
-        let creds: Vec<_> = providers::ALL
-            .iter()
-            .map(|pd| Credential {
-                id: pd.id().into(),
-                env_var: Some(pd.env_var().into()),
-                placeholder: Some(pd.placeholder().into()),
-                injections: Vec::new(),
-            })
-            .collect();
+        let creds = vec![Credential {
+            id: "some-provider".into(),
+            env_var: Some("SOME_TOKEN".into()),
+            placeholder: Some("some-placeholder-0000".into()),
+            injections: Vec::new(),
+        }];
         let frame = initial_policy_frame(&p, creds);
         let json = serde_json::to_value(&frame).expect("serialise");
         let credentials = &json["credentials"];
@@ -513,15 +518,24 @@ mod tests {
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        for expected in ["openai", "anthropic", "linear"] {
-            assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
-        }
+        assert!(ids.contains(&"some-provider"), "got {ids:?}");
     }
 
     #[tokio::test]
     async fn accept_loop_seeded_policy_includes_credentials_from_credential_session() {
+        use crate::credential_flow::providers::DefProvider;
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
         let session = session_with_dummy_sink();
-        let credential_session = credential_session_with_dummy_sink();
+        let credential_session = credential_session_seeding(vec![DefProvider::new(ProviderDef {
+            id: "some-provider".into(),
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some-placeholder-0000".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.some-provider.example".into(),
+                header: None,
+            }],
+        })]);
 
         let seeded = seed_frames(
             Vec::new(),
@@ -538,9 +552,7 @@ mod tests {
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        for expected in ["openai", "anthropic", "linear"] {
-            assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
-        }
+        assert!(ids.contains(&"some-provider"), "got {ids:?}");
     }
 
     #[tokio::test]

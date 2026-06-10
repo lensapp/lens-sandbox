@@ -1,4 +1,3 @@
-use crate::credential_flow::providers;
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -7,9 +6,9 @@ pub struct WorkloadEnv {
     pub refused: Vec<String>,
 }
 
-/// A var is managed if a built-in claims it or the run's custom providers / connected integrations declare it; managed vars are seeded as placeholders, never carried from `-e`.
+/// A var is managed when the run's providers — its custom providers and the catalog integrations — declare it; managed vars are seeded as placeholders, never carried from `-e`.
 fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
-    providers::is_managed_env(env_var) || extra_managed.iter().any(|m| m == env_var)
+    extra_managed.iter().any(|m| m == env_var)
 }
 
 pub fn injected_env_audit(
@@ -149,9 +148,13 @@ mod tests {
 
     #[test]
     fn a_user_override_of_a_managed_credential_is_refused_and_dropped() {
-        let c = compose_workload_env(None, &["OPENAI_API_KEY=sk-real".into()], &[]);
+        let c = compose_workload_env(
+            None,
+            &["SOME_TOKEN=some-real".into()],
+            &["SOME_TOKEN".to_string()],
+        );
         assert!(c.env.is_empty(), "credential var must not reach workload");
-        assert_eq!(c.refused, ["OPENAI_API_KEY"]);
+        assert_eq!(c.refused, ["SOME_TOKEN"]);
     }
 
     #[test]
@@ -217,8 +220,13 @@ mod tests {
 
     #[test]
     fn run_workload_env_surfaces_refused_credentials() {
-        let c = run_workload_env(None, &["OPENAI_API_KEY=x".into()], None, &[]);
-        assert_eq!(c.refused, ["OPENAI_API_KEY"]);
+        let c = run_workload_env(
+            None,
+            &["SOME_TOKEN=x".into()],
+            None,
+            &["SOME_TOKEN".to_string()],
+        );
+        assert_eq!(c.refused, ["SOME_TOKEN"]);
         assert!(c.env.is_empty());
     }
 
@@ -263,11 +271,14 @@ mod tests {
 
     #[test]
     fn injected_env_audit_omits_managed_credentials() {
-        let obj = injected_env_audit(&["A=1".into(), "OPENAI_API_KEY=x".into()], &[])
-            .expect("event built");
+        let obj = injected_env_audit(
+            &["A=1".into(), "SOME_TOKEN=x".into()],
+            &["SOME_TOKEN".to_string()],
+        )
+        .expect("event built");
         let env = obj.get("env").unwrap().as_object().unwrap();
         assert!(env.contains_key("A"));
-        assert!(!env.contains_key("OPENAI_API_KEY"));
+        assert!(!env.contains_key("SOME_TOKEN"));
     }
 
     #[test]
@@ -288,7 +299,9 @@ mod tests {
     #[test]
     fn injected_env_audit_is_none_when_nothing_is_injected() {
         assert!(injected_env_audit(&[], &[]).is_none());
-        assert!(injected_env_audit(&["OPENAI_API_KEY=x".into()], &[]).is_none());
+        assert!(
+            injected_env_audit(&["SOME_TOKEN=x".into()], &["SOME_TOKEN".to_string()]).is_none()
+        );
     }
 
     #[test]

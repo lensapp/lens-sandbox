@@ -10,7 +10,6 @@ pub struct BehaviourWorld {
     pub result: Option<CliRun>,
     pub argv: Vec<String>,
     pub cwd: Option<TempDir>,
-    pub stdin: Option<String>,
     pub summary_output: String,
     pub phase_output: Vec<u8>,
     pub detached_stdout: Vec<u8>,

@@ -280,25 +280,6 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn with_registry_detection_routes_to_registry() {
-        use crate::test_env::EnvVarGuard;
-        let state = WindowState::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let n = WindowCredentialNotifier::with_registry_detection(
-            state.clone(),
-            tx,
-            None,
-            Arc::new(Vec::new()),
-        );
-
-        let _g = EnvVarGuard::set("OPENAI_API_KEY", "sk-real");
-        n.present(&prompt("c1", "openai"));
-        let snap = state.snapshot();
-        assert!(snap.pending_credentials[0].host_value_available);
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
     fn with_registry_detection_offers_host_value_for_a_custom_provider() {
         use crate::test_env::EnvVarGuard;
         use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};

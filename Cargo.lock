@@ -3247,7 +3247,6 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "tempfile",
- "toml",
 ]
 
 [[package]]

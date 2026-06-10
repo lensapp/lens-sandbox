@@ -50,8 +50,6 @@ pub enum Command {
     Update(UpdateArgs),
     #[command(about = "Edit network rules in a policy file.")]
     Policy(PolicyArgs),
-    #[command(about = "Manage credential providers and their per-machine value decisions.")]
-    Credential(CredentialArgs),
     #[command(about = "Manage the credential-integration catalog (connectable services).")]
     Integration(IntegrationArgs),
 }
@@ -133,28 +131,6 @@ pub struct DisconnectArgs {
     pub policy: Option<PathBuf>,
 }
 
-#[derive(clap::Args)]
-pub struct CredentialArgs {
-    #[command(subcommand)]
-    pub command: CredentialCommand,
-}
-
-#[derive(Subcommand)]
-pub enum CredentialCommand {
-    #[command(about = "Declare a custom credential provider in the policy file.")]
-    Add(CredentialAddArgs),
-    #[command(about = "Add another per-domain injection to an existing custom provider.")]
-    AddInjection(CredentialInjectArgs),
-    #[command(about = "Set a credential's value: the host value, a stored value, or deny.")]
-    Set(CredentialSetArgs),
-    #[command(about = "Clear a credential's value decision so the next use re-prompts.")]
-    Clear(CredentialClearArgs),
-    #[command(about = "List credential providers and their current value decisions.")]
-    List(CredentialScopeArgs),
-    #[command(about = "Remove a custom provider from the policy file.")]
-    Remove(CredentialRemoveArgs),
-}
-
 fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let mut parts = s.splitn(3, ':');
@@ -202,116 +178,6 @@ fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, Strin
         domain: domain.to_string(),
         header,
     })
-}
-
-#[derive(clap::Args)]
-#[command(group(clap::ArgGroup::new("add_value").args(["value", "value_stdin"])))]
-pub struct CredentialAddArgs {
-    #[arg(
-        help = "New custom provider id; must not collide with a built-in or existing custom provider."
-    )]
-    pub id: String,
-    #[arg(long, help = "Environment variable the placeholder is seeded into.")]
-    pub env_var: String,
-    #[arg(
-        long = "inject",
-        required = true,
-        value_parser = parse_injection,
-        help = "Per-domain injection as KIND:DOMAIN. KIND is bearer_header, uri_placeholder, token_header, basic_x_access_token, or api_key_header (which requires a header: api_key_header:DOMAIN:HEADER). Repeatable."
-    )]
-    pub inject: Vec<lns_policy::providers::InjectionDef>,
-    #[arg(
-        long,
-        help = "Placeholder value; auto-generated (self-identifying) when omitted."
-    )]
-    pub placeholder: Option<String>,
-    #[arg(
-        long,
-        help = "Optional real value stored at the boundary (kept out of the workload); prefer --value-stdin to keep the secret out of your shell history and the process list."
-    )]
-    pub value: Option<String>,
-    #[arg(
-        long = "value-stdin",
-        help = "Read the optional stored value from stdin instead of an argument (a trailing newline is trimmed)."
-    )]
-    pub value_stdin: bool,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct CredentialInjectArgs {
-    #[arg(help = "Existing custom provider id to extend.")]
-    pub id: String,
-    #[arg(
-        long = "inject",
-        value_parser = parse_injection,
-        help = "Per-domain injection to append. KIND is bearer_header, uri_placeholder, token_header, basic_x_access_token, or api_key_header (which requires a header: api_key_header:DOMAIN:HEADER)."
-    )]
-    pub inject: lns_policy::providers::InjectionDef,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct CredentialRemoveArgs {
-    #[arg(help = "Custom provider id to remove; built-in providers cannot be removed.")]
-    pub id: String,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-#[command(group(clap::ArgGroup::new("decision").required(true).args(["value", "value_stdin", "host", "deny"])))]
-pub struct CredentialSetArgs {
-    #[arg(help = "Provider id (built-in, e.g. openai, or a declared custom provider).")]
-    pub id: String,
-    #[arg(
-        long,
-        help = "Store this real value; prefer --value-stdin so the secret stays out of your shell history and the process list."
-    )]
-    pub value: Option<String>,
-    #[arg(
-        long = "value-stdin",
-        help = "Read the stored value from stdin (a trailing newline is trimmed), keeping the secret off the command line."
-    )]
-    pub value_stdin: bool,
-    #[arg(long, help = "Use the value detected on the host for this provider.")]
-    pub host: bool,
-    #[arg(
-        long,
-        help = "Deny this credential; requests carrying its placeholder fail at the boundary."
-    )]
-    pub deny: bool,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct CredentialClearArgs {
-    #[arg(help = "Provider id whose value decision to clear.")]
-    pub id: String,
-}
-
-#[derive(clap::Args)]
-pub struct CredentialScopeArgs {
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -707,20 +573,20 @@ mod tests {
     #[test]
     fn parse_injection_accepts_api_key_header_with_header_name() {
         use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("api_key_header:api.anthropic.com:x-api-key").unwrap();
+        let inj = parse_injection("api_key_header:api.example.test:x-api-key").unwrap();
         assert_eq!(inj.kind, InjectionKind::ApiKeyHeader);
-        assert_eq!(inj.domain, "api.anthropic.com");
+        assert_eq!(inj.domain, "api.example.test");
         assert_eq!(inj.header.as_deref(), Some("x-api-key"));
     }
 
     #[test]
     fn parse_injection_rejects_api_key_header_without_a_header_name() {
-        let err = parse_injection("api_key_header:api.anthropic.com").unwrap_err();
+        let err = parse_injection("api_key_header:api.example.test").unwrap_err();
         assert!(
             err.contains("api_key_header") && err.contains("header name"),
             "got: {err}"
         );
-        let err = parse_injection("api_key_header:api.anthropic.com:").unwrap_err();
+        let err = parse_injection("api_key_header:api.example.test:").unwrap_err();
         assert!(
             err.contains("api_key_header") && err.contains("header name"),
             "got: {err}"

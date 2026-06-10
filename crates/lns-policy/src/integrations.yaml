@@ -45,3 +45,46 @@ integrations:
           domain: github.com
     tokenFallback:
       help: https://github.com/settings/personal-access-tokens/new
+  - id: openai
+    authKind: credential
+    routes:
+      - match: api.openai.com
+    credential:
+      envVar: OPENAI_API_KEY
+      placeholder: sk-LNSPLACEHOLDER0000000000000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: api.openai.com
+  - id: anthropic
+    authKind: credential
+    routes:
+      - match: api.anthropic.com
+    credential:
+      envVar: ANTHROPIC_API_KEY
+      placeholder: sk-ant-LNSPLACEHOLDER00000000000000000000000000000000000000000000000000000000000000000000000000
+      injections:
+        - kind: api_key_header
+          domain: api.anthropic.com
+          header: x-api-key
+        - kind: bearer_header
+          domain: api.anthropic.com
+  - id: linear
+    authKind: credential
+    routes:
+      - match: api.linear.app
+    credential:
+      envVar: LINEAR_API_KEY
+      placeholder: lin_api_LNSPLACEHOLDER0000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: api.linear.app
+  - id: telegram
+    authKind: credential
+    routes:
+      - match: api.telegram.org
+    credential:
+      envVar: TELEGRAM_BOT_TOKEN
+      placeholder: "0000000000:LNSPLACEHOLDER000000000000000000000"
+      injections:
+        - kind: uri_placeholder
+          domain: api.telegram.org

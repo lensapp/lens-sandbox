@@ -1,12 +1,11 @@
 use cucumber::{given, then, when};
 use std::time::Instant;
 
-use crate::credential_rig::{CredentialRig, FIXTURE_ID};
+use crate::credential_rig::{CredentialRig, FIXTURE_ENV, FIXTURE_ID, FIXTURE_PLACEHOLDER};
 use crate::world::BehaviourWorld;
 use lns_service::approval_flow::protocol::{
     CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame, PolicyMessage,
 };
-use lns_service::credential_flow::providers;
 use lns_service::credential_flow::session::CredentialDecisionRequest;
 use lns_service::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 
@@ -296,25 +295,21 @@ fn then_env_has_placeholder_per_entry(world: &mut BehaviourWorld) -> Result<(), 
         .credentials
         .as_ref()
         .ok_or("Policy frame missing credentials array")?;
-    for provider in providers::ALL.iter() {
-        let cred = creds
-            .iter()
-            .find(|c| c.id == provider.id())
-            .ok_or_else(|| format!("Policy frame missing credential for {}", provider.id()))?;
-        if cred.placeholder.as_deref() != Some(provider.placeholder()) {
-            return Err(format!(
-                "credential {} placeholder mismatch: got {:?}",
-                provider.id(),
-                cred.placeholder
-            ));
-        }
-        if cred.env_var.as_deref() != Some(provider.env_var()) {
-            return Err(format!(
-                "credential {} env_var mismatch: got {:?}",
-                provider.id(),
-                cred.env_var
-            ));
-        }
+    let cred = creds
+        .iter()
+        .find(|c| c.id == FIXTURE_ID)
+        .ok_or_else(|| format!("Policy frame missing credential for {FIXTURE_ID}"))?;
+    if cred.placeholder.as_deref() != Some(FIXTURE_PLACEHOLDER) {
+        return Err(format!(
+            "credential {FIXTURE_ID} placeholder mismatch: got {:?}",
+            cred.placeholder
+        ));
+    }
+    if cred.env_var.as_deref() != Some(FIXTURE_ENV) {
+        return Err(format!(
+            "credential {FIXTURE_ID} env_var mismatch: got {:?}",
+            cred.env_var
+        ));
     }
     Ok(())
 }
@@ -571,14 +566,11 @@ fn assert_credential_armed_with(
 
 #[then("the workload still sees only the placeholder")]
 fn then_workload_sees_placeholder(_w: &mut BehaviourWorld) -> Result<(), String> {
-    // Walk the registry rather than drained frames (the prior step consumed them): the real value only ever appears in CredentialInjection.value, never in the placeholder.
-    for p in providers::ALL.iter() {
-        assert!(
-            p.placeholder().to_lowercase().contains("lnsplaceholder"),
-            "registry placeholder {} must be a fake",
-            p.placeholder()
-        );
-    }
+    // The real value only ever appears in CredentialInjection.value; the seeded placeholder stays a fake.
+    assert!(
+        FIXTURE_PLACEHOLDER.to_lowercase().contains("placeholder"),
+        "fixture placeholder {FIXTURE_PLACEHOLDER} must be a fake"
+    );
     Ok(())
 }
 

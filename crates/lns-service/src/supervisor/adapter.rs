@@ -20,7 +20,7 @@ use crate::credential_flow::integrations::{
     resolve_applied_integrations, resolve_connectable_integrations,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
-use crate::credential_flow::providers::{self, DefProvider, Provider};
+use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
 use crate::credential_flow::session::CredentialSession;
 use crate::credential_flow::store::{
@@ -237,7 +237,7 @@ fn load_user_catalog_or_warn(path: &Path) -> lns_policy::integrations::Catalog {
     }
 }
 
-/// The env vars seeded as placeholders for this run's custom providers + connected integrations; stripped from `-e` so a real secret can't bypass the placeholder. Built-ins are handled globally by `is_managed_env`.
+/// The env vars seeded as placeholders for this run's connected and connectable integrations; stripped from `-e` so a real secret can't bypass the placeholder.
 fn collect_managed_env_vars(providers: &[DefProvider]) -> Vec<String> {
     providers.iter().map(|p| p.env_var().to_string()).collect()
 }
@@ -464,8 +464,7 @@ pub(super) async fn start(
         .collect();
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
-    let mut custom = providers::build_policy_providers(&policy);
-    custom.extend(applied.providers);
+    let mut custom = applied.providers;
     custom.extend(connectable.providers);
     let custom_providers = Arc::new(custom);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
@@ -847,18 +846,27 @@ mod tests {
 
     fn fixture_credential_session() -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>)
     {
+        fixture_credential_session_seeding(Arc::new(Vec::new()))
+    }
+
+    fn fixture_credential_session_seeding(
+        custom: Arc<Vec<DefProvider>>,
+    ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         let (store, _dir) = tempfile_credential_store();
         // Leak the tempdir guard for the life of the session (test-only).
         Box::leak(Box::new(_dir));
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
-        let session = Arc::new(CredentialSession::new(
-            CredentialStateFile::new(),
-            Arc::new(NoopCredentialNotifier),
-            store,
-            frame_tx,
-            std::time::Duration::from_secs(30),
-        ));
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_custom_providers(custom),
+        );
         (session, frame_rx)
     }
 
@@ -944,20 +952,15 @@ mod tests {
 
     #[test]
     fn make_credentials_provider_returns_registry_expansion_while_session_alive() {
-        use crate::credential_flow::providers;
-        let (session, _frame_rx) = fixture_credential_session();
+        let (session, _frame_rx) = fixture_credential_session_seeding(acme_custom());
         let provider = make_credentials_provider(&session);
         let creds = provider();
         let ids: Vec<&str> = creds.iter().map(|c| c.id.as_str()).collect();
-        for p in providers::ALL.iter() {
-            let id = p.id();
-            assert!(ids.contains(&id), "missing {id} in provider output");
-        }
+        assert!(ids.contains(&"acme"), "got {ids:?}");
     }
 
     #[test]
     fn make_policy_emitter_sends_policy_with_network_and_credentials() {
-        use crate::credential_flow::providers;
         use crate::credential_flow::store::{CredentialEntry, CredentialStateFile};
         use lns_policy::RouteRule;
         let (session, mut session_rx) = fixture_session();
@@ -968,13 +971,13 @@ mod tests {
         while session_rx.try_recv().is_ok() {}
 
         let (sink, mut sink_rx) = mpsc::unbounded_channel::<HostFrame>();
-        let emitter = make_policy_emitter(session, sink, Arc::new(Vec::new()));
+        let emitter = make_policy_emitter(session, sink, acme_custom());
 
         let mut state = CredentialStateFile::new();
         state.insert(
-            "some-provider".into(),
+            "acme".into(),
             CredentialEntry::Stored {
-                value: "some-token".into(),
+                value: "acme-token".into(),
             },
         );
         emitter(&state);
@@ -994,10 +997,7 @@ mod tests {
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        for p in providers::ALL.iter() {
-            let id = p.id();
-            assert!(ids.contains(&id), "missing {id} in {ids:?}");
-        }
+        assert!(ids.contains(&"acme"), "got {ids:?}");
     }
 
     #[test]
