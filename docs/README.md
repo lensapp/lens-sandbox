@@ -22,7 +22,7 @@ You drive everything through one binary: the `lns` CLI.
 - **[Policy and approvals](policy.md)** — the `lns-policy.yaml` file, the default
   `ask` verdict, the approval window, and editing rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of
-  the workload, the built-in providers, and managing them with `lns credential`.
+  the workload, and the per-machine value decisions that bind the real value.
 - **[Integrations](integrations.md)** — connect workloads to external services
   (credential injection + the routes they need) with `lns integration` and
   `lns connect`.

@@ -21,43 +21,28 @@ The workload behaves as though it holds the credential without the secret ever
 entering the sandbox. A request carrying a placeholder to a domain the provider
 isn't configured for is not rewritten — the placeholder goes nowhere useful.
 
-## Built-in providers
+## Providers are integrations
 
-These providers are recognized out of the box:
-
-| Provider    | Environment variable  | Injected for          |
-| ----------- | --------------------- | --------------------- |
-| `openai`    | `OPENAI_API_KEY`      | `api.openai.com`      |
-| `anthropic` | `ANTHROPIC_API_KEY`   | `api.anthropic.com`   |
-| `linear`    | `LINEAR_API_KEY`      | `api.linear.app`      |
-| `telegram`  | `TELEGRAM_BOT_TOKEN`  | `api.telegram.org`    |
-
-GitHub is connected as an [integration](integrations.md) (device sign-in) rather than
-a built-in static token — see [Integrations](integrations.md).
+Every credential provider is an [integration](integrations.md): a named service that
+bundles its placeholder, environment variable, and per-domain injection with the
+routes it needs. `openai`, `anthropic`, `linear`, `telegram`, `gitlab`, and
+`huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
+(device sign-in). Declare your own for an internal API with `lns integration add`
+(see [Integrations](integrations.md)). Connect one to a project with
+`lns integration connect <id>`, which records it under `integrations:` in that
+directory's `lns-policy.yaml`.
 
 ## Value decisions
 
 A provider's *value decision* is per-machine — it's how the real secret (or the
 choice to deny) is bound on your machine. It's stored in `~/.lns-credentials.json`,
-separate from the shareable `lns-policy.yaml`, so secrets are never committed. Set
-it with `lns credential set`, which requires exactly one of:
+separate from the shareable `lns-policy.yaml`, so secrets are never committed.
 
-```bash
-# Use the value Lens Sandbox detects on the host for this provider
-lns credential set anthropic --host
-
-# Store a specific real value at the boundary. Prefer --value-stdin so the
-# secret stays out of your shell history and the process list.
-printf '%s' "$MY_TOKEN" | lns credential set openai --value-stdin
-lns credential set openai --value sk-...            # also works, less safe
-
-# Deny: requests carrying this placeholder fail at the boundary
-lns credential set telegram --deny
-```
-
-If a provider has no value decision yet, the first request that carries its
-placeholder pauses for an approval — the same allow / deny flow as
-[network policy](policy.md), deciding whether to inject the real value.
+Decisions are made interactively: the first request that carries a placeholder
+pauses for an approval — the same allow / deny / ask flow as
+[network policy](policy.md) — where you choose to use the value Lens Sandbox detects
+on the host, store a specific value at the boundary, or deny (requests carrying the
+placeholder then fail at the boundary). The decision is remembered for next time.
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
 than a pasted secret it's a self-renewing **token set** obtained by an interactive
@@ -65,75 +50,9 @@ device sign-in (`lns integration connect <id>`), refreshed automatically and
 re-prompted when the grant can no longer be refreshed. It lives in the same per-machine
 file and is never written to `lns-policy.yaml`.
 
-Clear a decision so the next use prompts again:
+## Injection kinds
 
-```bash
-lns credential clear anthropic
-```
-
-List providers and their current decisions:
-
-```bash
-lns credential list
-```
-
-## Custom providers
-
-Declare your own provider for an internal API. The declaration is written to the
-policy file (`lns-policy.yaml` by default, or `--policy <path>`):
-
-```bash
-lns credential add acme \
-  --env-var ACME_API_TOKEN \
-  --inject bearer_header:api.acme.internal
-```
-
-- `id` — the new provider id; it must not collide with a built-in or an existing
-  custom provider.
-- `--env-var` — the environment variable the placeholder is seeded into.
-- `--inject KIND:DOMAIN` — how and where the real value is injected (repeatable).
-  `KIND` is `bearer_header`, `uri_placeholder`, `token_header`,
-  `basic_x_access_token`, or `api_key_header` (see
-  [Injection kinds](#injection-kinds) below). For `api_key_header`, append the
-  header name as a third segment: `--inject api_key_header:DOMAIN:HEADER`
-  (e.g. `api_key_header:api.anthropic.com:x-api-key`).
-- `--placeholder` — a specific placeholder value; auto-generated when omitted.
-- `--value` / `--value-stdin` — optionally store the real value at the boundary in
-  the same step (prefer `--value-stdin`).
-
-The declaration lands under `credentials.customProviders` in the policy file
-(declarations are shareable — only the *value* stays in `~/.lns-credentials.json`):
-
-```yaml
-network:
-  allowedRoutes: []
-  defaultVerdict: ask
-  defaultTransport: direct
-credentials:
-  customProviders:
-    - id: acme
-      envVar: ACME_API_TOKEN
-      placeholder: acme_LNSPLACEHOLDER0000000000000000000000
-      injections:
-        - kind: bearer_header
-          domain: api.acme.internal
-```
-
-Add another domain injection to an existing custom provider:
-
-```bash
-lns credential add-injection acme --inject bearer_header:api2.acme.internal
-```
-
-Remove a custom provider (built-ins cannot be removed):
-
-```bash
-lns credential remove acme
-```
-
-### Injection kinds
-
-An injection's `kind` decides how the real value reaches the destination:
+An integration's injection `kind` decides how the real value reaches the destination:
 
 | Kind                   | Effect on the request                                                 |
 | ---------------------- | --------------------------------------------------------------------- |
@@ -143,16 +62,15 @@ An injection's `kind` decides how the real value reaches the destination:
 | `basic_x_access_token` | HTTP Basic auth as `x-access-token:<value>`                           |
 | `api_key_header`       | A named header (the injection's `header:`, e.g. `x-api-key: <value>`) |
 
-`lns credential add` and `add-injection` accept all five non-AWS kinds.
-`api_key_header` requires the header name as a third segment
+`lns integration add --inject` accepts all five non-AWS kinds. `api_key_header`
+requires the header name as a third segment
 (`--inject api_key_header:DOMAIN:HEADER`); the other four are headerless and use
 the two-segment form (`--inject KIND:DOMAIN`). `awsSigv4` is unsupported as a
 static placeholder — it carries real STS material.
 
 ## See also
 
-- [Policy and approvals](policy.md) — credential decisions follow the same
+- [Integrations](integrations.md) — declare, connect, and list the services whose
+  credentials reach a workload.
+- [Policy and approvals](policy.md) — value decisions follow the same
   allow / deny / ask model as network rules.
-- [Integrations](integrations.md) — bundle a provider's injection with the routes
-  it needs into a connectable service.
-- [CLI reference](cli-reference.md) — the full `lns credential` flag list.

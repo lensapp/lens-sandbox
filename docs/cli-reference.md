@@ -138,30 +138,30 @@ lns policy remove <PATTERN>
 `PATTERN` is a host, wildcard (`*.github.com`), CIDR, or `host:port`. See
 [Policy and approvals](policy.md).
 
-## `lns credential`
+## `lns integration`
 
-Manage credential providers and their per-machine value decisions.
+Manage the credential-integration catalog — the services whose credentials reach a
+workload. The catalog is machine-global (`~/.lns-integrations.yaml`); connecting one
+records it under `integrations:` in a directory's `lns-policy.yaml`.
 
 ```bash
-lns credential add  <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--placeholder <P>] [--value <V> | --value-stdin]
-lns credential add-injection <ID> --inject <KIND:DOMAIN>
-lns credential set  <ID> (--host | --value <V> | --value-stdin | --deny)
-lns credential clear <ID>
-lns credential list
-lns credential remove <ID>
+lns integration add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
+lns integration list
+lns integration remove <ID>
+lns integration connect <ID> [--policy <PATH>]
+lns integration disconnect <ID> [--policy <PATH>]
 ```
 
-All subcommands except `clear` accept `--policy <PATH>` (default `lns-policy.yaml`).
+| Subcommand   | Meaning                                                                       |
+| ------------ | ----------------------------------------------------------------------------- |
+| `add`        | Declare a credential integration in your machine-global catalog.              |
+| `list`       | List the bundled and user-declared integrations and their auth kind.          |
+| `remove`     | Remove a user-declared integration; bundled ones cannot be removed.           |
+| `connect`    | Connect an integration to this directory's policy (`oauth` integrations sign in). |
+| `disconnect` | Disconnect an integration from this directory's policy.                       |
 
-| Subcommand      | Meaning                                                                  |
-| --------------- | ------------------------------------------------------------------------ |
-| `add`           | Declare a custom credential provider in the policy file.                 |
-| `add-injection` | Add another per-domain injection to an existing custom provider.         |
-| `set`           | Set a credential's value: the host value, a stored value, or deny.       |
-| `clear`         | Clear a credential's value decision so the next use re-prompts.          |
-| `list`          | List providers and their current value decisions.                        |
-| `remove`        | Remove a custom provider (built-ins cannot be removed).                  |
-
-Injection kinds declarable from the CLI: `bearer_header`, `uri_placeholder`. Prefer
-`--value-stdin` over `--value` so secrets stay out of your shell history and the
-process list. See [Credentials](credentials.md).
+`--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
+`token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
+name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
+connected integration are made interactively in the approval window — see
+[Credentials](credentials.md) and [Integrations](integrations.md).
