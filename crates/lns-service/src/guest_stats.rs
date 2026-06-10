@@ -184,32 +184,36 @@ mod tests {
     #[test]
     fn response_from_wraps_parsed_stats() {
         let resp = response_from(Ok(sample_output(0, 0, 50, 50)));
-        match resp {
-            Response::RunStats { stats } => assert_eq!(stats.cpu_permille, 500),
-            other => panic!("expected RunStats, got {other:?}"),
-        }
+        let expected = Response::RunStats {
+            stats: RunStatsInfo {
+                cpu_permille: 500,
+                mem_used_bytes: (524_288 - 262_144) * 1024,
+                mem_total_bytes: 524_288 * 1024,
+            },
+        };
+        assert_eq!(resp, expected);
     }
 
     #[test]
     fn response_from_surfaces_a_parse_failure() {
         let resp = response_from(Ok("garbage".to_string()));
-        match resp {
-            Response::Error { message } => {
-                assert!(message.contains("parsing guest stats failed"), "{message}");
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        let rendered = format!("{resp:?}");
+        assert!(rendered.contains("Error"), "got: {rendered}");
+        assert!(
+            rendered.contains("parsing guest stats failed"),
+            "got: {rendered}"
+        );
     }
 
     #[test]
     fn response_from_surfaces_a_capture_failure() {
         let resp = response_from(Err(anyhow::anyhow!("vsock unreachable")));
-        match resp {
-            Response::Error { message } => {
-                assert!(message.contains("sampling guest stats failed"), "{message}");
-                assert!(message.contains("vsock unreachable"), "{message}");
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        let rendered = format!("{resp:?}");
+        assert!(rendered.contains("Error"), "got: {rendered}");
+        assert!(
+            rendered.contains("sampling guest stats failed"),
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("vsock unreachable"), "got: {rendered}");
     }
 }

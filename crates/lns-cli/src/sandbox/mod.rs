@@ -289,6 +289,7 @@ mod tests {
 
     struct CannedService {
         response: Response,
+        frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
 
@@ -296,6 +297,15 @@ mod tests {
         fn new(response: Response) -> Self {
             Self {
                 response,
+                frames: Vec::new(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_frames(frames: Vec<Vec<u8>>) -> Self {
+            Self {
+                response: Response::Pong,
+                frames,
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -309,7 +319,13 @@ mod tests {
             Box::pin(async move { Ok(response) })
         }
         fn open_stream(&self, _request: Request) -> BoxFuture<'_, Result<Self::Stream>> {
-            Box::pin(async move { bail!("open_stream not faked in this test") })
+            let frames = self.frames.clone();
+            Box::pin(async move {
+                if frames.is_empty() {
+                    bail!("the daemon refused the stream");
+                }
+                Ok(stream_with(&frames).await)
+            })
         }
         fn aux_socket(&self) -> Option<PathBuf> {
             None
@@ -450,6 +466,83 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(stderr, b"warning!");
         assert!(stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logs_surfaces_a_failure_to_open_the_stream() {
+        let svc = CannedService::with_frames(Vec::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = logs(
+            &svc,
+            &SandboxLogsArgs {
+                run_id: 1,
+                follow: false,
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("refused the stream"));
+    }
+
+    #[tokio::test]
+    async fn attach_relays_output_and_adopts_the_workloads_exit_code() {
+        let svc = CannedService::with_frames(vec![
+            encode_frame(&Response::RunStarted { run_id: 9 }).unwrap(),
+            lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"live".to_vec())).unwrap(),
+            encode_frame(&Response::RunExit { code: 4 }).unwrap(),
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = attach(
+            &svc,
+            &SandboxAttachArgs {
+                run_id: 9,
+                detach_keys: crate::cli::DetachChord(Vec::new()),
+            },
+            TermInfo::default(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 4);
+        assert_eq!(stdout, b"live");
+        assert!(
+            svc.aux_socket().is_none(),
+            "the canned service offers no aux socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_marks_the_policy_unreadable_when_the_loader_finds_nothing() {
+        let svc = CannedService::new(Response::RunInspect {
+            details: Box::new(RunDetails {
+                summary: lns_ipc::RunSummary {
+                    id: 1,
+                    image: "some-image".into(),
+                    command: String::new(),
+                    status: lns_ipc::RunStatus::Running,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: lns_ipc::RunConfig {
+                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    ..Default::default()
+                },
+            }),
+        });
+        let mut out = Vec::new();
+        let code = inspect(&svc, &SandboxInspectArgs { run_id: 1 }, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("policy file could not be read"),
+            "got: {text}"
+        );
     }
 
     #[test]

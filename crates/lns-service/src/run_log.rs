@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follow_streams_chunks_appended_after_the_subscription() {
+    async fn follow_waits_for_output_appended_after_it_drained_the_buffer() {
         let buf = Arc::new(RunLogBuffer::new(1024));
         buf.append(StreamKind::Stdout, b"early");
 
@@ -412,6 +412,14 @@ mod tests {
             })
         };
 
+        let first = lns_ipc::read_frame_bytes_async(&mut client)
+            .await
+            .expect("the buffered chunk streams immediately");
+        assert!(matches!(
+            lns_ipc::decode_wire_frame_from_bytes(&first).unwrap(),
+            WireFrame::Stdout(b) if b == b"early"
+        ));
+
         buf.append(StreamKind::Stdout, b"late");
         buf.close(0);
 
@@ -421,8 +429,7 @@ mod tests {
         use tokio::io::AsyncReadExt;
         client.read_to_end(&mut received).await.unwrap();
         let frames = decode_frames(&received);
-        assert!(matches!(&frames[0], WireFrame::Stdout(b) if b == b"early"));
-        assert!(matches!(&frames[1], WireFrame::Stdout(b) if b == b"late"));
+        assert!(matches!(&frames[0], WireFrame::Stdout(b) if b == b"late"));
         assert!(matches!(
             frames.last(),
             Some(WireFrame::Json(Response::RunExit { code: 0 }))
