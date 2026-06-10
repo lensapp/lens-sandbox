@@ -107,9 +107,39 @@ async fn handle_connection(
         Request::ExecImage(args) => handle_exec(stream, args).await,
         Request::RunLogs { run_id, follow } => handle_logs(stream, run_id, follow).await,
         Request::AttachRun { run_id } => handle_attach(stream, run_id).await,
+        Request::RunStats { run_id } => handle_stats(stream, run_id).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+    let response = match crate::run_registry::connector(run_id) {
+        None => Response::Error {
+            message: format!("no active run with id {run_id}"),
+        },
+        Some(connector) => crate::guest_stats::response_from(
+            crate::vm::session_client::capture_session_output(
+                &connector,
+                crate::guest_stats::sample_argv(),
+            )
+            .await,
+        ),
+    };
+    let frame = encode_frame(&response)?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+    let _ = write_error(
+        &mut stream,
+        format!("sampling stats for run {run_id} is macOS-only in this build"),
+    )
+    .await;
+    Ok(())
 }
 
 async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyhow::Result<()> {

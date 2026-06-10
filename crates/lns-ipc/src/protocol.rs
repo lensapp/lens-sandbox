@@ -21,6 +21,7 @@ pub enum Request {
     InspectRun { run_id: u32 },
     RunLogs { run_id: u32, follow: bool },
     AttachRun { run_id: u32 },
+    RunStats { run_id: u32 },
     BeginIntegrationSignIn { id: String },
 }
 
@@ -66,6 +67,9 @@ pub enum Response {
     RunInspect {
         details: Box<RunDetails>,
     },
+    RunStats {
+        stats: RunStatsInfo,
+    },
     OauthVerification {
         verification_uri: String,
         user_code: String,
@@ -91,6 +95,13 @@ pub struct RunSummary {
 pub enum RunStatus {
     Running,
     Exited { code: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStatsInfo {
+    pub cpu_permille: u32,
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,6 +489,25 @@ mod tests {
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_stats_survives_a_request_and_response_round_trip() {
+        let req = Request::RunStats { run_id: 3 };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::RunStats {
+            stats: RunStatsInfo {
+                cpu_permille: 125,
+                mem_used_bytes: 88 * 1024 * 1024,
+                mem_total_bytes: 512 * 1024 * 1024,
+            },
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

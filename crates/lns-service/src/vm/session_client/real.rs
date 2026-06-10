@@ -76,6 +76,59 @@ async fn run_session(
     Ok(exit_code.load(Ordering::SeqCst))
 }
 
+const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+#[cfg(target_os = "macos")]
+pub async fn capture_session_output(
+    connector: &crate::vm::VsockConnector,
+    argv: Vec<String>,
+) -> Result<String> {
+    let fd = connector
+        .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(10))
+        .await
+        .context("opening capture vsock to broker")?;
+    let params = SessionParams {
+        argv,
+        env: Vec::new(),
+        tty: false,
+        stdin: false,
+        initial_winsize: None,
+    };
+    let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(64);
+    let (input_keepalive, input_rx) = mpsc::channel::<SessionInput>(1);
+    let session = tokio::spawn(run_session_on_fd(fd, params, frame_tx, input_rx));
+
+    let collect = async {
+        let mut out: Vec<u8> = Vec::new();
+        while let Some(frame) = frame_rx.recv().await {
+            if let WireFrame::Stdout(bytes) = frame {
+                anyhow::ensure!(
+                    out.len() + bytes.len() <= MAX_CAPTURE_BYTES,
+                    "capture output exceeded {MAX_CAPTURE_BYTES} bytes"
+                );
+                out.extend_from_slice(&bytes);
+            }
+        }
+        Ok(out)
+    };
+    let out = match tokio::time::timeout(CAPTURE_TIMEOUT, collect).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            session.abort();
+            return Err(e);
+        }
+        Err(_) => {
+            session.abort();
+            anyhow::bail!("capture session timed out after {CAPTURE_TIMEOUT:?}");
+        }
+    };
+    drop(input_keepalive);
+    let code = session.await.context("capture session task panicked")??;
+    anyhow::ensure!(code == 0, "capture command exited with code {code}");
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
 async fn pump_session_input(
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     mut input_rx: mpsc::Receiver<SessionInput>,
