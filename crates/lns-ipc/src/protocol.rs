@@ -23,6 +23,10 @@ pub enum Request {
     InspectVolume { name: String },
     RemoveVolume { name: String },
     PruneVolumes,
+    PullImage { image: String },
+    ListImages,
+    RemoveImage { image: String },
+    PruneImages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +91,20 @@ pub enum Response {
         reclaimed_bytes: u64,
         failed: Vec<VolumePruneFailure>,
     },
+    ImagePulled {
+        image: ImageInfo,
+    },
+    ImageList {
+        images: Vec<ImageInfo>,
+    },
+    ImageRemoved {
+        reference: String,
+        reclaimed_bytes: u64,
+    },
+    ImagesPruned {
+        removed: Vec<String>,
+        reclaimed_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +120,16 @@ pub struct VolumeInfo {
 pub struct VolumePruneFailure {
     pub name: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub reference: String,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub layers: u32,
+    pub pulled: String,
+    pub in_use_by: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,6 +519,73 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    #[test]
+    fn image_requests_survive_round_trips() {
+        for req in [
+            Request::PullImage {
+                image: "registry.example.test/some/image:1.0".into(),
+            },
+            Request::ListImages,
+            Request::RemoveImage {
+                image: "registry.example.test/some/image:1.0".into(),
+            },
+            Request::PruneImages,
+        ] {
+            let frame = crate::encode_frame(&req).unwrap();
+            let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, req);
+        }
+    }
+
+    #[test]
+    fn image_responses_survive_round_trips() {
+        let info = ImageInfo {
+            reference: "registry.example.test/some/image:1.0".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 3 * 1024 * 1024,
+            layers: 2,
+            pulled: "2026-06-10T12:00:00Z".into(),
+            in_use_by: Some(7),
+        };
+        for resp in [
+            Response::ImagePulled {
+                image: info.clone(),
+            },
+            Response::ImageList {
+                images: vec![info.clone()],
+            },
+            Response::ImageRemoved {
+                reference: info.reference.clone(),
+                reclaimed_bytes: 3 * 1024 * 1024,
+            },
+            Response::ImagesPruned {
+                removed: vec![info.reference.clone()],
+                reclaimed_bytes: 3 * 1024 * 1024,
+            },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
+    }
+
+    #[test]
+    fn image_info_serializes_idle_holder_as_null() {
+        let info = ImageInfo {
+            reference: "registry.example.test/some/image:1.0".into(),
+            digest: format!("sha256:{}", "b".repeat(64)),
+            size_bytes: 4096,
+            layers: 1,
+            pulled: "2026-06-10T12:00:00Z".into(),
+            in_use_by: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["in_use_by"], serde_json::Value::Null);
+        assert_eq!(json["reference"], "registry.example.test/some/image:1.0");
+        assert_eq!(json["size_bytes"], 4096);
+        assert_eq!(json["layers"], 1);
     }
 
     #[test]
