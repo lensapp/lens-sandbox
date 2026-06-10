@@ -17,6 +17,7 @@ pub enum Request {
     ExecImage(ExecImageArgs),
     Kill { run_id: u32, signal: SignalKind },
     ListRuns,
+    StopRun { run_id: u32, timeout_secs: u64 },
     BeginIntegrationSignIn { id: String },
     ListVolumes,
     CreateVolume { name: String },
@@ -64,6 +65,9 @@ pub enum Response {
     Acknowledged,
     RunList {
         runs: Vec<RunSummary>,
+    },
+    RunStopped {
+        forced: bool,
     },
     OauthVerification {
         verification_uri: String,
@@ -494,6 +498,27 @@ mod tests {
         assert_eq!(json["in_use_by"], serde_json::Value::Null);
         assert_eq!(json["name"], "prism-data");
         assert_eq!(json["disk_bytes"], 1024);
+    }
+
+    #[test]
+    fn stop_run_survives_a_request_round_trip() {
+        let req = Request::StopRun {
+            run_id: 7,
+            timeout_secs: 10,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_stopped_survives_a_response_round_trip() {
+        for forced in [false, true] {
+            let resp = Response::RunStopped { forced };
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     #[test]
