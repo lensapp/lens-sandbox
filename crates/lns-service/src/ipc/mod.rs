@@ -619,6 +619,10 @@ mod tests {
         }
     }
 
+    fn as_json(resp: Response) -> serde_json::Value {
+        serde_json::to_value(&resp).expect("responses serialize")
+    }
+
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn handle_request_volume_lifecycle_round_trips_through_the_store() {
@@ -627,37 +631,42 @@ mod tests {
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         let now = Instant::now();
 
-        let created = handle_request(
-            &Request::CreateVolume {
-                name: "cov-ipc-vol".into(),
-            },
-            now,
-        )
-        .await;
-        match created {
-            Response::VolumeCreated { volume } => assert_eq!(volume.name, "cov-ipc-vol"),
-            other => panic!("expected VolumeCreated, got {other:?}"),
-        }
+        let created = as_json(
+            handle_request(
+                &Request::CreateVolume {
+                    name: "cov-ipc-vol".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(created["type"], "VolumeCreated", "got {created}");
+        assert_eq!(created["volume"]["name"], "cov-ipc-vol");
 
-        let listed = handle_request(&Request::ListVolumes, now).await;
-        match listed {
-            Response::VolumeList { volumes } => {
-                assert!(volumes.iter().any(|v| v.name == "cov-ipc-vol"));
-            }
-            other => panic!("expected VolumeList, got {other:?}"),
-        }
+        let listed = as_json(handle_request(&Request::ListVolumes, now).await);
+        assert_eq!(listed["type"], "VolumeList", "got {listed}");
+        let listed_names: Vec<&serde_json::Value> = listed["volumes"]
+            .as_array()
+            .expect("a volume array")
+            .iter()
+            .map(|v| &v["name"])
+            .collect();
+        assert!(
+            listed_names.contains(&&serde_json::json!("cov-ipc-vol")),
+            "got {listed_names:?}"
+        );
 
-        let inspected = handle_request(
-            &Request::InspectVolume {
-                name: "cov-ipc-vol".into(),
-            },
-            now,
-        )
-        .await;
-        match inspected {
-            Response::VolumeInspect { volume } => assert_eq!(volume.in_use_by, None),
-            other => panic!("expected VolumeInspect, got {other:?}"),
-        }
+        let inspected = as_json(
+            handle_request(
+                &Request::InspectVolume {
+                    name: "cov-ipc-vol".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(inspected["type"], "VolumeInspect", "got {inspected}");
+        assert_eq!(inspected["volume"]["in_use_by"], serde_json::Value::Null);
 
         let removed = handle_request(
             &Request::RemoveVolume {
@@ -680,17 +689,14 @@ mod tests {
             now,
         )
         .await;
-        let pruned = handle_request(&Request::PruneVolumes, now).await;
-        match pruned {
-            Response::VolumesPruned {
-                removed,
-                reclaimed_bytes,
-            } => {
-                assert!(removed.contains(&"cov-ipc-prune".to_string()));
-                assert!(reclaimed_bytes > 0);
-            }
-            other => panic!("expected VolumesPruned, got {other:?}"),
-        }
+        let pruned = as_json(handle_request(&Request::PruneVolumes, now).await);
+        assert_eq!(pruned["type"], "VolumesPruned", "got {pruned}");
+        let pruned_names = pruned["removed"].as_array().expect("a removed array");
+        assert!(
+            pruned_names.contains(&serde_json::json!("cov-ipc-prune")),
+            "got {pruned_names:?}"
+        );
+        assert!(pruned["reclaimed_bytes"].as_u64().expect("reclaimed bytes") > 0);
     }
 
     #[tokio::test]
@@ -699,19 +705,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        let resp = handle_request(
-            &Request::InspectVolume {
-                name: "cov-ipc-absent".into(),
-            },
-            Instant::now(),
-        )
-        .await;
-        match resp {
-            Response::Error { message } => {
-                assert!(message.contains("no such volume"), "got: {message}");
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        let resp = as_json(
+            handle_request(
+                &Request::InspectVolume {
+                    name: "cov-ipc-absent".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(message.contains("no such volume"), "got: {message}");
     }
 
     #[tokio::test]
