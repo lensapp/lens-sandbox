@@ -13,7 +13,11 @@ struct RealVsockSyscalls;
 impl VsockSyscalls for RealVsockSyscalls {
     fn socket(&self) -> io::Result<RawFd> {
         // SAFETY: socket(2) only reads its int args; SOCK_CLOEXEC keeps the listener out of the workload.
+        #[cfg(target_os = "linux")]
         let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        // SAFETY: socket(2) only reads its int args; this vsock path never runs on the host build.
+        #[cfg(not(target_os = "linux"))]
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -49,6 +53,7 @@ impl VsockSyscalls for RealVsockSyscalls {
 
     fn accept_once(&self, listen_fd: RawFd) -> io::Result<RawFd> {
         // SAFETY: null addr/addrlen skips peer-address writeback; SOCK_CLOEXEC keeps the conn out of the workload.
+        #[cfg(target_os = "linux")]
         let fd = unsafe {
             libc::accept4(
                 listen_fd,
@@ -57,6 +62,9 @@ impl VsockSyscalls for RealVsockSyscalls {
                 libc::SOCK_CLOEXEC,
             )
         };
+        // SAFETY: null addr/addrlen skips peer-address writeback; this vsock path never runs on the host build.
+        #[cfg(not(target_os = "linux"))]
+        let fd = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
