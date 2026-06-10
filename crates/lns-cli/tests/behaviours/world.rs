@@ -24,6 +24,7 @@ pub struct BehaviourWorld {
     pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
+    pub image: ImageCliRig,
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +41,19 @@ pub struct VolumeCliRig {
     pub volumes: Vec<lns_ipc::VolumeInfo>,
     pub prune_plan: Option<(Vec<String>, u64)>,
     pub prune_failed: Vec<lns_ipc::VolumePruneFailure>,
+    pub refuse_message: Option<String>,
+    pub unreachable: bool,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub prompt_answer: Option<String>,
+}
+
+/// Scripted state for the fake image service plus the user's prompt answer.
+#[derive(Debug, Default)]
+pub struct ImageCliRig {
+    pub images: Vec<lns_ipc::ImageInfo>,
+    pub pull_result: Option<lns_ipc::ImageInfo>,
+    pub remove_result: Option<(String, u64)>,
+    pub prune_plan: Option<(Vec<String>, u64)>,
     pub refuse_message: Option<String>,
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,

@@ -44,6 +44,10 @@ pub enum Command {
     Ls,
     #[command(about = "Manage the named volumes used with `lns run -v` (`docker volume`-style).")]
     Volume(VolumeArgs),
+    #[command(
+        about = "Manage the cached OCI images that `lns run` boots from (`docker image`-style)."
+    )]
+    Image(ImageArgs),
     #[command(about = "Verify the audit chain of a completed run.")]
     Audit(AuditArgs),
     #[command(about = "Manage the Lens Sandbox background service.")]
@@ -130,6 +134,41 @@ pub struct VolumeNameArg {
 
 #[derive(clap::Args)]
 pub struct VolumePruneArgs {
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Skip the confirmation prompt."
+    )]
+    pub force: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ImageArgs {
+    #[command(subcommand)]
+    pub command: ImageCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ImageCommand {
+    #[command(about = "Pull an image into the cache ahead of `lns run`, resolving its digest.")]
+    Pull(ImageRefArg),
+    #[command(about = "List cached images with their digest, size, age, and user.")]
+    Ls,
+    #[command(about = "Remove a cached image; refused while a run uses it.")]
+    Rm(ImageRefArg),
+    #[command(about = "Remove every cached image not used by a running sandbox.")]
+    Prune(ImagePruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ImageRefArg {
+    #[arg(help = "Image reference, e.g. `alpine:3.20` or `alpine@sha256:…`.")]
+    pub image: String,
+}
+
+#[derive(clap::Args)]
+pub struct ImagePruneArgs {
     #[arg(
         short = 'f',
         long,

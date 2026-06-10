@@ -2,6 +2,7 @@ pub mod audit;
 pub mod chord;
 pub mod cli;
 pub mod config;
+pub mod image;
 pub mod integration;
 pub mod log;
 pub mod policy;
@@ -52,6 +53,13 @@ pub async fn run(cli: Cli) -> Result<i32> {
             let stdin = std::io::stdin();
             let mut input = stdin.lock();
             volume::run(&args.command, &svc, &mut input, &mut std::io::stdout()).await?
+        }
+        Command::Image(args) => {
+            service::require_running().await;
+            let svc = image::RealImageService::new(service::socket_path()?);
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            image::run(&args.command, &svc, &mut input, &mut std::io::stdout()).await?
         }
         Command::Audit(args) => audit::run_verify(args)?,
         Command::Service(args) => {
