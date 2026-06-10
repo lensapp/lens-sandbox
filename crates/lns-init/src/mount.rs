@@ -374,6 +374,10 @@ fn do_mount(
     flags: MountFlags,
     data: Option<&str>,
 ) -> Result<(), MountError> {
+    debug_assert!(
+        !flags.bind || !(flags.nosuid || flags.nodev || flags.noexec),
+        "a bind mount ignores nosuid/nodev/noexec in the initial mount() call; apply them with a separate MS_REMOUNT"
+    );
     let source_c = cstring(source, "source")?;
     let target_c = cstring(target, "target")?;
     let fstype_c = cstring(fstype, "fstype")?;
@@ -467,8 +471,6 @@ fn mount_volumes(
             seeded.push(&vol.dev);
         }
         do_mkdir_p(sys, &target, 0o755)?;
-        // Data volumes never need suid bits or device nodes; exec stays on so
-        // a user can run scripts they place on a volume.
         let flags = match vol.read_only {
             true => MountFlags::read_only().nosuid().nodev(),
             false => MountFlags::none().nosuid().nodev(),
@@ -682,9 +684,7 @@ fn mount_composefs_and_exec_broker_inner(
     do_mkdir(sys, &upper_work, 0o755)?;
 
     let opts = overlay_options();
-    // The workload rootfs stays permissive — images legitimately ship suid
-    // binaries and execute their own files; hardening lands on the infra,
-    // pseudo, and data mounts around it, not the rootfs itself.
+    // The workload rootfs stays permissive: images legitimately ship and exec their own suid binaries.
     do_mount(
         sys,
         "overlay",
@@ -1469,8 +1469,7 @@ mod tests {
         // /dev and /dev/pts keep device nodes (no nodev) but forbid suid + exec.
         assert_eq!(flags_for(DEV), MountFlags::none().nosuid().noexec());
         assert_eq!(flags_for(DEV_PTS), MountFlags::none().nosuid().noexec());
-        // The content store and overlay upper carry the workload's executables
-        // through the overlay, so exec stays on; neither needs suid or dev.
+        // Content store and overlay upper serve the workload's executables, so exec stays on.
         assert_eq!(flags_for(CONTENT), MountFlags::none().nosuid().nodev());
         assert_eq!(
             flags_for(UPPER_MOUNTPOINT),
@@ -1481,10 +1480,22 @@ mod tests {
             flags_for(COMPOSEFS_META),
             MountFlags::read_only().nosuid().nodev().noexec()
         );
-        // The workload rootfs stays permissive — images legitimately ship suid
-        // binaries and exec their own files. A regression that hardens it here
-        // would silently break those images, so pin it.
+        // Pin the permissive rootfs: a regression that hardens it would silently break suid-shipping images.
         assert_eq!(flags_for("/newroot"), MountFlags::none());
+    }
+
+    #[test]
+    #[should_panic(expected = "bind mount ignores")]
+    fn do_mount_rejects_security_flags_on_a_bind_mount() {
+        let sys = FakeSyscalls::new();
+        let _ = do_mount(
+            &sys,
+            "/src",
+            "/dst",
+            "none",
+            MountFlags::bind().nosuid(),
+            None,
+        );
     }
 
     #[test]
