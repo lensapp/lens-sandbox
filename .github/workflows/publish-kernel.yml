@@ -14,6 +14,14 @@ name: Publish lns guest kernel
 #   S3_BUCKET             — release-artifacts bucket
 #   S3_ACCESS_KEY_ID      — access key id
 #   S3_SECRET_ACCESS_KEY  — access key secret
+#
+# Required GitHub environment: `kernel-publish`, configured (Settings →
+# Environments) with required reviewers. The privileged back-fill and
+# publish jobs reference it so a human approves before the contents:write
+# token or the CDN-write secrets are released to a run. WARNING: if the
+# environment does not exist, GitHub auto-creates it UNPROTECTED and the
+# gate is a no-op — the back-fill job's base-ref build is the fail-safe
+# that holds regardless (it never runs PR-authored code with the token).
 
 on:
   pull_request:
@@ -152,28 +160,26 @@ jobs:
           fi
           echo "Kata bundle URL valid: $URL"
 
-      - name: Refuse to overwrite existing CDN artifact
+      # Best-effort early warning via the public CDN — no secrets in this
+      # PR-time job (Option C). The publish job's authenticated S3 check is
+      # the authoritative overwrite gate.
+      - name: Warn if the CDN already serves this artifact
         env:
-          AWS_DEFAULT_REGION: us-east-1
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
           PV: ${{ steps.manifest.outputs.published_version }}
         run: |
           set -euo pipefail
-          # If published_version is still "pending"/empty, the publish
-          # job will check again with the concrete value. Skip here.
           if [ -z "$PV" ] || [ "$PV" = "pending" ]; then
-            echo "published_version is pending; skipping overwrite preflight (will check again after extraction)."
+            echo "published_version is pending; skipping overwrite preflight (publish re-checks against S3 with the concrete value)."
             exit 0
           fi
           ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
-          if aws s3 ls "s3://${S3_BUCKET}/${ARTIFACT}" --endpoint-url "$S3_ENDPOINT_URL" >/dev/null 2>&1; then
-            echo "::error::s3://${S3_BUCKET}/${ARTIFACT} already exists in storage."
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -I -L "https://get.lns.run/${ARTIFACT}")
+          if [ "$STATUS" = "200" ]; then
+            echo "::error::https://get.lns.run/${ARTIFACT} already exists."
             echo "::error::Pick a new published_version in kernels.toml, or follow the emergency-overwrite procedure in runbooks/kernel-bump.md."
             exit 1
           fi
+          echo "No existing artifact at https://get.lns.run/${ARTIFACT} (HTTP $STATUS)."
 
       - name: Install zstd
         run: sudo apt-get update && sudo apt-get install -y zstd
@@ -301,37 +307,63 @@ jobs:
     if: github.event_name == 'pull_request' && needs.detect-bump.outputs.is-bump == 'true'
     needs: [detect-bump, compute]
     runs-on: ubuntu-latest
+    # Option A: required-reviewer gate before the contents:write token is
+    # released to this PR-time job. See the header note — an unconfigured
+    # environment is a no-op, so the base-ref build below is the fail-safe.
+    environment: kernel-publish
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # PR head supplies only data (kernels.toml) and is the push target.
+      # Its code is never compiled or executed in this token-bearing job.
+      - name: Checkout PR head (data + push target)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          path: pr
+
+      # Base ref is already-merged, already-reviewed code. The manifest
+      # rewriter is built from here so a malicious PR cannot run code with
+      # the write token in scope (Option C — fail-safe by construction).
+      - name: Checkout base ref (trusted code)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
 
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
-          cache-workspaces: .
+          cache-workspaces: base
           cache-on-failure: true
           cache-shared-key: publish-kernel
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: kernel-compute-*
-          path: .compute-results
+          path: pr/.compute-results
           merge-multiple: true
 
-      - name: Rewrite kernels.toml with computed values
-        run: cargo run --locked --quiet -p bump-kernel -- back-fill --results-dir .compute-results
+      - name: Build bump-kernel from base-ref code
+        working-directory: base
+        run: cargo build --locked --quiet -p bump-kernel
+
+      - name: Rewrite the PR's kernels.toml with computed values
+        run: |
+          base/target/debug/bump-kernel back-fill \
+            --results-dir pr/.compute-results \
+            --manifest pr/crates/lns-service/kernels.toml
 
       - name: Commit back to PR if changed
+        working-directory: pr
         run: |
           set -euo pipefail
           if git diff --quiet crates/lns-service/kernels.toml; then
             echo "::notice::Nothing to back-fill — manifest already matches computed values. This run was a no-op; the earlier red run (if any) was from a different cause."
             exit 0
           fi
-          PV=$(cargo run --locked --quiet -p bump-kernel -- show \
+          PV=$(../base/target/debug/bump-kernel show \
+            --manifest crates/lns-service/kernels.toml \
             | awk -F= '$1 == "published_version" {print $2}')
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
@@ -347,6 +379,9 @@ jobs:
     needs: detect-bump
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.detect-bump.outputs.is-bump == 'true'
     runs-on: ubuntu-latest
+    # Final human approval before the CDN-write secrets are released and
+    # bytes hit get.lns.run. Same `kernel-publish` environment as back-fill.
+    environment: kernel-publish
     strategy:
       fail-fast: false
       matrix:
