@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.9.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.8.0...lns-v0.9.0) (2026-06-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **credentials:** make integrations the only credential-provider mechanism
+
+### Features
+
+* **cli:** add integration catalog management and connect/disconnect ([9baa466](https://github.com/lensapp/lens-sandbox/commit/9baa466d203ea9131a60fea14085f08540ea0998))
+* **cli:** connect oauth integrations through an interactive device sign-in ([c7b970f](https://github.com/lensapp/lens-sandbox/commit/c7b970fc5301b1a014a52bbf219c8232745ea2c3))
+* **policy:** add integration catalog and richer route rules ([3f25fc2](https://github.com/lensapp/lens-sandbox/commit/3f25fc2500dae1478aa3735de50bbaf45f298308))
+* **policy:** add oauth AuthKind schema and bundled github_oauth integration ([02486b8](https://github.com/lensapp/lens-sandbox/commit/02486b82d083a6fbb6c593b55d60c819554765df))
+* **service:** add host-side OAuth device-flow engine and an oauth token entry ([92c7f3c](https://github.com/lensapp/lens-sandbox/commit/92c7f3c2d44e35ff119b6172568dba4e35c48d48))
+* **service:** connect to GitHub via a named consent card and browser sign-in ([bda876f](https://github.com/lensapp/lens-sandbox/commit/bda876f2e79f672ff36a6e4c66c1324c8fa1eca5))
+* **service:** offer a token fallback when oauth connect is blocked ([a5ab665](https://github.com/lensapp/lens-sandbox/commit/a5ab6654ead59b382a234f46552d47c1dd0dcff1))
+
+
+### Bug Fixes
+
+* **cli:** accept connected integration ids in `lns credential set` ([cfa0dae](https://github.com/lensapp/lens-sandbox/commit/cfa0dae10e6a17b064e312fbed49583d6301b76b))
+
+
+### Code Refactoring
+
+* **credentials:** make integrations the only credential-provider mechanism ([bd8d9d0](https://github.com/lensapp/lens-sandbox/commit/bd8d9d0da741454ecae665b930439298411fb5bd))
+
 ## [0.8.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.7.0...lns-v0.8.0) (2026-06-08)
 
 
