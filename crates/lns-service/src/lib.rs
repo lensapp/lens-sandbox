@@ -8,6 +8,7 @@ pub mod content_store;
 pub mod cpio;
 pub mod credential_flow;
 pub mod forward;
+pub mod guest_stats;
 pub mod guest_tools;
 pub mod image;
 pub mod image_store;
