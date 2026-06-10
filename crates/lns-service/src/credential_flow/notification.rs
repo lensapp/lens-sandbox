@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn present_inserts_into_state_with_host_value_flag_set() {
         let (n, state, _rx) = fixture(true, false);
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         let snap = state.snapshot();
         assert_eq!(snap.pending_credentials.len(), 1);
         assert!(snap.pending_credentials[0].host_value_available);
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn present_inserts_into_state_with_host_value_flag_cleared() {
         let (n, state, _rx) = fixture(false, false);
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         let snap = state.snapshot();
         assert_eq!(snap.pending_credentials.len(), 1);
         assert!(!snap.pending_credentials[0].host_value_available);
@@ -179,15 +179,15 @@ mod tests {
     #[test]
     fn present_with_duplicate_id_does_not_grow_state() {
         let (n, state, _rx) = fixture(true, false);
-        n.present(&prompt("c1", "github"));
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
+        n.present(&prompt("c1", "some-provider"));
         assert_eq!(state.snapshot().pending_credentials.len(), 1);
     }
 
     #[test]
     fn dismiss_removes_from_state() {
         let (n, state, _rx) = fixture(true, false);
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         n.dismiss("c1");
         assert_eq!(state.snapshot().pending_credentials.len(), 0);
     }
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn dismiss_unknown_id_is_a_noop() {
         let (n, state, _rx) = fixture(true, false);
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         n.dismiss("never-was");
         assert_eq!(state.snapshot().pending_credentials.len(), 1);
     }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn present_with_ctx_does_not_panic_and_state_updates() {
         let (n, state, _rx) = fixture(true, true);
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         n.dismiss("c1");
         n.inform("hello");
         n.clear_informs();
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn noop_notifier_methods_are_safe_to_call() {
         let n = NoopCredentialNotifier;
-        n.present(&prompt("c1", "github"));
+        n.present(&prompt("c1", "some-provider"));
         n.dismiss("c1");
         n.inform("anything");
         n.clear_informs();
@@ -291,8 +291,8 @@ mod tests {
             Arc::new(Vec::new()),
         );
 
-        let _g = EnvVarGuard::set("GITHUB_TOKEN", "ghp_real");
-        n.present(&prompt("c1", "github"));
+        let _g = EnvVarGuard::set("OPENAI_API_KEY", "sk-real");
+        n.present(&prompt("c1", "openai"));
         let snap = state.snapshot();
         assert!(snap.pending_credentials[0].host_value_available);
     }

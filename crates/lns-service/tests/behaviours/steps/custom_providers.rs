@@ -78,11 +78,11 @@ fn then_env_has_acme(world: &mut BehaviourWorld) -> Result<(), String> {
 }
 
 #[then(
-    regex = r"^the built-in placeholders for github, openai, anthropic, linear, and telegram are still present$"
+    regex = r"^the built-in placeholders for openai, anthropic, linear, and telegram are still present$"
 )]
 fn then_builtins_present(world: &mut BehaviourWorld) -> Result<(), String> {
     let creds = world.launched_seed.as_ref().ok_or("no launched seed")?;
-    for id in ["github", "openai", "anthropic", "linear", "telegram"] {
+    for id in ["openai", "anthropic", "linear", "telegram"] {
         if find(creds, id).is_none() {
             return Err(format!("missing built-in {id}"));
         }

@@ -882,10 +882,10 @@ mod tests {
         use crate::credential_flow::store::CredentialEntry;
         let (store, _dir) = tempfile_credential_store();
         let mut seeded = CredentialStateFile::new();
-        seeded.insert("github".into(), CredentialEntry::HostDetect);
+        seeded.insert("some-provider".into(), CredentialEntry::HostDetect);
         store.save(&seeded).unwrap();
         let state = load_credentials_or_warn(store.as_ref(), Path::new("/tmp/x"));
-        assert!(state.contains_key("github"));
+        assert!(state.contains_key("some-provider"));
     }
 
     #[test]
@@ -972,7 +972,7 @@ mod tests {
 
         let mut state = CredentialStateFile::new();
         state.insert(
-            "github".into(),
+            "some-provider".into(),
             CredentialEntry::Stored {
                 value: "ghp_real".into(),
             },
@@ -1269,8 +1269,8 @@ mod tests {
         session.submit_pending(
             CredentialPending {
                 id: "c1".into(),
-                credential_id: "github".into(),
-                action: "use of github placeholder".into(),
+                credential_id: "some-provider".into(),
+                action: "use of some-provider placeholder".into(),
                 reason: "placeholder-unauthorized".into(),
             },
             std::time::Instant::now(),

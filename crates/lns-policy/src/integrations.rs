@@ -540,7 +540,7 @@ mod tests {
             !ids.is_empty(),
             "the bundled catalog should ship at least one service"
         );
-        for builtin in ["github", "openai", "anthropic", "linear", "telegram"] {
+        for builtin in ["openai", "anthropic", "linear", "telegram"] {
             assert!(
                 !ids.contains(builtin),
                 "bundled catalog must not shadow the compiled-in built-in {builtin}"
@@ -655,18 +655,18 @@ mod tests {
     }
 
     #[test]
-    fn github_oauth_coexists_with_the_static_github_builtin_provider() {
+    fn github_is_served_by_the_oauth_integration_not_a_builtin_provider() {
         assert!(
             bundled_integrations()
                 .iter()
                 .any(|i| i.id == "github_oauth"),
-            "github_oauth must ship as a distinct integration id"
+            "github_oauth must ship as a bundled integration"
         );
         assert!(
-            crate::providers::builtins()
+            !crate::providers::builtins()
                 .iter()
                 .any(|p| p.id == "github"),
-            "the static github credential provider must remain a built-in"
+            "the github credential provider is removed; github is served by the github_oauth integration"
         );
     }
 

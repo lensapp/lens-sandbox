@@ -696,27 +696,27 @@ mod tests {
     #[test]
     fn submit_pending_presents_notification_with_credential_metadata() {
         let (s, n, _store, _rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         let p = n.presented.lock().unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].id, "c1");
-        assert_eq!(p[0].credential_id, "github");
-        assert_eq!(p[0].action, "use of github placeholder");
+        assert_eq!(p[0].credential_id, "some-provider");
+        assert_eq!(p[0].action, "use of some-provider placeholder");
     }
 
     #[test]
     fn duplicate_pending_id_does_not_present_a_second_notification() {
         let (s, n, _store, _rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         assert_eq!(n.presented.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn concurrent_requests_for_one_provider_present_a_single_card() {
         let (s, n, _store, _rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
-        s.submit_pending(pending("c2", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.submit_pending(pending("c2", "some-provider"), Instant::now());
         let presented = n.presented.lock().unwrap();
         assert_eq!(presented.len(), 1, "same provider must raise one card");
         assert_eq!(presented[0].id, "c1");
@@ -725,8 +725,8 @@ mod tests {
     #[test]
     fn decision_on_a_coalesced_card_resolves_every_held_request() {
         let (s, n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
-        s.submit_pending(pending("c2", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.submit_pending(pending("c2", "some-provider"), Instant::now());
 
         let outcome = s.record_decision(
             "c1",
@@ -758,8 +758,8 @@ mod tests {
     fn timeout_on_a_coalesced_card_fails_every_held_request_closed() {
         let (s, _n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(10));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
-        s.submit_pending(pending("c2", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
+        s.submit_pending(pending("c2", "some-provider"), t0);
 
         let swept = s.tick_timeouts(t0 + Duration::from_secs(11));
 
@@ -784,10 +784,10 @@ mod tests {
         let store = Arc::new(CapturingStore::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut state = CredentialStateFile::new();
-        state.insert("github".into(), CredentialEntry::Deny);
+        state.insert("some-provider".into(), CredentialEntry::Deny);
         let s = CredentialSession::new(state, notifier.clone(), store.clone(), tx, TEST_TIMEOUT);
 
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
 
         assert!(
             notifier.presented.lock().unwrap().is_empty(),
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn allow_with_host_detect_persists_host_detect_kind_and_emits_decision_frame() {
         let (s, n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
 
         let outcome = s.record_decision(
             "c1",
@@ -819,9 +819,12 @@ mod tests {
         assert_eq!(frame.decision, CredentialDecisionKind::Allow);
         let saves = store.saves.lock().unwrap();
         assert_eq!(saves.len(), 1);
-        assert_eq!(saves[0].get("github"), Some(&CredentialEntry::HostDetect));
         assert_eq!(
-            s.current_state().get("github"),
+            saves[0].get("some-provider"),
+            Some(&CredentialEntry::HostDetect)
+        );
+        assert_eq!(
+            s.current_state().get("some-provider"),
             Some(&CredentialEntry::HostDetect)
         );
     }
@@ -873,7 +876,7 @@ mod tests {
     #[test]
     fn timeout_request_emits_decision_frame_but_does_not_persist() {
         let (s, n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
 
         s.record_decision("c1", CredentialDecisionRequest::Timeout);
 
@@ -892,7 +895,7 @@ mod tests {
     #[test]
     fn allow_with_failed_persist_keeps_rule_in_memory_and_informs_developer() {
         let (s, n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         store.fail_next(io::ErrorKind::PermissionDenied, "disk full");
 
         s.record_decision(
@@ -901,7 +904,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.current_state().get("github"),
+            s.current_state().get("some-provider"),
             Some(&CredentialEntry::HostDetect)
         );
         let kind = decision_frame(&mut rx).decision;
@@ -923,7 +926,7 @@ mod tests {
     #[test]
     fn record_decision_twice_returns_unknownid_the_second_time() {
         let (s, _n, _store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         assert_eq!(
             s.record_decision("c1", CredentialDecisionRequest::Deny),
             DecisionOutcome::Resolved
@@ -940,7 +943,7 @@ mod tests {
     fn tick_timeouts_before_deadline_sweeps_nothing() {
         let (s, n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(30));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
 
         let expired = s.tick_timeouts(t0 + Duration::from_secs(5));
 
@@ -953,7 +956,7 @@ mod tests {
     fn tick_timeouts_after_deadline_dismisses_and_emits_timeout_decision() {
         let (s, n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(10));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
 
         let expired = s.tick_timeouts(t0 + Duration::from_secs(11));
 
@@ -969,7 +972,7 @@ mod tests {
     fn tick_timeouts_leaves_unexpired_entries_alone() {
         let (s, _n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(10));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
         s.submit_pending(pending("c2", "openai"), t0 + Duration::from_secs(20));
 
         let expired = s.tick_timeouts(t0 + Duration::from_secs(11));
@@ -985,7 +988,7 @@ mod tests {
     fn timeout_one_is_noop_when_a_decision_already_resolved_the_id() {
         // A concurrent record_decision can remove the id in the snapshot-then-sweep window; without the guard the sweep would emit a second decision frame.
         let (s, n, _store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         s.record_decision("c1", CredentialDecisionRequest::Deny);
 
         let acted = s.timeout_one("c1");
@@ -1004,7 +1007,7 @@ mod tests {
     fn tick_timeouts_return_count_reflects_only_actually_swept_entries() {
         let (s, _n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(1));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
         s.submit_pending(pending("c2", "openai"), t0);
 
         s.record_decision("c2", CredentialDecisionRequest::Deny);
@@ -1022,7 +1025,7 @@ mod tests {
     #[test]
     fn timeout_one_emits_timeout_and_dismisses_when_pending_is_present() {
         let (s, n, _store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
 
         let acted = s.timeout_one("c1");
 
@@ -1037,7 +1040,7 @@ mod tests {
     #[test]
     fn withdraw_run_dismisses_all_pending_without_emitting_frames() {
         let (s, n, _store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         s.submit_pending(pending("c2", "openai"), Instant::now());
 
         s.withdraw_run();
@@ -1055,7 +1058,7 @@ mod tests {
     #[test]
     fn record_decision_after_withdraw_returns_unknownid() {
         let (s, _n, _store, _rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         s.withdraw_run();
         assert_eq!(
             s.record_decision("c1", CredentialDecisionRequest::Deny),
@@ -1066,7 +1069,7 @@ mod tests {
     #[test]
     fn withdraw_run_clears_notifier_informs_so_window_does_not_stay_pinned() {
         let (s, n, _store, _rx) = fixture();
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         n.informed
             .lock()
             .unwrap()
@@ -1085,7 +1088,7 @@ mod tests {
     fn apply_external_state_replaces_in_memory_state() {
         let (s, _n, _store, mut rx) = fixture();
         let mut updated = CredentialStateFile::new();
-        updated.insert("github".into(), CredentialEntry::Deny);
+        updated.insert("some-provider".into(), CredentialEntry::Deny);
 
         s.apply_external_state(updated.clone());
 
@@ -1098,7 +1101,7 @@ mod tests {
     fn record_decision_after_timeout_returns_unknownid() {
         let (s, _n, _store, mut rx) = fixture_with_timeout(Duration::from_secs(1));
         let t0 = Instant::now();
-        s.submit_pending(pending("c1", "github"), t0);
+        s.submit_pending(pending("c1", "some-provider"), t0);
         s.tick_timeouts(t0 + Duration::from_secs(2));
         let _ = rx.try_recv();
 
@@ -1146,7 +1149,7 @@ mod tests {
                 captured_clone.snapshots.lock().unwrap().push(state.clone());
             }),
         );
-        session.submit_pending(pending("c1", "github"), Instant::now());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision(
             "c1",
             CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
@@ -1154,7 +1157,10 @@ mod tests {
 
         let snaps = captured.snapshots.lock().unwrap();
         assert_eq!(snaps.len(), 1);
-        assert_eq!(snaps[0].get("github"), Some(&CredentialEntry::HostDetect));
+        assert_eq!(
+            snaps[0].get("some-provider"),
+            Some(&CredentialEntry::HostDetect)
+        );
     }
 
     #[test]
@@ -1174,7 +1180,7 @@ mod tests {
                 let _ = tx_for_emitter.send(HostFrame::Policy(PolicyMessage::default()));
             }),
         );
-        session.submit_pending(pending("c1", "github"), Instant::now());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision(
             "c1",
             CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
@@ -1210,7 +1216,7 @@ mod tests {
                 captured_clone.snapshots.lock().unwrap().push(state.clone());
             }),
         );
-        session.submit_pending(pending("c1", "github"), Instant::now());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision("c1", CredentialDecisionRequest::Deny);
 
         let snaps = captured.snapshots.lock().unwrap();
@@ -1414,7 +1420,7 @@ mod tests {
     #[test]
     fn allow_for_a_non_connectable_id_does_not_connect() {
         let (s, _n, _store, _rx, connected) = fixture_connectable(&[]);
-        s.submit_pending(pending("c1", "github"), Instant::now());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
         s.record_decision(
             "c1",
             CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
@@ -1987,15 +1993,15 @@ mod tests {
     fn submit_pending_auto_allows_an_armed_builtin_stored_credential_on_its_host() {
         let (s, n, mut rx) = armed_session(
             vec![(
-                "github",
+                "openai",
                 CredentialEntry::Stored {
-                    value: "ghp_real".into(),
+                    value: "sk-real".into(),
                 },
             )],
             vec![],
         );
         s.submit_pending(
-            gate("github", "POST https://api.github.com/issues"),
+            gate("openai", "POST https://api.openai.com/issues"),
             Instant::now(),
         );
         assert!(n.presented.lock().unwrap().is_empty());

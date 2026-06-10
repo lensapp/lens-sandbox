@@ -55,9 +55,9 @@ mod tests {
 
     #[test]
     fn by_id_returns_a_provider_whose_id_matches_the_query() {
-        let p = by_id("github").expect("github present");
-        assert_eq!(p.id(), "github");
-        assert_eq!(p.env_var(), "GITHUB_TOKEN");
+        let p = by_id("openai").expect("openai present");
+        assert_eq!(p.id(), "openai");
+        assert_eq!(p.env_var(), "OPENAI_API_KEY");
     }
 
     fn policy_with(custom: Vec<ProviderDef>) -> lns_policy::Policy {
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn build_policy_providers_drops_an_id_that_collides_with_a_builtin() {
         let mut shadow = acme();
-        shadow.id = "github".into();
+        shadow.id = "openai".into();
         let providers = build_policy_providers(&policy_with(vec![shadow, acme()]));
         let ids: Vec<&str> = providers.iter().map(|p| p.id()).collect();
         assert_eq!(ids, ["acme"], "a built-in id must never be shadowed");
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn is_managed_env_recognises_a_shipped_credential_var() {
-        assert!(is_managed_env("GITHUB_TOKEN"));
+        assert!(is_managed_env("OPENAI_API_KEY"));
     }
 
     #[test]

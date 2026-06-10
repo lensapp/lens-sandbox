@@ -1,16 +1,6 @@
 # `id` and `envVar` are persisted rule keys; renaming a shipped one strands existing developer rules, so treat such edits as breaking changes.
 
 [[provider]]
-id = "github"
-envVar = "GITHUB_TOKEN"
-placeholder = "ghp_LNSPLACEHOLDER0000000000000000000000"
-# `gh` and the REST API hit api.github.com with `token <PAT>`; `git clone` over HTTPS hits github.com with Basic auth over `x-access-token:<PAT>`.
-injections = [
-    { kind = "token_header", domain = "api.github.com" },
-    { kind = "basic_x_access_token", domain = "github.com" },
-]
-
-[[provider]]
 id = "openai"
 envVar = "OPENAI_API_KEY"
 placeholder = "sk-LNSPLACEHOLDER0000000000000000000000000000000000"

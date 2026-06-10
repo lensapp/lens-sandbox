@@ -178,8 +178,12 @@ mod tests {
     #[test]
     fn skips_an_applied_id_that_collides_with_a_builtin() {
         // A catalog entry mis-id'd as a built-in must never be resolved — the built-in owns it.
-        let catalog = vec![cred_integration("github", "GITHUB_TOKEN", "api.github.com")];
-        let out = resolve_applied_integrations(&policy_applying(&["github"]), &catalog);
+        let catalog = vec![cred_integration(
+            "openai",
+            "OPENAI_API_KEY",
+            "api.openai.com",
+        )];
+        let out = resolve_applied_integrations(&policy_applying(&["openai"]), &catalog);
         assert!(out.providers.is_empty(), "built-in id must be skipped");
         assert!(out.routes.is_empty());
     }
@@ -290,7 +294,7 @@ mod tests {
     #[test]
     fn connectable_excludes_builtin_and_custom_provider_ids() {
         let catalog = vec![
-            cred_integration("github", "GITHUB_TOKEN", "api.github.com"),
+            cred_integration("openai", "OPENAI_API_KEY", "api.openai.com"),
             cred_integration("acme", "ACME_API_KEY", "api.acme.corp"),
         ];
         let mut policy = policy_applying(&[]);

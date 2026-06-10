@@ -429,14 +429,14 @@ fn existing_declaration_unchanged(world: &mut BehaviourWorld, id: String) -> Res
     }
 }
 
-#[then(regex = r"^the output shows the five built-in providers labelled as built-in$")]
+#[then(regex = r"^the output shows the four built-in providers labelled as built-in$")]
 fn output_shows_builtins(world: &mut BehaviourWorld) -> Result<(), String> {
     let out = world
         .result
         .as_ref()
         .map(|r| r.output.clone())
         .unwrap_or_default();
-    for id in ["github", "openai", "anthropic", "linear", "telegram"] {
+    for id in ["openai", "anthropic", "linear", "telegram"] {
         if !out.contains(&format!("{id}  (built-in)")) {
             return Err(format!("missing built-in {id} in:\n{out}"));
         }
