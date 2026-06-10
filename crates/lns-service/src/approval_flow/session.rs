@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::approval_flow::protocol::{
     Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending,
 };
+use lns_policy::integrations::TokenFallback;
 use lns_policy::{Policy, PolicyStore, RouteRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -20,11 +21,17 @@ pub struct OfferableIntegration {
     pub id: String,
     pub display_name: String,
     pub patterns: Vec<String>,
+    pub token_fallback: Option<TokenFallback>,
 }
 
-/// Connects an integration interactively (oauth sign-in or a straight credential connect) and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery.
+/// Connects an integration interactively and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery. `connect_with_token` arms a pasted token instead of running the interactive sign-in.
 pub trait IntegrationConnector: Send + Sync {
     fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
+    fn connect_with_token<'a>(
+        &'a self,
+        id: &'a str,
+        value: String,
+    ) -> futures_util::future::BoxFuture<'a, bool>;
 }
 
 pub trait Notifier: Send + Sync {
@@ -41,6 +48,8 @@ pub struct PendingPrompt {
     pub action: String,
     /// Some(display name) when `host` matches a connectable integration, so the card offers to connect it before the plain allow/deny.
     pub offer: Option<String>,
+    /// Some when the offered integration declares a token fallback, so the offer card can also reveal "use a token instead".
+    pub token_fallback: Option<TokenFallback>,
 }
 
 #[derive(Debug)]
@@ -113,18 +122,23 @@ impl ApprovalSession {
             .find(|i| i.patterns.iter().any(|p| host_matches_pattern(p, host)))
     }
 
-    /// The (id, display name) to offer for `host`, or `None` when nothing matches or the integration is already connected this run.
-    fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String)> {
+    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the integration is already connected this run.
+    fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String, Option<TokenFallback>)> {
         let integ = self.offer_for_host(host)?;
-        let (id, name) = (integ.id.clone(), integ.display_name.clone());
         let already_connected = self
             .policy
             .lock()
             .expect("policy mutex poisoned")
             .integrations
             .iter()
-            .any(|i| i == &id);
-        (!already_connected).then_some((id, name))
+            .any(|i| i == &integ.id);
+        (!already_connected).then(|| {
+            (
+                integ.id.clone(),
+                integ.display_name.clone(),
+                integ.token_fallback.clone(),
+            )
+        })
     }
 
     fn is_connecting(&self, id: &str) -> bool {
@@ -144,7 +158,7 @@ impl ApprovalSession {
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
         let matched = self.offer_id_and_name_for(&req.host);
-        let offer_integration_id = matched.as_ref().map(|(id, _)| id.clone());
+        let offer_integration_id = matched.as_ref().map(|(id, ..)| id.clone());
         // While a connect for this integration is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
         let coalesced = offer_integration_id
             .as_deref()
@@ -165,11 +179,16 @@ impl ApprovalSession {
         if coalesced {
             return;
         }
+        let (offer, token_fallback) = match matched {
+            Some((_, name, fallback)) => (Some(name), fallback),
+            None => (None, None),
+        };
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
             action: req.action,
-            offer: matched.map(|(_, name)| name),
+            offer,
+            token_fallback,
         });
     }
 
@@ -193,8 +212,18 @@ impl ApprovalSession {
             .map(|entry| entry.host)
     }
 
-    /// Accepts a held request's integration offer: drives one connect and releases **every** held request for that integration — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same integration coalesces onto the in-flight connect instead of starting another sign-in.
+    /// Accepts a held request's integration offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
     pub async fn connect_offer(&self, id: &str) -> DecisionOutcome {
+        self.connect_offer_with(id, None).await
+    }
+
+    /// Accepts a held request's integration offer by arming a pasted token instead of the interactive connect. See [`Self::connect_offer_with`].
+    pub async fn connect_offer_with_token(&self, id: &str, value: String) -> DecisionOutcome {
+        self.connect_offer_with(id, Some(value)).await
+    }
+
+    /// Drives one connect for the offered integration and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same integration coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
+    async fn connect_offer_with(&self, id: &str, token: Option<String>) -> DecisionOutcome {
         let Some(integration_id) = self.offer_integration_of(id) else {
             return DecisionOutcome::UnknownId;
         };
@@ -208,7 +237,10 @@ impl ApprovalSession {
             self.notifier.dismiss(&request_id);
         }
         let connected = match self.connector.get() {
-            Some(connector) => connector.connect(&integration_id).await,
+            Some(connector) => match token {
+                Some(value) => connector.connect_with_token(&integration_id, value).await,
+                None => connector.connect(&integration_id).await,
+            },
             None => false,
         };
         self.finish_connecting(&integration_id);
@@ -968,12 +1000,36 @@ pub(crate) mod tests {
     struct FakeConnector {
         result: bool,
         connected: StdMutex<Vec<String>>,
+        connected_with_token: StdMutex<Vec<(String, String)>>,
+    }
+
+    impl FakeConnector {
+        fn new(result: bool) -> Self {
+            Self {
+                result,
+                connected: StdMutex::new(Vec::new()),
+                connected_with_token: StdMutex::new(Vec::new()),
+            }
+        }
     }
 
     impl IntegrationConnector for FakeConnector {
         fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
             Box::pin(async move {
                 self.connected.lock().unwrap().push(id.to_string());
+                self.result
+            })
+        }
+        fn connect_with_token<'a>(
+            &'a self,
+            id: &'a str,
+            value: String,
+        ) -> futures_util::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.connected_with_token
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), value));
                 self.result
             })
         }
@@ -984,6 +1040,16 @@ pub(crate) mod tests {
             id: id.into(),
             display_name: name.into(),
             patterns: vec![pattern.into()],
+            token_fallback: None,
+        }
+    }
+
+    fn offerable_with_fallback(id: &str, name: &str, pattern: &str) -> OfferableIntegration {
+        OfferableIntegration {
+            token_fallback: Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            ..offerable(id, name, pattern)
         }
     }
 
@@ -1031,12 +1097,83 @@ pub(crate) mod tests {
         assert_eq!(n.presented.lock().unwrap()[0].offer, None);
     }
 
+    #[test]
+    fn submit_pending_surfaces_the_offered_integrations_token_fallback() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable_with_fallback(
+                "github_oauth",
+                "GitHub",
+                "api.github.com",
+            )],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        let presented = n.presented.lock().unwrap();
+        assert_eq!(presented[0].offer.as_deref(), Some("GitHub"));
+        assert_eq!(
+            presented[0].token_fallback,
+            Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "an offer for an integration that declares a token fallback carries it to the card"
+        );
+    }
+
+    #[test]
+    fn submit_pending_carries_no_token_fallback_for_an_offer_that_declares_none() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("github_oauth", "GitHub", "api.github.com")],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+        assert_eq!(n.presented.lock().unwrap()[0].token_fallback, None);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_with_token_arms_via_the_token_and_releases_the_held_request_allow_once()
+    {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, n, mut rx) = offer_session(
+            vec![offerable_with_fallback(
+                "github_oauth",
+                "GitHub",
+                "api.github.com",
+            )],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.github.com"), Instant::now());
+
+        let outcome = s.connect_offer_with_token("r1", "ghp_pasted".into()).await;
+
+        assert_eq!(outcome, DecisionOutcome::Resolved);
+        assert_eq!(
+            connector.connected_with_token.lock().unwrap().as_slice(),
+            &[("github_oauth".to_string(), "ghp_pasted".to_string())],
+            "the pasted token drives the token connect, not the interactive one"
+        );
+        assert!(
+            connector.connected.lock().unwrap().is_empty(),
+            "the interactive connect must not run when a token is pasted"
+        );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn connect_offer_with_token_for_a_non_offer_id_is_unknownid() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(vec![], Some(connector.clone()));
+        s.submit_pending(pending("r1", "example.com"), Instant::now());
+        assert_eq!(
+            s.connect_offer_with_token("r1", "ghp_pasted".into()).await,
+            DecisionOutcome::UnknownId
+        );
+        assert!(connector.connected_with_token.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn connect_offer_success_releases_the_held_request_with_allow_once() {
-        let connector = Arc::new(FakeConnector {
-            result: true,
-            connected: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
             vec![offerable("github_oauth", "GitHub", "api.github.com")],
             Some(connector.clone()),
@@ -1057,10 +1194,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn connect_offer_failure_releases_the_held_request_deny_once_closed() {
-        let connector = Arc::new(FakeConnector {
-            result: false,
-            connected: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(FakeConnector::new(false));
         let (s, _n, mut rx) = offer_session(
             vec![offerable("github_oauth", "GitHub", "api.github.com")],
             Some(connector),
@@ -1091,10 +1225,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn connect_offer_for_an_id_that_carries_no_offer_is_unknownid() {
-        let connector = Arc::new(FakeConnector {
-            result: true,
-            connected: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(FakeConnector::new(true));
         let (s, _n, mut rx) = offer_session(vec![], Some(connector.clone()));
         s.submit_pending(pending("r1", "example.com"), Instant::now());
 
@@ -1120,10 +1251,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn connect_offer_releases_every_held_request_for_the_integration() {
-        let connector = Arc::new(FakeConnector {
-            result: true,
-            connected: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
             vec![offerable("github_oauth", "GitHub", "api.github.com")],
             Some(connector.clone()),
@@ -1174,10 +1302,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn connect_offer_for_a_sibling_while_connecting_does_not_start_a_second_connect() {
-        let connector = Arc::new(FakeConnector {
-            result: true,
-            connected: StdMutex::new(Vec::new()),
-        });
+        let connector = Arc::new(FakeConnector::new(true));
         let (s, _n, mut rx) = offer_session(
             vec![offerable("github_oauth", "GitHub", "api.github.com")],
             Some(connector.clone()),

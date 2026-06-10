@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
 use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
+use crate::oauth::SignInPivot;
+use lns_policy::integrations::TokenFallback;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
@@ -13,11 +15,12 @@ pub struct DecisionDelivery {
     pub action: RequestAction,
 }
 
-/// What the user chose on a network card: one of the wire decisions, or accepting the integration offer (a host-only action that drives a connect rather than a per-request verdict).
+/// What the user chose on a network card: one of the wire decisions, accepting the integration offer via its interactive connect, or connecting it with a pasted token. The latter two are host-only actions that drive a connect rather than a per-request verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
     ConnectIntegration,
+    UseToken { value: String },
 }
 
 /// Carries the full [`CredentialDecisionRequest`] rather than a bare enum so the typed credential value threads through to `record_decision`.
@@ -35,15 +38,17 @@ pub struct CredentialCardPrompt {
     pub action: String,
     pub host_value_available: bool,
     pub oauth_display_name: Option<String>,
+    pub token_fallback: Option<TokenFallback>,
 }
 
-/// The device-flow verification card: which service, the code to type, and where to type it.
+/// The device-flow verification card: which service, the code to type, and where to type it. `token_fallback` is `Some` when the integration lets a blocked user pivot to a pasted token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignInCard {
     pub credential_id: String,
     pub display_name: String,
     pub user_code: String,
     pub verification_uri: String,
+    pub token_fallback: Option<TokenFallback>,
 }
 
 pub struct WindowState {
@@ -70,7 +75,7 @@ struct CredentialPendingEntry {
 
 struct SignInEntry {
     card: SignInCard,
-    cancel: tokio::sync::oneshot::Sender<()>,
+    cancel: tokio::sync::oneshot::Sender<SignInPivot>,
 }
 
 impl WindowState {
@@ -120,6 +125,7 @@ impl WindowState {
                 action: prompt.action,
                 host_value_available,
                 oauth_display_name: prompt.oauth_display_name,
+                token_fallback: prompt.token_fallback,
             },
             decision_tx,
         });
@@ -131,8 +137,12 @@ impl WindowState {
             .retain(|e| e.prompt.id != id);
     }
 
-    /// Coalesces by `credential_id`; the `cancel` sender aborts the in-flight device-flow poll when the card's Cancel is clicked.
-    pub fn insert_sign_in(&self, card: SignInCard, cancel: tokio::sync::oneshot::Sender<()>) {
+    /// Coalesces by `credential_id`; the `cancel` sender aborts the in-flight device-flow poll (or pivots it to a pasted token) when the card resolves.
+    pub fn insert_sign_in(
+        &self,
+        card: SignInCard,
+        cancel: tokio::sync::oneshot::Sender<SignInPivot>,
+    ) {
         let mut g = self.lock();
         if g.pending_sign_ins
             .iter()
@@ -149,8 +159,18 @@ impl WindowState {
             .retain(|e| e.card.credential_id != credential_id);
     }
 
-    /// Drops the card and fires its cancel so the device-flow poll aborts; returns whether a card was present.
+    /// Drops the card and aborts the in-flight device-flow poll; returns whether a card was present.
     pub fn cancel_sign_in(&self, credential_id: &str) -> bool {
+        self.resolve_sign_in(credential_id, SignInPivot::Cancel)
+    }
+
+    /// Drops the card and pivots the in-flight device flow to the pasted token, so the held request is released without restarting the connect.
+    pub fn pivot_sign_in(&self, credential_id: &str, value: String) -> bool {
+        self.resolve_sign_in(credential_id, SignInPivot::UseToken(value))
+    }
+
+    /// Drops the sign-in card and fires its cancel channel with `pivot`; returns whether a card was present.
+    fn resolve_sign_in(&self, credential_id: &str, pivot: SignInPivot) -> bool {
         let mut g = self.lock();
         let Some(idx) = g
             .pending_sign_ins
@@ -160,7 +180,7 @@ impl WindowState {
             return false;
         };
         let entry = g.pending_sign_ins.remove(idx);
-        let _ = entry.cancel.send(());
+        let _ = entry.cancel.send(pivot);
         true
     }
 
@@ -203,8 +223,18 @@ impl WindowState {
         self.deliver(id, RequestAction::Decide(decision))
     }
 
-    /// Accepts the integration offer: routes one connect for the clicked request and immediately drops every other offer card for the same integration, so no sibling card flashes up before the in-flight connect releases them all.
+    /// Accepts the integration offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
     pub fn connect_offer(&self, id: &str) -> bool {
+        self.route_offer(id, RequestAction::ConnectIntegration)
+    }
+
+    /// Accepts the integration offer by connecting it with a pasted token. See [`Self::route_offer`].
+    pub fn use_offer_token(&self, id: &str, value: String) -> bool {
+        self.route_offer(id, RequestAction::UseToken { value })
+    }
+
+    /// Routes one connect action for the clicked request and immediately drops every other offer card for the same integration, so no sibling card flashes up before the in-flight connect releases them all.
+    fn route_offer(&self, id: &str, action: RequestAction) -> bool {
         let mut g = self.lock();
         let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
             return false;
@@ -213,7 +243,7 @@ impl WindowState {
         let entry = g.pending.remove(idx);
         let _ = entry.decision_tx.send(DecisionDelivery {
             id: id.to_string(),
-            action: RequestAction::ConnectIntegration,
+            action,
         });
         if let Some(name) = offer {
             g.pending
@@ -366,6 +396,7 @@ mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             offer: None,
+            token_fallback: None,
         }
     }
 
@@ -375,6 +406,7 @@ mod tests {
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
+            token_fallback: None,
         }
     }
 
@@ -502,6 +534,7 @@ mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             offer: Some(name.into()),
+            token_fallback: None,
         }
     }
 
@@ -559,6 +592,38 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
         assert!(!s.connect_offer("nope"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn use_offer_token_routes_a_use_token_action_and_drops_sibling_offer_cards() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx.clone());
+        s.insert_pending(offer_prompt("r2", "api.github.com", "GitHub"), tx);
+        assert!(s.use_offer_token("r1", "ghp_pasted".into()));
+        assert_eq!(
+            s.pending_count(),
+            0,
+            "the clicked card and its siblings vanish so none flashes up before the connect releases them"
+        );
+        let got = rx.try_recv().expect("delivery");
+        assert_eq!(got.id, "r1");
+        assert_eq!(
+            got.action,
+            RequestAction::UseToken {
+                value: "ghp_pasted".into()
+            }
+        );
+        assert!(rx.try_recv().is_err(), "only one connect is routed");
+    }
+
+    #[test]
+    fn use_offer_token_returns_false_for_unknown_id() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(offer_prompt("r1", "api.github.com", "GitHub"), tx);
+        assert!(!s.use_offer_token("nope", "ghp_pasted".into()));
         assert!(rx.try_recv().is_err());
     }
 
@@ -643,6 +708,24 @@ mod tests {
         let snap = s.snapshot();
         assert!(snap.pending_credentials[0].host_value_available);
         assert!(!snap.pending_credentials[1].host_value_available);
+    }
+
+    #[test]
+    fn insert_credential_pending_carries_the_token_fallback() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        let mut prompt = cred_prompt("c1", "github_oauth");
+        prompt.token_fallback = Some(TokenFallback {
+            help: Some("https://example.com/pat".into()),
+        });
+        s.insert_credential_pending(prompt, false, tx);
+        assert_eq!(
+            s.snapshot().pending_credentials[0].token_fallback,
+            Some(TokenFallback {
+                help: Some("https://example.com/pat".into()),
+            }),
+            "the card carries the prompt's token fallback so the consent card can offer the pivot"
+        );
     }
 
     #[test]
@@ -737,6 +820,7 @@ mod tests {
             display_name: "GitHub".into(),
             user_code: "WXYZ-1234".into(),
             verification_uri: "https://github.com/login/device".into(),
+            token_fallback: None,
         }
     }
 
@@ -781,13 +865,33 @@ mod tests {
         s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
         assert!(s.cancel_sign_in("github_oauth"));
         assert!(s.snapshot().sign_ins.is_empty());
-        assert_eq!(cancel_rx.try_recv(), Ok(()));
+        assert_eq!(cancel_rx.try_recv(), Ok(SignInPivot::Cancel));
     }
 
     #[test]
     fn cancel_sign_in_for_unknown_id_is_false() {
         let s = WindowState::new();
         assert!(!s.cancel_sign_in("nope"));
+    }
+
+    #[test]
+    fn pivot_sign_in_drops_the_card_and_fires_the_pasted_token() {
+        let s = WindowState::new();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        s.insert_sign_in(sign_in_card("github_oauth"), cancel_tx);
+        assert!(s.pivot_sign_in("github_oauth", "ghp_pasted".into()));
+        assert!(s.snapshot().sign_ins.is_empty());
+        assert_eq!(
+            cancel_rx.try_recv(),
+            Ok(SignInPivot::UseToken("ghp_pasted".into())),
+            "the in-flight device flow receives the pasted token, not a cancel"
+        );
+    }
+
+    #[test]
+    fn pivot_sign_in_for_unknown_id_is_false() {
+        let s = WindowState::new();
+        assert!(!s.pivot_sign_in("nope", "ghp_x".into()));
     }
 
     #[test]

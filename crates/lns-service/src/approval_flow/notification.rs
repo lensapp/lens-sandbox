@@ -74,6 +74,7 @@ pub(crate) mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             offer: None,
+            token_fallback: None,
         }
     }
 

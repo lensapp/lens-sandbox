@@ -144,6 +144,7 @@ mod tests {
                 }],
             }),
             oauth: None,
+            token_fallback: None,
         }
     }
 
@@ -226,6 +227,7 @@ mod tests {
                     header: None,
                 }],
             }),
+            token_fallback: None,
         }
     }
 

@@ -147,6 +147,7 @@ mod tests {
             credential_id: "github".into(),
             action: "use".into(),
             oauth_display_name: None,
+            token_fallback: None,
         });
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(
@@ -155,6 +156,7 @@ mod tests {
                 display_name: "GitHub".into(),
                 user_code: "WXYZ-1234".into(),
                 verification_uri: "https://example.com/device".into(),
+                token_fallback: None,
             },
             cancel_tx,
         );
