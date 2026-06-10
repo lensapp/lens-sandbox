@@ -34,6 +34,9 @@ pub struct BehaviourWorld {
     pub forward_error: Option<String>,
 
     pub volume: Option<VolumeRig>,
+
+    /// Run id registered by a lifecycle scenario (stop / inspect / logs).
+    pub lifecycle_run: Option<u32>,
 }
 
 impl BehaviourWorld {

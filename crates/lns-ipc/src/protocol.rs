@@ -17,6 +17,7 @@ pub enum Request {
     ExecImage(ExecImageArgs),
     Kill { run_id: u32, signal: SignalKind },
     ListRuns,
+    StopRun { run_id: u32, timeout_secs: u64 },
     BeginIntegrationSignIn { id: String },
 }
 
@@ -55,6 +56,9 @@ pub enum Response {
     Acknowledged,
     RunList {
         runs: Vec<RunSummary>,
+    },
+    RunStopped {
+        forced: bool,
     },
     OauthVerification {
         verification_uri: String,
@@ -352,6 +356,27 @@ mod tests {
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, args);
+    }
+
+    #[test]
+    fn stop_run_survives_a_request_round_trip() {
+        let req = Request::StopRun {
+            run_id: 7,
+            timeout_secs: 10,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_stopped_survives_a_response_round_trip() {
+        for forced in [false, true] {
+            let resp = Response::RunStopped { forced };
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     #[test]
