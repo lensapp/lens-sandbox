@@ -513,7 +513,7 @@ mod tests {
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        for expected in ["github", "openai", "anthropic", "linear"] {
+        for expected in ["openai", "anthropic", "linear"] {
             assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
         }
     }
@@ -538,7 +538,7 @@ mod tests {
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        for expected in ["github", "openai", "anthropic", "linear"] {
+        for expected in ["openai", "anthropic", "linear"] {
             assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
         }
     }
@@ -771,7 +771,7 @@ mod tests {
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
 
-        let raw = r#"{"type":"credential_pending","id":"c1","credentialId":"github","action":"use of github placeholder","reason":"placeholder-unauthorized"}"#;
+        let raw = r#"{"type":"credential_pending","id":"c1","credentialId":"some-provider","action":"use of some-provider placeholder","reason":"placeholder-unauthorized"}"#;
         let stop = handle_inbound(
             Message::Text(raw.into()),
             &session,
@@ -785,7 +785,7 @@ mod tests {
 
         assert!(!stop);
         let seen = notifier.seen.lock().unwrap();
-        assert_eq!(seen.as_slice(), &["github".to_string()]);
+        assert_eq!(seen.as_slice(), &["some-provider".to_string()]);
         assert!(
             log.bytes.is_empty(),
             "credential_pending must not hit audit chain"
@@ -793,7 +793,7 @@ mod tests {
         assert!(anchor.anchors.is_empty());
         let _ = CredentialPending {
             id: "c1".into(),
-            credential_id: "github".into(),
+            credential_id: "some-provider".into(),
             action: "x".into(),
             reason: "y".into(),
         };

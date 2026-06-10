@@ -1,7 +1,7 @@
 use cucumber::{given, then, when};
 use std::time::Instant;
 
-use crate::credential_rig::CredentialRig;
+use crate::credential_rig::{CredentialRig, FIXTURE_ID};
 use crate::world::BehaviourWorld;
 use lns_service::approval_flow::protocol::{
     CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame, PolicyMessage,
@@ -62,26 +62,6 @@ fn submit_credential_with_id(rig: &mut CredentialRig, id: &str, credential_id: &
         reason: "placeholder-unauthorized".into(),
     };
     rig.session.submit_pending(pending, Instant::now());
-}
-
-#[given(regex = r#"^the built-in registry includes "([^"]+)", "([^"]+)", and "([^"]+)"$"#)]
-fn given_registry_has_three(_w: &mut BehaviourWorld, a: String, b: String, c: String) {
-    for id in [&a, &b, &c] {
-        assert!(
-            providers::ALL.iter().any(|p| p.id() == id),
-            "expected built-in registry to include {id}"
-        );
-    }
-}
-
-#[given(regex = r#"^the built-in registry includes "([^"]+)" and "([^"]+)"$"#)]
-fn given_registry_has_two(_w: &mut BehaviourWorld, a: String, b: String) {
-    for id in [&a, &b] {
-        assert!(
-            providers::ALL.iter().any(|p| p.id() == id),
-            "expected built-in registry to include {id}"
-        );
-    }
 }
 
 #[given(regex = r#"^a workload is running with the seeded "([^"]+)" placeholder$"#)]
@@ -187,11 +167,11 @@ fn given_workload_with_stored_rule(world: &mut BehaviourWorld, credential_id: St
 }
 
 #[given(
-    regex = r#"^a workload sends a request carrying the GitHub placeholder with no credential rule for "github"$"#
+    regex = r#"^a workload sends a request carrying the some-provider placeholder with no credential rule for "some-provider"$"#
 )]
 fn given_workload_sends_with_no_rule(world: &mut BehaviourWorld) {
     let rig = world.credential();
-    submit_credential_with_id(rig, "cred-coalesce-1", "github");
+    submit_credential_with_id(rig, "cred-coalesce-1", FIXTURE_ID);
 }
 
 #[given(regex = r#"^a workload has an open credential card for "([^"]+)"$"#)]
@@ -225,32 +205,18 @@ fn when_workload_launched(world: &mut BehaviourWorld) {
     rig.session.apply_external_state(state);
 }
 
-#[when("a workload reads the seeded GITHUB_TOKEN and OPENAI_API_KEY")]
-fn when_workload_reads_seeded(world: &mut BehaviourWorld) {
-    let rig = world.credential();
-    let state = rig.session.current_state();
-    rig.session.apply_external_state(state);
-}
-
-#[when(
-    regex = r#"^the workload sends a request carrying the (GitHub|OpenAI|Anthropic|Linear) placeholder$"#
-)]
-fn when_workload_sends_placeholder(world: &mut BehaviourWorld, provider_name: String) {
-    let credential_id = provider_id_for_name(&provider_name);
+#[when(regex = r#"^the workload sends a request carrying the some-provider placeholder$"#)]
+fn when_workload_sends_placeholder(world: &mut BehaviourWorld) {
     let rig = world.credential();
     rig.session
-        .submit_pending(make_credential_pending(credential_id), Instant::now());
+        .submit_pending(make_credential_pending(FIXTURE_ID), Instant::now());
 }
 
 #[when(
-    regex = r#"^the workload sends a request to "([^"]+)" carrying the (GitHub|OpenAI|Anthropic|Linear) placeholder$"#
+    regex = r#"^the workload sends a request to "([^"]+)" carrying the some-provider placeholder$"#
 )]
-fn when_workload_sends_to_host_with_placeholder(
-    world: &mut BehaviourWorld,
-    host: String,
-    provider_name: String,
-) {
-    let credential_id = provider_id_for_name(&provider_name);
+fn when_workload_sends_to_host_with_placeholder(world: &mut BehaviourWorld, host: String) {
+    let credential_id = FIXTURE_ID;
     // S8 drives both flows: a network pending on the approval rig and a credential pending on the credential rig.
     {
         let approval_rig = world.approval();
@@ -311,12 +277,12 @@ fn when_developer_deletes_entry(world: &mut BehaviourWorld, credential_id: Strin
 }
 
 #[when(
-    regex = r#"^the workload sends a second request carrying the GitHub placeholder before the developer decides$"#
+    regex = r#"^the workload sends a second request carrying the some-provider placeholder before the developer decides$"#
 )]
 fn when_workload_sends_second_placeholder(world: &mut BehaviourWorld) {
     let rig = world.credential();
     // Distinct id, same provider → exercises credential_id coalescing, not bare id dedup (S11).
-    submit_credential_with_id(rig, "cred-coalesce-2", "github");
+    submit_credential_with_id(rig, "cred-coalesce-2", FIXTURE_ID);
 }
 
 // The timeout and early-exit steps are shared across both flows; see steps/approval_flow.rs for the dispatch.
@@ -379,40 +345,27 @@ fn then_no_card_at_boot(world: &mut BehaviourWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[then(
-    r#"GITHUB_TOKEN starts with the "ghp_" prefix and is the length of a real GitHub personal access token"#
-)]
-fn then_github_token_shape(_w: &mut BehaviourWorld) -> Result<(), String> {
-    let p = providers::by_id("github").ok_or("github missing from registry")?;
-    if !p.placeholder().starts_with("ghp_") {
-        return Err(format!(
-            "placeholder missing ghp_ prefix: {}",
-            p.placeholder()
-        ));
-    }
-    if p.placeholder().len() != 40 {
-        return Err(format!(
-            "github placeholder len {} ≠ 40",
-            p.placeholder().len()
-        ));
-    }
-    Ok(())
-}
-
-#[then(r#"OPENAI_API_KEY starts with the "sk-" prefix and is the length of a real OpenAI API key"#)]
-fn then_openai_key_shape(_w: &mut BehaviourWorld) -> Result<(), String> {
-    let p = providers::by_id("openai").ok_or("openai missing from registry")?;
-    if !p.placeholder().starts_with("sk-") {
-        return Err(format!(
-            "placeholder missing sk- prefix: {}",
-            p.placeholder()
-        ));
-    }
-    if p.placeholder().len() != 51 {
-        return Err(format!(
-            "openai placeholder len {} ≠ 51",
-            p.placeholder().len()
-        ));
+#[then("every seeded placeholder self-identifies as a placeholder")]
+fn then_every_placeholder_self_identifies(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let frames = drain_frames(rig);
+    let policy = last_policy_frame(&frames).ok_or("no Policy frame emitted at launch")?;
+    let creds = policy
+        .credentials
+        .as_ref()
+        .ok_or("Policy frame missing credentials array")?;
+    for c in creds {
+        let placeholder = c
+            .placeholder
+            .as_deref()
+            .ok_or_else(|| format!("credential {} missing a placeholder", c.id))?;
+        let lower = placeholder.to_lowercase();
+        if !lower.contains("placeholder") && !lower.contains("lns") {
+            return Err(format!(
+                "credential {} placeholder does not self-identify as fake: {placeholder}",
+                c.id
+            ));
+        }
     }
     Ok(())
 }
@@ -566,13 +519,10 @@ fn assert_entry_kind(entry: &CredentialEntry, kind: &str) -> Result<(), String> 
 }
 
 #[then(
-    regex = r#"^the workload's (?:held )?request leaves the boundary with the host-detected (GitHub|OpenAI|Anthropic|Linear) credential substituted in$"#
+    regex = r#"^the workload's (?:held )?request leaves the boundary with the host-detected some-provider credential substituted in$"#
 )]
-fn then_request_leaves_with_host_value(
-    world: &mut BehaviourWorld,
-    provider_name: String,
-) -> Result<(), String> {
-    let credential_id = provider_id_for_name(&provider_name);
+fn then_request_leaves_with_host_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let credential_id = FIXTURE_ID;
     let rig = world.credential();
     let frames = drain_frames(rig);
     let policy = last_policy_frame(&frames)
@@ -592,7 +542,8 @@ fn then_request_leaves_with_typed_value(world: &mut BehaviourWorld) -> Result<()
     let rig = world.credential();
     let frames = drain_frames(rig);
     let policy = last_policy_frame(&frames).ok_or("no Policy frame emitted after decision")?;
-    let cred = find_credential(policy, "github").ok_or("Policy frame missing github credential")?;
+    let cred = find_credential(policy, FIXTURE_ID)
+        .ok_or("Policy frame missing some-provider credential")?;
     assert_credential_armed_with(cred, "typed-value")?;
     decision_allow_assert(&frames)?;
     Ok(())
@@ -632,14 +583,10 @@ fn then_workload_sees_placeholder(_w: &mut BehaviourWorld) -> Result<(), String>
 }
 
 #[then(
-    regex = r#"^a future request carrying the (GitHub|OpenAI|Anthropic|Linear) placeholder is exchanged silently using the (currently host-detected value|stored value|host-detected value until the sandbox exits)$"#
+    regex = r#"^a future request carrying the some-provider placeholder is exchanged silently using the (currently host-detected value|stored value|host-detected value until the sandbox exits)$"#
 )]
-fn then_future_request_silent(
-    world: &mut BehaviourWorld,
-    provider_name: String,
-    _source: String,
-) -> Result<(), String> {
-    let credential_id = provider_id_for_name(&provider_name);
+fn then_future_request_silent(world: &mut BehaviourWorld, _source: String) -> Result<(), String> {
+    let credential_id = FIXTURE_ID;
     let rig = world.credential();
     let entry = rig.session.current_state().get(credential_id).cloned();
     match entry {
@@ -651,13 +598,10 @@ fn then_future_request_silent(
 }
 
 #[then(
-    regex = r#"^a future request carrying the (GitHub|OpenAI|Anthropic|Linear) placeholder is failed at the boundary without prompting$"#
+    regex = r#"^a future request carrying the some-provider placeholder is failed at the boundary without prompting$"#
 )]
-fn then_future_request_failed(
-    world: &mut BehaviourWorld,
-    provider_name: String,
-) -> Result<(), String> {
-    let credential_id = provider_id_for_name(&provider_name);
+fn then_future_request_failed(world: &mut BehaviourWorld) -> Result<(), String> {
+    let credential_id = FIXTURE_ID;
     let rig = world.credential();
     let cards_before = rig.window_state.snapshot().pending_credentials.len();
     rig.session.submit_pending(
@@ -768,7 +712,7 @@ fn drain_frames_approval(rig: &mut crate::approval_rig::ApprovalRig) -> Vec<Host
 }
 
 #[then(
-    regex = r#"^a subsequent request from the workload carrying the GitHub placeholder fires a fresh credential card for "([^"]+)"$"#
+    regex = r#"^a subsequent request from the workload carrying the some-provider placeholder fires a fresh credential card for "([^"]+)"$"#
 )]
 fn then_subsequent_fires_fresh_card(
     world: &mut BehaviourWorld,
@@ -825,13 +769,10 @@ fn then_credentials_file_unchanged(world: &mut BehaviourWorld) -> Result<(), Str
 }
 
 #[then(
-    regex = r#"^a future request carrying the (GitHub|OpenAI|Anthropic|Linear) placeholder fires a fresh credential card$"#
+    regex = r#"^a future request carrying the some-provider placeholder fires a fresh credential card$"#
 )]
-fn then_future_request_fires_fresh_card(
-    world: &mut BehaviourWorld,
-    provider_name: String,
-) -> Result<(), String> {
-    let credential_id = provider_id_for_name(&provider_name).to_string();
+fn then_future_request_fires_fresh_card(world: &mut BehaviourWorld) -> Result<(), String> {
+    let credential_id = FIXTURE_ID.to_string();
     let rig = world.credential();
     submit_credential_with_id(rig, "fresh-after-timeout", &credential_id);
     let snap = rig.window_state.snapshot();
@@ -845,10 +786,10 @@ fn then_future_request_fires_fresh_card(
     Ok(())
 }
 
-#[then("the running credential rules contain a \"host-detect\" entry for \"github\"")]
+#[then("the running credential rules contain a \"host-detect\" entry for \"some-provider\"")]
 fn then_running_rules_have_host_detect(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.credential();
-    match rig.session.current_state().get("github") {
+    match rig.session.current_state().get(FIXTURE_ID) {
         Some(CredentialEntry::HostDetect) => Ok(()),
         other => Err(format!("expected HostDetect, got {other:?}")),
     }
@@ -860,16 +801,6 @@ fn injection_value(injection: &CredentialInjection) -> String {
     match injection {
         CredentialInjection::Header { value, .. } => value.clone(),
         CredentialInjection::UriPlaceholder { value, .. } => value.clone(),
-    }
-}
-
-fn provider_id_for_name(name: &str) -> &'static str {
-    match name {
-        "GitHub" => "github",
-        "OpenAI" => "openai",
-        "Anthropic" => "anthropic",
-        "Linear" => "linear",
-        other => panic!("unknown provider name {other}"),
     }
 }
 

@@ -13,7 +13,7 @@ Feature: lns-service honours custom credential providers from the policy
     Given "lns-policy.yaml" declares the "acme" custom provider with env var "ACME_API_KEY"
     When a sandbox is launched against that policy file
     Then the workload's environment contains "ACME_API_KEY" set to the declared acme placeholder
-    And the built-in placeholders for github, openai, anthropic, linear, and telegram are still present
+    And the built-in placeholders for openai, anthropic, linear, and telegram are still present
 
   Scenario: A workload using the custom placeholder triggers the credential flow
     Given a sandbox is running with the "acme" custom provider declared

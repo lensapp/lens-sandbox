@@ -1,5 +1,5 @@
 Feature: declaring custom credential providers from the CLI
-  Today only the built-in providers (github, openai, anthropic, linear,
+  Today only the built-in providers (openai, anthropic, linear,
   telegram) ship as credential placeholders. Developers need their own
   — a corporate API, an internal service — so the CLI can declare a
   custom provider into `lns-policy.yaml`: an id, an env var, a
@@ -56,7 +56,7 @@ Feature: declaring custom credential providers from the CLI
     And the command output states that the new injection will not reach a running workload until a new sandbox is launched
 
   Scenario: Declaring a custom provider whose id collides with a built-in is rejected
-    When the developer tries to declare a custom provider with id "github"
+    When the developer tries to declare a custom provider with id "openai"
     Then the command fails with a clear error
     And "lns-policy.yaml" is unchanged
 
@@ -74,7 +74,7 @@ Feature: declaring custom credential providers from the CLI
   Scenario: Listing providers shows both built-in and custom with their source
     Given "lns-policy.yaml" declares a custom provider "acme"
     When the developer lists providers
-    Then the output shows the five built-in providers labelled as built-in
+    Then the output shows the four built-in providers labelled as built-in
     And the "acme" provider labelled as custom from the policy file
 
   Scenario: Removing a custom provider deletes it from the policy file
@@ -83,7 +83,7 @@ Feature: declaring custom credential providers from the CLI
     Then "lns-policy.yaml" no longer contains the "acme" declaration
 
   Scenario: Removing a built-in provider is rejected
-    When the developer tries to remove the built-in "github" provider
+    When the developer tries to remove the built-in "openai" provider
     Then the command fails with a clear error
     And "lns-policy.yaml" is unchanged
 

@@ -236,16 +236,16 @@ mod tests {
         assert!(!s.contains("matchPattern"), "rust ident leaked: {s}");
     }
 
-    fn github_credential(armed: bool) -> Credential {
+    fn some_credential(armed: bool) -> Credential {
         Credential {
-            id: "github".into(),
-            env_var: Some("GITHUB_TOKEN".into()),
-            placeholder: Some("ghp_LNSPLACEHOLDERXXXXXXXXXXXXXXXXXXXX".into()),
+            id: "some-provider".into(),
+            env_var: Some("SOME_TOKEN".into()),
+            placeholder: Some("some-placeholder-0000000000000000000000".into()),
             injections: if armed {
                 vec![CredentialInjection::Header {
-                    domain: "api.github.com".into(),
+                    domain: "api.some-provider.example".into(),
                     header: "Authorization".into(),
-                    value: "Bearer ghp_real-token".into(),
+                    value: "Bearer some-secret".into(),
                 }]
             } else {
                 Vec::new()
@@ -257,12 +257,12 @@ mod tests {
     fn credential_in_policy_frame_serializes_with_camel_case_field_names() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: None,
-            credentials: Some(vec![github_credential(false)]),
+            credentials: Some(vec![some_credential(false)]),
         });
         let s = serde_json::to_string(&frame).unwrap();
-        assert!(s.contains(r#""envVar":"GITHUB_TOKEN""#), "got: {s}");
+        assert!(s.contains(r#""envVar":"SOME_TOKEN""#), "got: {s}");
         assert!(!s.contains("env_var"), "rust ident leaked into JSON: {s}");
-        assert!(s.contains(r#""placeholder":"ghp_LNS"#), "got: {s}");
+        assert!(s.contains(r#""placeholder":"some-placeholder"#), "got: {s}");
         assert!(s.contains(r#""injections":[]"#), "got: {s}");
     }
 
@@ -270,14 +270,17 @@ mod tests {
     fn header_injection_serializes_with_injection_type_discriminator() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: None,
-            credentials: Some(vec![github_credential(true)]),
+            credentials: Some(vec![some_credential(true)]),
         });
         let s = serde_json::to_string(&frame).unwrap();
         assert!(
             s.contains(r#""injectionType":"header""#),
             "discriminator tag missing or wrong: {s}"
         );
-        assert!(s.contains(r#""domain":"api.github.com""#), "got: {s}");
+        assert!(
+            s.contains(r#""domain":"api.some-provider.example""#),
+            "got: {s}"
+        );
         assert!(s.contains(r#""header":"Authorization""#), "got: {s}");
     }
 
@@ -285,7 +288,7 @@ mod tests {
     fn policy_frame_with_credentials_round_trips() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(NetworkPolicy::default()),
-            credentials: Some(vec![github_credential(true)]),
+            credentials: Some(vec![some_credential(true)]),
         });
         let s = serde_json::to_string(&frame).unwrap();
         let parsed: HostFrame = serde_json::from_str(&s).unwrap();
@@ -297,16 +300,16 @@ mod tests {
         let raw = r#"{
             "type": "credential_pending",
             "id": "cred-42",
-            "credentialId": "github",
-            "action": "POST https://api.github.com/issues",
+            "credentialId": "some-provider",
+            "action": "POST https://api.some-provider.example/issues",
             "reason": "placeholder-unauthorized"
         }"#;
         let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
         assert!(
             matches!(&parsed, GuestFrame::CredentialPending(cp)
                 if cp.id == "cred-42"
-                    && cp.credential_id == "github"
-                    && cp.action == "POST https://api.github.com/issues"
+                    && cp.credential_id == "some-provider"
+                    && cp.action == "POST https://api.some-provider.example/issues"
                     && cp.reason == "placeholder-unauthorized"),
             "got {parsed:?}"
         );

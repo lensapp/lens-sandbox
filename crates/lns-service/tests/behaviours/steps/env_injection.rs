@@ -29,16 +29,22 @@ fn given_image_env(world: &mut BehaviourWorld, key: String, value: String) {
         .push(format!("{key}={value}"));
 }
 
-#[given(regex = r#"^the credential registry seeds a \S+ placeholder$"#)]
-fn given_registry_seeds(_world: &mut BehaviourWorld) {
-    // no-op: the built-in provider registry always carries the shipped credentials.
+#[given(regex = r#"^a connected integration manages the "([^"]+)" credential variable$"#)]
+fn given_integration_manages(world: &mut BehaviourWorld, env_var: String) {
+    world.managed_vars.push(env_var);
 }
 
 #[when(regex = r#"^the user runs `([^`]*)`$"#)]
 fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
     let user_env = user_env_from(&cmd);
     let image_env = world.image_env.clone();
-    world.composed_env = Some(run_workload_env(image_env.as_deref(), &user_env, None, &[]));
+    let managed = world.managed_vars.clone();
+    world.composed_env = Some(run_workload_env(
+        image_env.as_deref(),
+        &user_env,
+        None,
+        &managed,
+    ));
     world.user_env = user_env;
 }
 
@@ -72,29 +78,35 @@ fn then_env_contains_both(
     Ok(())
 }
 
-#[then("the workload's GITHUB_TOKEN remains the seeded placeholder")]
-fn then_github_token_placeholder_stands(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then(regex = r#"^the workload's (\S+) override is dropped and refused$"#)]
+fn then_managed_var_refused(world: &mut BehaviourWorld, env_var: String) -> Result<(), String> {
     let composed = composed(world)?;
-    if composed.env.iter().any(|e| e.starts_with("GITHUB_TOKEN=")) {
+    let prefix = format!("{env_var}=");
+    if composed.env.iter().any(|e| e.starts_with(&prefix)) {
         return Err(format!(
-            "user GITHUB_TOKEN must not reach the workload env: {:?}",
+            "user {env_var} must not reach the workload env: {:?}",
             composed.env
         ));
     }
-    if !composed.refused.iter().any(|k| k == "GITHUB_TOKEN") {
+    if !composed.refused.contains(&env_var) {
         return Err(format!(
-            "expected GITHUB_TOKEN among refused, got {:?}",
+            "expected {env_var} among refused, got {:?}",
             composed.refused
         ));
     }
     Ok(())
 }
 
-#[then("a warning states the GITHUB_TOKEN override was refused because it is a managed credential")]
-fn then_warning_explains_refusal(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then(
+    regex = r#"^a warning states the (\S+) override was refused because it is a managed credential$"#
+)]
+fn then_warning_explains_refusal(
+    world: &mut BehaviourWorld,
+    env_var: String,
+) -> Result<(), String> {
     let _ = composed(world)?;
-    let msg = refusal_warning("GITHUB_TOKEN");
-    if msg.contains("GITHUB_TOKEN") && msg.contains("managed credential") {
+    let msg = refusal_warning(&env_var);
+    if msg.contains(&env_var) && msg.contains("managed credential") {
         Ok(())
     } else {
         Err(format!("refusal warning unclear: {msg:?}"))

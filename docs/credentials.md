@@ -1,7 +1,7 @@
 # Credentials
 
-Tools inside the sandbox often need something that *looks* like a credential — a
-`GITHUB_TOKEN`, an `OPENAI_API_KEY` — to behave normally. Lens Sandbox gives the
+Tools inside the sandbox often need something that *looks* like a credential — an
+`OPENAI_API_KEY`, an `ANTHROPIC_API_KEY` — to behave normally. Lens Sandbox gives the
 workload a credential-shaped **placeholder** instead of the real secret. The real
 value stays outside the workload and is swapped in at the network boundary, only
 for the right destination, and only when your policy allows it.
@@ -9,7 +9,7 @@ for the right destination, and only when your policy allows it.
 ## How placeholders work
 
 1. The workload starts with a placeholder seeded into the provider's environment
-   variable — e.g. `GITHUB_TOKEN=ghp_LNSPLACEHOLDER...`. The placeholder is
+   variable — e.g. `OPENAI_API_KEY=sk-LNSPLACEHOLDER...`. The placeholder is
    syntactically valid (tools accept it) but self-identifying as fake.
 2. The workload makes a request to the provider's domain carrying that placeholder
    (in a header or a URL, depending on the provider).
@@ -27,11 +27,13 @@ These providers are recognized out of the box:
 
 | Provider    | Environment variable  | Injected for          |
 | ----------- | --------------------- | --------------------- |
-| `github`    | `GITHUB_TOKEN`        | `api.github.com`, `github.com` |
 | `openai`    | `OPENAI_API_KEY`      | `api.openai.com`      |
 | `anthropic` | `ANTHROPIC_API_KEY`   | `api.anthropic.com`   |
 | `linear`    | `LINEAR_API_KEY`      | `api.linear.app`      |
 | `telegram`  | `TELEGRAM_BOT_TOKEN`  | `api.telegram.org`    |
+
+GitHub is connected as an [integration](integrations.md) (device sign-in) rather than
+a built-in static token — see [Integrations](integrations.md).
 
 ## Value decisions
 
@@ -42,7 +44,7 @@ it with `lns credential set`, which requires exactly one of:
 
 ```bash
 # Use the value Lens Sandbox detects on the host for this provider
-lns credential set github --host
+lns credential set anthropic --host
 
 # Store a specific real value at the boundary. Prefer --value-stdin so the
 # secret stays out of your shell history and the process list.
@@ -66,7 +68,7 @@ file and is never written to `lns-policy.yaml`.
 Clear a decision so the next use prompts again:
 
 ```bash
-lns credential clear github
+lns credential clear anthropic
 ```
 
 List providers and their current decisions:

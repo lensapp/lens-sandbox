@@ -30,6 +30,8 @@ pub struct BehaviourWorld {
     pub image_env: Option<Vec<String>>,
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
     pub user_env: Vec<String>,
+    /// Env vars a connected integration manages for the run; `-e` overrides of these are refused.
+    pub managed_vars: Vec<String>,
 
     pub forward_fake: Option<Arc<ForwardFake>>,
     pub forward_specs: Vec<PortPublish>,

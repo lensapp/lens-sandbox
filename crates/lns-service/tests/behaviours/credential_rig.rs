@@ -7,7 +7,10 @@ use futures_util::future::BoxFuture;
 use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
 use lns_service::approval_flow::window::WindowState;
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
-use lns_service::credential_flow::registry::expand_credentials_with;
+use lns_service::credential_flow::providers::DefProvider;
+use lns_service::credential_flow::registry::{
+    expand_credentials_with, expand_credentials_with_custom,
+};
 use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
     CredentialStateFile, CredentialStore, JsonFileCredentialStore,
@@ -15,6 +18,26 @@ use lns_service::credential_flow::store::{
 use lns_service::oauth::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
+
+pub const FIXTURE_ID: &str = "some-provider";
+pub const FIXTURE_ENV: &str = "SOME_TOKEN";
+pub const FIXTURE_PLACEHOLDER: &str = "some-placeholder-0000000000000000000000";
+pub const FIXTURE_DOMAIN: &str = "api.some-provider.example";
+
+/// An illustrative provider so the credential-flow scenarios pin the mechanism without coupling to any shipped service.
+fn fixture_providers() -> Vec<DefProvider> {
+    use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+    vec![DefProvider::new(ProviderDef {
+        id: FIXTURE_ID.into(),
+        env_var: FIXTURE_ENV.into(),
+        placeholder: FIXTURE_PLACEHOLDER.into(),
+        injections: vec![InjectionDef {
+            kind: InjectionKind::BearerHeader,
+            domain: FIXTURE_DOMAIN.into(),
+            header: None,
+        }],
+    })]
+}
 
 pub struct FlakyCredentialStore {
     inner: JsonFileCredentialStore,
@@ -89,9 +112,11 @@ impl CredentialRig {
             timeout,
             Box::new(move |state| {
                 let values = host_values_for_emitter.lock().unwrap().clone();
-                // Production registry expansion with the host-detect source pointed at the in-memory map instead of process env.
+                // Production registry expansion (built-ins ∪ the illustrative fixture) with the host-detect source pointed at the in-memory map instead of process env.
                 let credentials =
-                    expand_credentials_with(state, &|id: &str| values.get(id).cloned());
+                    expand_credentials_with_custom(state, &fixture_providers(), &|id: &str| {
+                        values.get(id).cloned()
+                    });
                 let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
                     network: None,
                     credentials: Some(credentials),
