@@ -77,7 +77,6 @@ struct TrayApp {
     window_state: Arc<WindowState>,
     _tray: tray_icon::TrayIcon,
     last_visible: bool,
-    positioned: bool,
     /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
     credential_inputs: HashMap<String, String>,
     /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
@@ -139,7 +138,6 @@ impl TrayApp {
             window_state,
             _tray: tray,
             last_visible: false,
-            positioned: false,
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             current_height: WINDOW_HEIGHT,
@@ -147,22 +145,31 @@ impl TrayApp {
     }
 
     fn sync_viewport_visibility(&mut self, ctx: &egui::Context) {
-        if !self.positioned
-            && let Some(pos) = top_right_position(ctx)
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-            self.positioned = true;
-        }
-
         let items = stack_items(&self.window_state.snapshot());
         let should_show = !items.is_empty();
+        let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
+        let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
+        let target = target_height(&items, revealed, monitor_height);
+
         match visibility_transition(should_show, self.last_visible) {
             VisibilityTransition::Show => {
+                // Place and size the window before revealing it, or macOS flashes it un-positioned mid-screen for a frame.
+                let Some(pos) = top_right_position(ctx) else {
+                    ctx.request_repaint();
+                    return;
+                };
+                join_all_spaces();
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    WINDOW_WIDTH,
+                    target,
+                )));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its cards.
                 ctx.request_repaint();
+                self.current_height = target;
                 self.last_visible = true;
             }
             VisibilityTransition::Hide => {
@@ -170,18 +177,15 @@ impl TrayApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
                 self.last_visible = false;
             }
-            VisibilityTransition::Unchanged => {}
-        }
-
-        let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
-        let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
-        let target = target_height(&items, revealed, monitor_height);
-        if (self.current_height - target).abs() > 0.5 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                WINDOW_WIDTH,
-                target,
-            )));
-            self.current_height = target;
+            VisibilityTransition::Unchanged => {
+                if self.last_visible && (self.current_height - target).abs() > 0.5 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        WINDOW_WIDTH,
+                        target,
+                    )));
+                    self.current_height = target;
+                }
+            }
         }
     }
 }
@@ -938,6 +942,26 @@ fn install_activation_policy(opts: &mut eframe::NativeOptions) {
 
 #[cfg(not(target_os = "macos"))]
 fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
+
+/// Lets the always-on-top approval window appear on whichever macOS Space is active — including a full-screen app's Space — instead of staying pinned to the desktop it was created on.
+#[cfg(target_os = "macos")]
+fn join_all_spaces() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowCollectionBehavior};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        crate::log::warn!("skipped tray-window Space behavior: not on the main thread");
+        return;
+    };
+    let extra = NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::FullScreenAuxiliary;
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        window.setCollectionBehavior(window.collectionBehavior() | extra);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn join_all_spaces() {}
 
 fn load_icon() -> anyhow::Result<Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../assets/lensTemplate@2x.png");
