@@ -36,8 +36,8 @@ lns integration add acme \
 
 - `id` — the integration id; must not collide with a bundled or existing user id.
 - `--env-var` — the environment variable the placeholder is seeded into.
-- `--inject KIND:DOMAIN` — how and where the real value is injected (repeatable); the
-  same kinds as [custom credential providers](credentials.md#injection-kinds).
+- `--inject KIND:DOMAIN` — how and where the real value is injected (repeatable); see
+  the [injection kinds](credentials.md#injection-kinds).
 - `--route HOST` — a host pattern the integration needs reachable (repeatable).
 - `--placeholder` — a specific placeholder; auto-generated (self-identifying) when
   omitted.
@@ -73,9 +73,9 @@ integrations:
 When a connected integration's run starts, its declared routes are allowed and its
 placeholder is seeded. The first request carrying that placeholder follows the
 ordinary credential [value decision](credentials.md#value-decisions) — it pauses for
-approval if you haven't bound a value yet, exactly like a built-in provider. Set one
-ahead of time with `lns credential set <id>`. A new integration reaches a workload
-only at launch, so relaunch a running sandbox to pick it up.
+approval if you haven't bound a value yet, where you choose to use the host value,
+store one, or deny. A new integration reaches a workload only at launch, so relaunch
+a running sandbox to pick it up.
 
 ## The catalog file
 
