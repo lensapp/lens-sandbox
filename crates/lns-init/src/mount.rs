@@ -38,13 +38,43 @@ const RUN_TMPFS_OPTS: &str = "mode=0755,size=64m";
 const RUN_LOCK_TMPFS_OPTS: &str = "mode=1777,size=4m";
 const UNPRIV_PORT_START_SYSCTL: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MountFlags {
-    None,
-    ReadOnly,
-    Bind,
-    Tmpfs,
-    TmpfsNoExec,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MountFlags {
+    bind: bool,
+    read_only: bool,
+    nosuid: bool,
+    nodev: bool,
+    noexec: bool,
+}
+
+impl MountFlags {
+    fn none() -> Self {
+        Self::default()
+    }
+    fn bind() -> Self {
+        Self {
+            bind: true,
+            ..Self::default()
+        }
+    }
+    fn read_only() -> Self {
+        Self {
+            read_only: true,
+            ..Self::default()
+        }
+    }
+    fn nosuid(mut self) -> Self {
+        self.nosuid = true;
+        self
+    }
+    fn nodev(mut self) -> Self {
+        self.nodev = true;
+        self
+    }
+    fn noexec(mut self) -> Self {
+        self.noexec = true;
+        self
+    }
 }
 
 pub(crate) struct SandboxUser {
@@ -358,8 +388,13 @@ fn do_mount(
         })
 }
 
-fn do_mount_pseudo(sys: &dyn Syscalls, target: &str, fstype: &str) -> Result<(), MountError> {
-    do_mount(sys, "none", target, fstype, MountFlags::None, None)
+fn do_mount_pseudo(
+    sys: &dyn Syscalls,
+    target: &str,
+    fstype: &str,
+    flags: MountFlags,
+) -> Result<(), MountError> {
+    do_mount(sys, "none", target, fstype, flags, None)
 }
 
 fn do_move_mount(sys: &dyn Syscalls, from: &str, to: &str) -> Result<(), MountError> {
@@ -432,9 +467,11 @@ fn mount_volumes(
             seeded.push(&vol.dev);
         }
         do_mkdir_p(sys, &target, 0o755)?;
+        // Data volumes never need suid bits or device nodes; exec stays on so
+        // a user can run scripts they place on a volume.
         let flags = match vol.read_only {
-            true => MountFlags::ReadOnly,
-            false => MountFlags::None,
+            true => MountFlags::read_only().nosuid().nodev(),
+            false => MountFlags::none().nosuid().nodev(),
         };
         do_mount(sys, &vol.dev, &target, "ext4", flags, None)?;
     }
@@ -453,7 +490,7 @@ fn mount_run_tmpfs(
         "tmpfs",
         &run,
         "tmpfs",
-        MountFlags::Tmpfs,
+        MountFlags::none().nosuid().nodev(),
         Some(RUN_TMPFS_OPTS),
     )?;
     if let Some((uid, gid)) = run_ids {
@@ -466,7 +503,7 @@ fn mount_run_tmpfs(
         "tmpfs",
         &lock,
         "tmpfs",
-        MountFlags::TmpfsNoExec,
+        MountFlags::none().nosuid().nodev().noexec(),
         Some(RUN_LOCK_TMPFS_OPTS),
     )
 }
@@ -478,7 +515,14 @@ fn seed_volume_if_pristine(
     run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
     do_mkdir(sys, VOLUME_SEED_MOUNT, 0o755).ok();
-    do_mount(sys, dev, VOLUME_SEED_MOUNT, "ext4", MountFlags::None, None)?;
+    do_mount(
+        sys,
+        dev,
+        VOLUME_SEED_MOUNT,
+        "ext4",
+        MountFlags::none().nosuid().nodev(),
+        None,
+    )?;
     let (uid, gid) = run_ids.unwrap_or((0, 0));
     let result = sys.seed_pristine_volume(VOLUME_SEED_MOUNT, image_target, uid, gid);
     do_umount(sys, VOLUME_SEED_MOUNT)?;
@@ -498,7 +542,7 @@ fn mask_proc_cmdline(
             err,
         })?;
     let target = format!("{newroot}{PROC_CMDLINE}");
-    do_mount(sys, &mask_file, &target, "none", MountFlags::Bind, None)
+    do_mount(sys, &mask_file, &target, "none", MountFlags::bind(), None)
 }
 
 fn ensure_dev_fd_links(sys: &dyn Syscalls) -> Result<(), MountError> {
@@ -576,8 +620,13 @@ fn mount_composefs_and_exec_broker_inner(
     raw_cmdline: &str,
     sys: &dyn Syscalls,
 ) -> Result<std::convert::Infallible, MountError> {
-    do_mount_pseudo(sys, SYS, "sysfs")?;
-    do_mount_pseudo(sys, DEV, "devtmpfs")?;
+    do_mount_pseudo(
+        sys,
+        SYS,
+        "sysfs",
+        MountFlags::none().nosuid().nodev().noexec(),
+    )?;
+    do_mount_pseudo(sys, DEV, "devtmpfs", MountFlags::none().nosuid().noexec())?;
 
     do_mkdir(sys, DEV_PTS, 0o755)?;
     do_mount(
@@ -585,7 +634,7 @@ fn mount_composefs_and_exec_broker_inner(
         "devpts",
         DEV_PTS,
         "devpts",
-        MountFlags::None,
+        MountFlags::none().nosuid().noexec(),
         Some("gid=5,mode=620,ptmxmode=666"),
     )?;
     let ptmx_c = cstring(DEV_PTMX, "ptmx-path")?;
@@ -600,7 +649,7 @@ fn mount_composefs_and_exec_broker_inner(
         content_tag,
         CONTENT,
         "virtiofs",
-        MountFlags::None,
+        MountFlags::none().nosuid().nodev(),
         None,
     )?;
 
@@ -613,7 +662,7 @@ fn mount_composefs_and_exec_broker_inner(
         descriptor_dev,
         COMPOSEFS_META,
         "erofs",
-        MountFlags::ReadOnly,
+        MountFlags::read_only().nosuid().nodev().noexec(),
         None,
     )?;
 
@@ -623,7 +672,7 @@ fn mount_composefs_and_exec_broker_inner(
         upper_dev,
         UPPER_MOUNTPOINT,
         "ext4",
-        MountFlags::None,
+        MountFlags::none().nosuid().nodev(),
         None,
     )?;
 
@@ -633,12 +682,15 @@ fn mount_composefs_and_exec_broker_inner(
     do_mkdir(sys, &upper_work, 0o755)?;
 
     let opts = overlay_options();
+    // The workload rootfs stays permissive — images legitimately ship suid
+    // binaries and execute their own files; hardening lands on the infra,
+    // pseudo, and data mounts around it, not the rootfs itself.
     do_mount(
         sys,
         "overlay",
         newroot,
         "overlay",
-        MountFlags::None,
+        MountFlags::none(),
         Some(&opts),
     )?;
 
@@ -1361,16 +1413,17 @@ mod tests {
                 source: "none".into(),
                 target: SYS.into(),
                 fstype: "sysfs".into(),
-                flags: MountFlags::None,
+                flags: MountFlags::none().nosuid().nodev().noexec(),
                 data: None,
             })
         );
-        // erofs descriptor is mounted read-only; upper as ext4 rw.
+        // erofs descriptor is mounted read-only and fully hardened (metadata
+        // only — never executed, no suid, no dev nodes).
         assert!(calls.contains(&Call::Mount {
             source: "/dev/vdb".into(),
             target: COMPOSEFS_META.into(),
             fstype: "erofs".into(),
-            flags: MountFlags::ReadOnly,
+            flags: MountFlags::read_only().nosuid().nodev().noexec(),
             data: None,
         }));
         // overlay is mounted onto the provided newroot with the data-only-lower opts.
@@ -1387,6 +1440,51 @@ mod tests {
             .unwrap();
         assert!(move_root < chroot, "move_mount(.,/) precedes chroot(.)");
         assert!(matches!(calls.last(), Some(Call::Fexecve(7))));
+    }
+
+    #[test]
+    fn boot_applies_per_mount_hardening_flags() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        let flags_for = |target: &str| -> MountFlags {
+            calls
+                .iter()
+                .find_map(|c| match c {
+                    Call::Mount {
+                        target: t, flags, ..
+                    } if t == target => Some(*flags),
+                    _ => None,
+                })
+                .expect("a mount was recorded for the target")
+        };
+        // Pseudo filesystems never hold suid bits, device nodes, or executables.
+        assert_eq!(flags_for(SYS), MountFlags::none().nosuid().nodev().noexec());
+        // /dev and /dev/pts keep device nodes (no nodev) but forbid suid + exec.
+        assert_eq!(flags_for(DEV), MountFlags::none().nosuid().noexec());
+        assert_eq!(flags_for(DEV_PTS), MountFlags::none().nosuid().noexec());
+        // The content store and overlay upper carry the workload's executables
+        // through the overlay, so exec stays on; neither needs suid or dev.
+        assert_eq!(flags_for(CONTENT), MountFlags::none().nosuid().nodev());
+        assert_eq!(
+            flags_for(UPPER_MOUNTPOINT),
+            MountFlags::none().nosuid().nodev()
+        );
+        // composefs metadata is read-only and fully hardened (never executed).
+        assert_eq!(
+            flags_for(COMPOSEFS_META),
+            MountFlags::read_only().nosuid().nodev().noexec()
+        );
+        // The workload rootfs stays permissive — images legitimately ship suid
+        // binaries and exec their own files. A regression that hardens it here
+        // would silently break those images, so pin it.
+        assert_eq!(flags_for("/newroot"), MountFlags::none());
     }
 
     #[test]
@@ -1852,18 +1950,19 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Call::Umount(t) if t == VOLUME_SEED_MOUNT))
         );
-        // Both targets are mounted ext4 under newroot; the second is read-only.
+        // Both targets are mounted ext4 under newroot, nosuid+nodev; the
+        // second is also read-only.
         assert!(
             calls
                 .iter()
                 .any(|c| matches!(c, Call::Mount { target, fstype, flags, .. }
-            if target == "/newroot/data" && fstype == "ext4" && *flags == MountFlags::None))
+            if target == "/newroot/data" && fstype == "ext4" && *flags == MountFlags::none().nosuid().nodev()))
         );
         assert!(
             calls
                 .iter()
                 .any(|c| matches!(c, Call::Mount { target, flags, .. }
-            if target == "/newroot/cache" && *flags == MountFlags::ReadOnly))
+            if target == "/newroot/cache" && *flags == MountFlags::read_only().nosuid().nodev()))
         );
     }
 
@@ -1933,7 +2032,11 @@ mod tests {
             })
             .expect("/run is mounted as tmpfs under newroot");
         let (flags, data) = run;
-        assert_eq!(flags, MountFlags::Tmpfs, "/run must be nosuid,nodev");
+        assert_eq!(
+            flags,
+            MountFlags::none().nosuid().nodev(),
+            "/run must be nosuid,nodev"
+        );
         let opts = data.expect("/run tmpfs carries options");
         assert!(opts.contains("mode=0755"), "/run must be 0755: {opts}");
         assert!(opts.contains("size="), "/run must be size-capped: {opts}");
@@ -1966,7 +2069,7 @@ mod tests {
         let (flags, data) = lock;
         assert_eq!(
             flags,
-            MountFlags::TmpfsNoExec,
+            MountFlags::none().nosuid().nodev().noexec(),
             "/run/lock must be nosuid,nodev,noexec"
         );
         assert!(
@@ -2336,7 +2439,7 @@ mod tests {
             .iter()
             .position(|c| {
                 matches!(c, Call::Mount { target, flags, .. }
-                if target == "/newroot/proc/cmdline" && *flags == MountFlags::Bind)
+                if target == "/newroot/proc/cmdline" && *flags == MountFlags::bind())
             })
             .expect("masked cmdline is bind-mounted over /newroot/proc/cmdline");
         let chroot = calls
@@ -2380,7 +2483,7 @@ mod tests {
     fn boot_aborts_when_the_cmdline_mask_cannot_be_bind_mounted() {
         let sys = FakeSyscalls::new().fail_when(|c| {
             matches!(c, Call::Mount { target, flags, .. }
-                if target == "/newroot/proc/cmdline" && *flags == MountFlags::Bind)
+                if target == "/newroot/proc/cmdline" && *flags == MountFlags::bind())
             .then_some(ErrorKind::PermissionDenied)
         });
         let err = mount_composefs_and_exec_broker_inner(
