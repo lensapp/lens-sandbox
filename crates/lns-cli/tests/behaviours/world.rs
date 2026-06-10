@@ -26,6 +26,7 @@ pub struct BehaviourWorld {
     pub volume: VolumeCliRig,
     pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
+    pub sandbox: SandboxCliRig,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +60,16 @@ pub struct ImageCliRig {
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub prompt_answer: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct SandboxCliRig {
+    pub response: Option<lns_ipc::Response>,
+    pub frames: Vec<Vec<u8>>,
+    pub unreachable: bool,
+    pub policy: Option<serde_json::Value>,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub workload_stdout: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
