@@ -95,7 +95,6 @@ pub fn set_connector(run_id: u32, connector: std::sync::Arc<VsockConnector>) {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn set_exit_code(run_id: u32, code: i32) {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_ref().and_then(|m| m.get(&run_id))
@@ -103,6 +102,13 @@ pub fn set_exit_code(run_id: u32, code: i32) {
     {
         *s = RunStatus::Exited { code };
     }
+}
+
+pub fn status(run_id: u32) -> Option<RunStatus> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(&run_id))
+        .and_then(|h| h.status.lock().ok().map(|s| *s))
 }
 
 pub fn snapshot() -> Vec<lns_ipc::RunSummary> {
@@ -320,7 +326,6 @@ mod tests {
         assert!(connector(id).is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_exit_code_flips_status_to_exited() {
         let id = allocate_run_id();
@@ -335,12 +340,26 @@ mod tests {
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_exit_code_is_noop_when_run_not_registered() {
         let id = allocate_run_id() + 2_000_003;
         set_exit_code(id, 17);
         assert!(snapshot().iter().all(|s| s.id != id));
+    }
+
+    #[tokio::test]
+    async fn status_reports_running_then_exited_and_none_when_unknown() {
+        let id = allocate_run_id();
+        assert_eq!(status(id), None);
+
+        let (handle, _rx) = make_handle();
+        register(id, handle);
+        assert_eq!(status(id), Some(RunStatus::Running));
+
+        set_exit_code(id, 5);
+        assert_eq!(status(id), Some(RunStatus::Exited { code: 5 }));
+
+        deregister(id);
     }
 
     #[test]

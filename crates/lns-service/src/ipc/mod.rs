@@ -182,6 +182,19 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
+        Request::StopRun {
+            run_id,
+            timeout_secs,
+        } => {
+            let id = *run_id;
+            stop_run_with(
+                id,
+                std::time::Duration::from_secs(*timeout_secs),
+                KILL_GRACE,
+                |signal| forward_session_input(id, session_input_from_signal(signal), "StopRun"),
+            )
+            .await
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -198,6 +211,58 @@ fn image_response(result: anyhow::Result<Response>) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
+}
+
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+pub(super) async fn stop_run_with<F, Fut>(
+    run_id: u32,
+    timeout: std::time::Duration,
+    kill_grace: std::time::Duration,
+    send_signal: F,
+) -> Response
+where
+    F: Fn(lns_ipc::SignalKind) -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    let Some(status) = crate::run_registry::status(run_id) else {
+        return Response::Error {
+            message: format!("no active run with id {run_id}"),
+        };
+    };
+    if matches!(status, lns_ipc::RunStatus::Exited { .. }) {
+        return Response::RunStopped { forced: false };
+    }
+    if let Response::Error { message } = send_signal(lns_ipc::SignalKind::Term).await {
+        return Response::Error { message };
+    }
+    if wait_for_exit(run_id, timeout).await {
+        return Response::RunStopped { forced: false };
+    }
+    if let Response::Error { message } = send_signal(lns_ipc::SignalKind::Kill).await {
+        return Response::Error { message };
+    }
+    if wait_for_exit(run_id, kill_grace).await {
+        return Response::RunStopped { forced: true };
+    }
+    Response::Error {
+        message: format!("run {run_id} did not exit within {kill_grace:?} of SIGKILL"),
+    }
+}
+
+async fn wait_for_exit(run_id: u32, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match crate::run_registry::status(run_id) {
+            None | Some(lns_ipc::RunStatus::Exited { .. }) => return true,
+            Some(lns_ipc::RunStatus::Running) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1018,6 +1083,285 @@ mod tests {
     #[test]
     fn session_input_from_signal_returns_none_on_linux() {
         assert!(session_input_from_signal(lns_ipc::SignalKind::Term).is_none());
+    }
+
+    fn register_running(run_id: u32) {
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let task = tokio::spawn(async {});
+        crate::run_registry::register(
+            run_id,
+            crate::run_registry::RunHandle {
+                cancel_tx,
+                task,
+                #[cfg(target_os = "macos")]
+                input_tx: None,
+                #[cfg(target_os = "macos")]
+                connector: None,
+                image: "stop-test".into(),
+                command: String::new(),
+                started: "1970-01-01T00:00:00Z".into(),
+                status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+                logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            },
+        );
+    }
+
+    fn recording_sender(
+        run_id: u32,
+        exit_on: Option<lns_ipc::SignalKind>,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::SignalKind>>>,
+        impl Fn(lns_ipc::SignalKind) -> std::future::Ready<Response>,
+    ) {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_for_closure = sent.clone();
+        let sender = move |signal: lns_ipc::SignalKind| {
+            sent_for_closure.lock().unwrap().push(signal);
+            if exit_on == Some(signal) {
+                crate::run_registry::set_exit_code(run_id, 137);
+            }
+            std::future::ready(Response::Acknowledged)
+        };
+        (sent, sender)
+    }
+
+    #[tokio::test]
+    async fn handle_request_stop_run_for_unknown_run_returns_error() {
+        let resp = handle_request(
+            &Request::StopRun {
+                run_id: 999_999,
+                timeout_secs: 1,
+            },
+            Instant::now(),
+        )
+        .await;
+        match resp {
+            Response::Error { message } => {
+                assert!(message.contains("no active run"), "got: {message}");
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_of_an_already_exited_run_succeeds_without_signalling() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        crate::run_registry::set_exit_code(id, 0);
+        let (sent, sender) = recording_sender(id, None);
+
+        let resp = stop_run_with(
+            id,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            sender,
+        )
+        .await;
+
+        assert_eq!(resp, Response::RunStopped { forced: false });
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "an exited run must not be signalled again"
+        );
+        crate::run_registry::deregister(id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_returns_unforced_when_the_workload_exits_on_term() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        let (sent, sender) = recording_sender(id, Some(lns_ipc::SignalKind::Term));
+
+        let resp = stop_run_with(id, std::time::Duration::from_secs(10), KILL_GRACE, sender).await;
+
+        assert_eq!(resp, Response::RunStopped { forced: false });
+        assert_eq!(sent.lock().unwrap().as_slice(), [lns_ipc::SignalKind::Term]);
+        crate::run_registry::deregister(id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_escalates_to_kill_when_term_is_ignored() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        let (sent, sender) = recording_sender(id, Some(lns_ipc::SignalKind::Kill));
+
+        let resp = stop_run_with(id, std::time::Duration::from_secs(10), KILL_GRACE, sender).await;
+
+        assert_eq!(resp, Response::RunStopped { forced: true });
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            [lns_ipc::SignalKind::Term, lns_ipc::SignalKind::Kill]
+        );
+        crate::run_registry::deregister(id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_with_zero_timeout_skips_straight_to_kill() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        let (sent, sender) = recording_sender(id, Some(lns_ipc::SignalKind::Kill));
+
+        let resp = stop_run_with(id, std::time::Duration::from_secs(0), KILL_GRACE, sender).await;
+
+        assert_eq!(resp, Response::RunStopped { forced: true });
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        crate::run_registry::deregister(id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_reports_failure_when_kill_does_not_end_the_run() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        let (sent, sender) = recording_sender(id, None);
+
+        let resp = stop_run_with(
+            id,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            sender,
+        )
+        .await;
+
+        match resp {
+            Response::Error { message } => {
+                assert!(message.contains("SIGKILL"), "got: {message}");
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        crate::run_registry::cancel(id);
+    }
+
+    #[tokio::test]
+    async fn stop_propagates_a_term_send_error() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+
+        let resp = stop_run_with(
+            id,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            |_| {
+                std::future::ready(Response::Error {
+                    message: "term send blew up".into(),
+                })
+            },
+        )
+        .await;
+
+        assert_eq!(
+            resp,
+            Response::Error {
+                message: "term send blew up".into()
+            }
+        );
+        crate::run_registry::cancel(id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_propagates_a_kill_send_error() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let calls_for_closure = calls.clone();
+
+        let resp = stop_run_with(
+            id,
+            std::time::Duration::from_secs(0),
+            std::time::Duration::from_secs(1),
+            move |_| {
+                let mut n = calls_for_closure.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    std::future::ready(Response::Acknowledged)
+                } else {
+                    std::future::ready(Response::Error {
+                        message: "kill send blew up".into(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            resp,
+            Response::Error {
+                message: "kill send blew up".into()
+            }
+        );
+        crate::run_registry::cancel(id);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn handle_request_stop_run_sends_term_through_the_session_channel() {
+        use crate::vm::session_client::SessionInput;
+        use tokio::sync::mpsc;
+
+        let id = crate::run_registry::allocate_run_id();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (input_tx, mut input_rx) = mpsc::channel::<SessionInput>(4);
+        crate::run_registry::register(
+            id,
+            crate::run_registry::RunHandle {
+                cancel_tx,
+                task,
+                input_tx: Some(input_tx),
+                connector: None,
+                image: String::new(),
+                command: String::new(),
+                started: String::new(),
+                status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+                logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            },
+        );
+
+        let consumer = tokio::spawn(async move {
+            let input = input_rx.recv().await.expect("Term must arrive");
+            assert!(
+                matches!(input, SessionInput::Signal(lns_session::SignalKind::Term)),
+                "expected Term, got {input:?}"
+            );
+            crate::run_registry::set_exit_code(id, 143);
+        });
+
+        let resp = handle_request(
+            &Request::StopRun {
+                run_id: id,
+                timeout_secs: 10,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(resp, Response::RunStopped { forced: false });
+        consumer.await.expect("consumer ran");
+        crate::run_registry::cancel(id);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn handle_request_stop_run_on_linux_reports_macos_only() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+
+        let resp = handle_request(
+            &Request::StopRun {
+                run_id: id,
+                timeout_secs: 1,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        match resp {
+            Response::Error { message } => {
+                assert!(message.to_lowercase().contains("macos"), "got: {message}");
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+        crate::run_registry::cancel(id);
     }
 
     #[cfg(target_os = "macos")]

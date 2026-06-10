@@ -39,6 +39,9 @@ pub struct BehaviourWorld {
     pub volume: Option<VolumeRig>,
 
     pub image: Option<ImageRig>,
+
+    /// Run id registered by a lifecycle scenario (stop / inspect / logs).
+    pub lifecycle_run: Option<u32>,
 }
 
 impl BehaviourWorld {
