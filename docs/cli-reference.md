@@ -98,6 +98,23 @@ lns volume ls | create <NAME> | inspect <NAME> | rm <NAME> | prune [-f]
 
 See [Running workloads — volumes](running-workloads.md#volumes).
 
+## `lns image`
+
+Manage the cached OCI images that `lns run` boots from (`docker image`-style).
+
+```bash
+lns image pull <IMAGE> | ls | rm <IMAGE> | prune [-f]
+```
+
+| Subcommand     | Meaning                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| `pull <IMAGE>` | Pull an image into the cache ahead of `lns run`, printing its resolved digest and a pinnable `repo@sha256:…` reference. |
+| `ls`           | List cached images with their digest, size, pull time, and the run using them (if any).  |
+| `rm <IMAGE>`   | Remove a cached image and reclaim layers no other cached image shares; refused while a run uses it. |
+| `prune`        | Remove every cached image not used by a running sandbox. Prompts unless `-f`/`--force`.  |
+
+See [Running workloads — images](running-workloads.md#managing-the-image-cache).
+
 ## `lns audit`
 
 Verify the audit chain of a run.
