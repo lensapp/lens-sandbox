@@ -20,7 +20,7 @@ case "$PLATFORM" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="$REPO_ROOT/vendor/static-nft"
+OUT_DIR="${LNS_STATIC_NFT_OUT_DIR:-$REPO_ROOT/vendor/static-nft}"
 STAGE_DIR="$(mktemp -d -t lns-static-nft.XXXXXX)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 
