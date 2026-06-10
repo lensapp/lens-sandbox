@@ -8,6 +8,7 @@ pub mod log;
 pub mod policy;
 pub mod raw_mode;
 pub mod run;
+pub mod sandbox;
 pub mod service;
 #[cfg(test)]
 mod test_env;
@@ -61,6 +62,10 @@ pub async fn run(cli: Cli) -> Result<i32> {
             let stdin = std::io::stdin();
             let mut input = stdin.lock();
             image::run(&args.command, &svc, &mut input, &mut std::io::stdout()).await?
+        }
+        Command::Sandbox(args) => {
+            service::require_running().await;
+            sandbox::real::dispatch(&args).await?
         }
         Command::Audit(args) => audit::run_verify(args)?,
         Command::Service(args) => {

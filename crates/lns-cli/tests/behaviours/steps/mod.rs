@@ -7,5 +7,6 @@ pub mod policy_cli;
 pub mod publish;
 pub mod run;
 pub mod run_config_defaults;
+pub mod sandbox_cli;
 pub mod update_check;
 pub mod volume_cli;
