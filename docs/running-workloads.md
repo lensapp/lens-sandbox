@@ -113,7 +113,8 @@ lns run -d ghcr.io/acme/long-job
 # prints: run #7
 ```
 
-A detached run is reachable later via `lns exec`, `lns ls`, and `lns kill`.
+A detached run is reachable later via `lns exec`, `lns ls`, `lns kill`, and the
+[`lns sandbox` lifecycle verbs](#lns-sandbox--managing-runs-youve-started).
 `-d` cannot be combined with `-i`/`-t`.
 
 ### Detaching from an attached run
@@ -161,6 +162,58 @@ lns kill 7 --signal KILL   # SIGKILL
 
 Signal names are case-insensitive and may be bare or `SIG`-prefixed. Supported
 signals: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`.
+
+For a graceful shutdown that waits and escalates for you, prefer
+`lns sandbox stop`.
+
+## `lns sandbox` — managing runs you've started
+
+The `lns sandbox` family extends `ls`/`exec`/`kill` with the rest of the
+lifecycle:
+
+```bash
+lns sandbox stop 7             # SIGTERM, wait up to 10s, then SIGKILL
+lns sandbox stop 7 -t 30       # give it longer to clean up
+lns sandbox logs 7             # print the captured output so far
+lns sandbox logs -f 7          # ...and keep following until it exits
+lns sandbox attach 7           # re-join a detached run live
+lns sandbox inspect 7          # state + launch config as JSON
+lns sandbox stats 7            # CPU share and memory, sampled over 1s
+```
+
+### Stopping vs killing
+
+`lns kill` sends one signal and returns. `lns sandbox stop` owns the whole
+shutdown: it sends `SIGTERM`, waits up to the timeout for the workload to exit,
+and only then sends `SIGKILL`. The command reports which of the two happened —
+`stopped run #7` for a graceful exit, `killed run #7` when it had to escalate.
+
+### Logs
+
+The service keeps a rolling capture of every run's stdout and stderr — the most
+recent 2 MiB — for as long as the run is listed by `lns ls`. `lns sandbox logs`
+prints what's buffered; `-f` streams new output until the run exits. Output of
+`lns exec` sessions is not captured, only the run's primary session.
+
+### Attaching
+
+`lns sandbox attach` joins a run's output from now on (no history replay) and
+forwards your keystrokes when the run was started with stdin open. The detach
+chord works exactly as it does for `lns run`. Note that a run started with
+`-d` has stdin closed, so attach is primarily a live view of its output.
+
+### Inspecting
+
+`lns sandbox inspect` prints one JSON document with the run's status, image,
+command, and launch configuration (cpus, memory, env, ports, volumes, run-as
+identity), plus the contents of its policy file when that file is readable on
+this machine.
+
+### Stats
+
+`lns sandbox stats` samples `/proc` inside the guest over one second and
+reports the sandbox's CPU share and memory use — the microVM is the workload,
+so the numbers cover everything the run is doing.
 
 ## See also
 
