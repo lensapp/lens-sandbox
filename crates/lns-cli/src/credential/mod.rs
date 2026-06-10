@@ -334,8 +334,8 @@ mod tests {
         );
         assert_eq!(
             describe(Some(&CredentialEntry::Oauth {
-                access_token: "gho_x".into(),
-                refresh_token: "ghr_x".into(),
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
                 expires_at: 0,
             })),
             "signed in (oauth)"

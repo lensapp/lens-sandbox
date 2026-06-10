@@ -30,9 +30,9 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn env_var_detector_returns_value_when_env_is_set() {
-        let _g = EnvVarGuard::set("LNS_TEST_CRED_DETECTION_PRESENT", "ghp_real");
+        let _g = EnvVarGuard::set("LNS_TEST_CRED_DETECTION_PRESENT", "some-token");
         let d = EnvVarDetector::new("LNS_TEST_CRED_DETECTION_PRESENT");
-        assert_eq!(d.detect().as_deref(), Some("ghp_real"));
+        assert_eq!(d.detect().as_deref(), Some("some-token"));
     }
 
     #[test]

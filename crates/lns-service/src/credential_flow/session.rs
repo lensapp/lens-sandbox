@@ -155,7 +155,7 @@ impl CredentialSession {
         self
     }
 
-    /// Per-id user-facing labels (e.g. `github_oauth` → "GitHub") for connect prompts and the sign-in card; ids absent here fall back to the id itself.
+    /// Per-id user-facing labels (e.g. `some-oauth` → "GitHub") for connect prompts and the sign-in card; ids absent here fall back to the id itself.
     pub fn with_oauth_display_names(mut self, display_names: HashMap<String, String>) -> Self {
         self.oauth_display_names = display_names;
         self
@@ -545,7 +545,7 @@ fn persistent_entry(request: CredentialDecisionRequest) -> Option<CredentialEntr
     }
 }
 
-/// The host an outbound request targets, parsed from a gate `action` like `GET api.github.com/x` or `CONNECT api.github.com:443`.
+/// The host an outbound request targets, parsed from a gate `action` like `GET api.some-oauth.example/x` or `CONNECT api.some-oauth.example:443`.
 fn request_host(action: &str) -> Option<&str> {
     let target = action.split_whitespace().nth(1)?;
     let host = target.split(['/', ':']).next()?;
@@ -1324,7 +1324,7 @@ mod tests {
     #[test]
     fn submit_pending_for_an_oauth_id_flavors_the_prompt_with_its_display_name() {
         let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         assert_eq!(
             n.presented.lock().unwrap()[0].oauth_display_name,
             Some("GitHub".to_string())
@@ -1334,7 +1334,7 @@ mod tests {
     #[test]
     fn submit_pending_surfaces_the_token_fallback_on_the_consent_prompt() {
         let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         assert_eq!(
             n.presented.lock().unwrap()[0].token_fallback,
             Some(TokenFallback {
@@ -1357,7 +1357,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut configs = HashMap::new();
         configs.insert(
-            "github_oauth".to_string(),
+            "some-oauth".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.test".into(),
                 scopes: vec![],
@@ -1373,10 +1373,10 @@ mod tests {
             TEST_TIMEOUT,
         )
         .with_oauth(configs, FakeFlow::polling(vec![]), Arc::new(FixedClock(0)));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         assert_eq!(
             notifier.presented.lock().unwrap()[0].oauth_display_name,
-            Some("github_oauth".to_string()),
+            Some("some-oauth".to_string()),
             "absent a configured name, the id is the fallback label"
         );
     }
@@ -1518,8 +1518,8 @@ mod tests {
 
     fn oauth_token(expires_in: u64) -> crate::oauth::TokenSet {
         crate::oauth::TokenSet {
-            access_token: "gho_access".into(),
-            refresh_token: "ghr_refresh".into(),
+            access_token: "some-access".into(),
+            refresh_token: "some-refresh".into(),
             expires_in: Duration::from_secs(expires_in),
         }
     }
@@ -1532,7 +1532,7 @@ mod tests {
         let connected_cb = connected.clone();
         let mut configs = HashMap::new();
         configs.insert(
-            "github_oauth".to_string(),
+            "some-oauth".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.test".into(),
                 scopes: vec!["repo".into()],
@@ -1548,16 +1548,16 @@ mod tests {
             TEST_TIMEOUT,
         )
         .with_connect_emitter(
-            HashSet::from(["github_oauth".to_string()]),
+            HashSet::from(["some-oauth".to_string()]),
             Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
         )
         .with_oauth(configs, flow, Arc::new(FixedClock(1000)))
         .with_oauth_display_names(HashMap::from([(
-            "github_oauth".to_string(),
+            "some-oauth".to_string(),
             "GitHub".to_string(),
         )]))
         .with_token_fallbacks(HashMap::from([(
-            "github_oauth".to_string(),
+            "some-oauth".to_string(),
             TokenFallback {
                 help: Some("https://example.com/pat".into()),
             },
@@ -1568,7 +1568,7 @@ mod tests {
     #[test]
     fn is_oauth_prompt_distinguishes_oauth_from_plain_pending() {
         let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.submit_pending(pending("c2", "plain"), Instant::now());
         assert!(s.is_oauth_prompt("c1"));
         assert!(
@@ -1587,13 +1587,13 @@ mod tests {
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
             )]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
-        s.submit_pending(pending("c2", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.submit_pending(pending("c2", "some-oauth"), Instant::now());
         let outcome = s.connect_oauth("c1").await;
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert_eq!(
             connected.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "accepting an oauth prompt connects the integration live"
         );
         assert_eq!(
@@ -1603,10 +1603,10 @@ mod tests {
                 .unwrap()
                 .last()
                 .unwrap()
-                .get("github_oauth"),
+                .get("some-oauth"),
             Some(&CredentialEntry::Oauth {
-                access_token: "gho_access".into(),
-                refresh_token: "ghr_refresh".into(),
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
             }),
             "the obtained token set is armed and persisted"
@@ -1624,7 +1624,7 @@ mod tests {
         drop(sign_ins);
         assert_eq!(
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "the sign-in card is dismissed once the flow resolves"
         );
     }
@@ -1633,16 +1633,16 @@ mod tests {
     async fn connect_oauth_pivots_to_a_pasted_token_arms_stored_connects_and_releases_held_requests()
      {
         let (s, n, store, mut rx, connected) = oauth_fixture(FakeFlow::polling(vec![]));
-        n.use_token_next_sign_in("ghp_pasted");
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
-        s.submit_pending(pending("c2", "github_oauth"), Instant::now());
+        n.use_token_next_sign_in("some-pasted-token");
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.submit_pending(pending("c2", "some-oauth"), Instant::now());
 
         let outcome = s.connect_oauth("c1").await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert_eq!(
             connected.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "pivoting to a token still connects the integration live"
         );
         assert_eq!(
@@ -1652,9 +1652,9 @@ mod tests {
                 .unwrap()
                 .last()
                 .unwrap()
-                .get("github_oauth"),
+                .get("some-oauth"),
             Some(&CredentialEntry::Stored {
-                value: "ghp_pasted".into(),
+                value: "some-pasted-token".into(),
             }),
             "the pasted token is armed as a Stored value in the integration's slot"
         );
@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(vec![f1.id, f2.id], vec!["c1".to_string(), "c2".to_string()]);
         assert_eq!(
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()],
+            &["some-oauth".to_string()],
             "the sign-in card is dismissed once the pivot resolves the flow"
         );
     }
@@ -1676,7 +1676,7 @@ mod tests {
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
             )]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.connect_oauth("c1").await;
         let sign_ins = n.sign_ins.lock().unwrap();
         assert_eq!(
@@ -1692,7 +1692,7 @@ mod tests {
     async fn connect_oauth_cancelled_fails_held_requests_and_dismisses_the_card() {
         let (s, n, store, mut rx, connected) = oauth_fixture(FakeFlow::polling(vec![]));
         n.cancel_next_sign_in();
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
 
         s.connect_oauth("c1").await;
 
@@ -1710,7 +1710,7 @@ mod tests {
         );
         assert_eq!(
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()]
+            &["some-oauth".to_string()]
         );
     }
 
@@ -1718,7 +1718,7 @@ mod tests {
     async fn connect_oauth_denied_fails_held_requests_without_arming_or_connecting() {
         let (s, _n, store, mut rx, connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.connect_oauth("c1").await;
         assert!(connected.lock().unwrap().is_empty());
         assert!(store.saves.lock().unwrap().is_empty());
@@ -1732,7 +1732,7 @@ mod tests {
     async fn connect_oauth_expired_fails_held_requests_without_arming() {
         let (s, _n, store, mut rx, _connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Expired]));
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.connect_oauth("c1").await;
         assert!(store.saves.lock().unwrap().is_empty());
         assert_eq!(
@@ -1744,7 +1744,7 @@ mod tests {
     #[tokio::test]
     async fn connect_oauth_surfaces_a_device_flow_error_and_fails_held_requests() {
         let (s, n, store, mut rx, _connected) = oauth_fixture(FakeFlow::code_error());
-        s.submit_pending(pending("c1", "github_oauth"), Instant::now());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.connect_oauth("c1").await;
         assert_eq!(
             decision_frame(&mut rx).decision,
@@ -1785,18 +1785,18 @@ mod tests {
                 oauth_token(3600),
             )]));
 
-        let ok = s.connect_integration_now("github_oauth").await;
+        let ok = s.connect_integration_now("some-oauth").await;
 
         assert!(ok, "a completed sign-in reports connected");
         assert_eq!(
             connected.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()]
+            &["some-oauth".to_string()]
         );
         assert_eq!(
-            s.current_state().get("github_oauth"),
+            s.current_state().get("some-oauth"),
             Some(&CredentialEntry::Oauth {
-                access_token: "gho_access".into(),
-                refresh_token: "ghr_refresh".into(),
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
             }),
             "the obtained token set is armed"
@@ -1804,7 +1804,7 @@ mod tests {
         assert_eq!(n.sign_ins.lock().unwrap().len(), 1);
         assert_eq!(
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
-            &["github_oauth".to_string()]
+            &["some-oauth".to_string()]
         );
     }
 
@@ -1813,7 +1813,7 @@ mod tests {
         let (s, _n, store, _rx, connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
 
-        let ok = s.connect_integration_now("github_oauth").await;
+        let ok = s.connect_integration_now("some-oauth").await;
 
         assert!(!ok);
         assert!(connected.lock().unwrap().is_empty());
@@ -1850,10 +1850,10 @@ mod tests {
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
             )]));
-        // A placeholder card for github_oauth is already held (the "use your GitHub access" prompt).
-        s.submit_pending(pending("cred1", "github_oauth"), Instant::now());
+        // A placeholder card for some-oauth is already held (the "use your GitHub access" prompt).
+        s.submit_pending(pending("cred1", "some-oauth"), Instant::now());
 
-        let ok = s.connect_integration_now("github_oauth").await;
+        let ok = s.connect_integration_now("some-oauth").await;
 
         assert!(ok);
         let frame = decision_frame(&mut rx);
@@ -1920,15 +1920,15 @@ mod tests {
         (session, notifier, rx)
     }
 
-    fn gh_oauth_provider() -> DefProvider {
+    fn some_oauth_provider() -> DefProvider {
         use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
         DefProvider::new(ProviderDef {
-            id: "github_oauth".into(),
-            env_var: "GH_TOKEN".into(),
-            placeholder: "gho_LNSPLACEHOLDER".into(),
+            id: "some-oauth".into(),
+            env_var: "SOME_OAUTH_TOKEN".into(),
+            placeholder: "some-oauth-placeholder".into(),
             injections: vec![InjectionDef {
                 kind: InjectionKind::TokenHeader,
-                domain: "api.github.com".into(),
+                domain: "api.some-oauth.example".into(),
                 header: None,
             }],
         })
@@ -1954,10 +1954,13 @@ mod tests {
     #[test]
     fn submit_pending_auto_allows_an_armed_credential_on_a_host_it_injects_into() {
         let (s, n, mut rx) = armed_session(
-            vec![("github_oauth", armed_oauth("gho_real"))],
-            vec![gh_oauth_provider()],
+            vec![("some-oauth", armed_oauth("some-token"))],
+            vec![some_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "GET api.github.com/"), Instant::now());
+        s.submit_pending(
+            gate("some-oauth", "GET api.some-oauth.example/"),
+            Instant::now(),
+        );
         assert!(
             n.presented.lock().unwrap().is_empty(),
             "an armed credential gated on a host it injects into is a propagation race, not a fresh consent — auto-allow without re-prompting"
@@ -1971,10 +1974,10 @@ mod tests {
     #[test]
     fn submit_pending_still_prompts_an_armed_credential_on_a_host_it_does_not_inject_into() {
         let (s, n, _rx) = armed_session(
-            vec![("github_oauth", armed_oauth("gho_real"))],
-            vec![gh_oauth_provider()],
+            vec![("some-oauth", armed_oauth("some-token"))],
+            vec![some_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "GET evil.example/"), Instant::now());
+        s.submit_pending(gate("some-oauth", "GET evil.example/"), Instant::now());
         assert_eq!(
             n.presented.lock().unwrap().len(),
             1,
@@ -2004,10 +2007,13 @@ mod tests {
     #[test]
     fn submit_pending_prompts_when_the_armed_oauth_value_is_empty() {
         let (s, n, _rx) = armed_session(
-            vec![("github_oauth", armed_oauth(""))],
-            vec![gh_oauth_provider()],
+            vec![("some-oauth", armed_oauth(""))],
+            vec![some_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "GET api.github.com/"), Instant::now());
+        s.submit_pending(
+            gate("some-oauth", "GET api.some-oauth.example/"),
+            Instant::now(),
+        );
         assert_eq!(
             n.presented.lock().unwrap().len(),
             1,
@@ -2018,10 +2024,10 @@ mod tests {
     #[test]
     fn submit_pending_prompts_when_the_action_has_no_parseable_host() {
         let (s, n, _rx) = armed_session(
-            vec![("github_oauth", armed_oauth("gho_real"))],
-            vec![gh_oauth_provider()],
+            vec![("some-oauth", armed_oauth("some-token"))],
+            vec![some_oauth_provider()],
         );
-        s.submit_pending(gate("github_oauth", "malformed"), Instant::now());
+        s.submit_pending(gate("some-oauth", "malformed"), Instant::now());
         assert_eq!(n.presented.lock().unwrap().len(), 1);
     }
 
@@ -2041,12 +2047,18 @@ mod tests {
 
     #[test]
     fn request_host_parses_method_target_forms() {
-        assert_eq!(request_host("GET api.github.com/x"), Some("api.github.com"));
         assert_eq!(
-            request_host("CONNECT api.github.com:443"),
-            Some("api.github.com")
+            request_host("GET api.some-oauth.example/x"),
+            Some("api.some-oauth.example")
         );
-        assert_eq!(request_host("POST github.com/graphql"), Some("github.com"));
+        assert_eq!(
+            request_host("CONNECT api.some-oauth.example:443"),
+            Some("api.some-oauth.example")
+        );
+        assert_eq!(
+            request_host("POST some-oauth.example/graphql"),
+            Some("some-oauth.example")
+        );
         assert_eq!(request_host("malformed"), None);
         assert_eq!(request_host("GET /onlypath"), None);
     }
@@ -2054,11 +2066,11 @@ mod tests {
     #[test]
     fn injection_targets_host_matches_header_and_uri_placeholder_domains() {
         let header = CredentialInjection::Header {
-            domain: "api.github.com".into(),
+            domain: "api.some-oauth.example".into(),
             header: "Authorization".into(),
             value: "token x".into(),
         };
-        assert!(injection_targets_host(&header, "api.github.com"));
+        assert!(injection_targets_host(&header, "api.some-oauth.example"));
         assert!(!injection_targets_host(&header, "evil.example"));
         let uri = CredentialInjection::UriPlaceholder {
             domain: "api.telegram.org".into(),

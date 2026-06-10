@@ -96,7 +96,7 @@ mod tests {
 
     fn sample_state() -> CredentialStateFile {
         let mut m = CredentialStateFile::new();
-        m.insert("github".into(), CredentialEntry::HostDetect);
+        m.insert("some-provider".into(), CredentialEntry::HostDetect);
         m.insert(
             "openai".into(),
             CredentialEntry::Stored {
@@ -312,7 +312,7 @@ mod tests {
         let store = JsonFileCredentialStore::new(path);
         store.save(&sample_state()).unwrap();
         let mut second = CredentialStateFile::new();
-        second.insert("github".into(), CredentialEntry::Deny);
+        second.insert("some-provider".into(), CredentialEntry::Deny);
         store.save(&second).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded, second);

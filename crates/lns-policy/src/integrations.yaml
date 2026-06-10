@@ -23,7 +23,7 @@ integrations:
       injections:
         - kind: bearer_header
           domain: huggingface.co
-  - id: github_oauth
+  - id: github
     name: GitHub
     authKind: oauth
     routes:

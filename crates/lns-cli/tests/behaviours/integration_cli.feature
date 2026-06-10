@@ -9,20 +9,26 @@ Feature: connecting integrations from the CLI
   credential store, never in `lns-policy.yaml`. `lns integration list`
   shows, per integration, whether it authenticates by sign-in or a value.
 
+  These scenarios use an arbitrary user-declared "some-oauth" integration, so
+  nothing here pins a shipped service.
+
+  Background:
+    Given a user catalog declares the "some-oauth" oauth integration
+
   Scenario: Connecting an oauth integration signs in and then records it
     Given the background service is available to sign in
-    When the developer runs "lns integration connect github_oauth"
+    When the developer runs "lns integration connect some-oauth"
     Then a verification URL and user code are shown
-    And "github_oauth" is recorded under integrations in lns-policy.yaml
+    And "some-oauth" is recorded under integrations in lns-policy.yaml
     And lns-policy.yaml carries no token material
 
   Scenario: Connecting an oauth integration fails clearly when the service is unavailable
     Given the background service is not available
-    When the developer runs "lns integration connect github_oauth"
+    When the developer runs "lns integration connect some-oauth"
     Then the command fails noting the service is needed to sign in
-    And "github_oauth" is not recorded in lns-policy.yaml
+    And "some-oauth" is not recorded in lns-policy.yaml
 
   Scenario: The catalog listing shows each integration's auth kind
     When the developer runs "lns integration list"
-    Then "github_oauth" is listed as authenticating by oauth
+    Then "some-oauth" is listed as authenticating by oauth
     And "gitlab" is listed as authenticating by credential
