@@ -16,6 +16,9 @@ pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 /// Supplies the registry credentials bundled into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
 pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 
+/// Maps a reloaded policy's `integrations:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
+pub type IntegrationRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send + Sync>;
+
 /// A connectable integration whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
 pub struct OfferableIntegration {
     pub id: String,
@@ -67,6 +70,7 @@ pub struct ApprovalSession {
     sink: FrameSink,
     timeout: Duration,
     credentials_provider: OnceLock<CredentialsProvider>,
+    integration_routes: OnceLock<IntegrationRouteDeriver>,
     offerable: Vec<OfferableIntegration>,
     connector: OnceLock<Arc<dyn IntegrationConnector>>,
     connecting: Mutex<HashSet<String>>,
@@ -94,6 +98,7 @@ impl ApprovalSession {
             sink,
             timeout,
             credentials_provider: OnceLock::new(),
+            integration_routes: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
@@ -109,6 +114,11 @@ impl ApprovalSession {
     /// Installs the credentials closure once at boot; idempotent, the first provider wins.
     pub fn set_credentials_provider(&self, provider: CredentialsProvider) {
         let _ = self.credentials_provider.set(provider);
+    }
+
+    /// Installs the integration-route deriver once at boot so a watcher reload re-applies a connected integration's routes instead of dropping them; idempotent, the first wins.
+    pub fn set_integration_route_deriver(&self, deriver: IntegrationRouteDeriver) {
+        let _ = self.integration_routes.set(deriver);
     }
 
     /// Installs the integration connector once the credential subsystem exists; idempotent, the first wins.
@@ -337,7 +347,13 @@ impl ApprovalSession {
         true
     }
 
-    pub fn apply_external_policy(&self, new_policy: Policy) {
+    pub fn apply_external_policy(&self, mut new_policy: Policy) {
+        if let Some(derive) = self.integration_routes.get() {
+            new_policy
+                .network
+                .allowed_routes
+                .extend(derive(&new_policy.integrations));
+        }
         *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
@@ -865,6 +881,34 @@ pub(crate) mod tests {
         let frame = rx.try_recv().expect("expected a policy frame");
         assert!(matches!(frame, HostFrame::Policy(_)));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn apply_external_policy_re_derives_a_connected_integrations_routes() {
+        let (s, _n, _store, mut rx) = fixture();
+        s.set_integration_route_deriver(Box::new(|ids| {
+            ids.iter()
+                .filter(|id| id.as_str() == "some-oauth")
+                .map(|_| RouteRule::allow_host("api.some-oauth.example"))
+                .collect()
+        }));
+        let mut reloaded = Policy::default();
+        reloaded.connect("some-oauth");
+
+        s.apply_external_policy(reloaded);
+
+        let routes = s.current_policy().network.allowed_routes;
+        assert_eq!(
+            routes.len(),
+            1,
+            "a reloaded id-only policy gets its integration route back live, not dropped"
+        );
+        assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
+        assert_eq!(
+            policy_frame(&mut rx).network.unwrap().allowed_routes[0].match_pattern,
+            "api.some-oauth.example",
+            "the hot-swap frame carries the re-derived route so the guest sees it"
+        );
     }
 
     #[test]
