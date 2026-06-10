@@ -20,8 +20,11 @@ name: Publish lns guest kernel
 # publish jobs reference it so a human approves before the contents:write
 # token or the CDN-write secrets are released to a run. WARNING: if the
 # environment does not exist, GitHub auto-creates it UNPROTECTED and the
-# gate is a no-op — the back-fill job's base-ref build is the fail-safe
-# that holds regardless (it never runs PR-authored code with the token).
+# gate is a no-op. The base-ref build is the fail-safe for PR-authored Rust
+# (build.rs / proc-macros / bump-kernel source), but NOT for a PR that
+# rewrites this workflow file — on pull_request the head's YAML runs, so
+# only the required-reviewer gate stops a malicious back-fill step.
+# Configure the environment; it is not optional.
 
 on:
   pull_request:
@@ -173,7 +176,7 @@ jobs:
             exit 0
           fi
           ARTIFACT="lns-kernel-${PV}-${{ matrix.arch }}"
-          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -I -L "https://get.lns.run/${ARTIFACT}")
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -I -L "https://get.lns.run/${ARTIFACT}" || echo 000)
           if [ "$STATUS" = "200" ]; then
             echo "::error::https://get.lns.run/${ARTIFACT} already exists."
             echo "::error::Pick a new published_version in kernels.toml, or follow the emergency-overwrite procedure in runbooks/kernel-bump.md."
@@ -308,8 +311,9 @@ jobs:
     needs: [detect-bump, compute]
     runs-on: ubuntu-latest
     # Option A: required-reviewer gate before the contents:write token is
-    # released to this PR-time job. See the header note — an unconfigured
-    # environment is a no-op, so the base-ref build below is the fail-safe.
+    # released to this PR-time job. An unconfigured environment is a no-op;
+    # the base-ref build below is the fail-safe for PR-authored code, and
+    # this gate is what covers a workflow-YAML rewrite (see the header).
     environment: kernel-publish
     permissions:
       contents: write
