@@ -37,7 +37,7 @@ Feature: volume lifecycle — list, create, inspect, remove, prune
     Given volume "prism-data" already exists in the store
     When volume "prism-data" is inspected
     Then the inspection reports "prism-data" as idle
-    And the inspection reports the volume's size
+    And the inspection reports the volume's size and disk usage
 
   Scenario: Inspecting a volume held by a live run names the holder
     Given a live run holds volume "prism-data"

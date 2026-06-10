@@ -33,9 +33,11 @@ impl Fs for RealFs {
     }
 
     async fn metadata(&self, p: &Path) -> io::Result<FileMeta> {
+        use std::os::unix::fs::MetadataExt;
         let md = tokio::fs::metadata(p).await?;
         Ok(FileMeta {
             size_bytes: md.len(),
+            allocated_bytes: md.blocks() * 512,
             created_unix_secs: unix_secs(md.created()),
         })
     }

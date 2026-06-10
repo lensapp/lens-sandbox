@@ -88,10 +88,11 @@ async fn inspection_in_use(w: &mut BehaviourWorld, name: String) {
     assert_eq!(inspected(rig, &name).in_use_by, Some(holder));
 }
 
-#[then(expr = "the inspection reports the volume's size")]
+#[then(expr = "the inspection reports the volume's size and disk usage")]
 async fn inspection_size(w: &mut BehaviourWorld) {
     let info = w.volume().last_inspect.clone().expect("an inspection");
     assert_eq!(info.size_bytes, VOLUME_DEFAULT_SIZE_BYTES);
+    assert_eq!(info.disk_bytes, crate::volume_rig::FAKE_ALLOCATED_BYTES);
 }
 
 #[then(expr = "the request is refused because there is no such volume")]
@@ -140,7 +141,7 @@ async fn prune_reports_reclaimed(w: &mut BehaviourWorld) {
     let report = w.volume().last_prune.clone().expect("a prune report");
     assert_eq!(
         report.reclaimed_bytes,
-        report.removed.len() as u64 * VOLUME_DEFAULT_SIZE_BYTES
+        report.removed.len() as u64 * crate::volume_rig::FAKE_ALLOCATED_BYTES
     );
 }
 

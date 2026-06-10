@@ -92,6 +92,7 @@ pub enum Response {
 pub struct VolumeInfo {
     pub name: String,
     pub size_bytes: u64,
+    pub disk_bytes: u64,
     pub created: String,
     pub in_use_by: Option<u32>,
 }
@@ -408,7 +409,8 @@ mod tests {
     fn volume_responses_survive_round_trips() {
         let info = VolumeInfo {
             name: "prism-data".into(),
-            size_bytes: 32 * 1024 * 1024,
+            size_bytes: 10 * 1024 * 1024 * 1024,
+            disk_bytes: 32 * 1024 * 1024,
             created: "2026-06-10T12:00:00Z".into(),
             in_use_by: Some(7),
         };
@@ -440,13 +442,15 @@ mod tests {
     fn volume_info_serializes_idle_holder_as_null() {
         let info = VolumeInfo {
             name: "prism-data".into(),
-            size_bytes: 1024,
+            size_bytes: 4096,
+            disk_bytes: 1024,
             created: "2026-06-10T12:00:00Z".into(),
             in_use_by: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["in_use_by"], serde_json::Value::Null);
         assert_eq!(json["name"], "prism-data");
+        assert_eq!(json["disk_bytes"], 1024);
     }
 
     #[test]

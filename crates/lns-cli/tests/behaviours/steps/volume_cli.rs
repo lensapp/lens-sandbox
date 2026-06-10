@@ -10,11 +10,13 @@ use lns_cli::volume::{self, VolumeService};
 use lns_ipc::{Request, Response, VolumeInfo};
 
 const FIXTURE_CREATED: &str = "2026-06-01T12:00:00Z";
+const FIXTURE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-fn fixture_volume(name: &str, size_bytes: u64, in_use_by: Option<u32>) -> VolumeInfo {
+fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Option<u32>) -> VolumeInfo {
     VolumeInfo {
         name: name.to_string(),
-        size_bytes,
+        size_bytes: FIXTURE_SIZE_BYTES,
+        disk_bytes,
         created: FIXTURE_CREATED.to_string(),
         in_use_by,
     }
@@ -85,17 +87,17 @@ impl VolumeService for FakeVolumeService {
     }
 }
 
-#[given(expr = "the service reports a volume {string} of {int} bytes held by run {int}")]
-fn reports_held_volume(world: &mut BehaviourWorld, name: String, size: u64, run: u32) {
+#[given(expr = "the service reports a volume {string} using {int} bytes on disk held by run {int}")]
+fn reports_held_volume(world: &mut BehaviourWorld, name: String, disk: u64, run: u32) {
     world
         .volume
         .volumes
-        .push(fixture_volume(&name, size, Some(run)));
+        .push(fixture_volume(&name, disk, Some(run)));
 }
 
-#[given(expr = "the service reports an idle volume {string} of {int} bytes")]
-fn reports_idle_volume(world: &mut BehaviourWorld, name: String, size: u64) {
-    world.volume.volumes.push(fixture_volume(&name, size, None));
+#[given(expr = "the service reports an idle volume {string} using {int} bytes on disk")]
+fn reports_idle_volume(world: &mut BehaviourWorld, name: String, disk: u64) {
+    world.volume.volumes.push(fixture_volume(&name, disk, None));
 }
 
 #[given(expr = "the service refuses with {string}")]
@@ -160,13 +162,14 @@ async fn run_volume(world: &mut BehaviourWorld, tail: String) {
     world.result = Some(run);
 }
 
-#[then(expr = "the output is JSON describing the idle volume {string} of {int} bytes")]
-fn output_is_volume_json(world: &mut BehaviourWorld, name: String, size: u64) {
+#[then(expr = "the output is JSON describing the idle volume {string} using {int} bytes on disk")]
+fn output_is_volume_json(world: &mut BehaviourWorld, name: String, disk: u64) {
     let output = &world.result.as_ref().expect("a CLI run").output;
     let parsed: serde_json::Value =
         serde_json::from_str(output).unwrap_or_else(|e| panic!("not JSON ({e}): {output:?}"));
     assert_eq!(parsed["name"], serde_json::Value::String(name));
-    assert_eq!(parsed["size_bytes"], serde_json::json!(size));
+    assert_eq!(parsed["size_bytes"], serde_json::json!(FIXTURE_SIZE_BYTES));
+    assert_eq!(parsed["disk_bytes"], serde_json::json!(disk));
     assert_eq!(parsed["in_use_by"], serde_json::Value::Null);
 }
 
