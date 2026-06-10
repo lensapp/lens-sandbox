@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::log;
 use crate::oci_layer_cache::LayerCache;
 
-mod manifest_cache;
+pub(crate) mod manifest_cache;
 mod real;
 pub use real::pull;
 
@@ -99,9 +99,7 @@ pub(crate) fn enforce_manifest_doc_size(
 
 #[derive(Debug)]
 pub struct PulledImage {
-    #[allow(dead_code)]
     pub reference: Reference,
-    #[allow(dead_code)]
     pub digest: String,
     pub layers: Vec<oci_client::client::ImageLayer>,
     pub config: oci_client::config::ConfigFile,

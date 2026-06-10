@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::approval_rig::ApprovalRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
+use crate::image_rig::ImageRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -34,6 +35,8 @@ pub struct BehaviourWorld {
     pub forward_error: Option<String>,
 
     pub volume: Option<VolumeRig>,
+
+    pub image: Option<ImageRig>,
 }
 
 impl BehaviourWorld {
@@ -66,5 +69,12 @@ impl BehaviourWorld {
             self.volume = Some(VolumeRig::new());
         }
         self.volume.as_mut().expect("volume rig must exist")
+    }
+
+    pub fn image(&mut self) -> &mut ImageRig {
+        if self.image.is_none() {
+            self.image = Some(ImageRig::new());
+        }
+        self.image.as_mut().expect("image rig must exist")
     }
 }
