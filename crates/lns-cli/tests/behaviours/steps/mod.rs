@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod config_cli;
 pub mod integration_cli;
 pub mod policy_cli;
 pub mod publish;
