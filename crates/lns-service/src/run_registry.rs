@@ -29,6 +29,7 @@ pub struct RunHandle {
     pub command: String,
     pub started: String,
     pub status: std::sync::Mutex<RunStatus>,
+    pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
 }
 
 pub fn allocate_run_id() -> u32 {
@@ -69,6 +70,13 @@ pub fn input_sender(run_id: u32) -> Option<mpsc::Sender<SessionInput>> {
     g.as_ref()
         .and_then(|m| m.get(&run_id))
         .and_then(|h| h.input_tx.clone())
+}
+
+pub fn log_buffer(run_id: u32) -> Option<std::sync::Arc<crate::run_log::RunLogBuffer>> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(&run_id))
+        .map(|h| h.logs.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -152,6 +160,7 @@ mod tests {
                 command: String::new(),
                 started: String::new(),
                 status: std::sync::Mutex::new(RunStatus::Running),
+                logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             },
             cancel_rx,
         )
@@ -337,6 +346,27 @@ mod tests {
     #[test]
     fn snapshot_from_none_returns_empty_vec() {
         assert!(snapshot_from(None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_buffer_returns_the_registered_runs_buffer() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        handle
+            .logs
+            .append(crate::run_log::StreamKind::Stdout, b"hello");
+        register(id, handle);
+
+        let buf = log_buffer(id).expect("registered run must expose its log buffer");
+        assert_eq!(buf.read_from(0).chunks[0].bytes, b"hello");
+
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn log_buffer_returns_none_for_unknown_run() {
+        let id = allocate_run_id() + 4_000_000;
+        assert!(log_buffer(id).is_none());
     }
 
     #[tokio::test]

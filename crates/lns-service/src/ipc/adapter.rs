@@ -240,7 +240,13 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     let command_label = args.cmd.join(" ");
     let started_label = rfc3339_now();
 
-    let task_frame_tx = frame_tx.clone();
+    let logs = Arc::new(crate::run_log::RunLogBuffer::default());
+    let (task_frame_tx, tee_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
+    tokio::spawn(crate::run_log::tee_frames(
+        tee_rx,
+        logs.clone(),
+        frame_tx.clone(),
+    ));
     let run_args = args;
     let run_task = tokio::spawn(async move {
         #[cfg(target_os = "macos")]
@@ -266,6 +272,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             command: command_label,
             started: started_label,
             status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+            logs,
         },
     );
 
