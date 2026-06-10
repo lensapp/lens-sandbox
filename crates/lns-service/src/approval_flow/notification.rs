@@ -73,6 +73,7 @@ pub(crate) mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
+            offer: None,
         }
     }
 
@@ -159,8 +160,10 @@ pub(crate) mod tests {
         let got = rx.try_recv().expect("delivery");
         assert_eq!(got.id, "r1");
         assert_eq!(
-            got.decision,
-            crate::approval_flow::protocol::Decision::AllowOnce
+            got.action,
+            crate::approval_flow::window::RequestAction::Decide(
+                crate::approval_flow::protocol::Decision::AllowOnce
+            )
         );
     }
 

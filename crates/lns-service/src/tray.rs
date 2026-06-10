@@ -190,6 +190,14 @@ impl eframe::App for TrayApp {
                 self.window_state.cancel_sign_in(&credential_id);
                 ui.ctx().request_repaint();
             }
+            Some(CardAction::ConnectOffer { id }) => {
+                self.window_state.connect_offer(&id);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::DeclineOffer { id }) => {
+                self.window_state.decline_offer(&id);
+                ui.ctx().request_repaint();
+            }
             None => {}
         }
     }
@@ -215,6 +223,12 @@ enum CardAction {
     },
     CancelSignIn {
         credential_id: String,
+    },
+    ConnectOffer {
+        id: String,
+    },
+    DeclineOffer {
+        id: String,
     },
 }
 
@@ -245,6 +259,10 @@ fn render_card(
             }
             // Network cards take precedence over credential cards when both are pending (S8).
             if let Some(prompt) = snapshot.pending.first() {
+                // An integration domain offers a connect before the bare allow/deny; declining falls back to the network card.
+                if let Some(display_name) = &prompt.offer {
+                    return render_offer_card(ui, prompt, display_name, snapshot.pending.len());
+                }
                 return render_network_card(ui, prompt, snapshot.pending.len());
             }
             // An in-flight device sign-in is the live action the user must finish next.
@@ -343,6 +361,50 @@ fn render_network_card(
     });
 
     chosen.map(|decision| CardAction::Decide { id, decision })
+}
+
+fn render_offer_card(
+    ui: &mut egui::Ui,
+    prompt: &PendingPrompt,
+    display_name: &str,
+    pending_count: usize,
+) -> Option<CardAction> {
+    use egui::RichText;
+
+    let id = prompt.id.clone();
+
+    render_card_header(ui, "CONNECT", pending_count);
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!("Connect to {display_name}?"))
+            .size(22.0)
+            .strong()
+            .color(window::TEXT_ACCENT),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(format!("A workload wants to reach {}.", prompt.host))
+            .size(12.0)
+            .color(window::TEXT_MUTED),
+    );
+
+    ui.add_space(18.0);
+    ui.add(egui::Separator::default().spacing(0.0));
+    ui.add_space(16.0);
+
+    let mut action: Option<CardAction> = None;
+    ui.horizontal(|ui| {
+        if primary_button(ui, &format!("Connect {display_name}")).clicked() {
+            action = Some(CardAction::ConnectOffer { id: id.clone() });
+        }
+        ui.add_space(BTN_GAP);
+        if deny_button(ui, "Not now").clicked() {
+            action = Some(CardAction::DeclineOffer { id });
+        }
+    });
+
+    action
 }
 
 fn render_credential_card(
