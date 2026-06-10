@@ -8,8 +8,8 @@ use lns_ipc::{
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::cli::{
-    SandboxAttachArgs, SandboxCommand, SandboxInspectArgs, SandboxLogsArgs, SandboxStatsArgs,
-    SandboxStopArgs,
+    KillArgs, SandboxAttachArgs, SandboxCommand, SandboxInspectArgs, SandboxLogsArgs,
+    SandboxStatsArgs, SandboxStopArgs,
 };
 use crate::service::client::BoxFuture;
 
@@ -44,11 +44,49 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
+        SandboxCommand::Ls => ls(svc, out).await,
+        SandboxCommand::Kill(args) => kill(svc, args, out).await,
+        SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
         SandboxCommand::Inspect(args) => inspect(svc, args, out).await,
         SandboxCommand::Stats(args) => stats(svc, args, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
+    }
+}
+
+async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+    let response = svc.one_shot(Request::ListRuns).await?;
+    match response {
+        Response::RunList { mut runs } => {
+            runs.sort_by(|a, b| b.started.cmp(&a.started));
+            crate::service::render_ls_table(out, &runs)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn kill<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &KillArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let signal = crate::service::parse_signal_name(&args.signal)?;
+    let response = svc
+        .one_shot(Request::Kill {
+            run_id: args.run_id,
+            signal,
+        })
+        .await?;
+    match response {
+        Response::Acknowledged => {
+            writeln!(out, "killed run #{}", args.run_id)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
 
@@ -118,25 +156,41 @@ fn render_inspect<W: std::io::Write>(
     policy: Option<serde_json::Value>,
     out: &mut W,
 ) -> Result<()> {
-    let doc = serde_json::json!({
-        "id": details.summary.id,
-        "image": details.summary.image,
-        "command": details.summary.command,
-        "status": details.summary.status,
-        "started": details.summary.started,
-        "config": {
-            "cpus": details.config.cpus,
-            "memMib": details.config.mem_mib,
-            "env": details.config.env,
-            "publishedPorts": details.config.published_ports,
-            "volumes": details.config.volumes,
-            "sandboxUser": details.config.sandbox_user,
-            "sandboxUid": details.config.sandbox_uid,
-            "detached": details.config.detached,
-        },
-        "policy": policy,
-    });
-    writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+    let mut config = serde_json::Map::new();
+    config.insert("cpus".into(), details.config.cpus.into());
+    config.insert("memMib".into(), details.config.mem_mib.into());
+    config.insert("env".into(), serde_json::to_value(&details.config.env)?);
+    config.insert(
+        "publishedPorts".into(),
+        serde_json::to_value(&details.config.published_ports)?,
+    );
+    config.insert(
+        "volumes".into(),
+        serde_json::to_value(&details.config.volumes)?,
+    );
+    config.insert(
+        "sandboxUser".into(),
+        serde_json::to_value(&details.config.sandbox_user)?,
+    );
+    config.insert(
+        "sandboxUid".into(),
+        serde_json::to_value(details.config.sandbox_uid)?,
+    );
+    config.insert("detached".into(), details.config.detached.into());
+
+    let mut doc = serde_json::Map::new();
+    doc.insert("id".into(), details.summary.id.into());
+    doc.insert("image".into(), details.summary.image.clone().into());
+    doc.insert("command".into(), details.summary.command.clone().into());
+    doc.insert(
+        "status".into(),
+        serde_json::to_value(details.summary.status)?,
+    );
+    doc.insert("started".into(), details.summary.started.clone().into());
+    doc.insert("config".into(), config.into());
+    doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
+    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(doc))?;
+    writeln!(out, "{rendered}")?;
     Ok(())
 }
 
@@ -340,6 +394,86 @@ mod tests {
             run_id,
             timeout: 10,
         }
+    }
+
+    #[tokio::test]
+    async fn run_with_writers_refuses_the_interactive_exec_verb() {
+        let svc = CannedService::new(Response::Pong);
+        let cmd = SandboxCommand::Exec(crate::cli::ExecArgs {
+            run_id: 1,
+            interactive: false,
+            tty: false,
+            detach_keys: crate::cli::DetachChord(Vec::new()),
+            cmd: vec!["echo".into()],
+        });
+        let mut out = Vec::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("interactive"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn ls_surfaces_a_daemon_error() {
+        let svc = CannedService::new(Response::Error {
+            message: "registry poisoned".into(),
+        });
+        let mut out = Vec::new();
+        let err = ls(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+    }
+
+    #[tokio::test]
+    async fn ls_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = ls(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn kill_surfaces_a_daemon_error() {
+        let svc = CannedService::new(Response::Error {
+            message: "no active session for run 1".into(),
+        });
+        let mut out = Vec::new();
+        let err = kill(
+            &svc,
+            &crate::cli::KillArgs {
+                run_id: 1,
+                signal: "TERM".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no active session"));
+    }
+
+    #[tokio::test]
+    async fn kill_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = kill(
+            &svc,
+            &crate::cli::KillArgs {
+                run_id: 1,
+                signal: "TERM".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 # Running workloads
 
-Everything that runs inside a sandbox goes through `lns run`. Once a run is up you
-can open extra sessions into it with `lns exec`, list active runs with `lns ls`,
-and signal them with `lns kill`. The model is deliberately close to `docker`.
+Everything that runs inside a sandbox goes through `lns run`. Once a run is up,
+the `lns sandbox` family manages it: list runs, open extra sessions, read logs,
+and stop them. The model is deliberately close to `docker`.
 
 The background service must be running first (`lns service start`).
 
@@ -113,7 +113,7 @@ lns run -d ghcr.io/acme/long-job
 # prints: run #7
 ```
 
-A detached run is reachable later via `lns exec`, `lns ls`, `lns kill`, and the
+A detached run is reachable later via the
 [`lns sandbox` lifecycle verbs](#lns-sandbox--managing-runs-youve-started).
 `-d` cannot be combined with `-i`/`-t`.
 
@@ -128,50 +128,14 @@ lns run --detach-keys ctrl-x,ctrl-x ghcr.io/acme/agent
 
 The value is a comma-separated chord of single characters or `ctrl-X` tokens.
 
-## `lns exec`
-
-Open another session inside a running run, like `docker exec`:
-
-```bash
-lns exec 7 -- bash
-```
-
-The first argument is the run id (shown by `lns run -d` and `lns ls`). `-i`, `-t`,
-and `--detach-keys` work as they do for `lns run`. Detaching from an exec session
-closes only that session — the run and any other sessions keep going.
-
-This is also how you open a debugging shell alongside a misbehaving workload
-without disturbing it.
-
-## `lns ls`
-
-List active runs:
-
-```bash
-lns ls
-```
-
-## `lns kill`
-
-Send a signal to a run (default `SIGTERM`), like `docker kill`:
-
-```bash
-lns kill 7                 # SIGTERM
-lns kill 7 --signal KILL   # SIGKILL
-```
-
-Signal names are case-insensitive and may be bare or `SIG`-prefixed. Supported
-signals: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`.
-
-For a graceful shutdown that waits and escalates for you, prefer
-`lns sandbox stop`.
-
 ## `lns sandbox` — managing runs you've started
 
-The `lns sandbox` family extends `ls`/`exec`/`kill` with the rest of the
-lifecycle:
+Everything you do to a run after starting it lives under `lns sandbox`:
 
 ```bash
+lns sandbox ls                 # list active runs
+lns sandbox exec 7 -- bash     # open another session inside a run
+lns sandbox kill 7             # send one signal (default SIGTERM)
 lns sandbox stop 7             # SIGTERM, wait up to 10s, then SIGKILL
 lns sandbox stop 7 -t 30       # give it longer to clean up
 lns sandbox logs 7             # print the captured output so far
@@ -181,19 +145,33 @@ lns sandbox inspect 7          # state + launch config as JSON
 lns sandbox stats 7            # CPU share and memory, sampled over 1s
 ```
 
+The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
+as hidden aliases.
+
+### Exec — another session inside a run
+
+`lns sandbox exec 7 -- bash` opens a second session, like `docker exec`. The
+run id is shown by `lns run -d` and `lns sandbox ls`. `-i`, `-t`, and
+`--detach-keys` work as they do for `lns run`; detaching from an exec session
+closes only that session — the run and any other sessions keep going. This is
+also how you open a debugging shell alongside a misbehaving workload without
+disturbing it.
+
 ### Stopping vs killing
 
-`lns kill` sends one signal and returns. `lns sandbox stop` owns the whole
-shutdown: it sends `SIGTERM`, waits up to the timeout for the workload to exit,
-and only then sends `SIGKILL`. The command reports which of the two happened —
-`stopped run #7` for a graceful exit, `killed run #7` when it had to escalate.
+`lns sandbox kill` sends one signal (case-insensitive, bare or
+`SIG`-prefixed: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and returns.
+`lns sandbox stop` owns the whole shutdown: it sends `SIGTERM`, waits up to
+the timeout for the workload to exit, and only then sends `SIGKILL`. The
+command reports which of the two happened — `stopped run #7` for a graceful
+exit, `killed run #7` when it had to escalate.
 
 ### Logs
 
 The service keeps a rolling capture of every run's stdout and stderr — the most
-recent 2 MiB — for as long as the run is listed by `lns ls`. `lns sandbox logs`
+recent 2 MiB — for as long as the run is listed by `lns sandbox ls`. `lns sandbox logs`
 prints what's buffered; `-f` streams new output until the run exits. Output of
-`lns exec` sessions is not captured, only the run's primary session.
+exec sessions is not captured, only the run's primary session.
 
 ### Attaching
 

@@ -44,7 +44,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
         }
         Command::Sandbox(args) => {
             service::require_running().await;
-            sandbox::real::dispatch(&args).await?
+            sandbox::real::dispatch(args).await?
         }
         Command::Audit(args) => audit::run_verify(args)?,
         Command::Service(args) => {

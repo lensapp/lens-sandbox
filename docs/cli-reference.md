@@ -42,46 +42,14 @@ run, which requires a `COMMAND` after `--`.
 
 See [Running workloads](running-workloads.md).
 
-## `lns exec`
-
-Open a new session against a running run (`docker exec`-style).
-
-```bash
-lns exec [OPTIONS] <RUN_ID> -- <COMMAND...>
-```
-
-| Option                  | Default         | Meaning                                                       |
-| ----------------------- | --------------- | ------------------------------------------------------------- |
-| `-i`, `--interactive`   | `true`          | Keep stdin open.                                              |
-| `-t`, `--tty`           | `true`          | Allocate a PTY for the session.                               |
-| `--detach-keys <CHORD>` | `ctrl-p,ctrl-q` | Detach chord; closes only this session, leaving the run alive.|
-| `-- <COMMAND...>`       |                 | Command to run. Required. Everything after `--`.              |
-
-## `lns kill`
-
-Send a signal to a running run (`docker kill`-style).
-
-```bash
-lns kill <RUN_ID> [--signal <SIG>]
-```
-
-| Option            | Default | Meaning                                                                 |
-| ----------------- | ------- | ----------------------------------------------------------------------- |
-| `--signal <SIG>`  | `TERM`  | Signal name, bare or `SIG`-prefixed, case-insensitive. Supported: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`. |
-
-## `lns ls`
-
-List active runs (`docker ps`-style).
-
-```bash
-lns ls
-```
-
 ## `lns sandbox`
 
-Manage running sandboxes: stop, logs, attach, inspect, stats.
+Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats.
 
 ```bash
+lns sandbox ls
+lns sandbox exec [OPTIONS] <RUN_ID> -- <COMMAND...>
+lns sandbox kill <RUN_ID> [--signal <SIG>]
 lns sandbox stop <RUN_ID> [-t <SECONDS>]
 lns sandbox logs [-f] <RUN_ID>
 lns sandbox attach <RUN_ID> [--detach-keys <CHORD>]
@@ -91,11 +59,17 @@ lns sandbox stats <RUN_ID>
 
 | Subcommand | Meaning |
 | ---------- | ------- |
+| `ls`       | List active runs (`docker ps`-style). |
+| `exec`     | Open a new session against a running run (`docker exec`-style). `-i`/`-t` and `--detach-keys` work as for `lns run`; detaching closes only the exec session. |
+| `kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
-| `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, and only while the run is listed by `lns ls`. |
+| `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, and only while the run is listed by `lns sandbox ls`. |
 | `attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) behaves exactly like `lns run`'s. Stdin reaches the workload only if the run was started with stdin open. |
 | `inspect`  | Print the run's state and launch configuration as JSON, with the policy file's parsed contents embedded when it is readable. |
 | `stats`    | Sample the sandbox's CPU share and memory over one second, via the guest's `/proc`. |
+
+The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
+as hidden aliases; the `lns sandbox` forms are the documented ones.
 
 ## `lns audit`
 

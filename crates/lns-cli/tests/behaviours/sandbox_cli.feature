@@ -6,11 +6,49 @@ Feature: managing running sandboxes from the CLI
   Scenario: the sandbox family lists its verbs in help
     When I run "lns sandbox --help"
     Then the exit code is 0
+    And the output contains "ls"
+    And the output contains "exec"
+    And the output contains "kill"
     And the output contains "stop"
     And the output contains "logs"
     And the output contains "attach"
     And the output contains "inspect"
     And the output contains "stats"
+
+  Scenario: the flat ls, exec, and kill verbs stay usable but leave the front page
+    When I run "lns --help"
+    Then the exit code is 0
+    And the output does not contain "docker ps"
+    And the output does not contain "docker exec"
+    And the output does not contain "docker kill"
+    When I run "lns ls"
+    Then the exit code is 0
+    When I run "lns kill 3"
+    Then the exit code is 0
+    When I run "lns exec 3 -- echo hi"
+    Then the exit code is 0
+
+  Scenario: sandbox ls renders the runs table
+    Given the service reports a run listing with run 3 of image "some-image" running
+    When the user runs sandbox command "ls"
+    Then the exit code is 0
+    And the output contains "ID"
+    And the output contains "some-image"
+    And the output contains "running"
+    And the service received a ListRuns request
+
+  Scenario: sandbox kill sends the requested signal
+    Given the service will answer Acknowledged
+    When the user runs sandbox command "kill 3 --signal KILL"
+    Then the exit code is 0
+    And the output contains "killed run #3"
+    And the service received a Kill request for run 3 with signal KILL
+
+  Scenario: sandbox kill rejects an unknown signal name
+    Given the service will answer Acknowledged
+    When the user runs sandbox command "kill 3 --signal NOPE"
+    Then the command fails with an exit code other than 0
+    And the output contains "unknown signal"
 
   Scenario: stopping a run reports a graceful stop
     Given the service will answer RunStopped without force
