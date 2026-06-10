@@ -15,10 +15,18 @@ pub use traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenS
 /// RFC 8628 §3.5: a `slow_down` response bumps the poll interval by 5 seconds.
 const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
 
-/// The terminal result of driving a device sign-in to completion.
+/// What the user did on the in-flight sign-in card: abandon it, or pivot to a pasted token instead of finishing the browser dance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignInPivot {
+    Cancel,
+    UseToken(String),
+}
+
+/// The terminal result of driving a device sign-in to completion; `Token` is the user pivoting to a pasted fallback token mid-flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignIn {
     Completed(TokenSet),
+    Token(String),
     Denied,
     Expired,
     Cancelled,
@@ -39,7 +47,7 @@ pub async fn run_device_flow(
     flow: &dyn DeviceFlow,
     cfg: &OauthConfig,
     present: impl FnOnce(&DeviceCode),
-    cancel: impl std::future::Future<Output = ()>,
+    cancel: impl std::future::Future<Output = SignInPivot>,
 ) -> Result<SignIn> {
     let code = flow.request_device_code(cfg).await?;
     present(&code);
@@ -48,7 +56,10 @@ pub async fn run_device_flow(
     loop {
         tokio::select! {
             biased;
-            _ = &mut cancel => return Ok(SignIn::Cancelled),
+            pivot = &mut cancel => return Ok(match pivot {
+                SignInPivot::Cancel => SignIn::Cancelled,
+                SignInPivot::UseToken(value) => SignIn::Token(value),
+            }),
             outcome = sleep_then_poll(flow, cfg, &code.device_code, interval) => {
                 match outcome? {
                     PollOutcome::Pending => {}
@@ -254,7 +265,7 @@ mod tests {
                     .unwrap()
                     .push((c.user_code.clone(), c.verification_uri.clone()));
             },
-            std::future::pending::<()>(),
+            std::future::pending::<SignInPivot>(),
         )
         .await
         .unwrap();
@@ -273,9 +284,14 @@ mod tests {
     async fn a_slow_down_response_keeps_polling_to_completion() {
         let flow =
             FakeDeviceFlow::polling(vec![PollOutcome::SlowDown, PollOutcome::Token(token(60))]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
-            .await
-            .unwrap();
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |_| {},
+            std::future::pending::<SignInPivot>(),
+        )
+        .await
+        .unwrap();
         assert_eq!(out, SignIn::Completed(token(60)));
         assert!(
             flow.polls.lock().unwrap().is_empty(),
@@ -286,31 +302,68 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_denied_grant_resolves_to_denied() {
         let flow = FakeDeviceFlow::polling(vec![PollOutcome::Denied]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
-            .await
-            .unwrap();
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |_| {},
+            std::future::pending::<SignInPivot>(),
+        )
+        .await
+        .unwrap();
         assert_eq!(out, SignIn::Denied);
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_expired_device_code_resolves_to_expired() {
         let flow = FakeDeviceFlow::polling(vec![PollOutcome::Pending, PollOutcome::Expired]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::pending::<()>())
-            .await
-            .unwrap();
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |_| {},
+            std::future::pending::<SignInPivot>(),
+        )
+        .await
+        .unwrap();
         assert_eq!(out, SignIn::Expired);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_cancel_signal_aborts_before_any_token_poll() {
         let flow = FakeDeviceFlow::polling(vec![]);
-        let out = run_device_flow(&flow, &sample_cfg(), |_| {}, std::future::ready(()))
-            .await
-            .unwrap();
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |_| {},
+            std::future::ready(SignInPivot::Cancel),
+        )
+        .await
+        .unwrap();
         assert_eq!(out, SignIn::Cancelled);
         assert!(
             flow.polls.lock().unwrap().is_empty(),
             "cancel must abort before consuming a poll"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_token_pivot_resolves_the_flow_to_token_without_polling() {
+        let flow = FakeDeviceFlow::polling(vec![]);
+        let out = run_device_flow(
+            &flow,
+            &sample_cfg(),
+            |_| {},
+            std::future::ready(SignInPivot::UseToken("ghp_pasted".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out,
+            SignIn::Token("ghp_pasted".into()),
+            "pasting a token mid-flow resolves the device flow with the token, not by polling"
+        );
+        assert!(
+            flow.polls.lock().unwrap().is_empty(),
+            "the pivot must short-circuit before consuming a poll"
         );
     }
 

@@ -43,3 +43,5 @@ integrations:
           domain: api.github.com
         - kind: basic_x_access_token
           domain: github.com
+    tokenFallback:
+      help: https://github.com/settings/personal-access-tokens/new

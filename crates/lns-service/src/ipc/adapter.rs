@@ -113,7 +113,7 @@ async fn handle_connection(
 /// Drives an oauth integration's device sign-in host-side, streaming the verification prompt to the client and persisting the obtained token set for the next run to arm.
 async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
     use crate::oauth::{
-        DeviceCode, OauthConfig, RealClock, RealDeviceFlow, SignIn, run_device_flow,
+        DeviceCode, OauthConfig, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
     };
 
     let user = lns_policy::integrations::Catalog::load_or_default(
@@ -141,7 +141,7 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
         move |code: &DeviceCode| {
             let _ = code_tx.send(code.clone());
         },
-        std::future::pending::<()>(),
+        std::future::pending::<SignInPivot>(),
     );
     tokio::pin!(flow);
     let outcome = loop {
@@ -174,6 +174,10 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
         },
         Ok(SignIn::Cancelled) => Response::OauthSignInFailed {
             reason: "the sign-in was cancelled".into(),
+        },
+        // This CLI-driven path streams only the browser dance; it offers no token-paste surface, so a pivot can't arise here.
+        Ok(SignIn::Token(_)) => Response::OauthSignInFailed {
+            reason: "token fallback is not available over this sign-in path".into(),
         },
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),
