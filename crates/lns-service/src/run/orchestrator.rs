@@ -205,6 +205,10 @@ async fn orchestrate(
             .initial_winsize
             .map(|(rows, cols)| lns_session::Winsize { rows, cols });
         let argv = build_workload_argv(image.config.as_ref(), &args.cmd, session.is_some());
+        let workdir = crate::workload_cwd::resolve(
+            args.workdir.as_deref(),
+            crate::workload_cwd::image_workdir(image.config.as_ref()).as_deref(),
+        );
         let composed = exec_env_strings(
             image.config.as_ref(),
             &args.cmd,
@@ -214,6 +218,7 @@ async fn orchestrate(
                 .as_ref()
                 .map(|s| s.managed_env_vars.as_slice())
                 .unwrap_or(&[]),
+            workdir.as_deref(),
         );
         for refused in &composed.refused {
             let _ = frame_tx
@@ -229,6 +234,7 @@ async fn orchestrate(
         let params = vm::session_client::SessionParams {
             argv,
             env,
+            cwd: workdir,
             tty: args.tty,
             stdin: args.stdin,
             initial_winsize,

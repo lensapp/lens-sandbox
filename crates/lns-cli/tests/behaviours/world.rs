@@ -25,6 +25,7 @@ pub struct BehaviourWorld {
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
     pub image: ImageCliRig,
+    pub merged_env: Option<Result<Vec<String>, String>>,
 }
 
 #[derive(Debug, Default)]

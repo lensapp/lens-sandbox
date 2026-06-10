@@ -26,7 +26,8 @@ pub async fn run(cli: Cli) -> Result<i32> {
         let _ = update_check::real::run_announce();
     }
     let code = match cli.command {
-        Command::Run(args) => {
+        Command::Run(mut args) => {
+            args.env = run::env_file::merged_run_env(&args.env_file, &args.env)?;
             let config_path = config::default_config_path()?;
             let defaults = config::load_run_defaults(&config_path)?;
             let args = config::apply_run_defaults(args, defaults);

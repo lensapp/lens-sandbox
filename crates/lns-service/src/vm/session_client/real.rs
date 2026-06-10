@@ -47,6 +47,7 @@ async fn run_session(
     let open = ClientFrame::OpenSession {
         argv: params.argv,
         env: params.env,
+        cwd: params.cwd,
         tty: params.tty,
         stdin: params.stdin,
         winsize: params.initial_winsize,

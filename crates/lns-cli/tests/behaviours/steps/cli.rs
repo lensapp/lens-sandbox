@@ -94,6 +94,19 @@ fn parse_error_requires_kv_form(world: &mut BehaviourWorld) -> Result<(), String
     }
 }
 
+#[then(regex = r"^the command fails with a parse error naming the (--[a-z-]+) flag$")]
+fn parse_error_names_flag(world: &mut BehaviourWorld, flag: String) -> Result<(), String> {
+    let res = world.result.as_ref().ok_or("no CLI run captured")?;
+    if res.exit_code == 2 && res.output.contains(&flag) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected exit 2 naming {flag}, got code {} (output: {:?})",
+            res.exit_code, res.output
+        ))
+    }
+}
+
 #[then("no run is started")]
 fn no_run_is_started(world: &mut BehaviourWorld) -> Result<(), String> {
     let res = world.result.as_ref().ok_or("no CLI run captured")?;

@@ -7,3 +7,4 @@ pub mod ipc;
 pub mod oauth_integration;
 pub mod volume_management;
 pub mod volumes;
+pub mod workdir;

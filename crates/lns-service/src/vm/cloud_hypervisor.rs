@@ -47,7 +47,6 @@ mod tests {
             debug: false,
             exec: ExecSpec {
                 kernel_env: Vec::new(),
-                workdir: None,
             },
             #[cfg(target_os = "macos")]
             vsock: None,

@@ -183,6 +183,8 @@ pub struct RunImageArgs {
     pub cmd: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
     pub debug: bool,
     #[serde(default = "default_tty")]
     pub tty: bool,
@@ -378,6 +380,7 @@ mod tests {
             sandbox_uid: Some(65534),
             cmd: Vec::new(),
             env: Vec::new(),
+            workdir: None,
             debug: false,
             tty: true,
             stdin: true,
@@ -402,6 +405,7 @@ mod tests {
             sandbox_uid: None,
             cmd: vec![],
             env: vec![],
+            workdir: None,
             debug: false,
             tty: true,
             stdin: true,

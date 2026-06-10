@@ -428,13 +428,18 @@ pub struct RunArgs {
 
     #[arg(
         long,
+        value_parser = clap::value_parser!(u8).range(1..),
         help = "Number of vCPUs; falls back to the `run.cpus` config default, then 1."
     )]
     pub cpus: Option<u8>,
 
     #[arg(
+        short = 'm',
         long,
-        help = "RAM in MiB; falls back to the `run.mem` config default, then 512."
+        visible_alias = "memory",
+        value_name = "SIZE",
+        value_parser = parse_mem_arg,
+        help = "RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; b/k/m/g, rounded up to MiB); falls back to the `run.mem` config default, then 512."
     )]
     pub mem: Option<usize>,
 
@@ -490,6 +495,15 @@ pub struct RunArgs {
     pub detach_keys: DetachChord,
 
     #[arg(
+        short = 'w',
+        long,
+        value_name = "DIR",
+        value_parser = parse_workdir_arg,
+        help = "Working directory inside the sandbox (absolute path; created if missing). Defaults to the image's WORKDIR."
+    )]
+    pub workdir: Option<String>,
+
+    #[arg(
         short = 'e',
         long = "env",
         value_name = "KEY=VALUE",
@@ -497,6 +511,13 @@ pub struct RunArgs {
         help = "Set a non-secret environment variable in the workload (repeatable). Secrets belong in the credential flow, not -e."
     )]
     pub env: Vec<String>,
+
+    #[arg(
+        long = "env-file",
+        value_name = "FILE",
+        help = "Read KEY=VALUE lines from a file into the workload env (repeatable; later files and -e win; `#` comments and blank lines are skipped)."
+    )]
+    pub env_file: Vec<PathBuf>,
 
     #[arg(
         short = 'p',
@@ -601,6 +622,45 @@ pub(crate) fn parse_env_kv(s: &str) -> Result<String, String> {
         return Err(format!("empty variable name in `{s}`"));
     }
     Ok(s.to_string())
+}
+
+fn parse_workdir_arg(s: &str) -> Result<String, String> {
+    if !s.starts_with('/') {
+        return Err(format!(
+            "workdir must be an absolute path inside the sandbox, got `{s}`"
+        ));
+    }
+    Ok(s.to_string())
+}
+
+const MIB: u128 = 1024 * 1024;
+
+pub(crate) fn parse_mem_arg(s: &str) -> Result<usize, String> {
+    let lower = s.trim().to_ascii_lowercase();
+    let digits_end = lower
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(lower.len());
+    let (digits, suffix) = lower.split_at(digits_end);
+    let value: u128 = digits
+        .parse()
+        .map_err(|_| format!("invalid memory size `{s}`: expected MiB, e.g. `512`, or `2g`"))?;
+    let mib = match suffix {
+        "" | "m" | "mb" | "mib" => value,
+        "b" => value.div_ceil(MIB),
+        "k" | "kb" | "kib" => value.div_ceil(1024),
+        "g" | "gb" | "gib" => value
+            .checked_mul(1024)
+            .ok_or_else(|| format!("memory size `{s}` is out of range"))?,
+        _ => {
+            return Err(format!(
+                "invalid memory size `{s}`: unknown unit `{suffix}` (use b, k, m, or g)"
+            ));
+        }
+    };
+    if mib == 0 {
+        return Err(format!("invalid memory size `{s}`: must be at least 1 MiB"));
+    }
+    usize::try_from(mib).map_err(|_| format!("memory size `{s}` is out of range"))
 }
 
 pub(crate) fn parse_publish_arg(s: &str) -> Result<PortPublish, String> {
@@ -772,6 +832,72 @@ mod tests {
     fn parse_env_kv_rejects_a_bare_key_with_no_equals() {
         let err = parse_env_kv("HOME").unwrap_err();
         assert!(err.contains("KEY=VALUE"), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_workdir_arg_accepts_an_absolute_path() {
+        assert_eq!(parse_workdir_arg("/app").unwrap(), "/app");
+    }
+
+    #[test]
+    fn parse_workdir_arg_rejects_a_relative_path() {
+        for spec in ["app", "./app", "../app", ""] {
+            let err = parse_workdir_arg(spec).unwrap_err();
+            assert!(err.contains("absolute path"), "spec {spec:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_mem_arg_bare_number_is_mib() {
+        assert_eq!(parse_mem_arg("512").unwrap(), 512);
+    }
+
+    #[test]
+    fn parse_mem_arg_m_suffixes_are_mib_passthrough() {
+        for spec in ["512m", "512mb", "512mib", "512M", "512MiB"] {
+            assert_eq!(parse_mem_arg(spec).unwrap(), 512, "spec: {spec}");
+        }
+    }
+
+    #[test]
+    fn parse_mem_arg_g_suffixes_scale_to_mib() {
+        for spec in ["2g", "2gb", "2gib", "2G"] {
+            assert_eq!(parse_mem_arg(spec).unwrap(), 2048, "spec: {spec}");
+        }
+    }
+
+    #[test]
+    fn parse_mem_arg_k_and_b_round_up_to_a_whole_mib() {
+        assert_eq!(parse_mem_arg("1024k").unwrap(), 1);
+        assert_eq!(parse_mem_arg("1500k").unwrap(), 2);
+        assert_eq!(parse_mem_arg("1b").unwrap(), 1);
+        assert_eq!(parse_mem_arg("1048577b").unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_mem_arg_rejects_zero() {
+        for spec in ["0", "0g", "0b"] {
+            let err = parse_mem_arg(spec).unwrap_err();
+            assert!(err.contains("at least 1 MiB"), "spec {spec}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_mem_arg_rejects_an_unknown_unit() {
+        let err = parse_mem_arg("12parsecs").unwrap_err();
+        assert!(err.contains("unknown unit"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_mem_arg_rejects_a_unit_with_no_number() {
+        let err = parse_mem_arg("g").unwrap_err();
+        assert!(err.contains("expected MiB"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_mem_arg_rejects_a_size_beyond_usize() {
+        let err = parse_mem_arg(&format!("{}g", u128::from(u64::MAX))).unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
     }
 
     #[test]

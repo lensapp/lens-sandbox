@@ -32,6 +32,7 @@ pub mod upperfs;
 pub mod vm;
 pub mod volume_store;
 pub mod workload_argv;
+pub mod workload_cwd;
 pub mod workload_env;
 
 #[cfg(test)]

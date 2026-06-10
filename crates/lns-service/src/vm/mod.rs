@@ -91,8 +91,6 @@ pub struct VsockChannel {
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct ExecSpec {
     pub kernel_env: Vec<(String, String)>,
-    #[allow(dead_code)]
-    pub workdir: Option<String>,
 }
 
 impl ExecSpec {
@@ -103,7 +101,6 @@ impl ExecSpec {
         token: &str,
         cmd: &[String],
     ) -> Self {
-        let workdir = image_config_workdir(image_config);
         let agent_command = match image_config {
             Some(cfg) => crate::workload_argv::from_image_config(cfg, cmd),
             None => crate::workload_argv::shell_quote_argv(cmd),
@@ -130,10 +127,7 @@ impl ExecSpec {
             "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
         ));
 
-        ExecSpec {
-            kernel_env,
-            workdir,
-        }
+        ExecSpec { kernel_env }
     }
 
     pub fn from_image_config(
@@ -144,7 +138,6 @@ impl ExecSpec {
             Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
             None => crate::workload_argv::shell_quote_argv(override_cmd),
         };
-        let workdir = image_config_workdir(image_config);
 
         ExecSpec {
             kernel_env: vec![
@@ -157,7 +150,6 @@ impl ExecSpec {
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
                 ),
             ],
-            workdir,
         }
     }
 
@@ -172,13 +164,6 @@ impl ExecSpec {
             None => Self::from_image_config(image_config, cmd),
         }
     }
-}
-
-fn image_config_workdir(image_config: Option<&oci_client::config::ConfigFile>) -> Option<String> {
-    image_config
-        .and_then(|c| c.config.as_ref())
-        .and_then(|c| c.working_dir.clone())
-        .filter(|s| !s.is_empty())
 }
 
 const DEFAULT_SANDBOX_USER: &str = "sandbox";
@@ -736,12 +721,11 @@ mod tests {
         String::from_utf8(out).ok()
     }
 
-    fn config_with_workdir(workdir: &str) -> oci_client::config::ConfigFile {
+    fn config_with_entrypoint() -> oci_client::config::ConfigFile {
         oci_client::config::ConfigFile {
             architecture: "arm64".into(),
             os: "linux".into(),
             config: Some(oci_client::config::Config {
-                working_dir: Some(workdir.to_string()),
                 entrypoint: Some(vec!["/entry".into()]),
                 cmd: Some(vec!["arg".into()]),
                 ..Default::default()
@@ -751,10 +735,9 @@ mod tests {
     }
 
     #[test]
-    fn from_image_config_with_some_uses_image_entrypoint_and_workdir() {
-        let cfg = config_with_workdir("/work");
+    fn from_image_config_with_some_uses_image_entrypoint() {
+        let cfg = config_with_entrypoint();
         let spec = ExecSpec::from_image_config(Some(&cfg), &[]);
-        assert_eq!(spec.workdir.as_deref(), Some("/work"));
         let b64 = spec
             .kernel_env
             .iter()
@@ -766,8 +749,8 @@ mod tests {
     }
 
     #[test]
-    fn server_with_some_image_config_uses_image_entrypoint_and_workdir() {
-        let cfg = config_with_workdir("/srv");
+    fn server_with_some_image_config_uses_image_entrypoint() {
+        let cfg = config_with_entrypoint();
         let spec = ExecSpec::server(
             Some(&cfg),
             &run_as("sandbox", Some(65534)),
@@ -775,7 +758,6 @@ mod tests {
             "token-xyz",
             &[],
         );
-        assert_eq!(spec.workdir.as_deref(), Some("/srv"));
         let b64 = spec
             .kernel_env
             .iter()
