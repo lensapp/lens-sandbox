@@ -25,6 +25,9 @@ pub async fn run(cli: Cli) -> Result<i32> {
     }
     let code = match cli.command {
         Command::Run(args) => {
+            let config_path = config::default_config_path()?;
+            let defaults = config::load_run_defaults(&config_path)?;
+            let args = config::apply_run_defaults(args, defaults);
             service::require_running().await;
             service::run_image(args, debug).await?
         }

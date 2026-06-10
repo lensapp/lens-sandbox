@@ -22,6 +22,15 @@ pub struct BehaviourWorld {
     pub attached_stdout_is_terminal: Option<bool>,
     pub uc: UpdateCheckRig,
     pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
+    pub resolved_run: Option<ResolvedRunView>,
+}
+
+#[derive(Debug, Default)]
+pub struct ResolvedRunView {
+    pub summary: String,
+    pub env: Vec<String>,
+    pub volumes: Vec<String>,
+    pub publish: Vec<String>,
 }
 
 #[derive(Debug, Default)]

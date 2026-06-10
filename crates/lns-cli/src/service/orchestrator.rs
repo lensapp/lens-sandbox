@@ -72,9 +72,9 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let detach_chord = args.detach_keys.0.clone();
 
     let request = Request::RunImage(RunImageArgs {
+        cpus: args.effective_cpus(),
+        mem: args.effective_mem(),
         image: args.image,
-        cpus: args.cpus,
-        mem: args.mem,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user: args.sandbox_user,
         sandbox_uid: args.sandbox_uid,
