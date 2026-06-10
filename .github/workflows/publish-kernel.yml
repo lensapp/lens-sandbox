@@ -2,8 +2,8 @@ name: Publish lns guest kernel
 
 # Three-phase publish for crates/lns-service/kernels.toml.
 #
-#   detect-bump          gate: kernels.toml existed at base AND
-#                        changed AND exists at head
+#   detect-bump          gate: kernels.toml exists at base AND head
+#                        AND its published_version changed between them
 #   compute + back-fill  PR-time: per-arch sha + provenance back-fill
 #                        (no upload)
 #   publish              push to main (or workflow_dispatch) → CDN upload
