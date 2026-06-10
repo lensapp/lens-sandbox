@@ -366,9 +366,6 @@ mod tests {
             if self.fail_metadata {
                 return Err(io::Error::other("metadata boom"));
             }
-            if !self.existing.lock().unwrap().contains(p) {
-                return Err(io::Error::from(io::ErrorKind::NotFound));
-            }
             let size = self.sizes.lock().unwrap().get(p).copied();
             Ok(FileMeta {
                 size_bytes: size.unwrap_or(VOLUME_DEFAULT_SIZE_BYTES),
@@ -379,9 +376,7 @@ mod tests {
             if self.fail_remove {
                 return Err(io::Error::other("remove boom"));
             }
-            if !self.existing.lock().unwrap().remove(p) {
-                return Err(io::Error::from(io::ErrorKind::NotFound));
-            }
+            self.existing.lock().unwrap().remove(p);
             Ok(())
         }
     }
