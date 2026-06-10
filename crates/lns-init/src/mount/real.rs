@@ -26,13 +26,22 @@ impl Syscalls for RealSyscalls {
         flags: MountFlags,
         data: Option<&CStr>,
     ) -> io::Result<()> {
-        let f: libc::c_ulong = match flags {
-            MountFlags::None => 0,
-            MountFlags::ReadOnly => libc::MS_RDONLY,
-            MountFlags::Bind => libc::MS_BIND,
-            MountFlags::Tmpfs => libc::MS_NOSUID | libc::MS_NODEV,
-            MountFlags::TmpfsNoExec => libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-        };
+        let mut f: libc::c_ulong = 0;
+        if flags.bind {
+            f |= libc::MS_BIND;
+        }
+        if flags.read_only {
+            f |= libc::MS_RDONLY;
+        }
+        if flags.nosuid {
+            f |= libc::MS_NOSUID;
+        }
+        if flags.nodev {
+            f |= libc::MS_NODEV;
+        }
+        if flags.noexec {
+            f |= libc::MS_NOEXEC;
+        }
         let data_ptr = data
             .map(|c| c.as_ptr() as *const libc::c_void)
             .unwrap_or(ptr::null());
@@ -193,7 +202,12 @@ impl Syscalls for RealSyscalls {
 
 pub fn mount_and_exec() -> Result<std::convert::Infallible, MountError> {
     let sys = RealSyscalls;
-    super::do_mount_pseudo(&sys, PROC, "proc")?;
+    super::do_mount_pseudo(
+        &sys,
+        PROC,
+        "proc",
+        super::MountFlags::none().nosuid().nodev().noexec(),
+    )?;
 
     let cmdline = std::fs::read_to_string("/proc/cmdline").map_err(MountError::DescriptorRead)?;
     let params = CmdlineParams::parse(&cmdline);
