@@ -108,14 +108,23 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet "$BASE" -- crates/lns-service/kernels.toml; then
+          # A bump is a change to the *published artifact identity*, not any
+          # edit to the file. published_version names the artifact
+          # (lns-kernel-<published_version>-<arch>), so key on it: a comment
+          # tweak, or a back-fill of [current.kata_bundle_sha256] onto an
+          # already-published pin, must not trigger a re-publish of bytes
+          # that already exist (the overwrite guard would hard-fail).
+          pv() { sed -n 's/^[[:space:]]*published_version[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' | head -1; }
+          HEAD_PV=$(pv < crates/lns-service/kernels.toml)
+          BASE_PV=$(git show "${BASE}:crates/lns-service/kernels.toml" | pv)
+          if [ "$HEAD_PV" = "$BASE_PV" ]; then
             echo "is-bump=false" >> "$GITHUB_OUTPUT"
-            echo "crates/lns-service/kernels.toml unchanged from base (workflow tweak only); nothing to publish."
+            echo "published_version unchanged (${HEAD_PV}) — comment/provenance/bundle-sha edit, not a new artifact; nothing to publish."
             exit 0
           fi
 
           echo "is-bump=true" >> "$GITHUB_OUTPUT"
-          echo "Detected kernel pin bump."
+          echo "Detected kernel pin bump: published_version ${BASE_PV} -> ${HEAD_PV}."
 
   # ────────────────────────────────────────────────────────────────
   # Phase 1: PR-time verify + compute (no upload).
