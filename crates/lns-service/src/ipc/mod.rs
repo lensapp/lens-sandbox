@@ -211,6 +211,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::AttachRun must be dispatched via handle_attach, not handle_request"
             )
         }
+        Request::RunStats { .. } => {
+            unreachable!(
+                "Request::RunStats must be dispatched via handle_stats, not handle_request"
+            )
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -1162,6 +1167,12 @@ mod tests {
     #[should_panic(expected = "Request::AttachRun must be dispatched via handle_attach")]
     async fn attach_run_via_handle_request_panics() {
         let _ = handle_request(&Request::AttachRun { run_id: 1 }, Instant::now()).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Request::RunStats must be dispatched via handle_stats")]
+    async fn run_stats_via_handle_request_panics() {
+        let _ = handle_request(&Request::RunStats { run_id: 1 }, Instant::now()).await;
     }
 
     #[tokio::test]
