@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn injected_env_audit_stamps_host_origin() {
-        let obj = injected_env_audit(&["A=1".into()]).expect("event built");
+        let obj = injected_env_audit(&["A=1".into()], &[]).expect("event built");
         assert_eq!(
             obj.get("origin").unwrap(),
             "host",
