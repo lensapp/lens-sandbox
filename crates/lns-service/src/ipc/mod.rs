@@ -7,36 +7,6 @@ use tokio::sync::{mpsc, oneshot};
 mod adapter;
 pub use adapter::run_server;
 
-fn rfc3339_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (year, month, day, hour, minute, second) = unix_to_ymdhms(secs);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-fn unix_to_ymdhms(secs: u64) -> (i32, u8, u8, u8, u8, u8) {
-    let days = (secs / 86_400) as i64;
-    let day_of_year_secs = secs % 86_400;
-    let hour = (day_of_year_secs / 3600) as u8;
-    let minute = ((day_of_year_secs % 3600) / 60) as u8;
-    let second = (day_of_year_secs % 60) as u8;
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
-    let year = (y + i64::from(m <= 2)) as i32;
-    (year, m, d, hour, minute, second)
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PumpOutcome {
     ExitFrame,
@@ -155,10 +125,44 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
         },
+        Request::ListVolumes => volume_response(
+            crate::volume_store::list()
+                .await
+                .map(|volumes| Response::VolumeList { volumes }),
+        ),
+        Request::CreateVolume { name } => volume_response(
+            crate::volume_store::create(name)
+                .await
+                .map(|volume| Response::VolumeCreated { volume }),
+        ),
+        Request::InspectVolume { name } => volume_response(
+            crate::volume_store::inspect(name)
+                .await
+                .map(|volume| Response::VolumeInspect { volume }),
+        ),
+        Request::RemoveVolume { name } => volume_response(
+            crate::volume_store::remove(name)
+                .await
+                .map(|()| Response::VolumeRemoved { name: name.clone() }),
+        ),
+        Request::PruneVolumes => {
+            volume_response(crate::volume_store::prune().await.map(|report| {
+                Response::VolumesPruned {
+                    removed: report.removed,
+                    reclaimed_bytes: report.reclaimed_bytes,
+                }
+            }))
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
     }
+}
+
+fn volume_response(result: anyhow::Result<Response>) -> Response {
+    result.unwrap_or_else(|e| Response::Error {
+        message: format!("{e:#}"),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -615,30 +619,98 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unix_to_ymdhms_pinned_known_timestamps() {
-        assert_eq!(unix_to_ymdhms(0), (1970, 1, 1, 0, 0, 0));
-        assert_eq!(unix_to_ymdhms(1_677_591_907), (2023, 2, 28, 13, 45, 7));
-        assert_eq!(unix_to_ymdhms(951_825_600), (2000, 2, 29, 12, 0, 0));
-        assert_eq!(unix_to_ymdhms(1_704_067_200), (2024, 1, 1, 0, 0, 0));
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_volume_lifecycle_round_trips_through_the_store() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+
+        let created = handle_request(
+            &Request::CreateVolume {
+                name: "cov-ipc-vol".into(),
+            },
+            now,
+        )
+        .await;
+        match created {
+            Response::VolumeCreated { volume } => assert_eq!(volume.name, "cov-ipc-vol"),
+            other => panic!("expected VolumeCreated, got {other:?}"),
+        }
+
+        let listed = handle_request(&Request::ListVolumes, now).await;
+        match listed {
+            Response::VolumeList { volumes } => {
+                assert!(volumes.iter().any(|v| v.name == "cov-ipc-vol"));
+            }
+            other => panic!("expected VolumeList, got {other:?}"),
+        }
+
+        let inspected = handle_request(
+            &Request::InspectVolume {
+                name: "cov-ipc-vol".into(),
+            },
+            now,
+        )
+        .await;
+        match inspected {
+            Response::VolumeInspect { volume } => assert_eq!(volume.in_use_by, None),
+            other => panic!("expected VolumeInspect, got {other:?}"),
+        }
+
+        let removed = handle_request(
+            &Request::RemoveVolume {
+                name: "cov-ipc-vol".into(),
+            },
+            now,
+        )
+        .await;
+        assert_eq!(
+            removed,
+            Response::VolumeRemoved {
+                name: "cov-ipc-vol".into()
+            }
+        );
+
+        let _ = handle_request(
+            &Request::CreateVolume {
+                name: "cov-ipc-prune".into(),
+            },
+            now,
+        )
+        .await;
+        let pruned = handle_request(&Request::PruneVolumes, now).await;
+        match pruned {
+            Response::VolumesPruned {
+                removed,
+                reclaimed_bytes,
+            } => {
+                assert!(removed.contains(&"cov-ipc-prune".to_string()));
+                assert!(reclaimed_bytes > 0);
+            }
+            other => panic!("expected VolumesPruned, got {other:?}"),
+        }
     }
 
-    #[test]
-    fn rfc3339_now_format_is_iso_with_z_suffix() {
-        let s = rfc3339_now();
-        assert_eq!(s.len(), 20, "got: {s}");
-        let bytes = s.as_bytes();
-        assert_eq!(bytes[4], b'-');
-        assert_eq!(bytes[7], b'-');
-        assert_eq!(bytes[10], b'T');
-        assert_eq!(bytes[13], b':');
-        assert_eq!(bytes[16], b':');
-        assert_eq!(bytes[19], b'Z');
-        for (i, c) in s.chars().enumerate() {
-            if [4, 7, 10, 13, 16, 19].contains(&i) {
-                continue;
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_inspect_of_an_unknown_volume_surfaces_the_store_error() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let resp = handle_request(
+            &Request::InspectVolume {
+                name: "cov-ipc-absent".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+        match resp {
+            Response::Error { message } => {
+                assert!(message.contains("no such volume"), "got: {message}");
             }
-            assert!(c.is_ascii_digit(), "non-digit at {i} in {s}");
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 

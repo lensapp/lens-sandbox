@@ -1,5 +1,11 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMeta {
+    pub size_bytes: u64,
+    pub created_unix_secs: u64,
+}
 
 pub trait Fs: Send + Sync {
     fn exists(&self, p: &Path) -> impl std::future::Future<Output = bool> + Send;
@@ -9,4 +15,10 @@ pub trait Fs: Send + Sync {
         p: &Path,
         size_bytes: u64,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+    fn read_dir(
+        &self,
+        dir: &Path,
+    ) -> impl std::future::Future<Output = io::Result<Vec<PathBuf>>> + Send;
+    fn metadata(&self, p: &Path) -> impl std::future::Future<Output = io::Result<FileMeta>> + Send;
+    fn remove_file(&self, p: &Path) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }

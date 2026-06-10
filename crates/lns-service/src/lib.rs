@@ -24,6 +24,7 @@ pub mod run_registry;
 pub mod runtime_layer;
 pub mod shutdown;
 pub mod supervisor;
+mod time_fmt;
 pub mod tray;
 pub mod update_check;
 pub mod upperfs;

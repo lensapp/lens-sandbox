@@ -265,14 +265,14 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(cache_root)]
+    #[serial_test::serial(env)]
     fn audit_path_lands_under_the_run_directory() {
         let p = audit_path(99).unwrap();
         assert!(p.ends_with("runs/99/audit.jsonl"), "got {}", p.display());
     }
 
     #[test]
-    #[serial_test::serial(cache_root)]
+    #[serial_test::serial(env)]
     fn record_volume_attached_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
