@@ -54,6 +54,24 @@ lns run -- /bin/sh
 lns run --cpus 4 --mem 2048 ghcr.io/acme/builder
 ```
 
+### Persistent defaults
+
+Settings you'd otherwise repeat on every run can be stored once with
+[`lns config`](cli-reference.md#lns-config). A per-run flag always overrides its
+configured default:
+
+```bash
+lns config set run.cpus 4
+lns config set run.mem 2048
+lns run ghcr.io/acme/builder            # boots with 4 vCPUs · 2048 MiB
+lns run --cpus 2 ghcr.io/acme/builder   # per-run flag wins: 2 vCPUs
+```
+
+Defaults exist for `run.cpus`, `run.mem`, `run.env`, `run.volume`, and
+`run.publish`. For the list keys, a flag overrides only the conflicting
+configured entry (same variable name, mount target, or host bind) — the rest
+still apply.
+
 ### Environment variables
 
 Set non-secret environment variables with `-e KEY=VALUE` (repeatable):
