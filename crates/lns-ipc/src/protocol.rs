@@ -18,6 +18,11 @@ pub enum Request {
     Kill { run_id: u32, signal: SignalKind },
     ListRuns,
     BeginIntegrationSignIn { id: String },
+    ListVolumes,
+    CreateVolume { name: String },
+    InspectVolume { name: String },
+    RemoveVolume { name: String },
+    PruneVolumes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +70,30 @@ pub enum Response {
     OauthSignInFailed {
         reason: String,
     },
+    VolumeList {
+        volumes: Vec<VolumeInfo>,
+    },
+    VolumeCreated {
+        volume: VolumeInfo,
+    },
+    VolumeInspect {
+        volume: VolumeInfo,
+    },
+    VolumeRemoved {
+        name: String,
+    },
+    VolumesPruned {
+        removed: Vec<String>,
+        reclaimed_bytes: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    pub created: String,
+    pub in_use_by: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +381,72 @@ mod tests {
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, args);
+    }
+
+    #[test]
+    fn volume_requests_survive_request_round_trips() {
+        for req in [
+            Request::ListVolumes,
+            Request::CreateVolume {
+                name: "prism-data".into(),
+            },
+            Request::InspectVolume {
+                name: "prism-data".into(),
+            },
+            Request::RemoveVolume {
+                name: "prism-data".into(),
+            },
+            Request::PruneVolumes,
+        ] {
+            let frame = crate::encode_frame(&req).unwrap();
+            let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, req);
+        }
+    }
+
+    #[test]
+    fn volume_responses_survive_round_trips() {
+        let info = VolumeInfo {
+            name: "prism-data".into(),
+            size_bytes: 32 * 1024 * 1024,
+            created: "2026-06-10T12:00:00Z".into(),
+            in_use_by: Some(7),
+        };
+        for resp in [
+            Response::VolumeList {
+                volumes: vec![info.clone()],
+            },
+            Response::VolumeCreated {
+                volume: info.clone(),
+            },
+            Response::VolumeInspect {
+                volume: info.clone(),
+            },
+            Response::VolumeRemoved {
+                name: "prism-data".into(),
+            },
+            Response::VolumesPruned {
+                removed: vec!["prism-data".into()],
+                reclaimed_bytes: 32 * 1024 * 1024,
+            },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
+    }
+
+    #[test]
+    fn volume_info_serializes_idle_holder_as_null() {
+        let info = VolumeInfo {
+            name: "prism-data".into(),
+            size_bytes: 1024,
+            created: "2026-06-10T12:00:00Z".into(),
+            in_use_by: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["in_use_by"], serde_json::Value::Null);
+        assert_eq!(json["name"], "prism-data");
     }
 
     #[test]
