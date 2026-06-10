@@ -47,6 +47,16 @@ fn signin_oauth(integ: &Integration) -> Option<&OauthAuth> {
     integ.oauth.as_ref().filter(|o| !o.client_id.is_empty())
 }
 
+/// The allow-routes a set of connected integration ids contributes, re-derived from the catalog so boot and a watcher reload reconstruct the same live routes from an id-only policy.
+pub fn applied_integration_routes(ids: &[String], catalog: &[Integration]) -> Vec<RouteRule> {
+    let applied: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    catalog
+        .iter()
+        .filter(|integ| applied.contains(integ.id.as_str()))
+        .flat_map(|integ| integ.routes.iter().map(|r| r.to_route_rule()))
+        .collect()
+}
+
 /// Resolves the policy's applied integration ids against the effective catalog.
 pub fn resolve_applied_integrations(
     policy: &Policy,
@@ -54,14 +64,14 @@ pub fn resolve_applied_integrations(
 ) -> AppliedIntegrations {
     let applied: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
 
-    let mut out = AppliedIntegrations::default();
+    let mut out = AppliedIntegrations {
+        routes: applied_integration_routes(&policy.integrations, catalog),
+        ..AppliedIntegrations::default()
+    };
     for integ in catalog {
-        let id = integ.id.as_str();
-        if !applied.contains(id) {
+        if !applied.contains(integ.id.as_str()) {
             continue;
         }
-        out.routes
-            .extend(integ.routes.iter().map(|r| r.to_route_rule()));
         if let Some(p) = wire_provider(integ) {
             out.providers.push(p);
         }
@@ -156,6 +166,21 @@ mod tests {
         let out = resolve_applied_integrations(&policy_applying(&[]), &catalog);
         assert!(out.providers.is_empty());
         assert!(out.routes.is_empty());
+    }
+
+    #[test]
+    fn applied_integration_routes_maps_connected_ids_to_their_catalog_routes() {
+        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let routes = applied_integration_routes(&["gitlab".to_string()], &catalog);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].match_pattern, "gitlab.com");
+        assert_eq!(routes[0].verdict, lns_policy::Verdict::Allow);
+    }
+
+    #[test]
+    fn applied_integration_routes_ignores_ids_absent_from_the_catalog() {
+        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        assert!(applied_integration_routes(&["nope".to_string()], &catalog).is_empty());
     }
 
     fn oauth_integration(id: &str, env_var: &str, domain: &str) -> Integration {

@@ -17,7 +17,7 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::integrations::{
-    resolve_applied_integrations, resolve_connectable_integrations,
+    applied_integration_routes, resolve_applied_integrations, resolve_connectable_integrations,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -285,6 +285,13 @@ fn make_policy_emitter(
     })
 }
 
+/// A watcher reload replaces the live policy from disk, where connected integrations are recorded id-only; this deriver re-applies their catalog routes so the reload doesn't drop them.
+fn make_integration_route_deriver(
+    catalog: Vec<lns_policy::integrations::Integration>,
+) -> crate::approval_flow::session::IntegrationRouteDeriver {
+    Box::new(move |ids| applied_integration_routes(ids, &catalog))
+}
+
 /// Connecting an un-connected catalog integration allows its routes on the approval session's live policy (and persists `integrations:`), so the held request proceeds without a relaunch.
 fn make_connect_emitter(
     session: Arc<ApprovalSession>,
@@ -487,6 +494,8 @@ pub(super) async fn start(
         ApprovalSession::new(policy, notifier, store, frame_tx, APPROVAL_TIMEOUT)
             .with_offers(offerable),
     );
+
+    session.set_integration_route_deriver(make_integration_route_deriver(catalog.clone()));
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -1057,6 +1066,34 @@ mod tests {
         let connect = make_connect_emitter(session.clone(), Arc::new(HashMap::new()));
         connect("gitlab");
         assert_eq!(session.current_policy().integrations, ["gitlab"]);
+    }
+
+    #[test]
+    fn make_integration_route_deriver_maps_connected_ids_to_catalog_routes() {
+        use lns_policy::integrations::{AuthKind, Integration, IntegrationRoute};
+        let catalog = vec![Integration {
+            id: "some-oauth".into(),
+            name: None,
+            auth_kind: AuthKind::Oauth,
+            routes: vec![IntegrationRoute {
+                match_pattern: "api.some-oauth.example".into(),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: None,
+            oauth: None,
+            token_fallback: None,
+        }];
+        let derive = make_integration_route_deriver(catalog);
+        let routes = derive(&["some-oauth".to_string()]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
+        assert!(
+            derive(&["nope".to_string()]).is_empty(),
+            "an id absent from the catalog contributes no route"
+        );
     }
 
     #[test]
