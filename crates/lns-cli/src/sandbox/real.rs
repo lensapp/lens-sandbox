@@ -52,7 +52,13 @@ impl SandboxService for RealSandboxService {
     }
 }
 
-pub async fn dispatch(args: &crate::cli::SandboxArgs) -> Result<i32> {
+pub async fn dispatch(args: crate::cli::SandboxArgs) -> Result<i32> {
+    let command = match args.command {
+        crate::cli::SandboxCommand::Exec(exec_args) => {
+            return crate::service::exec_image(exec_args).await;
+        }
+        other => other,
+    };
     let svc = RealSandboxService {
         socket: crate::service::socket_path()?,
     };
@@ -63,13 +69,5 @@ pub async fn dispatch(args: &crate::cli::SandboxArgs) -> Result<i32> {
     let mut out = std::io::stdout();
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
-    run_with_writers(
-        &args.command,
-        &svc,
-        term,
-        &mut out,
-        &mut stdout,
-        &mut stderr,
-    )
-    .await
+    run_with_writers(&command, &svc, term, &mut out, &mut stdout, &mut stderr).await
 }

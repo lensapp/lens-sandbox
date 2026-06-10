@@ -186,7 +186,7 @@ pub(crate) fn parse_signal_name(name: &str) -> Result<SignalKind> {
         }
     })
 }
-pub(super) fn render_ls_table<W: std::io::Write>(
+pub(crate) fn render_ls_table<W: std::io::Write>(
     out: &mut W,
     rows: &[RunSummary],
 ) -> std::io::Result<()> {

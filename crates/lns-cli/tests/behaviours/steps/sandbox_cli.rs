@@ -98,6 +98,60 @@ fn service_unreachable(w: &mut BehaviourWorld) {
     w.sandbox.unreachable = true;
 }
 
+#[given(regex = r"^the service will answer Acknowledged$")]
+fn canned_acknowledged(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::Acknowledged);
+}
+
+#[given(regex = r#"^the service reports a run listing with run (\d+) of image "([^"]+)" running$"#)]
+fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: run_id,
+            image,
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }],
+    });
+}
+
+#[then("the service received a ListRuns request")]
+fn then_list_runs_request(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::ListRuns) {
+        Ok(())
+    } else {
+        Err(format!("expected ListRuns among {requests:?}"))
+    }
+}
+
+#[then(regex = r"^the service received a Kill request for run (\d+) with signal KILL$")]
+fn then_kill_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::Kill {
+        run_id,
+        signal: lns_ipc::SignalKind::Kill,
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then(regex = r#"^the output does not contain "([^"]*)"$"#)]
+fn then_output_does_not_contain(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let output = &w.result.as_ref().ok_or("no CLI run captured")?.output;
+    if output.contains(&needle) {
+        Err(format!(
+            "expected output not to contain {needle:?}, got {output:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[given(
     regex = r#"^the service reports run (\d+) of image "([^"]+)" running with (\d+) cpus and (\d+) MiB$"#
 )]
