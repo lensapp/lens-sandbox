@@ -32,6 +32,12 @@ impl DescriptorBuilder {
         Self { root: root.into() }
     }
 
+    pub fn cached(&self, req: &DescriptorRequest<'_>) -> Result<Option<BuiltDescriptor>> {
+        let runtime_digest = req.runtime_layer.map(|r| r.digest());
+        let merge_hash = compute_merge_hash(req.layer_digests, runtime_digest);
+        self.try_cached(&merge_hash)
+    }
+
     pub fn build(
         &self,
         content_store: &ContentStore,
@@ -39,21 +45,10 @@ impl DescriptorBuilder {
     ) -> Result<BuiltDescriptor> {
         let runtime_digest = req.runtime_layer.map(|r| r.digest());
         let merge_hash = compute_merge_hash(req.layer_digests, runtime_digest);
-        let dir = self.root.join("composefs").join(&merge_hash);
-        let path = dir.join("descriptor.erofs");
-
-        if let Ok(meta) = std::fs::metadata(&path)
-            && meta.is_file()
-        {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("re-reading cached {}", path.display()))?;
-            return Ok(BuiltDescriptor {
-                merge_hash,
-                path,
-                descriptor_sha256: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
-                size: meta.len(),
-            });
+        if let Some(hit) = self.try_cached(&merge_hash)? {
+            return Ok(hit);
         }
+        let path = self.path_for(&merge_hash);
 
         let mut fs = oci::build_filesystem_from_layer_bytes(content_store, req.layers)
             .context("expanding OCI layers into composefs tree")?;
@@ -73,6 +68,7 @@ impl DescriptorBuilder {
 
         atomic_install(&path, &bytes)
             .with_context(|| format!("installing composefs descriptor at {}", path.display()))?;
+        write_sha_sidecar(&path, &descriptor_sha256);
 
         Ok(BuiltDescriptor {
             merge_hash,
@@ -80,6 +76,63 @@ impl DescriptorBuilder {
             descriptor_sha256,
             size: bytes.len() as u64,
         })
+    }
+
+    fn path_for(&self, merge_hash: &str) -> PathBuf {
+        self.root
+            .join("composefs")
+            .join(merge_hash)
+            .join("descriptor.erofs")
+    }
+
+    fn try_cached(&self, merge_hash: &str) -> Result<Option<BuiltDescriptor>> {
+        let path = self.path_for(merge_hash);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return Ok(None);
+        };
+        if !meta.is_file() {
+            return Ok(None);
+        }
+        let descriptor_sha256 = match read_sha_sidecar(&path) {
+            Some(sha) => sha,
+            None => {
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("re-reading cached {}", path.display()))?;
+                let sha = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+                write_sha_sidecar(&path, &sha);
+                sha
+            }
+        };
+        Ok(Some(BuiltDescriptor {
+            merge_hash: merge_hash.to_string(),
+            path,
+            descriptor_sha256,
+            size: meta.len(),
+        }))
+    }
+}
+
+fn sidecar_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".sha256");
+    PathBuf::from(s)
+}
+
+fn read_sha_sidecar(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(sidecar_path(path)).ok()?;
+    let text = text.trim();
+    let hex_part = text.strip_prefix("sha256:")?;
+    let valid = hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit());
+    valid.then(|| text.to_string())
+}
+
+fn write_sha_sidecar(path: &Path, sha: &str) {
+    let sidecar = sidecar_path(path);
+    if let Err(e) = std::fs::write(&sidecar, sha) {
+        let sidecar_str = sidecar.display();
+        crate::log::warn!(
+            "descriptor sha sidecar write failed at {sidecar_str} ({e}); next run will re-hash"
+        );
     }
 }
 
@@ -344,6 +397,111 @@ mod tests {
         let bytes = std::fs::read(&r.path).unwrap();
         assert!(bytes.len() > 1024);
         assert_eq!(&bytes[1024..1028], &[0xe2, 0xe1, 0xf5, 0xe0]);
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        store: ContentStore,
+        builder: DescriptorBuilder,
+        digests: Vec<String>,
+        layers: Vec<Vec<u8>>,
+    }
+
+    fn fixture(layer_digest: &str) -> Fixture {
+        let dir = tempdir();
+        let store = ContentStore::new(dir.path().join("content"));
+        let builder = DescriptorBuilder::new(dir.path());
+        Fixture {
+            _dir: dir,
+            store,
+            builder,
+            digests: vec![layer_digest.repeat(32)],
+            layers: vec![tiny_tar("hello", b"world")],
+        }
+    }
+
+    impl Fixture {
+        fn request(&self) -> DescriptorRequest<'_> {
+            DescriptorRequest {
+                layer_digests: &self.digests,
+                layers: &self.layers,
+                runtime_layer: None,
+            }
+        }
+    }
+
+    #[test]
+    fn build_writes_a_sha_sidecar_next_to_the_descriptor() {
+        let f = fixture("sha256:1a");
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        let sidecar = sidecar_path(&built.path);
+        assert_eq!(
+            std::fs::read_to_string(sidecar).unwrap(),
+            built.descriptor_sha256,
+        );
+    }
+
+    #[test]
+    fn cached_returns_none_before_build_and_the_built_descriptor_after() {
+        let f = fixture("sha256:2b");
+        assert!(f.builder.cached(&f.request()).unwrap().is_none());
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        assert_eq!(f.builder.cached(&f.request()).unwrap(), Some(built));
+    }
+
+    #[test]
+    fn cached_hit_serves_sha_from_sidecar_without_rehashing_the_descriptor() {
+        let f = fixture("sha256:3c");
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        std::fs::write(&built.path, b"corrupted on disk after install").unwrap();
+        let hit = f.builder.cached(&f.request()).unwrap().expect("cache hit");
+        assert_eq!(
+            hit.descriptor_sha256, built.descriptor_sha256,
+            "a warm hit must trust the sidecar instead of re-reading the descriptor",
+        );
+    }
+
+    #[test]
+    fn cached_falls_back_to_hashing_and_self_heals_when_sidecar_is_missing() {
+        let f = fixture("sha256:4d");
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        let sidecar = sidecar_path(&built.path);
+        std::fs::remove_file(&sidecar).unwrap();
+        let hit = f.builder.cached(&f.request()).unwrap().expect("cache hit");
+        assert_eq!(hit.descriptor_sha256, built.descriptor_sha256);
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap(),
+            built.descriptor_sha256,
+            "the fallback hash must be persisted so the next run skips it",
+        );
+    }
+
+    #[test]
+    fn cached_rejects_a_corrupt_sidecar_and_rehashes() {
+        let f = fixture("sha256:5e");
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        let sidecar = sidecar_path(&built.path);
+        for garbage in ["not a digest", "sha256:zz", "sha256:abc"] {
+            std::fs::write(&sidecar, garbage).unwrap();
+            let hit = f.builder.cached(&f.request()).unwrap().expect("cache hit");
+            assert_eq!(
+                hit.descriptor_sha256, built.descriptor_sha256,
+                "garbage sidecar {garbage:?} must be ignored and re-derived",
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_squatting_on_the_sidecar_path_does_not_fail_the_build() {
+        let f = fixture("sha256:6f");
+        assert!(f.builder.cached(&f.request()).unwrap().is_none());
+        let path = f.builder.path_for(&compute_merge_hash(&f.digests, None));
+        std::fs::create_dir_all(sidecar_path(&path)).unwrap();
+        let built = f.builder.build(&f.store, &f.request()).unwrap();
+        assert!(
+            built.path.is_file(),
+            "descriptor must land despite the sidecar failure",
+        );
     }
 
     #[test]
