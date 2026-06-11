@@ -2,11 +2,11 @@ use crate::world::{BehaviourWorld, CannedSequence, PhasePipe};
 use clap::Parser;
 use cucumber::{given, then, when};
 use lns_cli::cli::{Cli, Command};
+use lns_cli::run::progress::ProgressRenderer;
 use lns_cli::run::summary::print_run_summary;
 use lns_cli::service::{
     PrePhaseStep, drive_attached_session_with_writers, pre_phase_step, render_started_run,
 };
-use lns_cli::run::progress::ProgressRenderer;
 use lns_ipc::{
     LogLevel, Response, WireFrame, encode_frame, encode_wire_frame, read_frame_bytes_async,
 };
@@ -62,8 +62,8 @@ async fn stream_pull_progress_halfway(world: &mut BehaviourWorld) {
         total: 10 * 1024 * 1024,
     })
     .expect("encode progress");
-    let pulled_frame = encode_frame(&run_log("Pulled", "1 layer   (0.42s · 10.0 MiB)"))
-        .expect("encode pulled");
+    let pulled_frame =
+        encode_frame(&run_log("Pulled", "1 layer   (0.42s · 10.0 MiB)")).expect("encode pulled");
     {
         let pipe = pipe_mut(world);
         pipe.server
@@ -87,7 +87,9 @@ async fn stream_pull_progress_halfway(world: &mut BehaviourWorld) {
 fn terminal_shows_bar_at_half(world: &mut BehaviourWorld) -> Result<(), String> {
     let s = String::from_utf8_lossy(&world.phase_output);
     if !s.contains("\r") {
-        return Err(format!("bar must redraw in place via carriage return: {s:?}"));
+        return Err(format!(
+            "bar must redraw in place via carriage return: {s:?}"
+        ));
     }
     if s.contains("pulling") && s.contains("50%") && s.contains("5.0 MiB / 10.0 MiB") {
         Ok(())

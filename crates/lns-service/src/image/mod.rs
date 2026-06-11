@@ -306,7 +306,9 @@ pub(crate) async fn pull_inner<R: Registry>(
                                 p.add(bytes);
                             }
                         };
-                        client.pull_blob(reference_ref, &descriptor, &on_chunk).await
+                        client
+                            .pull_blob(reference_ref, &descriptor, &on_chunk)
+                            .await
                     })
                     .await
                     .with_context(|| format!("resolving layer {i} (digest {digest})"))?;
@@ -560,8 +562,7 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
         f();
         drop(guard);
-        let points = capture.points.lock().unwrap().clone();
-        points
+        capture.points.lock().unwrap().clone()
     }
 
     async fn capture_progress<F, Fut, R>(f: F) -> (R, Vec<(u64, u64)>)
