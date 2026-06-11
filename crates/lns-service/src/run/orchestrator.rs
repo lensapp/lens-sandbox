@@ -71,33 +71,64 @@ async fn orchestrate(
     }
 
     let started = std::time::Instant::now();
-    let mut phase = std::time::Instant::now();
-    let mut lap = move || {
-        let elapsed = phase.elapsed();
-        phase = std::time::Instant::now();
-        elapsed
-    };
-    let guest_tools = guest_tools::ensure().await?;
-    log::debug!("prepared guest tools in {:.2?}", lap());
+    let prepare_started = std::time::Instant::now();
 
     let cache_dir = cache::root()?;
     let layer_cache = oci_layer_cache::LayerCache::new(cache_dir.join("layers"));
     let content_store = content_store::ContentStore::new(cache_dir.join("content"));
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir);
-
-    let mut image =
-        ingest::run(args.image.as_deref(), &args.cmd, &layer_cache, image::pull).await?;
-    log::debug!("prepared image layers in {:.2?}", lap());
-
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
-    let session = supervisor::SupervisorSession::start_if_policy(
-        run_id,
-        policy.as_deref().map(Path::new),
-        guest_tools.root.clone(),
-        args.env.clone(),
-    )
-    .await?;
-    log::debug!("prepared supervisor session in {:.2?}", lap());
+
+    let tools_then_session = async {
+        let guest_tools = guest_tools::ensure().await?;
+        log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
+        let (session, initrd) = tokio::try_join!(
+            supervisor::SupervisorSession::start_if_policy(
+                run_id,
+                policy.as_deref().map(Path::new),
+                guest_tools.root.clone(),
+                args.env.clone(),
+            ),
+            initramfs::build(&guest_tools),
+        )?;
+        log::debug!(
+            "supervisor session and initramfs ready at +{:.2?}",
+            prepare_started.elapsed()
+        );
+        Ok::<_, anyhow::Error>((guest_tools, session, initrd))
+    };
+    let image_fut = async {
+        let image = ingest::run(args.image.as_deref(), &args.cmd, &layer_cache, image::pull).await?;
+        log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
+        Ok::<_, anyhow::Error>(image)
+    };
+    let kernel_fut = async {
+        let kernel_path = kernel::ensure().await?;
+        log::debug!("kernel ready at +{:.2?}", prepare_started.elapsed());
+        Ok::<_, anyhow::Error>(kernel_path)
+    };
+    let upper_fut = async {
+        let upper_disk_path = upperfs::provision(run_id).await?;
+        log::debug!("upper disk ready at +{:.2?}", prepare_started.elapsed());
+        Ok::<_, anyhow::Error>(upper_disk_path)
+    };
+    let volumes_fut = async {
+        let resolved = crate::volume_store::resolve(&args.volumes, run_id).await?;
+        log::debug!("volumes ready at +{:.2?}", prepare_started.elapsed());
+        Ok::<_, anyhow::Error>(resolved)
+    };
+
+    let (
+        (guest_tools, session, initrd),
+        mut image,
+        kernel_path,
+        upper_disk_path,
+        (volume_attachments, volume_leases),
+    ) = tokio::try_join!(tools_then_session, image_fut, kernel_fut, upper_fut, volumes_fut)?;
+    log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
+    for vol in &args.volumes {
+        crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
+    }
 
     let imageless = args.image.is_none();
     let runtime_layer = runtime_layer::for_run(
@@ -106,24 +137,38 @@ async fn orchestrate(
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
     )?;
-    log::debug!("prepared runtime layer in {:.2?}", lap());
 
     let layers = std::mem::take(&mut image.bytes);
     let layer_digests = std::mem::take(&mut image.digests);
-    let descriptor_cs = content_store.clone();
-    let descriptor = tokio::task::spawn_blocking(move || {
-        descriptor_builder.build(
-            &descriptor_cs,
-            &composefs::descriptor::DescriptorRequest {
-                layer_digests: &layer_digests,
-                layers: &layers,
-                runtime_layer: runtime_layer.as_ref(),
-            },
-        )
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("composefs descriptor build task panicked: {e}"))??;
-    log::debug!("prepared composefs descriptor in {:.2?}", lap());
+    let probe = composefs::descriptor::DescriptorRequest {
+        layer_digests: &layer_digests,
+        layers: &layers,
+        runtime_layer: runtime_layer.as_ref(),
+    };
+    let cached_descriptor = descriptor_builder.cached(&probe)?;
+    let descriptor = match cached_descriptor {
+        Some(hit) => hit,
+        None => {
+            log::progress("Assembling", "rootfs", 0, 0);
+            let descriptor_cs = content_store.clone();
+            tokio::task::spawn_blocking(move || {
+                descriptor_builder.build(
+                    &descriptor_cs,
+                    &composefs::descriptor::DescriptorRequest {
+                        layer_digests: &layer_digests,
+                        layers: &layers,
+                        runtime_layer: runtime_layer.as_ref(),
+                    },
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("composefs descriptor build task panicked: {e}"))??
+        }
+    };
+    log::debug!(
+        "composefs descriptor ready at +{:.2?}",
+        prepare_started.elapsed()
+    );
     log::debug!(
         path = %descriptor.path.display(),
         size = descriptor.size,
@@ -142,22 +187,6 @@ async fn orchestrate(
         imageless,
     );
     let exec = vm::ExecSpec::for_run(&run_as, &args.cmd, image.config.as_ref(), session.as_ref());
-
-    let kernel_path = kernel::ensure().await?;
-    log::debug!("prepared kernel in {:.2?}", lap());
-    let initrd = initramfs::build(&guest_tools).await?;
-    log::debug!("prepared initramfs in {:.2?}", lap());
-
-    let upper_disk_path = upperfs::provision(run_id).await?;
-    log::debug!("prepared upper disk in {:.2?}", lap());
-    log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
-
-    let (volume_attachments, volume_leases) =
-        crate::volume_store::resolve(&args.volumes, run_id).await?;
-    log::debug!("prepared volumes in {:.2?}", lap());
-    for vol in &args.volumes {
-        crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
-    }
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -241,6 +270,7 @@ async fn orchestrate(
         };
 
         let frame_tx_for_session = frame_tx.clone();
+        log::progress("Booting", "microVM", 0, 0);
         let boot_start = std::time::Instant::now();
         let mut vm_task = tokio::spawn(async move {
             let _volume_leases = volume_leases;
@@ -269,14 +299,17 @@ async fn orchestrate(
         crate::run_registry::set_connector(run_id, connector.clone());
         let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
+        log::progress("Connecting", "session", 0, 0);
+        let connect_started = std::time::Instant::now();
         let fd = connector
             .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(30))
             .await?;
-        log::debug!("connected broker in {:.2?}", lap());
+        log::debug!("connected broker in {:.2?}", connect_started.elapsed());
+        let session_started = std::time::Instant::now();
         let session_code =
             vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx)
                 .await?;
-        log::debug!("workload ran for {:.2?}", lap());
+        log::debug!("workload ran for {:.2?}", session_started.elapsed());
         log::debug!(code = session_code, "broker session ended");
         crate::run_registry::set_exit_code(run_id, session_code);
 
