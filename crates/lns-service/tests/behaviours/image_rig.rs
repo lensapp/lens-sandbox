@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lns_service::image_store::{
@@ -9,6 +10,7 @@ use lns_service::image_store::{
 #[derive(Debug, Default, Clone)]
 pub struct IndexFs {
     files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+    fail_write: Arc<AtomicBool>,
 }
 
 impl Fs for IndexFs {
@@ -28,6 +30,9 @@ impl Fs for IndexFs {
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
     }
     async fn write(&self, p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if self.fail_write.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("write boom"));
+        }
         self.files
             .lock()
             .unwrap()
@@ -85,6 +90,7 @@ pub struct ImageRig {
     pub last_list: Option<Vec<lns_ipc::ImageInfo>>,
     pub last_removed: Option<RemovedImage>,
     pub last_prune: Option<PruneReport>,
+    pub last_pull: Option<lns_ipc::ImageInfo>,
     pub last_error: Option<String>,
 }
 
@@ -101,7 +107,31 @@ impl ImageRig {
             last_list: None,
             last_removed: None,
             last_prune: None,
+            last_pull: None,
             last_error: None,
+        }
+    }
+
+    pub fn fail_index_writes(&self) {
+        self.fs.fail_write.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn pull(&mut self, reference: &str, digest: &str, size: u64) {
+        let record = ImageRecord {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", "f".repeat(64)),
+            layers: vec![LayerRef {
+                digest: digest.to_string(),
+                size_bytes: size,
+            }],
+            pulled_unix_secs: 1_765_022_400,
+        };
+        match image_store::pull_with(&self.fs, &self.images_root, &record, &self.active).await {
+            Ok(info) => {
+                self.last_pull = Some(info);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
         }
     }
 
