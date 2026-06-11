@@ -196,6 +196,16 @@ fn images_root() -> Result<PathBuf> {
     Ok(crate::cache::root()?.join("images"))
 }
 
+fn cache_lock() -> &'static tokio::sync::RwLock<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::RwLock<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
+/// An in-flight pull holds this shared guard so a concurrent rm/prune can't sweep the layers it has installed but not yet recorded.
+pub(crate) async fn lock_shared() -> tokio::sync::RwLockReadGuard<'static, ()> {
+    cache_lock().read().await
+}
+
 pub async fn record(pulled: &PulledImage) -> Result<()> {
     record_with(
         &real::RealFs,
@@ -222,6 +232,7 @@ pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
 }
 
 pub async fn remove(image: &str) -> Result<RemovedImage> {
+    let _exclusive = cache_lock().write().await;
     remove_with(
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
@@ -233,6 +244,7 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
 }
 
 pub async fn prune() -> Result<PruneReport> {
+    let _exclusive = cache_lock().write().await;
     prune_with(
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
@@ -887,5 +899,31 @@ mod tests {
             vec!["registry.example.test/cov/lifecycle:1".to_string()]
         );
         assert!(list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn concurrent_pulls_share_the_cache_lock() {
+        let first = lock_shared().await;
+        assert!(
+            cache_lock().try_read().is_ok(),
+            "two in-flight pulls must not block each other"
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn an_in_flight_pull_blocks_a_sweep_until_it_finishes() {
+        let in_flight = lock_shared().await;
+        assert!(
+            cache_lock().try_write().is_err(),
+            "rm/prune must wait while a pull is still installing layers"
+        );
+        drop(in_flight);
+        assert!(
+            cache_lock().try_write().is_ok(),
+            "once the pull finishes the sweep may proceed"
+        );
     }
 }
