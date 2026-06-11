@@ -283,29 +283,50 @@ pub(crate) async fn pull_inner<R: Registry>(
     let layers_owned: Vec<(usize, oci_client::manifest::OciDescriptor)> =
         manifest.layers.iter().cloned().enumerate().collect();
     let bytes_per_layer: Vec<Vec<u8>> = stream::iter(layers_owned)
-        .map(|(i, descriptor)| async move {
-            let layer_idx = i + 1;
-            let short = short_digest(&descriptor.digest);
-            let size = descriptor.size;
-            log::debug!(
-                layer = layer_idx,
-                of = n,
-                digest = short,
-                size = size,
-                "fetch-or-cache",
-            );
-            let digest = descriptor.digest.clone();
-            layer_cache
-                .get_or_install(&digest, || async move {
-                    let on_chunk = move |bytes: u64| {
-                        if let Some(p) = progress {
-                            p.add(bytes);
-                        }
-                    };
-                    client.pull_blob(reference_ref, &descriptor, &on_chunk).await
+        .map(|(i, descriptor)| {
+            // Cached layers were DiffID-verified on their cold pull; their decompressed content is pinned by the already-verified compressed digest, so re-decompressing them every run is pure waste.
+            let expected_diff_id = (!was_cached[i]).then(|| config.rootfs.diff_ids[i].clone());
+            async move {
+                let layer_idx = i + 1;
+                let short = short_digest(&descriptor.digest);
+                let size = descriptor.size;
+                log::debug!(
+                    layer = layer_idx,
+                    of = n,
+                    digest = short,
+                    size = size,
+                    "fetch-or-cache",
+                );
+                let digest = descriptor.digest.clone();
+                let media_type = descriptor.media_type.clone();
+                let bytes = layer_cache
+                    .get_or_install(&digest, || async move {
+                        let on_chunk = move |bytes: u64| {
+                            if let Some(p) = progress {
+                                p.add(bytes);
+                            }
+                        };
+                        client.pull_blob(reference_ref, &descriptor, &on_chunk).await
+                    })
+                    .await
+                    .with_context(|| format!("resolving layer {i} (digest {digest})"))?;
+                let Some(expected_diff_id) = expected_diff_id else {
+                    return Ok(bytes);
+                };
+                let (bytes, actual_diff_id) = tokio::task::spawn_blocking(move || {
+                    let actual = compute_diff_id(&bytes, &media_type)
+                        .with_context(|| format!("computing DiffID for layer {i}"))?;
+                    Ok::<_, anyhow::Error>((bytes, actual))
                 })
-                .await
-                .with_context(|| format!("resolving layer {i} (digest {digest})"))
+                .await??;
+                if !ct_digest_eq(&actual_diff_id, &expected_diff_id) {
+                    anyhow::bail!(
+                        "layer {i} DiffID mismatch: image config says {expected_diff_id}, \
+                         actual {actual_diff_id}"
+                    );
+                }
+                Ok(bytes)
+            }
         })
         .buffered(MAX_CONCURRENT_LAYER_FETCHES)
         .try_collect()
@@ -318,28 +339,6 @@ pub(crate) async fn pull_inner<R: Registry>(
             "{n} layer{plural}   ({elapsed_s:.2}s · {total_bytes_fmt})"
         );
     }
-
-    // Cached layers were DiffID-verified on their cold pull; their decompressed content is pinned by the already-verified compressed digest, so re-decompressing them every run is pure waste.
-    let diff_id_futures = bytes_per_layer
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !was_cached[*i])
-        .map(|(i, bytes)| {
-            let descriptor = &manifest.layers[i];
-            let expected_diff_id = config.rootfs.diff_ids[i].clone();
-            async move {
-                let actual_diff_id = compute_diff_id(bytes, &descriptor.media_type)
-                    .with_context(|| format!("computing DiffID for layer {i}"))?;
-                if !ct_digest_eq(&actual_diff_id, &expected_diff_id) {
-                    anyhow::bail!(
-                        "layer {i} DiffID mismatch: image config says {expected_diff_id}, \
-                     actual {actual_diff_id}"
-                    );
-                }
-                Ok::<(), anyhow::Error>(())
-            }
-        });
-    futures_util::future::try_join_all(diff_id_futures).await?;
 
     let mut layers: Vec<oci_client::client::ImageLayer> = Vec::with_capacity(n);
     let mut layer_digests: Vec<String> = Vec::with_capacity(n);
