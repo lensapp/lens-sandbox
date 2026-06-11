@@ -90,8 +90,9 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         &self,
         reference: &Reference,
         descriptor: &oci_client::manifest::OciDescriptor,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<Vec<u8>> {
-        self.inner.pull_blob(reference, descriptor).await
+        self.inner.pull_blob(reference, descriptor, on_chunk).await
     }
 }
 
@@ -211,6 +212,7 @@ mod tests {
             &self,
             _reference: &Reference,
             _descriptor: &OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<Vec<u8>> {
             Ok(vec![])
         }
@@ -300,7 +302,7 @@ mod tests {
         };
         assert!(
             caching
-                .pull_blob(&reference, &descriptor)
+                .pull_blob(&reference, &descriptor, &|_| {})
                 .await
                 .unwrap()
                 .is_empty()

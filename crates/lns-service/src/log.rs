@@ -16,7 +16,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 pub const TARGET: &str = "lns.log";
 
-const PROGRESS_TARGET: &str = "lns.progress";
+pub(crate) const PROGRESS_TARGET: &str = "lns.progress";
 
 /// Emits a transient progress update for the CLI's live status line; total 0 means indeterminate.
 pub fn progress(verb: &str, message: &str, current: u64, total: u64) {

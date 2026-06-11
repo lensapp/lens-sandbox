@@ -22,7 +22,88 @@ pub(crate) trait Registry: Send + Sync {
         &self,
         reference: &Reference,
         descriptor: &OciDescriptor,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+}
+
+pub(crate) struct CountingSink<'a> {
+    buf: Vec<u8>,
+    on_chunk: &'a (dyn Fn(u64) + Send + Sync),
+}
+
+impl<'a> CountingSink<'a> {
+    pub(crate) fn new(on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
+        Self {
+            buf: Vec::new(),
+            on_chunk,
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl tokio::io::AsyncWrite for CountingSink<'_> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let sink = self.get_mut();
+        (sink.on_chunk)(buf.len() as u64);
+        sink.buf.extend_from_slice(buf);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+const MIN_PROGRESS_STEP_BYTES: u64 = 256 * 1024;
+
+struct PullProgress {
+    total: u64,
+    step: u64,
+    received: std::sync::atomic::AtomicU64,
+    logged: std::sync::Mutex<u64>,
+}
+
+impl PullProgress {
+    fn start(total: u64) -> Self {
+        log::progress("Pulling", "", 0, total);
+        Self {
+            total,
+            step: (total / 100).max(MIN_PROGRESS_STEP_BYTES),
+            received: std::sync::atomic::AtomicU64::new(0),
+            logged: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn add(&self, n: u64) {
+        let cur = self
+            .received
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
+            + n;
+        let mut logged = self.logged.lock().expect("pull-progress mutex");
+        let crossed_step = cur / self.step > *logged / self.step;
+        let reached_total = self.total > 0 && cur >= self.total && *logged < self.total;
+        if cur > *logged && (crossed_step || reached_total) {
+            *logged = cur;
+            log::progress("Pulling", "", cur, self.total);
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -184,6 +265,15 @@ pub(crate) async fn pull_inner<R: Registry>(
             "{image} ({n} layer{plural}, {total_bytes_fmt})"
         );
     }
+    let missing_total: u64 = manifest
+        .layers
+        .iter()
+        .zip(&was_cached)
+        .filter(|(_, cached)| !**cached)
+        .map(|(d, _)| d.size.max(0) as u64)
+        .fold(0u64, u64::saturating_add);
+    let progress = any_missing.then(|| PullProgress::start(missing_total));
+    let progress = progress.as_ref();
     let pull_start = std::time::Instant::now();
 
     // `buffered` preserves manifest order — `buffer_unordered` caused the digest-mismatch bug fixed in 608bda56.
@@ -207,7 +297,12 @@ pub(crate) async fn pull_inner<R: Registry>(
             let digest = descriptor.digest.clone();
             layer_cache
                 .get_or_install(&digest, || async move {
-                    client.pull_blob(reference_ref, &descriptor).await
+                    let on_chunk = move |bytes: u64| {
+                        if let Some(p) = progress {
+                            p.add(bytes);
+                        }
+                    };
+                    client.pull_blob(reference_ref, &descriptor, &on_chunk).await
                 })
                 .await
                 .with_context(|| format!("resolving layer {i} (digest {digest})"))
@@ -414,6 +509,78 @@ mod tests {
         (result, verbs)
     }
 
+    #[derive(Default)]
+    struct ProgressCapture {
+        points: Mutex<Vec<(u64, u64)>>,
+    }
+
+    struct ProgressPointVisitor {
+        current: u64,
+        total: u64,
+    }
+
+    impl tracing::field::Visit for ProgressPointVisitor {
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            match field.name() {
+                "current" => self.current = value,
+                "total" => self.total = value,
+                _ => {}
+            }
+        }
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    struct ProgressLayer(std::sync::Arc<ProgressCapture>);
+
+    impl<S> tracing_subscriber::Layer<S> for ProgressLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != crate::log::PROGRESS_TARGET {
+                return;
+            }
+            let mut v = ProgressPointVisitor {
+                current: 0,
+                total: 0,
+            };
+            event.record(&mut v);
+            self.0.points.lock().unwrap().push((v.current, v.total));
+        }
+    }
+
+    fn capture_progress_sync(f: impl FnOnce()) -> Vec<(u64, u64)> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = std::sync::Arc::new(ProgressCapture::default());
+        let subscriber =
+            tracing_subscriber::registry().with(ProgressLayer(std::sync::Arc::clone(&capture)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        f();
+        drop(guard);
+        let points = capture.points.lock().unwrap().clone();
+        points
+    }
+
+    async fn capture_progress<F, Fut, R>(f: F) -> (R, Vec<(u64, u64)>)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = std::sync::Arc::new(ProgressCapture::default());
+        let subscriber =
+            tracing_subscriber::registry().with(ProgressLayer(std::sync::Arc::clone(&capture)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        let result = f().await;
+        drop(guard);
+        let points = capture.points.lock().unwrap().clone();
+        (result, points)
+    }
+
     fn build_two_layer_image() -> FakeImage {
         let layer_a_raw = b"layer-a-tarball-bytes".to_vec();
         let layer_b_raw = b"layer-b-tarball-bytes".to_vec();
@@ -501,6 +668,7 @@ mod tests {
             &self,
             _reference: &Reference,
             descriptor: &OciDescriptor,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<Vec<u8>> {
             self.calls
                 .lock()
@@ -511,7 +679,12 @@ mod tests {
                 .iter()
                 .find(|(d, _)| d == &descriptor.digest)
                 .map(|(_, b)| b.clone());
-            blob.ok_or_else(|| anyhow::anyhow!("no canned blob for {}", descriptor.digest))
+            let blob =
+                blob.ok_or_else(|| anyhow::anyhow!("no canned blob for {}", descriptor.digest))?;
+            let mid = blob.len() / 2;
+            on_chunk(mid as u64);
+            on_chunk((blob.len() - mid) as u64);
+            Ok(blob)
         }
     }
 
@@ -1021,6 +1194,134 @@ mod tests {
             verbs,
             vec!["ImageCached".to_string()],
             "warm cache must emit only ImageCached (no Resolved, no Pulled)",
+        );
+    }
+
+    #[test]
+    fn pull_progress_emits_start_then_step_crossings_then_completion() {
+        let total = MIN_PROGRESS_STEP_BYTES * 4;
+        let points = capture_progress_sync(|| {
+            let p = PullProgress::start(total);
+            p.add(MIN_PROGRESS_STEP_BYTES - 1);
+            p.add(2);
+            p.add(MIN_PROGRESS_STEP_BYTES);
+            p.add(2 * MIN_PROGRESS_STEP_BYTES - 1);
+        });
+        assert_eq!(
+            points,
+            vec![
+                (0, total),
+                (MIN_PROGRESS_STEP_BYTES + 1, total),
+                (2 * MIN_PROGRESS_STEP_BYTES + 1, total),
+                (total, total),
+            ],
+            "sub-step chunks must stay silent; boundary crossings and completion must emit",
+        );
+    }
+
+    #[test]
+    fn pull_progress_small_pull_emits_only_start_and_completion() {
+        let points = capture_progress_sync(|| {
+            let p = PullProgress::start(10);
+            p.add(4);
+            p.add(6);
+        });
+        assert_eq!(points, vec![(0, 10), (10, 10)]);
+    }
+
+    #[test]
+    fn pull_progress_overshoot_beyond_declared_total_still_reports_monotonically() {
+        let points = capture_progress_sync(|| {
+            let p = PullProgress::start(10);
+            p.add(25);
+        });
+        assert_eq!(
+            points,
+            vec![(0, 10), (25, 10)],
+            "a registry sending more bytes than the manifest declared must not wedge progress",
+        );
+    }
+
+    #[test]
+    fn pull_progress_zero_total_reports_byte_counter_on_step_crossings() {
+        let points = capture_progress_sync(|| {
+            let p = PullProgress::start(0);
+            p.add(MIN_PROGRESS_STEP_BYTES + 5);
+        });
+        assert_eq!(points, vec![(0, 0), (MIN_PROGRESS_STEP_BYTES + 5, 0)]);
+    }
+
+    #[tokio::test]
+    async fn counting_sink_reports_each_chunk_and_accumulates_bytes() {
+        use tokio::io::AsyncWriteExt;
+        let seen = Mutex::new(Vec::<u64>::new());
+        let on_chunk = |n: u64| seen.lock().unwrap().push(n);
+        let mut sink = CountingSink::new(&on_chunk);
+        sink.write_all(b"hello ").await.unwrap();
+        sink.write_all(b"world").await.unwrap();
+        sink.flush().await.unwrap();
+        sink.shutdown().await.unwrap();
+        assert_eq!(sink.into_bytes(), b"hello world");
+        assert_eq!(*seen.lock().unwrap(), vec![6, 5]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pull_inner_cold_cache_streams_progress_from_zero_to_missing_total() {
+        let image = build_two_layer_image();
+        let total: u64 = image.manifest.layers.iter().map(|l| l.size as u64).sum();
+        let (_dir, cache) = cache();
+        let registry = image.into_registry();
+        let (result, points) =
+            capture_progress(|| pull_inner(&registry, "alpine:3.20", &cache)).await;
+        result.expect("cold pull");
+        assert_eq!(
+            points.first(),
+            Some(&(0, total)),
+            "the bar must appear at 0% as soon as the pull starts",
+        );
+        assert_eq!(
+            points.last(),
+            Some(&(total, total)),
+            "the bar must reach 100% when the last byte lands",
+        );
+        assert!(
+            points.windows(2).all(|w| w[0].0 < w[1].0),
+            "progress must be monotone: {points:?}",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pull_inner_partial_cache_reports_progress_against_missing_bytes_only() {
+        let image = build_two_layer_image();
+        let (_dir, cache) = cache();
+        let (digest0, bytes0) = image.blobs[0].clone();
+        cache.install_from_bytes(&digest0, &bytes0).unwrap();
+        let missing = image.manifest.layers[1].size as u64;
+        let registry = image.into_registry();
+        let (result, points) =
+            capture_progress(|| pull_inner(&registry, "alpine:3.20", &cache)).await;
+        result.expect("partial pull");
+        assert!(
+            points.iter().all(|(_, t)| *t == missing),
+            "total must count only bytes that actually need fetching: {points:?}",
+        );
+        assert_eq!(points.last(), Some(&(missing, missing)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pull_inner_warm_cache_emits_no_progress_frames() {
+        let image = build_two_layer_image();
+        let (_dir, cache) = cache();
+        for (digest, bytes) in &image.blobs {
+            cache.install_from_bytes(digest, bytes).unwrap();
+        }
+        let registry = image.into_registry();
+        let (result, points) =
+            capture_progress(|| pull_inner(&registry, "alpine:3.20", &cache)).await;
+        result.expect("warm pull");
+        assert!(
+            points.is_empty(),
+            "a fully cached image has no wait to report: {points:?}",
         );
     }
 
