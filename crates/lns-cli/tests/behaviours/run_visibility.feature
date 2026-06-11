@@ -49,6 +49,12 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Then `✓ session ready` is printed
     And finally `✓ started run #N` is printed before the attached session takes over
 
+  Scenario: Layer downloads show a live in-place progress bar on a terminal
+    Given the image is not in the local cache
+    When the service streams pull progress halfway through the download
+    Then the terminal shows an in-place pull progress bar at 50%
+    And the pulled completion line erases the bar and starts at column 0
+
   Scenario: Warm image cache collapses the resolve+pull phases
     Given the image is already cached locally
     When the run starts

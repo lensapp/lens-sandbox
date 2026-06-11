@@ -104,7 +104,9 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         other => anyhow::bail!("expected RunStarted, got {other:?}"),
     };
 
-    let outcome = drive_pre_phase(&mut stream, &mut std::io::stderr()).await?;
+    let mut progress =
+        crate::run::progress::ProgressRenderer::new(std::io::stderr().is_terminal());
+    let outcome = drive_pre_phase(&mut stream, &mut std::io::stderr(), &mut progress).await?;
     if let PrePhaseOutcome::EarlyExit(code) = outcome {
         return Ok(code);
     }
@@ -325,6 +327,7 @@ where
                     WireFrame::Json(Response::RunLog { level, verb, message }) => {
                         render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
                     }
+                    WireFrame::Json(Response::RunProgress { .. }) => {}
                     WireFrame::Json(Response::RunExit { code }) => break code,
                     WireFrame::Json(Response::Error { message }) => {
                         anyhow::bail!("daemon error: {message}")
@@ -655,15 +658,26 @@ pub enum PrePhaseStep {
     EarlyExit(i32),
 }
 
-pub async fn pre_phase_step<S, W>(stream: &mut S, writer: &mut W) -> Result<PrePhaseStep>
+pub fn pre_phase_step<W>(
+    bytes: &[u8],
+    writer: &mut W,
+    progress: &mut crate::run::progress::ProgressRenderer,
+) -> Result<PrePhaseStep>
 where
-    S: AsyncReadExt + Unpin,
     W: std::io::Write,
 {
-    let bytes = read_frame_bytes_async(stream)
-        .await
-        .context("reading pre-phase frame")?;
-    let wire = decode_wire_frame_from_bytes(&bytes).context("decoding pre-phase frame")?;
+    let wire = decode_wire_frame_from_bytes(bytes).context("decoding pre-phase frame")?;
+    if let WireFrame::Json(Response::RunProgress {
+        verb,
+        message,
+        current,
+        total,
+    }) = wire
+    {
+        progress.update(&verb, &message, current, total, writer)?;
+        return Ok(PrePhaseStep::Continue);
+    }
+    progress.clear(writer)?;
     match wire {
         WireFrame::Json(Response::RunLog {
             level,
@@ -685,13 +699,30 @@ where
     }
 }
 
-pub async fn drive_pre_phase<S, W>(stream: &mut S, writer: &mut W) -> Result<PrePhaseOutcome>
+const PROGRESS_TICK: Duration = Duration::from_millis(100);
+
+pub async fn drive_pre_phase<S, W>(
+    stream: &mut S,
+    writer: &mut W,
+    progress: &mut crate::run::progress::ProgressRenderer,
+) -> Result<PrePhaseOutcome>
 where
     S: AsyncReadExt + Unpin,
     W: std::io::Write,
 {
+    let mut ticker = tokio::time::interval(PROGRESS_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        match pre_phase_step(stream, writer).await? {
+        let read = read_frame_bytes_async(stream);
+        tokio::pin!(read);
+        let bytes = loop {
+            tokio::select! {
+                r = &mut read => break r,
+                _ = ticker.tick() => progress.tick(writer)?,
+            }
+        }
+        .context("reading pre-phase frame")?;
+        match pre_phase_step(&bytes, writer, progress)? {
             PrePhaseStep::Continue => {}
             PrePhaseStep::SessionReady => return Ok(PrePhaseOutcome::SessionReady),
             PrePhaseStep::EarlyExit(code) => return Ok(PrePhaseOutcome::EarlyExit(code)),
@@ -828,6 +859,19 @@ mod tests {
         server.write_all(&frame).await.expect("write");
     }
 
+    fn no_progress() -> crate::run::progress::ProgressRenderer {
+        crate::run::progress::ProgressRenderer::new(false)
+    }
+
+    fn run_progress(verb: &str, message: &str, current: u64, total: u64) -> Response {
+        Response::RunProgress {
+            verb: verb.to_string(),
+            message: message.to_string(),
+            current,
+            total,
+        }
+    }
+
     #[tokio::test]
     async fn drive_pre_phase_renders_log_frames_and_returns_session_ready() {
         let (mut client, mut server) = tokio::io::duplex(4096);
@@ -838,7 +882,7 @@ mod tests {
             write_response(&mut server, run_log("SessionReady", "")).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf).await.unwrap();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress()).await.unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
         let s = String::from_utf8(buf).unwrap();
         assert!(
@@ -858,7 +902,7 @@ mod tests {
             write_response(&mut server, Response::RunExit { code: 42 }).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf).await.unwrap();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress()).await.unwrap();
         assert_eq!(outcome, PrePhaseOutcome::EarlyExit(42));
     }
 
@@ -875,7 +919,7 @@ mod tests {
             .await;
         });
         let mut buf = Vec::<u8>::new();
-        let err = drive_pre_phase(&mut client, &mut buf)
+        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
             .await
             .expect_err("daemon Error must surface");
         assert!(format!("{err:#}").contains("no such image"));
@@ -890,10 +934,96 @@ mod tests {
             server.write_all(&frame).await.expect("write");
         });
         let mut buf = Vec::<u8>::new();
-        let err = drive_pre_phase(&mut client, &mut buf)
+        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
             .await
             .expect_err("stdout before SessionReady is a protocol violation");
         assert!(format!("{err:#}").contains("unexpected frame"));
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_ignores_progress_frames_when_stderr_is_not_a_tty() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_progress("Pulling", "", 5, 10)).await;
+            write_response(&mut server, run_progress("Booting", "microVM", 0, 0)).await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s, "✓ session ready\n",
+            "piped output must contain only final status lines",
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_renders_then_clears_progress_before_the_next_status_line() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_progress("Pulling", "", 5, 10)).await;
+            write_response(&mut server, run_log("Pulled", "2 layers")).await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let mut progress = crate::run::progress::ProgressRenderer::new(true);
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress)
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("pulling"), "live bar must render: {s:?}");
+        assert!(s.contains("50%"), "{s:?}");
+        let check_idx = s.find('✓').unwrap();
+        assert!(
+            s[..check_idx].ends_with('\r'),
+            "the bar must be erased so the status line starts at column 0: {s:?}",
+        );
+        assert!(s.contains("✓ pulled 2 layers"), "{s:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drive_pre_phase_animates_the_spinner_while_waiting_between_frames() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_progress("Booting", "microVM", 0, 0)).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let mut progress = crate::run::progress::ProgressRenderer::new(true);
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress)
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        let spinner_glyphs: std::collections::HashSet<char> = s
+            .chars()
+            .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+            .collect();
+        assert!(
+            spinner_glyphs.len() >= 2,
+            "the spinner must visibly animate while the service is silent: {s:?}",
+        );
+        assert!(s.contains("✓ session ready"), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn drive_attached_session_tolerates_progress_frames_after_session_ready() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let progress = encode_frame(&run_progress("Pulling", "", 1, 2)).expect("encode");
+            server.write_all(&progress).await.expect("write progress");
+            let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode RunExit");
+            server.write_all(&exit).await.expect("write RunExit");
+        });
+        let code = drive_attached_session(client, None, 42, false, Vec::new())
+            .await
+            .expect("a stray progress frame must not kill an attached session");
+        assert_eq!(code, 0);
     }
 
     #[tokio::test]
