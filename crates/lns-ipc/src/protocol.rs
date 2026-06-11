@@ -124,6 +124,13 @@ pub enum Response {
         removed: Vec<String>,
         reclaimed_bytes: u64,
     },
+    RunProgress {
+        verb: String,
+        message: String,
+        current: u64,
+        /// 0 means the size of the work is unknown (render as indeterminate).
+        total: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -681,6 +688,28 @@ mod tests {
     fn run_stopped_survives_a_response_round_trip() {
         for forced in [false, true] {
             let resp = Response::RunStopped { forced };
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
+    }
+
+    #[test]
+    fn run_progress_survives_round_trips_for_determinate_and_indeterminate() {
+        for resp in [
+            Response::RunProgress {
+                verb: "Pulling".into(),
+                message: String::new(),
+                current: 12 * 1024 * 1024,
+                total: 51 * 1024 * 1024,
+            },
+            Response::RunProgress {
+                verb: "Booting".into(),
+                message: "microVM".into(),
+                current: 0,
+                total: 0,
+            },
+        ] {
             let frame = crate::encode_frame(&resp).unwrap();
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
