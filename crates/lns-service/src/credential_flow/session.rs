@@ -64,6 +64,10 @@ pub trait CredentialNotifier: Send + Sync {
     fn dismiss_sign_in(&self, credential_id: &str) {
         let _ = credential_id;
     }
+    /// Signals that an accepted consent's connect has resolved (either way), so any surface holding the card's slot can release it; default no-op.
+    fn connect_finished(&self, display_name: &str) {
+        let _ = display_name;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,7 +329,10 @@ impl CredentialSession {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(prompt_id);
-        if self.run_oauth_connect(&credential_id).await {
+        let connected = self.run_oauth_connect(&credential_id).await;
+        self.notifier
+            .connect_finished(&self.display_name_for(&credential_id));
+        if connected {
             for request_id in &request_ids {
                 self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
             }
@@ -574,6 +581,7 @@ mod tests {
         dismissed: StdMutex<Vec<String>>,
         informed: StdMutex<Vec<String>>,
         informs_cleared: StdMutex<usize>,
+        connects_finished: StdMutex<Vec<String>>,
     }
 
     impl RecordingNotifier {
@@ -615,6 +623,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(credential_id.to_string());
+        }
+        fn connect_finished(&self, display_name: &str) {
+            self.connects_finished
+                .lock()
+                .unwrap()
+                .push(display_name.to_string());
         }
     }
 
@@ -1761,9 +1775,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_oauth_signals_connect_finished_with_the_display_name() {
+        let (s, n, _store, _rx, _connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "the resolved connect releases the slot the consent card's placeholder holds"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_failure_still_signals_connect_finished() {
+        let (s, n, _store, _rx, _connected) = oauth_fixture(FakeFlow::code_error());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "a failed sign-in must not leave a connecting placeholder behind"
+        );
+    }
+
+    #[tokio::test]
     async fn connect_oauth_on_an_unknown_prompt_is_a_noop() {
-        let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
         assert_eq!(s.connect_oauth("nope").await, DecisionOutcome::UnknownId);
+        assert!(n.connects_finished.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -10,7 +10,9 @@ use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::approval_flow::window::{self, CredentialCardPrompt, SignInCard, Snapshot, WindowState};
+use crate::approval_flow::window::{
+    self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
+};
 use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
@@ -23,11 +25,15 @@ const SCREEN_EDGE_MARGIN: f32 = 20.0;
 const MIN_WINDOW_HEIGHT: f32 = 140.0;
 const FALLBACK_MAX_HEIGHT: f32 = 720.0;
 const INFORM_ITEM_HEIGHT: f32 = 56.0;
+const CONNECTING_ITEM_HEIGHT: f32 = 80.0;
 const CARD_ITEM_HEIGHT: f32 = 250.0;
 /// Added per card whose token-fallback field is revealed: an input, a help link, and a Save button below the primary action.
 const TOKEN_REVEAL_EXTRA: f32 = 150.0;
 const STACK_ITEM_GAP: f32 = 14.0;
-const STACK_CHROME: f32 = 60.0;
+const FRAME_INNER_MARGIN: i8 = 22;
+const FRAME_OUTER_MARGIN: i8 = 8;
+/// The vertical space the frame's margins add around the scroll content; the window sizes to measured content + this chrome.
+const STACK_CHROME: f32 = 2.0 * (FRAME_INNER_MARGIN as f32 + FRAME_OUTER_MARGIN as f32);
 
 pub fn run_tray(
     shutdown: Arc<Shutdown>,
@@ -145,11 +151,8 @@ impl TrayApp {
     }
 
     fn sync_viewport_visibility(&mut self, ctx: &egui::Context) {
-        let items = stack_items(&self.window_state.snapshot());
-        let should_show = !items.is_empty();
-        let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
-        let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
-        let target = target_height(&items, revealed, monitor_height);
+        let order = self.window_state.snapshot().order;
+        let should_show = !order.is_empty();
 
         match visibility_transition(should_show, self.last_visible) {
             VisibilityTransition::Show => {
@@ -158,18 +161,22 @@ impl TrayApp {
                     ctx.request_repaint();
                     return;
                 };
+                // A seed height keeps the reveal frame (which skips ui()) close to size; ui() then snaps the window to its measured content so no estimate slop shows as bottom padding.
+                let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
+                let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
+                let seed = target_height(&order, revealed, monitor_height);
                 join_all_spaces();
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                     WINDOW_WIDTH,
-                    target,
+                    seed,
                 )));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its cards.
+                // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its cards and fits its height.
                 ctx.request_repaint();
-                self.current_height = target;
+                self.current_height = seed;
                 self.last_visible = true;
             }
             VisibilityTransition::Hide => {
@@ -177,15 +184,19 @@ impl TrayApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
                 self.last_visible = false;
             }
-            VisibilityTransition::Unchanged => {
-                if self.last_visible && (self.current_height - target).abs() > 0.5 {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        WINDOW_WIDTH,
-                        target,
-                    )));
-                    self.current_height = target;
-                }
-            }
+            // Resizing while visible is driven by ui()'s content measurement, not an estimate.
+            VisibilityTransition::Unchanged => {}
+        }
+    }
+
+    /// Snaps the viewport to `target` — the scroll area's reported content height plus chrome, clamped to the screen. Driven by content size (not the window-bounded `min_rect`), so a card that grows taller than the current window still makes the window grow instead of clipping.
+    fn fit_height_to_content(&mut self, ctx: &egui::Context, target: f32) {
+        if (self.current_height - target).abs() > 0.5 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                WINDOW_WIDTH,
+                target,
+            )));
+            self.current_height = target;
         }
     }
 }
@@ -208,12 +219,19 @@ impl eframe::App for TrayApp {
         prune_credential_inputs(&mut self.credential_inputs, &snapshot);
         prune_token_drafts(&mut self.token_drafts, &snapshot);
 
-        match render_stack(
+        let monitor_height = ui.ctx().input(|i| i.viewport().monitor_size).map(|m| m.y);
+        let cap = content_cap(monitor_height);
+        let (action, content_height) = render_stack(
             ui,
             &snapshot,
             &mut self.credential_inputs,
             &mut self.token_drafts,
-        ) {
+            cap - STACK_CHROME,
+        );
+        let target = (content_height + STACK_CHROME).clamp(MIN_WINDOW_HEIGHT, cap);
+        self.fit_height_to_content(ui.ctx(), target);
+
+        match action {
             Some(CardAction::Decide { id, decision }) => {
                 self.window_state.decide(&id, decision);
                 ui.ctx().request_repaint();
@@ -304,32 +322,22 @@ enum TokenFallbackEvent {
     OpenHelp(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StackItem {
-    Inform(usize),
-    Network(usize),
-    SignIn(usize),
-    Credential(usize),
-}
-
-/// Every pending entry, in the order it stacks down the window: passive informs on top, then network/connect cards, in-flight sign-ins, and credential prompts. Returning all of them — not just the first of each — is what keeps concurrent notifications from one service hiding another's.
-fn stack_items(snapshot: &Snapshot) -> Vec<StackItem> {
-    let mut items = Vec::new();
-    items.extend((0..snapshot.informs.len()).map(StackItem::Inform));
-    items.extend((0..snapshot.pending.len()).map(StackItem::Network));
-    items.extend((0..snapshot.sign_ins.len()).map(StackItem::SignIn));
-    items.extend((0..snapshot.pending_credentials.len()).map(StackItem::Credential));
-    items
-}
-
 fn item_height(item: &StackItem) -> f32 {
     match item {
         StackItem::Inform(_) => INFORM_ITEM_HEIGHT,
+        StackItem::Connecting(_) => CONNECTING_ITEM_HEIGHT,
         _ => CARD_ITEM_HEIGHT,
     }
 }
 
-/// Window height that fits the whole stack, capped at the usable monitor height so a long stack scrolls inside the window rather than running off-screen.
+/// The tallest the window may grow: the usable monitor height, or a fixed fallback when the monitor size isn't known yet. Beyond this the stack scrolls instead of running off-screen.
+fn content_cap(monitor_height: Option<f32>) -> f32 {
+    monitor_height
+        .map(|h| (h - 2.0 * SCREEN_EDGE_MARGIN).max(MIN_WINDOW_HEIGHT))
+        .unwrap_or(FALLBACK_MAX_HEIGHT)
+}
+
+/// A pre-measurement seed for the height: only the reveal frame (which skips ui()) uses it, after which ui() snaps the window to its measured content. Estimates per-item heights and clamps to [`content_cap`].
 fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f32>) -> f32 {
     if items.is_empty() {
         return MIN_WINDOW_HEIGHT;
@@ -338,37 +346,36 @@ fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f3
         + STACK_ITEM_GAP * (items.len() - 1) as f32
         + revealed as f32 * TOKEN_REVEAL_EXTRA
         + STACK_CHROME;
-    let cap = monitor_height
-        .map(|h| (h - 2.0 * SCREEN_EDGE_MARGIN).max(MIN_WINDOW_HEIGHT))
-        .unwrap_or(FALLBACK_MAX_HEIGHT);
-    content.clamp(MIN_WINDOW_HEIGHT, cap)
+    content.clamp(MIN_WINDOW_HEIGHT, content_cap(monitor_height))
 }
 
+/// Renders the stack and returns the fired action plus the content's natural height (the scroll area's `content_size`), which the caller adds chrome to and sizes the window from. Reporting content size — not the window-bounded laid-out size — is what lets the window grow to a card taller than itself instead of clipping it.
 fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
     token_drafts: &mut HashMap<String, TokenDraft>,
-) -> Option<CardAction> {
+    scroll_max: f32,
+) -> (Option<CardAction>, f32) {
     use egui::{CornerRadius, Frame, Margin, Stroke};
 
-    let items = stack_items(snapshot);
-    if items.is_empty() {
-        return None;
+    if snapshot.order.is_empty() {
+        return (None, 0.0);
     }
 
     Frame::new()
         .fill(window::BG_SECONDARY)
         .stroke(Stroke::new(1.0, window::BORDER))
         .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(22))
-        .outer_margin(Margin::same(8))
+        .inner_margin(Margin::same(FRAME_INNER_MARGIN))
+        .outer_margin(Margin::same(FRAME_OUTER_MARGIN))
         .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
+            let out = egui::ScrollArea::vertical()
+                .max_height(scroll_max)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     let mut action = None;
-                    for (idx, item) in items.iter().enumerate() {
+                    for (idx, item) in snapshot.order.iter().enumerate() {
                         if idx > 0 {
                             ui.add_space(STACK_ITEM_GAP);
                             ui.add(egui::Separator::default().spacing(0.0));
@@ -379,8 +386,8 @@ fn render_stack(
                         action = action.or(fired);
                     }
                     action
-                })
-                .inner
+                });
+            (out.inner, out.content_size.y)
         })
         .inner
 }
@@ -414,7 +421,28 @@ fn render_item(
             let draft = token_drafts.entry(prompt.id.clone()).or_default();
             render_credential_card(ui, prompt, input, draft)
         }
+        StackItem::Connecting(i) => {
+            render_connecting_card(ui, &snapshot.connecting[i]);
+            None
+        }
     }
+}
+
+fn render_connecting_card(ui: &mut egui::Ui, display_name: &str) {
+    use egui::RichText;
+
+    render_card_header(ui, "CONNECT");
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(18.0).color(window::ACCENT_GREEN));
+        ui.label(
+            RichText::new(format!("Connecting to {display_name}…"))
+                .size(16.0)
+                .strong()
+                .color(window::TEXT_ACCENT),
+        );
+    });
 }
 
 fn render_inform_banner(ui: &mut egui::Ui, msg: &str, index: usize) -> Option<CardAction> {
@@ -1017,6 +1045,8 @@ mod tests {
             pending_credentials: vec![credential_prompt("keep")],
             sign_ins: Vec::new(),
             informs: Vec::new(),
+            connecting: Vec::new(),
+            order: vec![StackItem::Credential(0)],
         };
         let mut inputs = HashMap::new();
         inputs.insert("keep".to_string(), "typed so far".to_string());
@@ -1031,62 +1061,20 @@ mod tests {
         );
     }
 
-    fn net_prompt(id: &str) -> PendingPrompt {
-        PendingPrompt {
-            id: id.to_string(),
-            host: "api.example.test".to_string(),
-            action: "CONNECT api.example.test:443".to_string(),
-            offer: None,
-            token_fallback: None,
-        }
-    }
-
-    fn sign_in(credential_id: &str) -> SignInCard {
-        SignInCard {
-            credential_id: credential_id.to_string(),
-            display_name: "Some Service".to_string(),
-            user_code: "WXYZ-1234".to_string(),
-            verification_uri: "https://some-oauth.example/device".to_string(),
-            token_fallback: None,
-        }
-    }
-
-    #[test]
-    fn stack_items_includes_every_pending_entry_so_none_is_hidden() {
-        let snapshot = Snapshot {
-            pending: vec![net_prompt("n1"), net_prompt("n2")],
-            pending_credentials: vec![credential_prompt("c1")],
-            sign_ins: vec![sign_in("s1")],
-            informs: vec!["one".into(), "two".into()],
-        };
-        assert_eq!(
-            stack_items(&snapshot),
-            vec![
-                StackItem::Inform(0),
-                StackItem::Inform(1),
-                StackItem::Network(0),
-                StackItem::Network(1),
-                StackItem::SignIn(0),
-                StackItem::Credential(0),
-            ],
-            "two concurrent services plus warnings all stack; nothing is dropped to a hidden queue"
-        );
-    }
-
-    #[test]
-    fn stack_items_is_empty_when_nothing_pends() {
-        let snapshot = Snapshot {
-            pending: Vec::new(),
-            pending_credentials: Vec::new(),
-            sign_ins: Vec::new(),
-            informs: Vec::new(),
-        };
-        assert!(stack_items(&snapshot).is_empty());
-    }
-
     #[test]
     fn target_height_is_the_floor_when_the_stack_is_empty() {
         assert_eq!(target_height(&[], 0, Some(1080.0)), MIN_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn content_cap_insets_a_known_monitor_and_falls_back_without_one() {
+        assert_eq!(content_cap(Some(900.0)), 900.0 - 2.0 * SCREEN_EDGE_MARGIN);
+        assert_eq!(content_cap(None), FALLBACK_MAX_HEIGHT);
+        assert_eq!(
+            content_cap(Some(10.0)),
+            MIN_WINDOW_HEIGHT,
+            "a tiny monitor still leaves at least the floor so the scroll area never goes negative"
+        );
     }
 
     #[test]
@@ -1100,6 +1088,15 @@ mod tests {
         assert!(
             two > one,
             "a second concurrent card makes the window taller rather than hiding the first"
+        );
+    }
+
+    #[test]
+    fn a_connecting_placeholder_takes_less_room_than_a_full_card() {
+        assert!(item_height(&StackItem::Connecting(0)) < item_height(&StackItem::Network(0)));
+        assert_eq!(
+            item_height(&StackItem::Connecting(0)),
+            CONNECTING_ITEM_HEIGHT
         );
     }
 
