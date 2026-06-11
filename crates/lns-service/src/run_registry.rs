@@ -105,6 +105,16 @@ pub fn set_exit_code(run_id: u32, code: i32) {
     }
 }
 
+pub fn mark_exited_from_log(run_id: u32) {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g.as_ref().and_then(|m| m.get(&run_id))
+        && let Some(code) = h.logs.exit()
+        && let Ok(mut s) = h.status.lock()
+    {
+        *s = RunStatus::Exited { code };
+    }
+}
+
 pub fn status(run_id: u32) -> Option<RunStatus> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
@@ -408,6 +418,66 @@ mod tests {
         let id = allocate_run_id() + 2_000_003;
         set_exit_code(id, 17);
         assert!(snapshot().iter().all(|s| s.id != id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn mark_exited_from_log_adopts_the_log_buffers_exit_code() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        handle.logs.close(7);
+        register(id, handle);
+
+        mark_exited_from_log(id);
+
+        assert_eq!(status(id), Some(RunStatus::Exited { code: 7 }));
+        deregister(id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn mark_exited_from_log_leaves_a_run_running_while_its_log_is_open() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(id, handle);
+
+        mark_exited_from_log(id);
+
+        assert_eq!(status(id), Some(RunStatus::Running));
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn mark_exited_from_log_is_noop_when_run_not_registered() {
+        let id = allocate_run_id() + 2_000_004;
+        mark_exited_from_log(id);
+        assert_eq!(status(id), None);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_finished_run_stays_listed_with_readable_logs_until_it_is_removed() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        handle
+            .logs
+            .append(crate::run_log::StreamKind::Stdout, b"done");
+        handle.logs.close(0);
+        register(id, handle);
+
+        mark_exited_from_log(id);
+
+        let listed = snapshot().into_iter().find(|s| s.id == id);
+        assert_eq!(
+            listed.map(|s| s.status),
+            Some(RunStatus::Exited { code: 0 }),
+            "a finished run must remain listed as exited",
+        );
+        let logs = log_buffer(id).expect("a finished run's logs stay readable while it is listed");
+        assert_eq!(logs.read_from(0).chunks[0].bytes, b"done");
+
+        assert_eq!(remove_if_exited(id), RemoveOutcome::Removed);
+        assert_eq!(status(id), None, "rm finally drops the finished run");
     }
 
     #[tokio::test]
