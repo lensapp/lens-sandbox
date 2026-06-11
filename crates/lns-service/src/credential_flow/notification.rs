@@ -109,6 +109,11 @@ impl CredentialNotifier for WindowCredentialNotifier {
         self.state.remove_sign_in(credential_id);
         self.wake();
     }
+
+    fn connect_finished(&self, display_name: &str) {
+        self.state.clear_connecting(display_name);
+        self.wake();
+    }
 }
 
 #[cfg(test)]
@@ -270,12 +275,33 @@ mod tests {
     }
 
     #[test]
+    fn connect_finished_clears_the_connecting_placeholder() {
+        let (n, state, _rx) = fixture(false, false);
+        let mut consent = prompt("c1", "some-oauth");
+        consent.oauth_display_name = Some("GitHub".into());
+        n.present(&consent);
+        state.decide_credential(
+            "c1",
+            crate::credential_flow::session::CredentialDecisionRequest::Allow(
+                crate::credential_flow::store::CredentialEntry::HostDetect,
+            ),
+        );
+        assert_eq!(state.snapshot().connecting, vec!["GitHub".to_string()]);
+        n.connect_finished("GitHub");
+        assert!(
+            state.snapshot().connecting.is_empty(),
+            "the resolved connect takes the placeholder down"
+        );
+    }
+
+    #[test]
     fn noop_notifier_methods_are_safe_to_call() {
         let n = NoopCredentialNotifier;
         n.present(&prompt("c1", "some-provider"));
         n.dismiss("c1");
         n.inform("anything");
         n.clear_informs();
+        n.connect_finished("GitHub");
     }
 
     #[test]

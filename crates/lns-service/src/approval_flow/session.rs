@@ -42,6 +42,10 @@ pub trait Notifier: Send + Sync {
     fn dismiss(&self, id: &str);
     fn inform(&self, message: &str);
     fn clear_informs(&self);
+    /// Signals that an accepted offer's connect has resolved (either way), so any surface holding the card's slot can release it; default no-op for notifiers without one.
+    fn connect_finished(&self, display_name: &str) {
+        let _ = display_name;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +63,13 @@ pub struct PendingPrompt {
 struct PendingEntry {
     host: String,
     deadline: Instant,
-    offer_integration_id: Option<String>,
+    offer: Option<OfferRef>,
+}
+
+#[derive(Debug, Clone)]
+struct OfferRef {
+    integration_id: String,
+    display_name: String,
 }
 
 pub struct ApprovalSession {
@@ -168,11 +178,14 @@ impl ApprovalSession {
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
         let matched = self.offer_id_and_name_for(&req.host);
-        let offer_integration_id = matched.as_ref().map(|(id, ..)| id.clone());
+        let offer_ref = matched.as_ref().map(|(id, name, _)| OfferRef {
+            integration_id: id.clone(),
+            display_name: name.clone(),
+        });
         // While a connect for this integration is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
-        let coalesced = offer_integration_id
-            .as_deref()
-            .is_some_and(|id| self.is_connecting(id));
+        let coalesced = offer_ref
+            .as_ref()
+            .is_some_and(|o| self.is_connecting(&o.integration_id));
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         if pending.contains_key(&req.id) {
             return;
@@ -182,7 +195,7 @@ impl ApprovalSession {
             PendingEntry {
                 host: req.host.clone(),
                 deadline: now + self.timeout,
-                offer_integration_id,
+                offer: offer_ref,
             },
         );
         drop(pending);
@@ -234,44 +247,49 @@ impl ApprovalSession {
 
     /// Drives one connect for the offered integration and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same integration coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
     async fn connect_offer_with(&self, id: &str, token: Option<String>) -> DecisionOutcome {
-        let Some(integration_id) = self.offer_integration_of(id) else {
+        let Some(offer) = self.offer_of(id) else {
             return DecisionOutcome::UnknownId;
         };
-        if !self.begin_connecting(&integration_id) {
+        if !self.begin_connecting(&offer.integration_id) {
             // Another card already started this connect; its batch will release this request too.
             self.notifier.dismiss(id);
             return DecisionOutcome::Resolved;
         }
         // Hide every offer card for this integration so the sign-in card isn't covered; the requests stay held for the batch release.
-        for request_id in self.offer_request_ids(&integration_id) {
+        for request_id in self.offer_request_ids(&offer.integration_id) {
             self.notifier.dismiss(&request_id);
         }
         let connected = match self.connector.get() {
             Some(connector) => match token {
-                Some(value) => connector.connect_with_token(&integration_id, value).await,
-                None => connector.connect(&integration_id).await,
+                Some(value) => {
+                    connector
+                        .connect_with_token(&offer.integration_id, value)
+                        .await
+                }
+                None => connector.connect(&offer.integration_id).await,
             },
             None => false,
         };
-        self.finish_connecting(&integration_id);
+        self.finish_connecting(&offer.integration_id);
+        self.notifier.connect_finished(&offer.display_name);
         let decision = if connected {
             Decision::AllowOnce
         } else {
             Decision::DenyOnce
         };
-        for request_id in self.drain_offer_requests(&integration_id) {
+        for request_id in self.drain_offer_requests(&offer.integration_id) {
             self.send_decision_frame(&request_id, decision);
         }
         DecisionOutcome::Resolved
     }
 
-    /// The integration a held entry offers, if any; does not remove the entry.
-    fn offer_integration_of(&self, id: &str) -> Option<String> {
+    /// The offer a held entry carries, if any; does not remove the entry.
+    fn offer_of(&self, id: &str) -> Option<OfferRef> {
         self.pending
             .lock()
             .expect("pending mutex poisoned")
             .get(id)?
-            .offer_integration_id
+            .offer
             .clone()
     }
 
@@ -295,7 +313,7 @@ impl ApprovalSession {
             .lock()
             .expect("pending mutex poisoned")
             .iter()
-            .filter(|(_, e)| e.offer_integration_id.as_deref() == Some(integration_id))
+            .filter(|(_, e)| offers_integration(e, integration_id))
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -305,7 +323,7 @@ impl ApprovalSession {
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         let ids: Vec<String> = pending
             .iter()
-            .filter(|(_, e)| e.offer_integration_id.as_deref() == Some(integration_id))
+            .filter(|(_, e)| offers_integration(e, integration_id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -328,9 +346,9 @@ impl ApprovalSession {
                 // A request offering an integration that's mid sign-in must not be swept; its connect releases it.
                 .filter(|(_, entry)| {
                     entry
-                        .offer_integration_id
-                        .as_deref()
-                        .is_none_or(|id| !connecting.contains(id))
+                        .offer
+                        .as_ref()
+                        .is_none_or(|o| !connecting.contains(&o.integration_id))
                 })
                 .map(|(id, _)| id.clone())
                 .collect()
@@ -428,6 +446,13 @@ fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     }
 }
 
+fn offers_integration(entry: &PendingEntry, integration_id: &str) -> bool {
+    entry
+        .offer
+        .as_ref()
+        .is_some_and(|o| o.integration_id == integration_id)
+}
+
 fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
     match decision {
         Decision::AllowAlways => Some(RouteRule::allow_host(host)),
@@ -449,6 +474,7 @@ pub(crate) mod tests {
         pub(crate) dismissed: StdMutex<Vec<String>>,
         pub(crate) informed: StdMutex<Vec<String>>,
         pub(crate) informs_cleared: StdMutex<usize>,
+        pub(crate) connects_finished: StdMutex<Vec<String>>,
     }
 
     impl Notifier for RecordingNotifier {
@@ -463,6 +489,12 @@ pub(crate) mod tests {
         }
         fn clear_informs(&self) {
             *self.informs_cleared.lock().unwrap() += 1;
+        }
+        fn connect_finished(&self, display_name: &str) {
+            self.connects_finished
+                .lock()
+                .unwrap()
+                .push(display_name.to_string());
         }
     }
 
@@ -1328,6 +1360,80 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connect_offer_signals_connect_finished_with_the_offers_display_name() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "the resolved connect releases the slot its placeholder holds in the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_failure_still_signals_connect_finished() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "a failed connect must not leave a connecting placeholder behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_without_a_connector_signals_connect_finished() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offer_with_token_signals_connect_finished() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, n, _rx) = offer_session(
+            vec![offerable_with_fallback(
+                "some-oauth",
+                "GitHub",
+                "api.some-oauth.example",
+            )],
+            Some(connector),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer_with_token("r1", "some-pasted-token".into())
+            .await;
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()]
+        );
+    }
+
     #[test]
     fn submit_pending_coalesces_a_request_while_its_integration_is_connecting() {
         let (s, n, _rx) = offer_session(
@@ -1350,7 +1456,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn connect_offer_for_a_sibling_while_connecting_does_not_start_a_second_connect() {
         let connector = Arc::new(FakeConnector::new(true));
-        let (s, _n, mut rx) = offer_session(
+        let (s, n, mut rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             Some(connector.clone()),
         );
@@ -1363,6 +1469,10 @@ pub(crate) mod tests {
         assert!(
             connector.connected.lock().unwrap().is_empty(),
             "a second sign-in must not run while one is in flight"
+        );
+        assert!(
+            n.connects_finished.lock().unwrap().is_empty(),
+            "the duplicate click must not release the in-flight connect's placeholder"
         );
         assert!(
             rx.try_recv().is_err(),
