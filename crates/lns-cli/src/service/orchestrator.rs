@@ -212,6 +212,12 @@ pub async fn ls() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachBehaviour {
+    SignalAndDrain,
+    LeaveRunning,
+}
+
 pub(crate) async fn drive_attached_session<S>(
     stream: S,
     aux_socket: Option<PathBuf>,
@@ -231,6 +237,7 @@ where
         tty,
         std::io::stdout().is_terminal(),
         detach_chord,
+        DetachBehaviour::SignalAndDrain,
         &mut stdout,
         &mut stderr,
     )
@@ -245,6 +252,7 @@ pub async fn drive_attached_session_with_writers<S, O, E>(
     tty: bool,
     stdout_is_terminal: bool,
     detach_chord: Vec<u8>,
+    detach: DetachBehaviour,
     stdout: &mut O,
     stderr: &mut E,
 ) -> Result<i32>
@@ -275,7 +283,7 @@ where
             let pump_chord = detach_chord;
             let pump_early_exit = early_exit_tx.clone();
             let stdin = tokio::spawn(async move {
-                let r = run_stdin_pump(socket, run_id, pump_chord).await;
+                let r = run_stdin_pump(socket, run_id, pump_chord, detach).await;
                 if matches!(&r, Ok(true)) {
                     let _ = pump_early_exit.send(());
                 }
@@ -292,7 +300,14 @@ where
         tokio::select! {
             biased;
             _ = early_exit_rx.recv() => {
-                break drain_after_chord(&mut stream, stdout, stderr, &mut last_stdout_byte).await;
+                break exit_code_after_detach(
+                    detach,
+                    &mut stream,
+                    stdout,
+                    stderr,
+                    &mut last_stdout_byte,
+                )
+                .await;
             }
             res = read_frame_bytes_async(&mut stream) => {
                 let bytes = res.context("reading run-response frame")?;
@@ -359,6 +374,26 @@ where
     stderr.write_all(&line).await?;
     stderr.flush().await.ok();
     Ok(())
+}
+
+async fn exit_code_after_detach<S, O, E>(
+    detach: DetachBehaviour,
+    stream: &mut S,
+    stdout: &mut O,
+    stderr: &mut E,
+    last_stdout_byte: &mut Option<u8>,
+) -> i32
+where
+    S: AsyncReadExt + Unpin,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
+{
+    match detach {
+        DetachBehaviour::SignalAndDrain => {
+            drain_after_chord(stream, stdout, stderr, last_stdout_byte).await
+        }
+        DetachBehaviour::LeaveRunning => 0,
+    }
 }
 
 async fn drain_after_chord<S, O, E>(
@@ -432,7 +467,12 @@ where
     }
 }
 
-async fn run_stdin_pump(socket: PathBuf, run_id: u32, detach_chord: Vec<u8>) -> Result<bool> {
+async fn run_stdin_pump(
+    socket: PathBuf,
+    run_id: u32,
+    detach_chord: Vec<u8>,
+    detach: DetachBehaviour,
+) -> Result<bool> {
     let mut input = tokio::io::stdin();
     let mut buf = [0u8; 4096];
     let mut detector = (!detach_chord.is_empty()).then(|| DetachChordDetector::new(detach_chord));
@@ -463,7 +503,7 @@ async fn run_stdin_pump(socket: PathBuf, run_id: u32, detach_chord: Vec<u8>) -> 
         let chunk = &buf[..n];
         match detector.as_mut() {
             Some(d) => {
-                if !pump_with_detector(&socket, run_id, chunk, d).await? {
+                if !pump_with_detector(&socket, run_id, chunk, d, detach).await? {
                     return Ok(true);
                 }
             }
@@ -486,10 +526,11 @@ async fn pump_with_detector(
     run_id: u32,
     bytes: &[u8],
     detector: &mut DetachChordDetector,
+    detach: DetachBehaviour,
 ) -> Result<bool> {
     let mut pending: Vec<u8> = Vec::new();
     for &b in bytes {
-        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending);
+        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending, detach);
         for request in &requests {
             send_one_shot(socket, request).await?;
         }
@@ -523,6 +564,7 @@ fn plan_feed(
     action: FeedAction,
     run_id: u32,
     pending: &mut Vec<u8>,
+    detach: DetachBehaviour,
 ) -> (Vec<Request>, PumpControl) {
     match action {
         FeedAction::Forward(byte) => {
@@ -553,10 +595,12 @@ fn plan_feed(
         }
         FeedAction::Trigger => {
             let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
-            requests.push(Request::RunSignal {
-                run_id,
-                signal: SignalKind::Hup,
-            });
+            if matches!(detach, DetachBehaviour::SignalAndDrain) {
+                requests.push(Request::RunSignal {
+                    run_id,
+                    signal: SignalKind::Hup,
+                });
+            }
             (requests, PumpControl::Detach)
         }
     }
@@ -998,6 +1042,7 @@ mod tests {
             false,
             true,
             Vec::new(),
+            DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
         )
@@ -1007,6 +1052,62 @@ mod tests {
         assert_eq!(
             captured, b"hello\n",
             "expected exactly one appended newline"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_code_after_detach_leave_running_returns_zero_without_draining() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let exit = encode_frame(&Response::RunExit { code: 9 }).expect("encode exit");
+        server.write_all(&exit).await.expect("write exit");
+
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let mut last = None;
+        let code = exit_code_after_detach(
+            DetachBehaviour::LeaveRunning,
+            &mut client,
+            &mut captured,
+            &mut status,
+            &mut last,
+        )
+        .await;
+
+        assert_eq!(code, 0, "a docker-style detach returns 0 at once");
+        assert!(
+            captured.is_empty(),
+            "LeaveRunning must leave the run running, not drain its output"
+        );
+        let bytes = read_frame_bytes_async(&mut client)
+            .await
+            .expect("the workload's frame is still pending — it was not drained");
+        assert!(matches!(
+            decode_wire_frame_from_bytes(&bytes).expect("decode"),
+            WireFrame::Json(Response::RunExit { code: 9 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn exit_code_after_detach_signal_and_drain_adopts_the_drained_exit_code() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let exit = encode_frame(&Response::RunExit { code: 7 }).expect("encode exit");
+        server.write_all(&exit).await.expect("write exit");
+
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let mut last = None;
+        let code = exit_code_after_detach(
+            DetachBehaviour::SignalAndDrain,
+            &mut client,
+            &mut captured,
+            &mut status,
+            &mut last,
+        )
+        .await;
+
+        assert_eq!(
+            code, 7,
+            "SignalAndDrain drains through to the real exit code"
         );
     }
 
@@ -1029,6 +1130,7 @@ mod tests {
             false,
             true,
             Vec::new(),
+            DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
         )
@@ -1057,6 +1159,7 @@ mod tests {
             false,
             false,
             Vec::new(),
+            DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
         )
@@ -1087,6 +1190,7 @@ mod tests {
             false,
             true,
             Vec::new(),
+            DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
         )
@@ -1107,7 +1211,12 @@ mod tests {
     #[test]
     fn plan_feed_forward_accumulates_without_sending() {
         let mut pending = Vec::new();
-        let (requests, control) = plan_feed(FeedAction::Forward(b'a'), 1, &mut pending);
+        let (requests, control) = plan_feed(
+            FeedAction::Forward(b'a'),
+            1,
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+        );
         assert!(requests.is_empty());
         assert!(matches!(control, PumpControl::Continue));
         assert_eq!(pending, vec![b'a']);
@@ -1116,7 +1225,12 @@ mod tests {
     #[test]
     fn plan_feed_hold_flushes_accumulated_bytes() {
         let mut pending = vec![b'x', b'y'];
-        let (requests, _) = plan_feed(FeedAction::Hold, 7, &mut pending);
+        let (requests, _) = plan_feed(
+            FeedAction::Hold,
+            7,
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+        );
         assert_eq!(
             requests,
             vec![Request::RunStdin {
@@ -1130,14 +1244,24 @@ mod tests {
     #[test]
     fn plan_feed_hold_with_nothing_pending_sends_nothing() {
         let mut pending = Vec::new();
-        let (requests, _) = plan_feed(FeedAction::Hold, 7, &mut pending);
+        let (requests, _) = plan_feed(
+            FeedAction::Hold,
+            7,
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+        );
         assert!(requests.is_empty());
     }
 
     #[test]
     fn plan_feed_flush_sends_pending_before_the_held_bytes() {
         let mut pending = vec![b'p'];
-        let (requests, _) = plan_feed(FeedAction::Flush(vec![b'h']), 3, &mut pending);
+        let (requests, _) = plan_feed(
+            FeedAction::Flush(vec![b'h']),
+            3,
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+        );
         assert_eq!(
             requests,
             vec![
@@ -1161,6 +1285,7 @@ mod tests {
             FeedAction::FlushAndForward(vec![b'h'], b'c'),
             3,
             &mut pending,
+            DetachBehaviour::SignalAndDrain,
         );
         assert_eq!(
             requests,
@@ -1172,9 +1297,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_feed_trigger_flushes_then_signals_hup_and_detaches() {
+    fn plan_feed_trigger_signals_hup_then_detaches_for_run_and_exec() {
         let mut pending = vec![b'p'];
-        let (requests, control) = plan_feed(FeedAction::Trigger, 9, &mut pending);
+        let (requests, control) = plan_feed(
+            FeedAction::Trigger,
+            9,
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+        );
         assert_eq!(
             requests,
             vec![
@@ -1187,6 +1317,27 @@ mod tests {
                     signal: SignalKind::Hup
                 },
             ]
+        );
+        assert!(matches!(control, PumpControl::Detach));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_trigger_leaves_the_run_running_without_signalling_for_attach() {
+        let mut pending = vec![b'p'];
+        let (requests, control) = plan_feed(
+            FeedAction::Trigger,
+            9,
+            &mut pending,
+            DetachBehaviour::LeaveRunning,
+        );
+        assert_eq!(
+            requests,
+            vec![Request::RunStdin {
+                run_id: 9,
+                bytes: vec![b'p']
+            }],
+            "a docker-style detach flushes pending input but never signals the workload"
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());

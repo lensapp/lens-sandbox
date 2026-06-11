@@ -291,6 +291,7 @@ where
         term.stdin_is_tty,
         term.stdout_is_terminal,
         args.detach_keys.0.clone(),
+        crate::service::DetachBehaviour::LeaveRunning,
         stdout,
         stderr,
     )
