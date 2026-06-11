@@ -228,7 +228,11 @@ pub async fn create_with<F: Fs>(
     name: &str,
 ) -> Result<lns_ipc::VolumeInfo> {
     validate_name(name)?;
-    let image_path = ensure_image(fs, store_root, name).await?;
+    let image_path = image_path_in(store_root, name);
+    if !fs.exists(&image_path).await {
+        let _guard = take_lease(registry, name, MAINTENANCE_HOLDER_RUN_ID)?;
+        ensure_image(fs, store_root, name).await?;
+    }
     info_for(fs, registry, &image_path, name).await
 }
 
@@ -740,6 +744,22 @@ mod tests {
             .unwrap();
         assert_eq!(info.in_use_by, Some(7));
         assert_eq!(fs.created_images().len(), 1, "no second image");
+    }
+
+    #[tokio::test]
+    async fn create_of_a_new_image_yields_to_a_concurrent_holder_instead_of_racing_the_temp_file() {
+        let registry = reg();
+        let fs = FakeFs::default();
+        let _held = take_lease(&registry, "prism-data", 9).unwrap();
+        let err = create_with(&fs, &registry, Path::new("/store"), "prism-data")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("in use by run #9"), "got: {err}");
+        assert!(
+            fs.created_images().is_empty(),
+            "create must not write the backing image while a run holds the volume"
+        );
     }
 
     #[tokio::test]
