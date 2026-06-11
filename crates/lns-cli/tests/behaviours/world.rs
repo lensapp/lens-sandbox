@@ -39,6 +39,7 @@ pub struct ResolvedRunView {
 pub struct VolumeCliRig {
     pub volumes: Vec<lns_ipc::VolumeInfo>,
     pub prune_plan: Option<(Vec<String>, u64)>,
+    pub prune_failed: Vec<lns_ipc::VolumePruneFailure>,
     pub refuse_message: Option<String>,
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,

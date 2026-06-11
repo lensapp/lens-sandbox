@@ -85,6 +85,7 @@ pub enum Response {
     VolumesPruned {
         removed: Vec<String>,
         reclaimed_bytes: u64,
+        failed: Vec<VolumePruneFailure>,
     },
 }
 
@@ -95,6 +96,12 @@ pub struct VolumeInfo {
     pub disk_bytes: u64,
     pub created: String,
     pub in_use_by: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumePruneFailure {
+    pub name: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,6 +437,10 @@ mod tests {
             Response::VolumesPruned {
                 removed: vec!["prism-data".into()],
                 reclaimed_bytes: 32 * 1024 * 1024,
+                failed: vec![VolumePruneFailure {
+                    name: "scratch".into(),
+                    error: "permission denied".into(),
+                }],
             },
         ] {
             let frame = crate::encode_frame(&resp).unwrap();

@@ -150,6 +150,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 Response::VolumesPruned {
                     removed: report.removed,
                     reclaimed_bytes: report.reclaimed_bytes,
+                    failed: report.failed,
                 }
             }))
         }

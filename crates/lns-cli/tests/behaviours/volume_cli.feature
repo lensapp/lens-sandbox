@@ -90,6 +90,14 @@ Feature: managing named volumes from the CLI
     Then the exit code is 0
     And the output contains "No unused volumes."
 
+  Scenario: pruning reports volumes it could not remove and fails
+    Given the service will prune volumes "prism-data" and "scratch" reclaiming 67108864 bytes
+    And the service will fail to prune "stuck" with "permission denied"
+    When the user runs volume command "prune --force"
+    Then the exit code is 1
+    And the output contains "Total reclaimed space: 64 MiB"
+    And the output contains "Failed to remove stuck: permission denied"
+
   Scenario: an unreachable service is reported plainly
     Given the service is unreachable
     When the user runs volume command "ls"

@@ -253,10 +253,11 @@ pub async fn remove_with<F: Fs>(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PruneReport {
     pub removed: Vec<String>,
     pub reclaimed_bytes: u64,
+    pub failed: Vec<lns_ipc::VolumePruneFailure>,
 }
 
 pub async fn prune_with<F: Fs>(
@@ -264,18 +265,21 @@ pub async fn prune_with<F: Fs>(
     registry: &Arc<LeaseRegistry>,
     store_root: &Path,
 ) -> Result<PruneReport> {
-    let mut report = PruneReport {
-        removed: Vec::new(),
-        reclaimed_bytes: 0,
-    };
+    let mut report = PruneReport::default();
     for info in list_with(fs, registry, store_root).await? {
         let Ok(_guard) = take_lease(registry, &info.name, MAINTENANCE_HOLDER_RUN_ID) else {
             continue;
         };
-        fs.remove_file(&image_path_in(store_root, &info.name))
-            .await?;
-        report.removed.push(info.name);
-        report.reclaimed_bytes += info.disk_bytes;
+        match fs.remove_file(&image_path_in(store_root, &info.name)).await {
+            Ok(()) => {
+                report.reclaimed_bytes += info.disk_bytes;
+                report.removed.push(info.name);
+            }
+            Err(e) => report.failed.push(lns_ipc::VolumePruneFailure {
+                name: info.name,
+                error: e.to_string(),
+            }),
+        }
     }
     Ok(report)
 }
@@ -314,6 +318,7 @@ mod tests {
         existing: Mutex<HashSet<PathBuf>>,
         created: Mutex<Vec<PathBuf>>,
         allocated: Mutex<HashMap<PathBuf, u64>>,
+        unremovable: Mutex<HashSet<PathBuf>>,
         fail_create: bool,
         fail_read_dir: bool,
         read_dir_missing: bool,
@@ -336,6 +341,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(PathBuf::from(p), bytes);
+        }
+        fn refuse_remove(&self, p: &str) {
+            self.unremovable.lock().unwrap().insert(PathBuf::from(p));
         }
     }
 
@@ -379,7 +387,7 @@ mod tests {
             })
         }
         async fn remove_file(&self, p: &Path) -> io::Result<()> {
-            if self.fail_remove {
+            if self.fail_remove || self.unremovable.lock().unwrap().contains(p) {
                 return Err(io::Error::other("remove boom"));
             }
             self.existing.lock().unwrap().remove(p);
@@ -838,17 +846,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_propagates_a_remove_failure() {
-        let fs = FakeFs {
-            existing: Mutex::new([PathBuf::from("/store/idle.img")].into_iter().collect()),
-            fail_remove: true,
-            ..Default::default()
-        };
-        let err = prune_with(&fs, &reg(), Path::new("/store"))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("remove boom"), "got: {err}");
+    async fn prune_records_a_remove_failure_and_keeps_reclaiming_the_rest() {
+        let fs = FakeFs::with(&["/store/bad.img", "/store/good.img"]);
+        fs.set_allocated("/store/good.img", 4096);
+        fs.refuse_remove("/store/bad.img");
+        let report = prune_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        assert_eq!(report.removed, vec!["good".to_string()]);
+        assert_eq!(report.reclaimed_bytes, 4096);
+        assert_eq!(report.failed.len(), 1, "got {:?}", report.failed);
+        assert_eq!(report.failed[0].name, "bad");
+        assert!(report.failed[0].error.contains("remove boom"));
+        assert!(
+            fs.exists(Path::new("/store/bad.img")).await,
+            "the unremovable image stays"
+        );
+        assert!(!fs.exists(Path::new("/store/good.img")).await);
     }
 
     #[test]
