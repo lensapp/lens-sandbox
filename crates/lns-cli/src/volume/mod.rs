@@ -103,20 +103,25 @@ async fn prune(
         Response::VolumesPruned {
             removed,
             reclaimed_bytes,
+            failed,
         } => {
-            if removed.is_empty() {
-                writeln!(writer, "No unused volumes.")?;
-                return Ok(0);
-            }
             for name in &removed {
                 writeln!(writer, "{name}")?;
             }
-            writeln!(
-                writer,
-                "Total reclaimed space: {}",
-                format_size(reclaimed_bytes)
-            )?;
-            Ok(0)
+            if !removed.is_empty() {
+                writeln!(
+                    writer,
+                    "Total reclaimed space: {}",
+                    format_size(reclaimed_bytes)
+                )?;
+            }
+            for f in &failed {
+                writeln!(writer, "Failed to remove {}: {}", f.name, f.error)?;
+            }
+            if removed.is_empty() && failed.is_empty() {
+                writeln!(writer, "No unused volumes.")?;
+            }
+            Ok(if failed.is_empty() { 0 } else { 1 })
         }
         other => bail!("unexpected response from daemon: {other:?}"),
     }

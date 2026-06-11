@@ -7,7 +7,7 @@ use cucumber::{given, then, when};
 use lns_cli::cli::{Cli, Command};
 use lns_cli::integration::LocalBoxFuture;
 use lns_cli::volume::{self, VolumeService};
-use lns_ipc::{Request, Response, VolumeInfo};
+use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};
 
 const FIXTURE_CREATED: &str = "2026-06-01T12:00:00Z";
 const FIXTURE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -26,6 +26,7 @@ fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Option<u32>) -> Volume
 struct FakeVolumeService {
     volumes: Vec<VolumeInfo>,
     prune_plan: Option<(Vec<String>, u64)>,
+    prune_failed: Vec<VolumePruneFailure>,
     refuse_message: Option<String>,
     unreachable: bool,
     requests: Arc<Mutex<Vec<Request>>>,
@@ -36,6 +37,7 @@ impl FakeVolumeService {
         Self {
             volumes: world.volume.volumes.clone(),
             prune_plan: world.volume.prune_plan.clone(),
+            prune_failed: world.volume.prune_failed.clone(),
             refuse_message: world.volume.refuse_message.clone(),
             unreachable: world.volume.unreachable,
             requests: world.volume.requests.clone(),
@@ -72,6 +74,7 @@ impl FakeVolumeService {
                 Response::VolumesPruned {
                     removed,
                     reclaimed_bytes,
+                    failed: self.prune_failed.clone(),
                 }
             }
             other => panic!("unexpected volume request {other:?}"),
@@ -113,6 +116,14 @@ fn prune_plan(world: &mut BehaviourWorld, a: String, b: String, bytes: u64) {
 #[given(expr = "the service will prune no volumes")]
 fn prune_plan_empty(world: &mut BehaviourWorld) {
     world.volume.prune_plan = Some((Vec::new(), 0));
+}
+
+#[given(expr = "the service will fail to prune {string} with {string}")]
+fn prune_failure(world: &mut BehaviourWorld, name: String, error: String) {
+    world
+        .volume
+        .prune_failed
+        .push(VolumePruneFailure { name, error });
 }
 
 #[given(expr = "the service is unreachable")]
