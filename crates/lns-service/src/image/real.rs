@@ -68,6 +68,7 @@ impl Registry for RealRegistry {
 }
 
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
+    let _shared = crate::image_store::lock_shared().await;
     let manifests = crate::cache::root()?.join("manifests");
     let registry = CachingRegistry::new(RealRegistry::new(), ManifestCache::new(manifests));
     let pulled = pull_inner(&registry, image, layer_cache).await?;
