@@ -193,6 +193,11 @@ fn volume_name_of(path: &Path) -> Option<String> {
     file.strip_suffix(".img").map(str::to_string)
 }
 
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub async fn list_with<F: Fs>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
@@ -207,7 +212,11 @@ pub async fn list_with<F: Fs>(
     names.sort();
     let mut out = Vec::with_capacity(names.len());
     for name in &names {
-        out.push(info_for(fs, registry, &image_path_in(store_root, name), name).await?);
+        match info_for(fs, registry, &image_path_in(store_root, name), name).await {
+            Ok(info) => out.push(info),
+            Err(e) if is_not_found(&e) => continue,
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }
@@ -318,6 +327,7 @@ mod tests {
         existing: Mutex<HashSet<PathBuf>>,
         created: Mutex<Vec<PathBuf>>,
         allocated: Mutex<HashMap<PathBuf, u64>>,
+        vanished: Mutex<HashSet<PathBuf>>,
         unremovable: Mutex<HashSet<PathBuf>>,
         fail_create: bool,
         fail_read_dir: bool,
@@ -341,6 +351,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(PathBuf::from(p), bytes);
+        }
+        fn vanish(&self, p: &str) {
+            self.vanished.lock().unwrap().insert(PathBuf::from(p));
         }
         fn refuse_remove(&self, p: &str) {
             self.unremovable.lock().unwrap().insert(PathBuf::from(p));
@@ -378,6 +391,9 @@ mod tests {
         async fn metadata(&self, p: &Path) -> io::Result<FileMeta> {
             if self.fail_metadata {
                 return Err(io::Error::other("metadata boom"));
+            }
+            if self.vanished.lock().unwrap().contains(p) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let allocated = self.allocated.lock().unwrap().get(p).copied();
             Ok(FileMeta {
@@ -697,6 +713,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("metadata boom"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn list_skips_a_volume_that_vanishes_before_its_metadata_read() {
+        let fs = FakeFs::with(&["/store/alpha.img", "/store/zeta.img"]);
+        fs.vanish("/store/zeta.img");
+        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha"],
+            "the vanished entry is skipped, not fatal"
+        );
     }
 
     #[tokio::test]
