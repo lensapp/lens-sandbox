@@ -104,8 +104,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         other => anyhow::bail!("expected RunStarted, got {other:?}"),
     };
 
-    let mut progress =
-        crate::run::progress::ProgressRenderer::new(std::io::stderr().is_terminal());
+    let mut progress = crate::run::progress::ProgressRenderer::new(std::io::stderr().is_terminal());
     let outcome = drive_pre_phase(&mut stream, &mut std::io::stderr(), &mut progress).await?;
     if let PrePhaseOutcome::EarlyExit(code) = outcome {
         return Ok(code);
@@ -882,7 +881,9 @@ mod tests {
             write_response(&mut server, run_log("SessionReady", "")).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress()).await.unwrap();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+            .await
+            .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
         let s = String::from_utf8(buf).unwrap();
         assert!(
@@ -902,7 +903,9 @@ mod tests {
             write_response(&mut server, Response::RunExit { code: 42 }).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress()).await.unwrap();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+            .await
+            .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::EarlyExit(42));
     }
 
