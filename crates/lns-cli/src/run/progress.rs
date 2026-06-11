@@ -38,21 +38,26 @@ impl ProgressRenderer {
         if !self.enabled {
             return Ok(());
         }
-        self.active = Some(ActiveProgress {
+        let active = ActiveProgress {
             verb: verb.to_string(),
             message: message.to_string(),
             current,
             total,
-        });
-        self.render(writer)
+        };
+        let line = progress_line(SPINNER_FRAMES[self.spin], &active);
+        self.active = Some(active);
+        self.write_line(&line, writer)
     }
 
+    // `active` is only ever set by update(), so a disabled renderer never has a line to animate.
     pub fn tick(&mut self, writer: &mut impl Write) -> std::io::Result<()> {
-        if !self.enabled || self.active.is_none() {
-            return Ok(());
-        }
-        self.spin = (self.spin + 1) % SPINNER_FRAMES.len();
-        self.render(writer)
+        let next_spin = (self.spin + 1) % SPINNER_FRAMES.len();
+        let line = match &self.active {
+            Some(active) => progress_line(SPINNER_FRAMES[next_spin], active),
+            None => return Ok(()),
+        };
+        self.spin = next_spin;
+        self.write_line(&line, writer)
     }
 
     pub fn clear(&mut self, writer: &mut impl Write) -> std::io::Result<()> {
@@ -67,11 +72,7 @@ impl ProgressRenderer {
         Ok(())
     }
 
-    fn render(&mut self, writer: &mut impl Write) -> std::io::Result<()> {
-        let Some(active) = &self.active else {
-            return Ok(());
-        };
-        let line = progress_line(SPINNER_FRAMES[self.spin], active);
+    fn write_line(&mut self, line: &str, writer: &mut impl Write) -> std::io::Result<()> {
         let width = line.chars().count();
         let pad = " ".repeat(self.rendered_width.saturating_sub(width));
         write!(writer, "\r{line}{pad}")?;
