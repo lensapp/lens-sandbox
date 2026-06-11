@@ -68,6 +68,8 @@ pub trait CredentialNotifier: Send + Sync {
     fn connect_finished(&self, display_name: &str) {
         let _ = display_name;
     }
+    /// Drops every in-flight connect placeholder on run teardown so a sign-in that never resolves can't keep the window pinned; default no-op.
+    fn clear_all_connecting(&self) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,10 +508,15 @@ impl CredentialSession {
     }
 
     fn timeout_one(&self, prompt_id: &str) -> bool {
-        let Some((_, request_ids)) = self.remove_pending(prompt_id) else {
+        let Some((credential_id, request_ids)) = self.remove_pending(prompt_id) else {
             return false;
         };
         self.notifier.dismiss(prompt_id);
+        // A consent clicked into a sign-in right as it expired leaves a placeholder no later sign-in will resolve; take it down with the prompt.
+        if self.oauth_configs.contains_key(&credential_id) {
+            self.notifier
+                .connect_finished(&self.display_name_for(&credential_id));
+        }
         for request_id in &request_ids {
             self.send_decision_frame(request_id, CredentialDecisionKind::Timeout);
         }
@@ -532,6 +539,7 @@ impl CredentialSession {
             self.notifier.dismiss(prompt_id);
         }
         self.notifier.clear_informs();
+        self.notifier.clear_all_connecting();
     }
 }
 
@@ -582,6 +590,7 @@ mod tests {
         informed: StdMutex<Vec<String>>,
         informs_cleared: StdMutex<usize>,
         connects_finished: StdMutex<Vec<String>>,
+        all_connecting_cleared: StdMutex<usize>,
     }
 
     impl RecordingNotifier {
@@ -629,6 +638,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(display_name.to_string());
+        }
+        fn clear_all_connecting(&self) {
+            *self.all_connecting_cleared.lock().unwrap() += 1;
         }
     }
 
@@ -1048,6 +1060,25 @@ mod tests {
             CredentialDecisionKind::Timeout
         );
         assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["c1".to_string()]);
+        assert!(
+            n.connects_finished.lock().unwrap().is_empty(),
+            "a plain credential never holds a connect placeholder, so its timeout signals none"
+        );
+    }
+
+    #[test]
+    fn timeout_clears_a_connecting_placeholder_for_an_expired_oauth_consent() {
+        let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        let t0 = Instant::now();
+        s.submit_pending(pending("c1", "some-oauth"), t0);
+
+        s.tick_timeouts(t0 + TEST_TIMEOUT + Duration::from_secs(1));
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "timing out a clicked consent must release the placeholder no later sign-in will resolve"
+        );
     }
 
     #[test]
@@ -1094,6 +1125,20 @@ mod tests {
             *n.informs_cleared.lock().unwrap(),
             1,
             "withdraw_run must call clear_informs exactly once"
+        );
+    }
+
+    #[test]
+    fn withdraw_run_clears_connecting_placeholders_so_window_does_not_stay_pinned() {
+        let (s, n, _store, _rx) = fixture();
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        s.withdraw_run();
+
+        assert_eq!(
+            *n.all_connecting_cleared.lock().unwrap(),
+            1,
+            "an in-flight sign-in placeholder must not survive the run that started it"
         );
     }
 

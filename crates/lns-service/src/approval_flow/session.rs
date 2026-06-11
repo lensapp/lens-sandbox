@@ -46,6 +46,8 @@ pub trait Notifier: Send + Sync {
     fn connect_finished(&self, display_name: &str) {
         let _ = display_name;
     }
+    /// Drops every in-flight connect placeholder on run teardown so a connect that never resolves can't keep the window pinned; default no-op.
+    fn clear_all_connecting(&self) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,23 +218,22 @@ impl ApprovalSession {
     }
 
     pub fn record_decision(&self, id: &str, decision: Decision) -> DecisionOutcome {
-        let Some(host) = self.remove_pending(id) else {
+        let Some(entry) = self.remove_pending(id) else {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(id);
         self.send_decision_frame(id, decision);
-        if let Some(rule) = rule_for_always_decision(&host, decision) {
+        if let Some(rule) = rule_for_always_decision(&entry.host, decision) {
             self.apply_persistent_rule(rule);
         }
         DecisionOutcome::Resolved
     }
 
-    fn remove_pending(&self, id: &str) -> Option<String> {
+    fn remove_pending(&self, id: &str) -> Option<PendingEntry> {
         self.pending
             .lock()
             .expect("pending mutex poisoned")
             .remove(id)
-            .map(|entry| entry.host)
     }
 
     /// Accepts a held request's integration offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
@@ -357,10 +358,14 @@ impl ApprovalSession {
     }
 
     fn timeout_one(&self, id: &str) -> bool {
-        if self.remove_pending(id).is_none() {
+        let Some(entry) = self.remove_pending(id) else {
             return false;
-        }
+        };
         self.notifier.dismiss(id);
+        // A request clicked into a connect right as it expired leaves a placeholder no later connect will resolve; take it down with the request.
+        if let Some(offer) = &entry.offer {
+            self.notifier.connect_finished(&offer.display_name);
+        }
         self.send_decision_frame(id, Decision::Timeout);
         true
     }
@@ -389,6 +394,7 @@ impl ApprovalSession {
             self.notifier.dismiss(id);
         }
         self.notifier.clear_informs();
+        self.notifier.clear_all_connecting();
     }
 
     fn send_decision_frame(&self, id: &str, decision: Decision) {
@@ -475,6 +481,7 @@ pub(crate) mod tests {
         pub(crate) informed: StdMutex<Vec<String>>,
         pub(crate) informs_cleared: StdMutex<usize>,
         pub(crate) connects_finished: StdMutex<Vec<String>>,
+        pub(crate) all_connecting_cleared: StdMutex<usize>,
     }
 
     impl Notifier for RecordingNotifier {
@@ -495,6 +502,9 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(display_name.to_string());
+        }
+        fn clear_all_connecting(&self) {
+            *self.all_connecting_cleared.lock().unwrap() += 1;
         }
     }
 
@@ -887,6 +897,38 @@ pub(crate) mod tests {
             *n.informs_cleared.lock().unwrap(),
             1,
             "withdraw_run must call clear_informs exactly once"
+        );
+    }
+
+    #[test]
+    fn withdraw_run_clears_connecting_placeholders_so_window_does_not_stay_pinned() {
+        let (s, n, _store, _rx) = fixture();
+        s.submit_pending(pending("r1", "a"), Instant::now());
+
+        s.withdraw_run();
+
+        assert_eq!(
+            *n.all_connecting_cleared.lock().unwrap(),
+            1,
+            "an in-flight connect placeholder must not survive the run that started it"
+        );
+    }
+
+    #[test]
+    fn timeout_clears_a_connecting_placeholder_for_an_expired_offer() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            None,
+        );
+        let t0 = Instant::now();
+        s.submit_pending(pending("r1", "api.some-oauth.example"), t0);
+
+        s.tick_timeouts(t0 + TEST_TIMEOUT + Duration::from_secs(1));
+
+        assert_eq!(
+            n.connects_finished.lock().unwrap().as_slice(),
+            &["GitHub".to_string()],
+            "timing out a clicked offer must release the placeholder no later connect will resolve"
         );
     }
 
