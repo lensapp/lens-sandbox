@@ -132,10 +132,10 @@ mod tests {
         r.update("Pulling", "", 5, 10, &mut buf).unwrap();
         r.tick(&mut buf).unwrap();
         r.clear(&mut buf).unwrap();
+        let rendered = text(&buf);
         assert!(
-            buf.is_empty(),
-            "non-tty output must stay machine-readable: {:?}",
-            text(&buf),
+            rendered.is_empty(),
+            "non-tty output must stay machine-readable: {rendered:?}"
         );
     }
 

@@ -522,10 +522,11 @@ mod tests {
 
     impl tracing::field::Visit for ProgressPointVisitor {
         fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-            match field.name() {
-                "current" => self.current = value,
-                "total" => self.total = value,
-                _ => {}
+            if field.name() == "current" {
+                self.current = value;
+            }
+            if field.name() == "total" {
+                self.total = value;
             }
         }
         fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
