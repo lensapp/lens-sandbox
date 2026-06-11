@@ -6,13 +6,17 @@ use cucumber::{given, then, when};
 
 pub(crate) fn start_service(world: &mut E2eWorld) {
     world.ensure_service_dir();
-    let service_bin = service_binary();
-    let socket = world.service_socket.as_ref().unwrap().clone();
-
-    let envs = [
-        ("LNS_SOCKET_PATH", socket.as_path()),
-        ("LNS_SERVICE_BIN", service_bin.as_path()),
+    let mut envs: Vec<(&str, std::ffi::OsString)> = vec![
+        (
+            "LNS_SOCKET_PATH",
+            world.service_socket.clone().unwrap().into(),
+        ),
+        ("LNS_SERVICE_BIN", service_binary().into()),
     ];
+    if let Some(home) = &world.home {
+        envs.push(("HOME", home.path().into()));
+        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
+    }
     let result = run_cli_with_env(["service", "start"], envs);
     assert!(
         result.exit_code == 0,
@@ -51,6 +55,15 @@ fn no_service_running(world: &mut E2eWorld) {
 
 #[given("the Lens Sandbox service is running")]
 fn service_is_running(world: &mut E2eWorld) {
+    start_service(world);
+}
+
+#[given("the Lens Sandbox service is running in that home")]
+fn service_is_running_in_home(world: &mut E2eWorld) {
+    assert!(
+        world.home.is_some(),
+        "Given a clean lns cache home before starting the service in it"
+    );
     start_service(world);
 }
 
