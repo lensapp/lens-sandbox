@@ -18,6 +18,16 @@ fn live_run_uses(w: &mut BehaviourWorld, reference: String) {
     w.image().hold(&reference);
 }
 
+#[given(expr = "the image index cannot be written")]
+fn index_cannot_be_written(w: &mut BehaviourWorld) {
+    w.image().fail_index_writes();
+}
+
+#[when(expr = "image {string} with layer {string} of {int} bytes is pulled")]
+async fn image_pulled(w: &mut BehaviourWorld, reference: String, digest: String, size: u64) {
+    w.image().pull(&reference, &digest, size).await;
+}
+
 #[when(expr = "the images are listed")]
 async fn list_images(w: &mut BehaviourWorld) {
     w.image().list().await;
@@ -74,6 +84,29 @@ fn listing_in_use(w: &mut BehaviourWorld, reference: String) {
 fn listing_idle(w: &mut BehaviourWorld, reference: String) {
     let rig = w.image();
     assert_eq!(listed(rig, &reference).in_use_by, None);
+}
+
+#[then(expr = "the pull succeeds reporting {string} at {int} bytes")]
+fn pull_succeeds(w: &mut BehaviourWorld, reference: String, size: u64) {
+    let rig = w.image();
+    assert!(
+        rig.last_error.is_none(),
+        "unexpected pull error: {:?}",
+        rig.last_error
+    );
+    let info = rig.last_pull.as_ref().expect("a pull result");
+    assert_eq!(info.reference, reference);
+    assert_eq!(info.size_bytes, size);
+}
+
+#[then(expr = "the pull is refused because the index could not be written")]
+fn pull_refused_index_write(w: &mut BehaviourWorld) {
+    let err = w.image().last_error.clone().expect("a pull error");
+    assert!(err.contains("writing image record"), "got: {err}");
+    assert!(
+        w.image().last_pull.is_none(),
+        "a failed pull must not report a result"
+    );
 }
 
 #[then(expr = "the image record for {string} is gone from the cache")]

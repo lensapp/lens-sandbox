@@ -215,11 +215,26 @@ pub async fn record(pulled: &PulledImage) -> Result<()> {
     .await
 }
 
+pub async fn pull_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    record: &ImageRecord,
+    active: &[lns_ipc::RunSummary],
+) -> Result<lns_ipc::ImageInfo> {
+    record_with(fs, images_root, record).await?;
+    Ok(info_from(record, active))
+}
+
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let pulled = crate::image::pull(image, &layer_cache).await?;
-    let record = record_for(&pulled, now_unix_secs());
-    Ok(info_from(&record, &crate::run_registry::snapshot()))
+    pull_with(
+        &real::RealFs,
+        &images_root()?,
+        &record_for(&pulled, now_unix_secs()),
+        &crate::run_registry::snapshot(),
+    )
+    .await
 }
 
 pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
