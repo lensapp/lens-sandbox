@@ -158,6 +158,56 @@ pub fn cancel(run_id: u32) -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    Removed,
+    Running,
+    NotFound,
+}
+
+pub fn remove_if_exited(run_id: u32) -> RemoveOutcome {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    remove_if_exited_from(g.as_mut(), run_id)
+}
+
+fn remove_if_exited_from(map: Option<&mut HashMap<u32, RunHandle>>, run_id: u32) -> RemoveOutcome {
+    let Some(map) = map else {
+        return RemoveOutcome::NotFound;
+    };
+    match map.get(&run_id) {
+        None => RemoveOutcome::NotFound,
+        Some(h) if is_exited(h) => {
+            map.remove(&run_id);
+            RemoveOutcome::Removed
+        }
+        Some(_) => RemoveOutcome::Running,
+    }
+}
+
+pub fn prune_exited() -> Vec<u32> {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    prune_exited_from(g.as_mut())
+}
+
+fn prune_exited_from(map: Option<&mut HashMap<u32, RunHandle>>) -> Vec<u32> {
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    let exited: Vec<u32> = map
+        .iter()
+        .filter(|(_, h)| is_exited(h))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in &exited {
+        map.remove(id);
+    }
+    exited
+}
+
+fn is_exited(h: &RunHandle) -> bool {
+    matches!(h.status.lock().map(|s| *s), Ok(RunStatus::Exited { .. }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +389,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn set_exit_code_flips_status_to_exited() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -360,6 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn status_reports_running_then_exited_and_none_when_unknown() {
         let id = allocate_run_id();
         assert_eq!(status(id), None);
@@ -445,5 +497,91 @@ mod tests {
         assert_eq!(row.status, RunStatus::Running);
 
         deregister(id);
+    }
+
+    fn set_status(map: &HashMap<u32, RunHandle>, id: u32, status: RunStatus) {
+        *map.get(&id).unwrap().status.lock().unwrap() = status;
+    }
+
+    #[tokio::test]
+    async fn remove_if_exited_from_drops_an_exited_entry_but_refuses_a_running_one() {
+        let mut map = HashMap::new();
+        let (handle, _rx) = make_handle();
+        map.insert(1, handle);
+
+        assert_eq!(
+            remove_if_exited_from(Some(&mut map), 1),
+            RemoveOutcome::Running
+        );
+        assert!(map.contains_key(&1), "a running run must not be removed");
+
+        set_status(&map, 1, RunStatus::Exited { code: 0 });
+        assert_eq!(
+            remove_if_exited_from(Some(&mut map), 1),
+            RemoveOutcome::Removed
+        );
+        assert!(!map.contains_key(&1), "an exited run must be removed");
+    }
+
+    #[test]
+    fn remove_if_exited_from_reports_not_found_for_absent_id_and_empty_registry() {
+        assert_eq!(remove_if_exited_from(None, 1), RemoveOutcome::NotFound);
+        let mut empty: HashMap<u32, RunHandle> = HashMap::new();
+        assert_eq!(
+            remove_if_exited_from(Some(&mut empty), 1),
+            RemoveOutcome::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_exited_from_removes_every_exited_run_and_keeps_running_ones() {
+        let mut map = HashMap::new();
+        for id in [10, 11, 12] {
+            let (handle, _rx) = make_handle();
+            map.insert(id, handle);
+        }
+        set_status(&map, 10, RunStatus::Exited { code: 0 });
+        set_status(&map, 12, RunStatus::Exited { code: 3 });
+
+        let mut removed = prune_exited_from(Some(&mut map));
+        removed.sort_unstable();
+
+        assert_eq!(removed, vec![10, 12]);
+        assert!(map.contains_key(&11), "the running run must survive");
+        assert!(!map.contains_key(&10) && !map.contains_key(&12));
+    }
+
+    #[test]
+    fn prune_exited_from_empty_registry_returns_no_ids() {
+        assert!(prune_exited_from(None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_if_exited_removes_an_exited_run_from_the_live_registry() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(id, handle);
+        set_exit_code(id, 0);
+
+        assert_eq!(remove_if_exited(id), RemoveOutcome::Removed);
+        assert_eq!(status(id), None);
+    }
+
+    #[tokio::test]
+    async fn remove_if_exited_refuses_a_running_run_in_the_live_registry() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(id, handle);
+
+        assert_eq!(remove_if_exited(id), RemoveOutcome::Running);
+        assert_eq!(status(id), Some(RunStatus::Running));
+
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn remove_if_exited_reports_not_found_for_an_unknown_run() {
+        let id = allocate_run_id() + 6_000_000;
+        assert_eq!(remove_if_exited(id), RemoveOutcome::NotFound);
     }
 }

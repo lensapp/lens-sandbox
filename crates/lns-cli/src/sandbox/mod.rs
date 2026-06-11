@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::cli::{
     KillArgs, SandboxAttachArgs, SandboxCommand, SandboxInspectArgs, SandboxLogsArgs,
-    SandboxStatsArgs, SandboxStopArgs,
+    SandboxRmArgs, SandboxStatsArgs, SandboxStopArgs,
 };
 use crate::service::client::BoxFuture;
 
@@ -52,6 +52,8 @@ where
         SandboxCommand::Stats(args) => stats(svc, args, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
+        SandboxCommand::Rm(args) => rm(svc, args, out).await,
+        SandboxCommand::Prune => prune(svc, out).await,
     }
 }
 
@@ -112,6 +114,45 @@ async fn stop<W: std::io::Write>(
                 "killed run #{} after the {}s timeout",
                 args.run_id, args.timeout
             )?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn rm<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxRmArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::RemoveRun {
+            run_id: args.run_id,
+        })
+        .await?;
+    match response {
+        Response::Acknowledged => {
+            writeln!(out, "removed run #{}", args.run_id)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+    let response = svc.one_shot(Request::PruneRuns).await?;
+    match response {
+        Response::RunsPruned { mut removed } => {
+            if removed.is_empty() {
+                writeln!(out, "no finished runs to remove")?;
+            } else {
+                removed.sort_unstable();
+                for id in removed {
+                    writeln!(out, "removed run #{id}")?;
+                }
+            }
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -527,6 +568,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("macOS-only"));
+    }
+
+    #[tokio::test]
+    async fn rm_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = rm(&svc, &SandboxRmArgs { run_id: 1 }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn prune_surfaces_a_daemon_error() {
+        let svc = CannedService::new(Response::Error {
+            message: "registry poisoned".into(),
+        });
+        let mut out = Vec::new();
+        let err = prune(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+    }
+
+    #[tokio::test]
+    async fn prune_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = prune(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[test]

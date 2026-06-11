@@ -85,7 +85,7 @@ See [Running workloads — images](running-workloads.md#managing-the-image-cache
 
 ## `lns sandbox`
 
-Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats.
+Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune.
 
 ```bash
 lns sandbox ls
@@ -96,6 +96,8 @@ lns sandbox logs [-f] <RUN_ID>
 lns sandbox attach <RUN_ID> [--detach-keys <CHORD>]
 lns sandbox inspect <RUN_ID>
 lns sandbox stats <RUN_ID>
+lns sandbox rm <RUN_ID>
+lns sandbox prune
 ```
 
 | Subcommand | Meaning |
@@ -105,9 +107,11 @@ lns sandbox stats <RUN_ID>
 | `kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, and only while the run is listed by `lns sandbox ls`. |
-| `attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) behaves exactly like `lns run`'s. Stdin reaches the workload only if the run was started with stdin open. |
+| `attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
 | `inspect`  | Print the run's state and launch configuration as JSON, with the policy file's parsed contents embedded when it is readable. |
 | `stats`    | Sample the sandbox's CPU share and memory over one second, via the guest's `/proc`. |
+| `rm`       | Remove a single finished run from the list (`docker rm`-style). Refuses a run that is still running — stop it first. |
+| `prune`    | Remove every finished run from the list at once (`docker container prune`-style); running runs are left untouched. |
 
 The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
 as hidden aliases; the `lns sandbox` forms are the documented ones.

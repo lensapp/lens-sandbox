@@ -71,6 +71,14 @@ fn then_error(world: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
+#[then("the response is Acknowledged")]
+fn then_acknowledged(world: &mut BehaviourWorld) -> Result<(), String> {
+    match world.response.as_ref().ok_or("no response captured")? {
+        lns_ipc::Response::Acknowledged => Ok(()),
+        other => Err(format!("expected Acknowledged, got {other:?}")),
+    }
+}
+
 #[then("the response pid matches the current process")]
 fn then_pid_matches(world: &mut BehaviourWorld) -> Result<(), String> {
     match world.response.as_ref().ok_or("no response captured")? {

@@ -28,3 +28,20 @@ Feature: run lifecycle — graceful stop over IPC
     Then the inspect details name image "some-image:1"
     And the inspect details report 2 cpus and 1024 MiB
     And the inspect details report the run as running
+
+  Scenario: Removing an unknown run surfaces an Error
+    Given a fresh service handler
+    When a RemoveRun request for run 99999 arrives
+    Then the response is Error
+    And the error message contains "no run with id 99999"
+
+  Scenario: Removing a still-running run is refused
+    Given a registered run that is still running
+    When a RemoveRun request for that run arrives
+    Then the response is Error
+    And the error message contains "still running"
+
+  Scenario: Removing a run that has already exited is acknowledged
+    Given a registered run that has already exited
+    When a RemoveRun request for that run arrives
+    Then the response is Acknowledged

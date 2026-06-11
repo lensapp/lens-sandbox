@@ -22,6 +22,8 @@ pub enum Request {
     RunLogs { run_id: u32, follow: bool },
     AttachRun { run_id: u32 },
     RunStats { run_id: u32 },
+    RemoveRun { run_id: u32 },
+    PruneRuns,
     BeginIntegrationSignIn { id: String },
     ListVolumes,
     CreateVolume { name: String },
@@ -78,6 +80,9 @@ pub enum Response {
     },
     RunStats {
         stats: RunStatsInfo,
+    },
+    RunsPruned {
+        removed: Vec<u32>,
     },
     OauthVerification {
         verification_uri: String,
@@ -680,6 +685,29 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    #[test]
+    fn remove_run_survives_a_request_round_trip() {
+        let req = Request::RemoveRun { run_id: 7 };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn prune_runs_survives_a_request_and_response_round_trip() {
+        let req = Request::PruneRuns;
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::RunsPruned {
+            removed: vec![4, 7],
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

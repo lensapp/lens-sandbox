@@ -203,6 +203,20 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 message: format!("no active run with id {run_id}"),
             },
         },
+        Request::RemoveRun { run_id } => match crate::run_registry::remove_if_exited(*run_id) {
+            crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+            crate::run_registry::RemoveOutcome::Running => Response::Error {
+                message: format!(
+                    "run {run_id} is still running; stop it first with `lns sandbox stop {run_id}`"
+                ),
+            },
+            crate::run_registry::RemoveOutcome::NotFound => Response::Error {
+                message: format!("no run with id {run_id}"),
+            },
+        },
+        Request::PruneRuns => Response::RunsPruned {
+            removed: crate::run_registry::prune_exited(),
+        },
         Request::RunLogs { .. } => {
             unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
         }
@@ -1205,6 +1219,27 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn handle_request_prune_runs_removes_exited_runs_and_reports_their_ids() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        crate::run_registry::set_exit_code(id, 0);
+
+        let resp = handle_request(&Request::PruneRuns, Instant::now()).await;
+
+        match resp {
+            Response::RunsPruned { removed } => {
+                assert!(
+                    removed.contains(&id),
+                    "{id} should be pruned, got {removed:?}"
+                );
+            }
+            other => unreachable!("expected RunsPruned, got {other:?}"),
+        }
+        assert_eq!(crate::run_registry::status(id), None);
+    }
+
+    #[tokio::test]
     async fn handle_request_stop_run_for_unknown_run_returns_error() {
         let resp = handle_request(
             &Request::StopRun {
@@ -1223,6 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn stop_of_an_already_exited_run_succeeds_without_signalling() {
         let id = crate::run_registry::allocate_run_id();
         register_running(id);

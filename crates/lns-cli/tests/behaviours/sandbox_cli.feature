@@ -14,6 +14,8 @@ Feature: managing running sandboxes from the CLI
     And the output contains "attach"
     And the output contains "inspect"
     And the output contains "stats"
+    And the output contains "rm"
+    And the output contains "prune"
 
   Scenario: the flat ls, exec, and kill verbs stay usable but leave the front page
     When I run "lns --help"
@@ -134,3 +136,30 @@ Feature: managing running sandboxes from the CLI
     Then the exit code is 5
     And the workload stdout contains "live output"
     And the service received an AttachRun request for run 3
+
+  Scenario: rm drops a finished run from the list
+    Given the service will answer Acknowledged
+    When the user runs sandbox command "rm 3"
+    Then the exit code is 0
+    And the output contains "removed run #3"
+    And the service received a RemoveRun request for run 3
+
+  Scenario: rm of a still-running run fails with the daemon's reason
+    Given the service will answer an error "run 3 is still running; stop it first with `lns sandbox stop 3`"
+    When the user runs sandbox command "rm 3"
+    Then the command fails with an exit code other than 0
+    And the output contains "still running"
+
+  Scenario: prune removes every finished run and lists them
+    Given the service will answer RunsPruned for runs 4 and 7
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the output contains "removed run #4"
+    And the output contains "removed run #7"
+    And the service received a PruneRuns request
+
+  Scenario: prune reports when there is nothing to remove
+    Given the service will answer RunsPruned for no runs
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the output contains "no finished runs to remove"

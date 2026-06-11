@@ -49,7 +49,7 @@ pub enum Command {
     )]
     Image(ImageArgs),
     #[command(
-        about = "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats."
+        about = "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune."
     )]
     Sandbox(SandboxArgs),
     #[command(about = "Verify the audit chain of a completed run.")]
@@ -211,6 +211,12 @@ pub enum SandboxCommand {
     Inspect(SandboxInspectArgs),
     #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
     Stats(SandboxStatsArgs),
+    #[command(
+        about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
+    )]
+    Rm(SandboxRmArgs),
+    #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
+    Prune,
 }
 
 #[derive(clap::Args)]
@@ -250,7 +256,7 @@ pub struct SandboxAttachArgs {
         long,
         default_value = "ctrl-p,ctrl-q",
         value_parser = parse_detach_keys_arg,
-        help = "Detach chord (same semantics as `lns run`); on match the CLI sends SIGHUP to the workload's foreground pgrp and detaches."
+        help = "Detach chord; on match the CLI detaches and returns, leaving the run running (docker-attach style — no signal is sent)."
     )]
     pub detach_keys: DetachChord,
 }
@@ -264,6 +270,12 @@ pub struct SandboxInspectArgs {
 #[derive(clap::Args)]
 pub struct SandboxStatsArgs {
     #[arg(help = "Target run id surfaced by `lns ls`.")]
+    pub run_id: u32,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxRmArgs {
+    #[arg(help = "Target finished run id surfaced by `lns sandbox ls`.")]
     pub run_id: u32,
 }
 
@@ -574,7 +586,7 @@ pub struct RunArgs {
         long,
         default_value = "ctrl-p,ctrl-q",
         value_parser = parse_detach_keys_arg,
-        help = "Comma-separated detach chord (single chars or `ctrl-X`); on match the CLI sends SIGHUP to the workload's foreground pgrp."
+        help = "Comma-separated detach chord (single chars or `ctrl-X`); on match the CLI sends SIGHUP to the workload's foreground pgrp and reports its exit code. To leave a run running, start it with `-d` and re-join with `lns sandbox attach`."
     )]
     pub detach_keys: DetachChord,
 

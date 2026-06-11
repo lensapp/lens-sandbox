@@ -60,3 +60,14 @@ Feature: sandbox lifecycle verbs reach the service end to end
     When I run sandbox command "stats 4242" against the service
     Then the exit code is non-zero
     And the output contains "4242"
+
+  Scenario: removing an unknown run reports the daemon's error
+    Given the Lens Sandbox service is running
+    When I run sandbox command "rm 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "no run with id 4242"
+
+  Scenario: pruning with no finished runs succeeds end to end
+    Given the Lens Sandbox service is running
+    When I run sandbox command "prune" against the service
+    Then the exit code is 0
