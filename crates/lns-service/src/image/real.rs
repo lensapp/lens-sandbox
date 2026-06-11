@@ -10,8 +10,8 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver, pull_inner,
-    serialized_len,
+    CountingSink, PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver,
+    pull_inner, serialized_len,
 };
 
 pub struct RealRegistry {
@@ -57,13 +57,14 @@ impl Registry for RealRegistry {
         &self,
         reference: &Reference,
         descriptor: &OciDescriptor,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
+        let mut out = CountingSink::new(on_chunk);
         self.client
             .pull_blob(reference, descriptor, &mut out)
             .await
             .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
-        Ok(out)
+        Ok(out.into_bytes())
     }
 }
 
