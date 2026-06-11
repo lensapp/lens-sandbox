@@ -37,6 +37,25 @@ async fn registered_exited_run(world: &mut BehaviourWorld) {
     world.lifecycle_run = Some(run_id);
 }
 
+#[given("a registered run that is still running")]
+async fn registered_running_run(world: &mut BehaviourWorld) {
+    let run_id = lns_service::run_registry::allocate_run_id();
+    register_run(run_id);
+    world.lifecycle_run = Some(run_id);
+}
+
+#[when(regex = r#"^a RemoveRun request for run (\d+) arrives$"#)]
+async fn remove_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
+    world.response = Some(run_one_shot(&Request::RemoveRun { run_id }, world.started_at()).await);
+}
+
+#[when("a RemoveRun request for that run arrives")]
+async fn remove_registered_run(world: &mut BehaviourWorld) {
+    let run_id = world.lifecycle_run.expect("a run must be registered first");
+    world.response = Some(run_one_shot(&Request::RemoveRun { run_id }, world.started_at()).await);
+    lns_service::run_registry::deregister(run_id);
+}
+
 #[when(regex = r#"^a StopRun request for run (\d+) arrives$"#)]
 async fn stop_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
     world.response = Some(

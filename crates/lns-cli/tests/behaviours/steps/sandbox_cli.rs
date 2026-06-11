@@ -103,6 +103,39 @@ fn canned_acknowledged(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::Acknowledged);
 }
 
+#[given(regex = r"^the service will answer RunsPruned for runs (\d+) and (\d+)$")]
+fn canned_pruned(w: &mut BehaviourWorld, first: u32, second: u32) {
+    w.sandbox.response = Some(Response::RunsPruned {
+        removed: vec![first, second],
+    });
+}
+
+#[given(regex = r"^the service will answer RunsPruned for no runs$")]
+fn canned_pruned_empty(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::RunsPruned { removed: vec![] });
+}
+
+#[then(regex = r"^the service received a RemoveRun request for run (\d+)$")]
+fn then_remove_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::RemoveRun { run_id };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then("the service received a PruneRuns request")]
+fn then_prune_request(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::PruneRuns) {
+        Ok(())
+    } else {
+        Err(format!("expected PruneRuns among {requests:?}"))
+    }
+}
+
 #[given(regex = r#"^the service reports a run listing with run (\d+) of image "([^"]+)" running$"#)]
 fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
     w.sandbox.response = Some(Response::RunList {

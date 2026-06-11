@@ -205,8 +205,10 @@ A detached run is reachable later via the
 
 ### Detaching from an attached run
 
-While attached, the detach chord (default `ctrl-p,ctrl-q`) leaves the run running
-and returns you to your shell. Change it with `--detach-keys`:
+While attached, the detach chord (default `ctrl-p,ctrl-q`) sends `SIGHUP` to the
+workload and returns its exit code; the run does not keep running once you leave.
+To start something you can step away from and re-join, use `-d` and
+[`lns sandbox attach`](#attaching). Change the chord with `--detach-keys`:
 
 ```bash
 lns run --detach-keys ctrl-x,ctrl-x ghcr.io/acme/agent
@@ -229,6 +231,8 @@ lns sandbox logs -f 7          # ...and keep following until it exits
 lns sandbox attach 7           # re-join a detached run live
 lns sandbox inspect 7          # state + launch config as JSON
 lns sandbox stats 7            # CPU share and memory, sampled over 1s
+lns sandbox rm 7               # drop one finished run from the list
+lns sandbox prune              # drop every finished run from the list
 ```
 
 The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
@@ -263,8 +267,10 @@ exec sessions is not captured, only the run's primary session.
 
 `lns sandbox attach` joins a run's output from now on (no history replay) and
 forwards your keystrokes when the run was started with stdin open. The detach
-chord works exactly as it does for `lns run`. Note that a run started with
-`-d` has stdin closed, so attach is primarily a live view of its output.
+chord (default `ctrl-p,ctrl-q`) leaves the run running and returns you to your
+shell — docker-attach style, no signal is sent — so it's safe to step away from
+a `-d` run you want to keep alive. A run started with `-d` has stdin closed, so
+attach is primarily a live view of its output.
 
 ### Inspecting
 
@@ -278,6 +284,14 @@ this machine.
 `lns sandbox stats` samples `/proc` inside the guest over one second and
 reports the sandbox's CPU share and memory use — the microVM is the workload,
 so the numbers cover everything the run is doing.
+
+### Cleaning up the list
+
+A finished run lingers in `lns sandbox ls` (as `exited`) until its teardown
+completes, so you can still read its captured logs. To drop it sooner, `lns
+sandbox rm 7` removes one finished run; `lns sandbox prune` removes every
+finished run at once. Both refuse to touch a run that is still running — stop it
+first with `lns sandbox stop`. Removing a run also discards its buffered logs.
 
 ## See also
 
