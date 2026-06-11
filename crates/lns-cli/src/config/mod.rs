@@ -187,8 +187,8 @@ fn list(path: &Path, writer: &mut impl Write) -> Result<i32> {
 
 fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> {
     match key {
-        ConfigKey::RunCpus => cfg.run.cpus = Some(parse_number(key, single(key, values)?)?),
-        ConfigKey::RunMem => cfg.run.mem = Some(parse_number(key, single(key, values)?)?),
+        ConfigKey::RunCpus => cfg.run.cpus = Some(parse_cpus(key, single(key, values)?)?),
+        ConfigKey::RunMem => cfg.run.mem = Some(parse_mem(key, single(key, values)?)?),
         ConfigKey::RunEnv => {
             cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
         }
@@ -218,6 +218,18 @@ fn parse_number<N: std::str::FromStr<Err = std::num::ParseIntError>>(
 ) -> Result<N> {
     value
         .parse()
+        .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))
+}
+
+fn parse_cpus(key: ConfigKey, value: &str) -> Result<u8> {
+    match parse_number(key, value)? {
+        0 => bail!("invalid {} value {value:?}: must be at least 1", key.name()),
+        n => Ok(n),
+    }
+}
+
+fn parse_mem(key: ConfigKey, value: &str) -> Result<usize> {
+    crate::cli::parse_mem_arg(value)
         .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))
 }
 
@@ -264,8 +276,8 @@ pub struct RunDefaults {
 pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
     let cfg = load(path)?;
     Ok(RunDefaults {
-        cpus: cfg.run.cpus,
-        mem: cfg.run.mem,
+        cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
+        mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
         env: parsed_defaults(
             ConfigKey::RunEnv,
             &cfg.run.env,
@@ -285,6 +297,20 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
             crate::cli::parse_publish_arg,
         )?,
     })
+}
+
+fn nonzero_default<N>(key: ConfigKey, value: Option<N>, path: &Path) -> Result<Option<N>>
+where
+    N: Copy + PartialEq + From<u8> + std::fmt::Display,
+{
+    if value == Some(N::from(0)) {
+        bail!(
+            "invalid {} default 0 in {}: must be at least 1",
+            key.name(),
+            path.display()
+        );
+    }
+    Ok(value)
 }
 
 fn parsed_defaults<T>(
@@ -580,7 +606,9 @@ mod tests {
             tty: true,
             detach: false,
             detach_keys: crate::cli::DetachChord(vec![0x10, 0x11]),
+            workdir: None,
             env: Vec::new(),
+            env_file: Vec::new(),
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
@@ -620,6 +648,62 @@ mod tests {
         std::fs::write(&path, "run:\n  publish:\n    - nonsense\n").unwrap();
         let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
         assert!(err.contains("run.publish"), "got: {err}");
+    }
+
+    #[test]
+    fn store_rejects_a_zero_cpu_default() {
+        let mut cfg = ConfigFile::default();
+        let err = store(&mut cfg, ConfigKey::RunCpus, &["0".to_string()]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("run.cpus"), "got: {msg}");
+        assert!(msg.contains("at least 1"), "got: {msg}");
+    }
+
+    #[test]
+    fn store_rejects_a_zero_mem_default() {
+        let mut cfg = ConfigFile::default();
+        let err = store(&mut cfg, ConfigKey::RunMem, &["0".to_string()]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("run.mem"), "got: {msg}");
+        assert!(msg.contains("at least 1 MiB"), "got: {msg}");
+    }
+
+    #[test]
+    fn store_accepts_a_mem_unit_suffix_and_normalizes_to_mib() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        let (code, out) = run_ok(&set_cmd(ConfigKey::RunMem, &["2g"]), &path);
+        assert_eq!(code, 0);
+        assert!(out.contains("Set run.mem to 2g"), "got: {out}");
+        assert_eq!(load(&path).unwrap().run.mem, Some(2048));
+        let (_, shown) = run_ok(
+            &ConfigCommand::Get(ConfigKeyArgs {
+                key: ConfigKey::RunMem,
+            }),
+            &path,
+        );
+        assert_eq!(shown, "2048\n");
+    }
+
+    #[test]
+    fn load_run_defaults_rejects_a_hand_edited_zero_cpu_naming_the_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  cpus: 0\n").unwrap();
+        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
+        assert!(err.contains("run.cpus"), "got: {err}");
+        assert!(err.contains("config.yaml"), "got: {err}");
+        assert!(err.contains("at least 1"), "got: {err}");
+    }
+
+    #[test]
+    fn load_run_defaults_rejects_a_hand_edited_zero_mem_naming_the_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  mem: 0\n").unwrap();
+        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
+        assert!(err.contains("run.mem"), "got: {err}");
+        assert!(err.contains("config.yaml"), "got: {err}");
     }
 
     #[test]

@@ -48,6 +48,18 @@ Feature: lns config stores persistent run defaults
     When the developer sets the default "run.cpus" to "many"
     Then the command fails mentioning "run.cpus"
 
+  Scenario: A memory default may use a unit suffix and is stored in MiB
+    When the developer sets the default "run.mem" to "2g"
+    Then getting "run.mem" prints "2048"
+
+  Scenario: A zero cpu default is rejected when set
+    When the developer sets the default "run.cpus" to "0"
+    Then the command fails mentioning "at least 1"
+
+  Scenario: A zero memory default is rejected when set
+    When the developer sets the default "run.mem" to "0"
+    Then the command fails mentioning "run.mem"
+
   Scenario: A malformed env default is rejected when set
     When the developer sets the default "run.env" to "BARE"
     Then the command fails mentioning "KEY=VALUE"
