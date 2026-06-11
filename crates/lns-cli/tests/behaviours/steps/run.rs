@@ -6,7 +6,10 @@ use lns_cli::run::summary::print_run_summary;
 use lns_cli::service::{
     PrePhaseStep, drive_attached_session_with_writers, pre_phase_step, render_started_run,
 };
-use lns_ipc::{LogLevel, Response, WireFrame, encode_frame, encode_wire_frame};
+use lns_cli::run::progress::ProgressRenderer;
+use lns_ipc::{
+    LogLevel, Response, WireFrame, encode_frame, encode_wire_frame, read_frame_bytes_async,
+};
 use lns_policy::{Policy, RouteRule, Transport, Verdict};
 use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
@@ -18,6 +21,17 @@ fn pipe_mut(world: &mut BehaviourWorld) -> &mut PhasePipe {
     world.pipe.as_mut().unwrap()
 }
 
+async fn step_from_pipe(
+    pipe: &mut PhasePipe,
+    writer: &mut Vec<u8>,
+    progress: &mut ProgressRenderer,
+) -> PrePhaseStep {
+    let bytes = read_frame_bytes_async(&mut pipe.client)
+        .await
+        .expect("read frame");
+    pre_phase_step(&bytes, writer, progress).expect("pre_phase_step")
+}
+
 async fn send_and_step(world: &mut BehaviourWorld, resp: Response) -> PrePhaseStep {
     let frame = encode_frame(&resp).expect("encode response");
     {
@@ -26,9 +40,7 @@ async fn send_and_step(world: &mut BehaviourWorld, resp: Response) -> PrePhaseSt
     }
     let mut writer = std::mem::take(&mut world.phase_output);
     let pipe = pipe_mut(world);
-    let step = pre_phase_step(&mut pipe.client, &mut writer)
-        .await
-        .expect("pre_phase_step");
+    let step = step_from_pipe(pipe, &mut writer, &mut ProgressRenderer::new(false)).await;
     world.phase_output = writer;
     step
 }
@@ -38,6 +50,65 @@ fn run_log(verb: &str, message: &str) -> Response {
         level: LogLevel::Info,
         verb: Some(verb.to_string()),
         message: message.to_string(),
+    }
+}
+
+#[when("the service streams pull progress halfway through the download")]
+async fn stream_pull_progress_halfway(world: &mut BehaviourWorld) {
+    let progress_frame = encode_frame(&Response::RunProgress {
+        verb: "Pulling".to_string(),
+        message: String::new(),
+        current: 5 * 1024 * 1024,
+        total: 10 * 1024 * 1024,
+    })
+    .expect("encode progress");
+    let pulled_frame = encode_frame(&run_log("Pulled", "1 layer   (0.42s · 10.0 MiB)"))
+        .expect("encode pulled");
+    {
+        let pipe = pipe_mut(world);
+        pipe.server
+            .write_all(&progress_frame)
+            .await
+            .expect("write progress");
+        pipe.server
+            .write_all(&pulled_frame)
+            .await
+            .expect("write pulled");
+    }
+    let mut writer = std::mem::take(&mut world.phase_output);
+    let pipe = pipe_mut(world);
+    let mut renderer = ProgressRenderer::new(true);
+    let _ = step_from_pipe(pipe, &mut writer, &mut renderer).await;
+    let _ = step_from_pipe(pipe, &mut writer, &mut renderer).await;
+    world.phase_output = writer;
+}
+
+#[then("the terminal shows an in-place pull progress bar at 50%")]
+fn terminal_shows_bar_at_half(world: &mut BehaviourWorld) -> Result<(), String> {
+    let s = String::from_utf8_lossy(&world.phase_output);
+    if !s.contains("\r") {
+        return Err(format!("bar must redraw in place via carriage return: {s:?}"));
+    }
+    if s.contains("pulling") && s.contains("50%") && s.contains("5.0 MiB / 10.0 MiB") {
+        Ok(())
+    } else {
+        Err(format!("no 50% pull bar in: {s:?}"))
+    }
+}
+
+#[then("the pulled completion line erases the bar and starts at column 0")]
+fn pulled_line_erases_bar(world: &mut BehaviourWorld) -> Result<(), String> {
+    let s = String::from_utf8_lossy(&world.phase_output);
+    let idx = s
+        .find('✓')
+        .ok_or_else(|| format!("no completion line in: {s:?}"))?;
+    if !s[..idx].ends_with('\r') {
+        return Err(format!("bar not erased before the ✓ line: {s:?}"));
+    }
+    if s.contains("✓ pulled 1 layer") {
+        Ok(())
+    } else {
+        Err(format!("missing pulled line: {s:?}"))
     }
 }
 
@@ -459,12 +530,9 @@ async fn resolution_fails(world: &mut BehaviourWorld) {
     }
     let mut writer = std::mem::take(&mut world.phase_output);
     let pipe = pipe_mut(world);
-    let _ = pre_phase_step(&mut pipe.client, &mut writer)
-        .await
-        .expect("step 1");
-    let outcome = pre_phase_step(&mut pipe.client, &mut writer)
-        .await
-        .expect("step 2");
+    let mut progress = ProgressRenderer::new(false);
+    let _ = step_from_pipe(pipe, &mut writer, &mut progress).await;
+    let outcome = step_from_pipe(pipe, &mut writer, &mut progress).await;
     world.phase_output = writer;
     if let PrePhaseStep::EarlyExit(code) = outcome {
         world.early_exit_code = Some(code);
