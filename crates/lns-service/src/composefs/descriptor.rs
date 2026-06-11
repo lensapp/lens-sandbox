@@ -492,6 +492,18 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_squatting_on_the_descriptor_path_reads_as_a_cache_miss() {
+        let f = fixture("sha256:7a");
+        let path = f.builder.path_for(&compute_merge_hash(&f.digests, None));
+        std::fs::create_dir_all(&path).unwrap();
+        assert_eq!(
+            f.builder.cached(&f.request()).unwrap(),
+            None,
+            "a non-file at the descriptor path must not be served as a hit",
+        );
+    }
+
+    #[test]
     fn a_directory_squatting_on_the_sidecar_path_does_not_fail_the_build() {
         let f = fixture("sha256:6f");
         assert!(f.builder.cached(&f.request()).unwrap().is_none());
