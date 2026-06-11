@@ -16,6 +16,13 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 pub const TARGET: &str = "lns.log";
 
+const PROGRESS_TARGET: &str = "lns.progress";
+
+/// Emits a transient progress update for the CLI's live status line; total 0 means indeterminate.
+pub fn progress(verb: &str, message: &str, current: u64, total: u64) {
+    tracing::debug!(target: PROGRESS_TARGET, verb, message, current, total);
+}
+
 #[derive(Clone)]
 pub(crate) struct RunFrameTx(pub Sender<WireFrame>);
 
@@ -231,6 +238,44 @@ fn format_extras(extras: &[(String, String)]) -> String {
     out
 }
 
+#[derive(Default)]
+struct ProgressVisitor {
+    verb: String,
+    message: String,
+    current: u64,
+    total: u64,
+}
+
+impl Visit for ProgressVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "verb" => self.verb = value.to_string(),
+            "message" => self.message = value.to_string(),
+            _ => {}
+        }
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        match field.name() {
+            "current" => self.current = value,
+            "total" => self.total = value,
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+}
+
+fn run_frame_tx<S>(
+    event: &Event<'_>,
+    ctx: &tracing_subscriber::layer::Context<'_, S>,
+) -> Option<RunFrameTx>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    ctx.event_scope(event)?
+        .from_root()
+        .find_map(|span| span.extensions().get::<RunFrameTx>().cloned())
+}
+
 // `try_send` rather than `send` because `on_event` is synchronous; log frames are dropped on full rather than blocking the emitter.
 struct FrameForwardLayer;
 
@@ -239,6 +284,20 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == PROGRESS_TARGET {
+            let Some(tx) = run_frame_tx(event, &ctx) else {
+                return;
+            };
+            let mut v = ProgressVisitor::default();
+            event.record(&mut v);
+            let _ = tx.0.try_send(WireFrame::Json(Response::RunProgress {
+                verb: v.verb,
+                message: v.message,
+                current: v.current,
+                total: v.total,
+            }));
+            return;
+        }
         if event.metadata().target() != TARGET {
             return;
         }
@@ -250,13 +309,7 @@ where
             _ => return,
         };
 
-        let Some(scope) = ctx.event_scope(event) else {
-            return;
-        };
-        let Some(tx) = scope
-            .from_root()
-            .find_map(|span| span.extensions().get::<RunFrameTx>().cloned())
-        else {
+        let Some(tx) = run_frame_tx(event, &ctx) else {
             return;
         };
 
@@ -687,6 +740,133 @@ mod tests {
                 s.extensions_mut().insert(RunFrameTx(tx.clone()));
             }
         });
+    }
+
+    #[tokio::test]
+    async fn progress_in_run_scope_forwards_a_run_progress_frame() {
+        use tokio::sync::mpsc;
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run", run_id = 1u32);
+            attach_tx_to_span(&span, tx);
+            let _g = span.enter();
+            progress("Pulling", "", 12, 100);
+        });
+        match rx.try_recv().expect("RunProgress frame emitted") {
+            WireFrame::Json(Response::RunProgress {
+                verb,
+                message,
+                current,
+                total,
+            }) => {
+                assert_eq!(verb, "Pulling");
+                assert_eq!(message, "");
+                assert_eq!(current, 12);
+                assert_eq!(total, 100);
+            }
+            other => panic!("expected WireFrame::Json(RunProgress), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_with_message_carries_it_for_indeterminate_phases() {
+        use tokio::sync::mpsc;
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run", run_id = 1u32);
+            attach_tx_to_span(&span, tx);
+            let _g = span.enter();
+            progress("Booting", "microVM", 0, 0);
+        });
+        match rx.try_recv().expect("RunProgress frame emitted") {
+            WireFrame::Json(Response::RunProgress {
+                verb,
+                message,
+                current,
+                total,
+            }) => {
+                assert_eq!(verb, "Booting");
+                assert_eq!(message, "microVM");
+                assert_eq!(current, 0);
+                assert_eq!(total, 0, "indeterminate phases report total 0");
+            }
+            other => panic!("expected WireFrame::Json(RunProgress), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_outside_run_scope_is_dropped() {
+        use tokio::sync::mpsc;
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let (_tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            progress("Pulling", "", 1, 2);
+        });
+        assert!(
+            rx.try_recv().is_err(),
+            "progress without a run span must not produce a frame",
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_in_a_span_without_tx_is_dropped() {
+        use tokio::sync::mpsc;
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let (_tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run");
+            let _g = span.enter();
+            progress("Pulling", "", 1, 2);
+        });
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn progress_never_renders_to_the_local_human_layer() {
+        let buf = TestBuf::new();
+        let local = tsfmt::layer()
+            .event_format(LogFormat { color: false })
+            .with_writer(buf.clone())
+            .with_filter(local_log_filter(false));
+        let subscriber = tracing_subscriber::registry().with(local);
+        with_default(subscriber, || {
+            progress("Pulling", "", 1, 2);
+        });
+        assert!(
+            buf.contents().is_empty(),
+            "progress frames are CLI-rendering data, not log lines: {:?}",
+            buf.text(),
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_visitor_ignores_fields_it_does_not_know() {
+        use tokio::sync::mpsc;
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        with_default(subscriber, || {
+            let span = tracing::info_span!("run");
+            attach_tx_to_span(&span, tx);
+            let _g = span.enter();
+            tracing::debug!(
+                target: PROGRESS_TARGET,
+                verb = "Pulling",
+                message = "",
+                current = 5u64,
+                total = 10u64,
+                stray_str = "ignored",
+                stray_u64 = 7u64,
+                stray_debug = ?std::time::Duration::from_secs(1),
+            );
+        });
+        match rx.try_recv().expect("RunProgress frame emitted") {
+            WireFrame::Json(Response::RunProgress { current, total, .. }) => {
+                assert_eq!((current, total), (5, 10));
+            }
+            other => panic!("expected RunProgress, got {other:?}"),
+        }
     }
 
     #[tokio::test]
