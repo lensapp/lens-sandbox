@@ -104,6 +104,10 @@ impl RunLogBuffer {
         self.state.lock().expect("run-log state poisoned").next_seq
     }
 
+    pub fn exit(&self) -> Option<i32> {
+        self.state.lock().expect("run-log state poisoned").exit
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.version.subscribe()
     }
@@ -254,6 +258,14 @@ mod tests {
         buf.close(7);
         buf.close(99);
         assert_eq!(buf.read_from(0).exit, Some(7));
+    }
+
+    #[test]
+    fn exit_is_none_until_closed_then_reports_the_code() {
+        let buf = RunLogBuffer::new(1024);
+        assert_eq!(buf.exit(), None);
+        buf.close(42);
+        assert_eq!(buf.exit(), Some(42));
     }
 
     #[tokio::test]

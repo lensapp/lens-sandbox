@@ -16,14 +16,14 @@ pub(super) enum PumpOutcome {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PostPumpAction {
-    DeregisterOnly,
+    Retain,
     BackgroundDrain,
     CancelAndDeregister,
 }
 
 pub(super) fn post_pump_action(outcome: &PumpOutcome, detached: bool) -> PostPumpAction {
     match outcome {
-        PumpOutcome::ExitFrame | PumpOutcome::ChannelClosed => PostPumpAction::DeregisterOnly,
+        PumpOutcome::ExitFrame | PumpOutcome::ChannelClosed => PostPumpAction::Retain,
         PumpOutcome::WriteFailed(_) if detached => PostPumpAction::BackgroundDrain,
         PumpOutcome::WriteFailed(_) => PostPumpAction::CancelAndDeregister,
     }
@@ -650,26 +650,27 @@ mod tests {
     }
 
     #[test]
-    fn post_pump_action_exit_frame_just_deregisters_regardless_of_detached() {
+    fn post_pump_action_exit_frame_retains_the_finished_run_regardless_of_detached() {
         assert_eq!(
             post_pump_action(&PumpOutcome::ExitFrame, true),
-            PostPumpAction::DeregisterOnly,
+            PostPumpAction::Retain,
+            "a finished run must stay listed as exited until `lns sandbox rm`/`prune`",
         );
         assert_eq!(
             post_pump_action(&PumpOutcome::ExitFrame, false),
-            PostPumpAction::DeregisterOnly,
+            PostPumpAction::Retain,
         );
     }
 
     #[test]
-    fn post_pump_action_channel_closed_just_deregisters_regardless_of_detached() {
+    fn post_pump_action_channel_closed_retains_the_finished_run_regardless_of_detached() {
         assert_eq!(
             post_pump_action(&PumpOutcome::ChannelClosed, true),
-            PostPumpAction::DeregisterOnly,
+            PostPumpAction::Retain,
         );
         assert_eq!(
             post_pump_action(&PumpOutcome::ChannelClosed, false),
-            PostPumpAction::DeregisterOnly,
+            PostPumpAction::Retain,
         );
     }
 

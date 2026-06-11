@@ -350,8 +350,8 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 
     let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx).await?;
     match post_pump_action(&outcome, detached) {
-        PostPumpAction::DeregisterOnly => {
-            crate::run_registry::deregister(run_id);
+        PostPumpAction::Retain => {
+            crate::run_registry::mark_exited_from_log(run_id);
         }
         PostPumpAction::BackgroundDrain => {
             if let PumpOutcome::WriteFailed(e) = &outcome {
@@ -359,7 +359,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             }
             tokio::spawn(async move {
                 while frame_rx.recv().await.is_some() {}
-                crate::run_registry::deregister(run_id);
+                crate::run_registry::mark_exited_from_log(run_id);
             });
         }
         PostPumpAction::CancelAndDeregister => {
