@@ -189,7 +189,7 @@ impl TrayApp {
         }
     }
 
-    /// Snaps the viewport to `target` — the scroll area's reported content height plus chrome, clamped to the screen. Driven by content size (not the window-bounded `min_rect`), so a card that grows taller than the current window still makes the window grow instead of clipping.
+    /// Snaps the viewport to `target` using measured content size, not the window-bounded `min_rect`, so a card taller than the current window grows it instead of being clipped.
     fn fit_height_to_content(&mut self, ctx: &egui::Context, target: f32) {
         if (self.current_height - target).abs() > 0.5 {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
@@ -330,14 +330,14 @@ fn item_height(item: &StackItem) -> f32 {
     }
 }
 
-/// The tallest the window may grow: the usable monitor height, or a fixed fallback when the monitor size isn't known yet. Beyond this the stack scrolls instead of running off-screen.
+/// The tallest the window may grow before the stack scrolls rather than running off-screen — the usable monitor height, or a fixed fallback when the monitor size isn't known yet.
 fn content_cap(monitor_height: Option<f32>) -> f32 {
     monitor_height
         .map(|h| (h - 2.0 * SCREEN_EDGE_MARGIN).max(MIN_WINDOW_HEIGHT))
         .unwrap_or(FALLBACK_MAX_HEIGHT)
 }
 
-/// A pre-measurement seed for the height: only the reveal frame (which skips ui()) uses it, after which ui() snaps the window to its measured content. Estimates per-item heights and clamps to [`content_cap`].
+/// A pre-measurement height seed for the reveal frame alone (which skips ui()), after which ui() snaps the window to its measured content.
 fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f32>) -> f32 {
     if items.is_empty() {
         return MIN_WINDOW_HEIGHT;
@@ -349,7 +349,7 @@ fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f3
     content.clamp(MIN_WINDOW_HEIGHT, content_cap(monitor_height))
 }
 
-/// Renders the stack and returns the fired action plus the content's natural height (the scroll area's `content_size`), which the caller adds chrome to and sizes the window from. Reporting content size — not the window-bounded laid-out size — is what lets the window grow to a card taller than itself instead of clipping it.
+/// Renders the stack and returns the fired action plus the content's natural height (the scroll area's `content_size`, not the window-bounded laid-out size), which the caller sizes the window from so a card taller than the window grows it instead of being clipped.
 fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,

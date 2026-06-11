@@ -398,6 +398,11 @@ impl WindowState {
             .retain(|e| e.display_name != display_name);
     }
 
+    /// Drops every connecting placeholder regardless of integration; used on run teardown so an in-flight connect can't keep the window pinned after the workload is gone.
+    pub fn clear_all_connecting(&self) {
+        self.lock().connecting.clear();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, WindowInner> {
         self.inner.lock().expect("window state mutex poisoned")
     }
@@ -1165,6 +1170,27 @@ mod tests {
         s.connect_offer("r1");
         s.clear_connecting("Other Service");
         assert_eq!(s.snapshot().connecting, vec!["GitHub".to_string()]);
+    }
+
+    #[test]
+    fn clear_all_connecting_drops_every_placeholder() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(
+            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
+            tx.clone(),
+        );
+        s.insert_pending(
+            offer_prompt("r2", "api.other-oauth.example", "Other Service"),
+            tx,
+        );
+        s.connect_offer("r1");
+        s.connect_offer("r2");
+        s.clear_all_connecting();
+        assert!(
+            s.snapshot().connecting.is_empty(),
+            "run teardown takes down every in-flight placeholder so the window can close"
+        );
     }
 
     fn oauth_cred_prompt(id: &str, name: &str) -> CredentialPendingPrompt {
