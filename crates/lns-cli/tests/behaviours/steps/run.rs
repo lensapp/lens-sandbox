@@ -564,6 +564,7 @@ async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>)
         false,
         world.attached_stdout_is_terminal.unwrap_or(true),
         Vec::new(),
+        lns_cli::service::DetachBehaviour::SignalAndDrain,
         &mut stdout,
         &mut status,
     )

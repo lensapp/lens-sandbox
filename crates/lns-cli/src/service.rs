@@ -18,9 +18,9 @@ const NOT_RUNNING_MESSAGE: &str =
 
 mod orchestrator;
 pub use orchestrator::{
-    PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers, drive_pre_phase,
-    exec_image, kill, ls, pre_phase_step, render_started_run, render_status_line, require_running,
-    run_image,
+    DetachBehaviour, PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers,
+    drive_pre_phase, exec_image, kill, ls, pre_phase_step, render_started_run, render_status_line,
+    require_running, run_image,
 };
 
 fn require_running_check(alive: bool) -> Result<(), &'static str> {
