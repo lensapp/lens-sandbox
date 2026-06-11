@@ -13,13 +13,18 @@ pub(crate) trait ConnectOnce {
     fn connect_once(&self, port: u32) -> impl Future<Output = Result<RawFd>> + Send;
 }
 
+const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(10);
+
+// Capped low because every ms spent past guest readiness is added to every single run's boot time, while a refused vsock connect costs near nothing.
+const CONNECT_MAX_DELAY: Duration = Duration::from_millis(100);
+
 pub(crate) async fn connect_with<C: ConnectOnce + Sync>(
     connector: &C,
     port: u32,
     timeout: Duration,
 ) -> Result<RawFd> {
     let deadline = Instant::now() + timeout;
-    let mut delay = Duration::from_millis(50);
+    let mut delay = CONNECT_INITIAL_DELAY;
     loop {
         match connector.connect_once(port).await {
             Ok(fd) => return Ok(fd),
@@ -30,7 +35,7 @@ pub(crate) async fn connect_with<C: ConnectOnce + Sync>(
                     });
                 }
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_millis(500));
+                delay = (delay * 2).min(CONNECT_MAX_DELAY);
             }
         }
     }
@@ -97,5 +102,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fd, 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_with_polls_tightly_enough_to_catch_readiness_fast() {
+        let fake = FakeConnect {
+            fails_before_ok: AtomicI32::new(6),
+            always_fail: false,
+            fd: 3,
+        };
+        let started = tokio::time::Instant::now();
+        let fd = connect_with(&fake, 9, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(fd, 3);
+        let waited = started.elapsed();
+        assert_eq!(
+            waited,
+            Duration::from_millis(10 + 20 + 40 + 80 + 100 + 100),
+            "backoff schedule regressed — a guest ready after the 6th probe \
+             must be reached in 350ms, not the old 1.27s",
+        );
     }
 }
