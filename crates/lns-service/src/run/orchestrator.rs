@@ -76,7 +76,10 @@ async fn orchestrate(
     let cache_dir = cache::root()?;
     let layer_cache = oci_layer_cache::LayerCache::new(cache_dir.join("layers"));
     let content_store = content_store::ContentStore::new(cache_dir.join("content"));
+    let run_scratch_dir = cache_dir.join("runs").join(run_id.to_string());
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir);
+    let mut run_scratch =
+        super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
     let tools_then_session = async {
@@ -119,19 +122,19 @@ async fn orchestrate(
         Ok::<_, anyhow::Error>(resolved)
     };
 
-    let (
-        (guest_tools, session, initrd),
-        mut image,
-        kernel_path,
-        upper_disk_path,
-        (volume_attachments, volume_leases),
-    ) = tokio::try_join!(
+    // join! rather than try_join! so the detached spawn_blocking inside upperfs::provision always settles before the scratch guard can fire — a cancelled provision would keep writing and re-orphan the run dir we just cleaned.
+    let (tools_res, image_res, kernel_res, upper_res, volumes_res) = tokio::join!(
         tools_then_session,
         image_fut,
         kernel_fut,
         upper_fut,
         volumes_fut
-    )?;
+    );
+    let (guest_tools, session, initrd) = tools_res?;
+    let mut image = image_res?;
+    let kernel_path = kernel_res?;
+    let upper_disk_path = upper_res?;
+    let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
     for vol in &args.volumes {
         crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
@@ -311,6 +314,7 @@ async fn orchestrate(
         let fd = connector
             .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(30))
             .await?;
+        run_scratch.keep();
         log::debug!("connected broker in {:.2?}", connect_started.elapsed());
         let session_started = std::time::Instant::now();
         let session_code =
@@ -334,6 +338,7 @@ async fn orchestrate(
     {
         let _volume_leases = volume_leases;
         vm::boot(spec, None).await?;
+        run_scratch.keep();
         log::info!("Finished", "in {:.2?}", started.elapsed());
         Ok(0)
     }

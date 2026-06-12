@@ -3,6 +3,7 @@ use lns_ipc::{Response, WireFrame};
 use tokio::sync::mpsc::Sender;
 
 mod orchestrator;
+mod scratch;
 mod shutdown;
 pub use orchestrator::handle;
 
