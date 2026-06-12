@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.10.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.9.0...lns-v0.10.0) (2026-06-12)
+
+
+### Features
+
+* **cli:** apply lns config defaults to lns run, per-run flags win ([cea6a37](https://github.com/lensapp/lens-sandbox/commit/cea6a37745ac0389b8f124cbf051128ca860bb69))
+* **cli:** attach detaches without signalling the run ([e573e7e](https://github.com/lensapp/lens-sandbox/commit/e573e7e8b2d28ee4c24419146e5b4ae66203f522))
+* **cli:** consolidate ls, exec, and kill under lns sandbox ([f13ccef](https://github.com/lensapp/lens-sandbox/commit/f13ccef654c9a8780aef6bf7a26dcc0ff86920e8))
+* **cli:** lns config — get/set/unset/list persistent run defaults ([461af9a](https://github.com/lensapp/lens-sandbox/commit/461af9a35b31082e7c327dc5a6509729b89bfabf))
+* **cli:** lns image subcommand family ([6b2c6c3](https://github.com/lensapp/lens-sandbox/commit/6b2c6c36b3b5c95aef8b2eb48e40560bfb253e8c))
+* **cli:** lns sandbox — stop, logs, attach, inspect, stats ([a8c5271](https://github.com/lensapp/lens-sandbox/commit/a8c5271d2806d4312fc9ad8ae893c01b64335210))
+* **cli:** lns sandbox rm and prune for finished runs ([fc8bbdb](https://github.com/lensapp/lens-sandbox/commit/fc8bbdb940b86ca68f39e3a21a01939a66cc010a))
+* **cli:** lns volume subcommand family ([07e7d5c](https://github.com/lensapp/lens-sandbox/commit/07e7d5ce8578240af46efbd2fc690983d603aa77))
+* **cli:** render a live progress bar and spinner during run pre-phase waits ([6025d98](https://github.com/lensapp/lens-sandbox/commit/6025d9886bb20dadc476051d4add574b995bd660))
+* **config:** accept memory units and reject zero in run.cpus/run.mem defaults ([bf7c912](https://github.com/lensapp/lens-sandbox/commit/bf7c912b607b0f2757b5f224320b7ea1b835309e))
+* **run:** add --env-file, -w/--workdir, and Docker-style memory units ([6652b1b](https://github.com/lensapp/lens-sandbox/commit/6652b1b6b14b756a8eea287ec319796dc4c3e6ab))
+* **volumes:** collect prune failures instead of aborting ([3b88ca5](https://github.com/lensapp/lens-sandbox/commit/3b88ca5754afce49a87c956c442802ffd0d16f9e))
+* **volumes:** report on-disk usage alongside logical size ([0829d2e](https://github.com/lensapp/lens-sandbox/commit/0829d2e6759e1df243890a64c31aab1d2a9951f5))
+
 ## [0.9.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.8.0...lns-v0.9.0) (2026-06-10)
 
 
