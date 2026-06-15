@@ -444,11 +444,16 @@ impl ApprovalSession {
     }
 }
 
-/// Matches a request host against an integration route pattern: exact, or a `*.suffix` wildcard covering the apex and any subdomain.
+/// Matches a request host against an integration route pattern: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
 fn host_matches_pattern(pattern: &str, host: &str) -> bool {
-    match pattern.strip_prefix("*.") {
-        Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
-        None => pattern == host,
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host == suffix || host.ends_with(&format!(".{suffix}"))
+    } else if let Some((prefix, suffix)) = pattern.split_once('*') {
+        host.starts_with(prefix)
+            && host[prefix.len()..].ends_with(suffix)
+            && host.len() > prefix.len() + suffix.len()
+    } else {
+        pattern == host
     }
 }
 
@@ -1599,6 +1604,22 @@ pub(crate) mod tests {
         assert!(!host_matches_pattern(
             "*.huggingface.co",
             "huggingface.co.evil.com"
+        ));
+    }
+
+    #[test]
+    fn host_matches_pattern_mid_segment_wildcard_covers_a_variable_label() {
+        assert!(host_matches_pattern(
+            "bedrock-runtime.*.amazonaws.com",
+            "bedrock-runtime.us-east-1.amazonaws.com"
+        ));
+        assert!(!host_matches_pattern(
+            "bedrock-runtime.*.amazonaws.com",
+            "bedrock-runtime.us-east-1amazonaws.com"
+        ));
+        assert!(!host_matches_pattern(
+            "bedrock-runtime.*.amazonaws.com",
+            "bedrock.us-east-1.amazonaws.com"
         ));
     }
 }
