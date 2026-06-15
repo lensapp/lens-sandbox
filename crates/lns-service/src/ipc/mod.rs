@@ -29,6 +29,10 @@ pub(super) fn post_pump_action(outcome: &PumpOutcome, detached: bool) -> PostPum
     }
 }
 
+pub(super) fn peer_is_authorized(peer_uid: u32, self_uid: u32) -> bool {
+    peer_uid == self_uid
+}
+
 async fn pump_responses<W>(
     stream: &mut W,
     frame_rx: &mut mpsc::Receiver<WireFrame>,
@@ -425,6 +429,17 @@ fn session_input_from_signal(_signal: lns_ipc::SignalKind) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_with_the_services_own_uid_is_authorized() {
+        assert!(peer_is_authorized(1000, 1000));
+    }
+
+    #[test]
+    fn a_peer_from_a_different_uid_is_rejected_in_both_directions() {
+        assert!(!peer_is_authorized(1000, 0));
+        assert!(!peer_is_authorized(0, 1000));
+    }
 
     #[tokio::test]
     async fn ping_returns_pong() {

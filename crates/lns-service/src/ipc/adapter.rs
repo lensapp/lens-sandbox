@@ -14,7 +14,10 @@ use crate::log;
 use crate::shutdown::Shutdown;
 use crate::time_fmt::rfc3339_now;
 
-use super::{PostPumpAction, PumpOutcome, handle_request, post_pump_action, pump_responses};
+use super::{
+    PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
+    pump_responses,
+};
 #[cfg(target_os = "macos")]
 use super::{build_session_params, validate_exec};
 
@@ -32,6 +35,9 @@ pub async fn run_server(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (stream, _) = accept_result.context("accept failed")?;
+                if !peer_is_trusted(&stream) {
+                    continue;
+                }
                 let shutdown = shutdown.clone();
                 let start = started_at;
                 tokio::spawn(async move {
@@ -51,7 +57,7 @@ pub async fn run_server(
 }
 
 async fn bind_or_replace_stale(socket_path: &Path) -> anyhow::Result<UnixListener> {
-    match UnixListener::bind(socket_path) {
+    match bind_secure(socket_path) {
         Ok(listener) => return Ok(listener),
         Err(e) if e.kind() != io::ErrorKind::AddrInUse => {
             return Err(e).with_context(|| format!("failed to bind {}", socket_path.display()));
@@ -69,8 +75,48 @@ async fn bind_or_replace_stale(socket_path: &Path) -> anyhow::Result<UnixListene
     std::fs::remove_file(socket_path)
         .with_context(|| format!("removing stale socket {}", socket_path.display()))?;
 
-    UnixListener::bind(socket_path)
-        .with_context(|| format!("failed to rebind {}", socket_path.display()))
+    bind_secure(socket_path).with_context(|| format!("failed to rebind {}", socket_path.display()))
+}
+
+fn bind_secure(socket_path: &Path) -> io::Result<UnixListener> {
+    let listener = UnixListener::bind(socket_path)?;
+    set_socket_mode_0600(socket_path)?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn set_socket_mode_0600(socket_path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_socket_mode_0600(_socket_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn peer_is_trusted(stream: &UnixStream) -> bool {
+    match stream.peer_cred() {
+        Ok(cred) => {
+            let authorized = peer_is_authorized(cred.uid(), service_euid());
+            if !authorized {
+                log::warn!(
+                    peer_uid = cred.uid(),
+                    "rejected IPC connection from another user"
+                );
+            }
+            authorized
+        }
+        Err(e) => {
+            log::warn!(error = %e, "rejected IPC connection: peer credentials unavailable");
+            false
+        }
+    }
+}
+
+fn service_euid() -> u32 {
+    // SAFETY: geteuid is reentrant and always succeeds per POSIX.
+    unsafe { libc::geteuid() }
 }
 
 async fn is_instance_alive(socket_path: &Path) -> bool {
