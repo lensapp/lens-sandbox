@@ -120,8 +120,9 @@ place of `credential:`) whose `flow` selects one of two shapes:
 - **`flow: pkce`** (OAuth 2.0 authorization code + PKCE) — `connect` opens your browser
   to the provider's authorization page, and after you approve, the service captures the
   returned key over a one-time loopback callback. The result is a **durable** key with
-  no refresh or expiry, so it stays armed across runs until the provider revokes it. Its
-  block carries an authorization endpoint and a token endpoint (and no client id).
+  no refresh or expiry, so it stays armed across runs until the provider revokes it. The
+  bundled `openrouter` integration signs in this way; its block carries an authorization
+  endpoint and a token endpoint (and no client id).
 
 ## See also
 
