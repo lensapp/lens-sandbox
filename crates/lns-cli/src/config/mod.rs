@@ -756,13 +756,10 @@ mod tests {
         )
         .unwrap();
         let defaults = load_run_defaults(&path).unwrap();
-        match &defaults.mounts[0] {
-            MountSpec::Named(v) => {
-                assert_eq!(v.target, "/var/cache");
-                assert!(v.read_only);
-            }
-            other => panic!("expected a named volume, got {other:?}"),
-        }
+        assert_eq!(
+            defaults.mounts,
+            vec![MountSpec::parse("cache:/var/cache:ro").unwrap()]
+        );
         assert_eq!(defaults.publish[0].host_port, 8080);
         assert_eq!(defaults.publish[0].container_port, 80);
     }
@@ -773,14 +770,10 @@ mod tests {
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "run:\n  volume:\n    - /srv/data:/data:ro\n").unwrap();
         let defaults = load_run_defaults(&path).unwrap();
-        match &defaults.mounts[0] {
-            MountSpec::Bind(b) => {
-                assert_eq!(b.host_source, "/srv/data");
-                assert_eq!(b.target, "/data");
-                assert!(b.read_only);
-            }
-            other => panic!("expected a host bind, got {other:?}"),
-        }
+        assert_eq!(
+            defaults.mounts,
+            vec![MountSpec::parse("/srv/data:/data:ro").unwrap()]
+        );
     }
 
     #[test]

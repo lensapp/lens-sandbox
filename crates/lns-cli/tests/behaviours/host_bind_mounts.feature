@@ -86,7 +86,6 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     And the dropped path "/Users/me/proj/.env" is reported on stderr
     And no KEEP or DROP prompt is shown
 
-  @todo
   Scenario: The run summary lists each bind, its mode, and secret disposition
     Given the host directory "/Users/me/proj" contains ".env"
     And the operator will answer the secret prompt with "keep"

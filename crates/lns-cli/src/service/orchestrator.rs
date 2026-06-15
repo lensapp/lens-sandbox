@@ -99,7 +99,15 @@ fn real_client() -> Result<real::RealServiceClient> {
     ))
 }
 
-fn resolve_host_binds(specs: &[lns_ipc::BindSpec]) -> Result<Vec<lns_ipc::BindMount>> {
+/// A detached run must never block on the KEEP/DROP prompt, so it drops undecided secrets like a no-terminal run even when launched from a TTY.
+fn host_binds_interactive(detached: bool, stdin_is_tty: bool) -> bool {
+    !detached && stdin_is_tty
+}
+
+fn resolve_host_binds(
+    specs: &[lns_ipc::BindSpec],
+    interactive: bool,
+) -> Result<Vec<crate::run::host_bind::ResolvedBind>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
@@ -113,7 +121,7 @@ fn resolve_host_binds(specs: &[lns_ipc::BindSpec]) -> Result<Vec<lns_ipc::BindMo
         specs,
         &scan,
         &store,
-        crate::raw_mode::stdin_is_tty(),
+        interactive,
         &mut input,
         &mut std::io::stderr(),
     )
@@ -124,7 +132,13 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let resolved_policy = print_run_summary(&args, &cwd, &mut std::io::stderr())?;
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
-    let binds = resolve_host_binds(&bind_specs)?;
+    let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
+    let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
+    let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
+    if !dispositions.is_empty() {
+        eprint!("{dispositions}");
+    }
+    let binds: Vec<lns_ipc::BindMount> = resolved_binds.iter().map(|b| b.to_wire()).collect();
 
     let client = real_client()?;
     let socket = client.socket();
@@ -1272,6 +1286,22 @@ mod tests {
     fn lf_to_crlf_expands_every_newline_and_leaves_other_bytes() {
         assert_eq!(lf_to_crlf(b"a\nb\n"), b"a\r\nb\r\n");
         assert_eq!(lf_to_crlf(b"no newline"), b"no newline");
+    }
+
+    #[test]
+    fn host_binds_interactive_is_suppressed_for_a_detached_run_even_with_a_tty() {
+        assert!(
+            host_binds_interactive(false, true),
+            "attached + tty prompts"
+        );
+        assert!(
+            !host_binds_interactive(true, true),
+            "a detached run must never block on the secret prompt, even from a terminal"
+        );
+        assert!(
+            !host_binds_interactive(false, false),
+            "no terminal cannot prompt"
+        );
     }
 
     #[test]

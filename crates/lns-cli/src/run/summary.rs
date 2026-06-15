@@ -128,6 +128,20 @@ fn bind_line(bind: &lns_ipc::BindSpec) -> String {
     format!("{} → {} ({mode})", bind.host_source, bind.target)
 }
 
+/// Renders the post-scan secret disposition of each host bind (printed after KEEP/DROP resolution); empty when no bind exposed or dropped a secret.
+pub fn format_bind_dispositions(binds: &[crate::run::host_bind::ResolvedBind]) -> String {
+    let mut s = String::new();
+    for bind in binds {
+        for name in &bind.kept {
+            writeln!(s, "  {name}: kept (exposed)").unwrap();
+        }
+        for name in &bind.dropped {
+            writeln!(s, "  {name}: dropped").unwrap();
+        }
+    }
+    s
+}
+
 fn flags_line(args: &RunArgs) -> String {
     let mut flags: Vec<&str> = Vec::new();
     if args.interactive {
@@ -371,6 +385,52 @@ mod tests {
             s.contains("Bind:      /Users/me/proj → /work (read-write)"),
             "missing bind line: {s}"
         );
+    }
+
+    #[test]
+    fn summary_marks_a_read_only_host_bind() {
+        let mut args = run_args(Some("ubuntu"));
+        args.mounts = vec![lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+            host_source: "/Users/me/cfg".into(),
+            target: "/cfg".into(),
+            read_only: true,
+        })];
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Bind:      /Users/me/cfg → /cfg (read-only)"),
+            "missing read-only bind line: {s}"
+        );
+    }
+
+    #[test]
+    fn bind_dispositions_render_kept_and_dropped_secrets() {
+        let binds = vec![crate::run::host_bind::ResolvedBind {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+            kept: vec![".env".into()],
+            dropped: vec![".npmrc".into()],
+        }];
+        let s = format_bind_dispositions(&binds);
+        assert!(s.contains(".env: kept (exposed)"), "missing kept line: {s}");
+        assert!(s.contains(".npmrc: dropped"), "missing dropped line: {s}");
+    }
+
+    #[test]
+    fn bind_dispositions_are_empty_without_detected_secrets() {
+        let binds = vec![crate::run::host_bind::ResolvedBind {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+            kept: vec![],
+            dropped: vec![],
+        }];
+        assert!(format_bind_dispositions(&binds).is_empty());
     }
 
     #[test]

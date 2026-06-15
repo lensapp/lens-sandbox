@@ -47,9 +47,10 @@ pub struct HostBindRig {
 
 #[derive(Debug)]
 pub struct HostBindOutcome {
-    pub result: Result<Vec<lns_ipc::BindMount>, String>,
+    pub result: Result<Vec<lns_cli::run::host_bind::ResolvedBind>, String>,
     pub prompt: String,
     pub persisted: std::collections::HashMap<String, SecretDisposition>,
+    pub summary: String,
 }
 
 #[derive(Debug, Default)]

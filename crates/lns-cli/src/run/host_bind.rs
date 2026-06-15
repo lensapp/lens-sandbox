@@ -79,7 +79,28 @@ pub fn is_ignored(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| p == name)
 }
 
-/// Scans each bind for secret-shaped files and resolves a KEEP/DROP for every one — honoring `.lensignore`, reusing recorded decisions, prompting for the rest (or defaulting to DROP when there is no terminal) — and returns wire binds whose `dropped_paths` the guest will mask.
+/// One host bind after secret resolution: the secrets to expose (`kept`) and to mask (`dropped`), ready to render in the summary or lower to the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBind {
+    pub host_source: String,
+    pub target: String,
+    pub read_only: bool,
+    pub kept: Vec<String>,
+    pub dropped: Vec<String>,
+}
+
+impl ResolvedBind {
+    pub fn to_wire(&self) -> lns_ipc::BindMount {
+        lns_ipc::BindMount {
+            host_source: self.host_source.clone(),
+            target: self.target.clone(),
+            read_only: self.read_only,
+            dropped_paths: self.dropped.clone(),
+        }
+    }
+}
+
+/// Scans each bind for secret-shaped files and resolves a KEEP/DROP for every one — honoring `.lensignore`, reusing recorded decisions, prompting for the rest (or defaulting to DROP when there is no terminal).
 pub fn resolve_binds(
     specs: &[lns_ipc::BindSpec],
     scan: &dyn DirScan,
@@ -87,7 +108,7 @@ pub fn resolve_binds(
     interactive: bool,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
-) -> Result<Vec<lns_ipc::BindMount>> {
+) -> Result<Vec<ResolvedBind>> {
     let mut decisions = store.load().context("loading host-bind decisions")?;
     let mut recorded = false;
     let mut resolved = Vec::with_capacity(specs.len());
@@ -97,6 +118,7 @@ pub fn resolve_binds(
             bail!("host path does not exist: {}", spec.host_source);
         }
         let ignore = lensignore_patterns(scan, root);
+        let mut kept = Vec::new();
         let mut dropped = Vec::new();
         for name in scan_secrets(scan, root) {
             if is_ignored(&name, &ignore) {
@@ -120,15 +142,17 @@ pub fn resolve_binds(
                     SecretDisposition::Drop
                 }
             };
-            if disposition == SecretDisposition::Drop {
-                dropped.push(name);
+            match disposition {
+                SecretDisposition::Keep => kept.push(name),
+                SecretDisposition::Drop => dropped.push(name),
             }
         }
-        resolved.push(lns_ipc::BindMount {
+        resolved.push(ResolvedBind {
             host_source: spec.host_source.clone(),
             target: spec.target.clone(),
             read_only: spec.read_only,
-            dropped_paths: dropped,
+            kept,
+            dropped,
         });
     }
     if recorded {
@@ -216,7 +240,7 @@ mod tests {
         store: &FakeStore,
         interactive: bool,
         answer: &str,
-    ) -> (Result<Vec<lns_ipc::BindMount>>, String) {
+    ) -> (Result<Vec<ResolvedBind>>, String) {
         let mut input = std::io::Cursor::new(answer.to_string());
         let mut out = Vec::new();
         let r = resolve_binds(specs, dir, store, interactive, &mut input, &mut out);
@@ -327,7 +351,7 @@ mod tests {
         let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
         let binds = out.unwrap();
         assert_eq!(binds.len(), 1);
-        assert!(binds[0].dropped_paths.is_empty());
+        assert!(binds[0].dropped.is_empty());
         assert!(prompt.is_empty(), "clean bind must not prompt: {prompt:?}");
         assert_eq!(*store.saves.lock().unwrap(), 0);
     }
@@ -341,7 +365,12 @@ mod tests {
         let store = FakeStore::default();
         let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "keep\n");
         let binds = out.unwrap();
-        assert!(binds[0].dropped_paths.is_empty(), "KEEP must not drop");
+        assert!(binds[0].dropped.is_empty(), "KEEP must not drop");
+        assert_eq!(
+            binds[0].kept,
+            vec![".env".to_string()],
+            "KEEP records exposed"
+        );
         assert!(prompt.contains("/proj/.env"), "prompt names the secret");
         assert_eq!(
             store.state.lock().unwrap().get("/proj/.env").copied(),
@@ -358,7 +387,7 @@ mod tests {
         };
         let store = FakeStore::default();
         let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "drop\n");
-        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert_eq!(out.unwrap()[0].dropped, vec![".env".to_string()]);
         assert_eq!(
             store.state.lock().unwrap().get("/proj/.env").copied(),
             Some(SecretDisposition::Drop)
@@ -373,7 +402,7 @@ mod tests {
         };
         let store = FakeStore::default();
         let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "\n");
-        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert_eq!(out.unwrap()[0].dropped, vec![".env".to_string()]);
     }
 
     #[test]
@@ -389,7 +418,7 @@ mod tests {
             .unwrap()
             .insert("/proj/.env".into(), SecretDisposition::Keep);
         let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
-        assert!(out.unwrap()[0].dropped_paths.is_empty());
+        assert!(out.unwrap()[0].dropped.is_empty());
         assert!(prompt.is_empty(), "a recorded decision must not re-prompt");
         assert_eq!(*store.saves.lock().unwrap(), 0);
     }
@@ -426,7 +455,7 @@ mod tests {
         };
         let store = FakeStore::default();
         let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
-        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert_eq!(out.unwrap()[0].dropped, vec![".env".to_string()]);
         assert!(prompt.is_empty(), ".lensignore must pre-empt the prompt");
         assert_eq!(
             *store.saves.lock().unwrap(),
@@ -443,7 +472,7 @@ mod tests {
         };
         let store = FakeStore::default();
         let (out, report) = resolve(&[bind("/proj", "/work")], &dir, &store, false, "");
-        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert_eq!(out.unwrap()[0].dropped, vec![".env".to_string()]);
         assert!(
             report.contains("/proj/.env"),
             "drop is reported: {report:?}"
@@ -465,5 +494,26 @@ mod tests {
         let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
         let err = out.unwrap_err().to_string();
         assert!(err.contains("host path does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn to_wire_carries_source_target_mode_and_only_the_dropped_paths() {
+        let resolved = ResolvedBind {
+            host_source: "/proj".into(),
+            target: "/work".into(),
+            read_only: true,
+            kept: vec![".env".into()],
+            dropped: vec![".npmrc".into()],
+        };
+        let wire = resolved.to_wire();
+        assert_eq!(
+            wire,
+            lns_ipc::BindMount {
+                host_source: "/proj".into(),
+                target: "/work".into(),
+                read_only: true,
+                dropped_paths: vec![".npmrc".into()],
+            }
+        );
     }
 }
