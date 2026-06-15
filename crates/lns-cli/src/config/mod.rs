@@ -472,7 +472,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let ctx = RunCtx {
             debug: false,
-            cwd: dir.path().to_path_buf(),
+            cwd: None,
             input: &mut input,
             out: &mut out,
         };

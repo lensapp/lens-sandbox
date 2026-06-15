@@ -87,8 +87,9 @@ pub const SPEC: CommandSpec = CommandSpec {
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = PolicyArgs::from_arg_matches(matches)?;
+        let cwd = ctx.cwd()?;
         let mut out = ctx.out;
-        run(&args.command, &ctx.cwd, &mut out)
+        run(&args.command, &cwd, &mut out)
     })
 }
 
@@ -262,7 +263,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let ctx = RunCtx {
             debug: false,
-            cwd: dir.path().to_path_buf(),
+            cwd: Some(dir.path().to_path_buf()),
             input: &mut input,
             out: &mut out,
         };
