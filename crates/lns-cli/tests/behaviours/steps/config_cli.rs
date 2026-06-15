@@ -1,8 +1,7 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::cli::{ConfigCommand, ConfigKeyArgs, ConfigSetArgs};
-use lns_cli::config::{self, ConfigKey};
+use lns_cli::config::{self, ConfigCommand, ConfigKey, ConfigKeyArgs, ConfigSetArgs};
 use std::path::PathBuf;
 
 fn config_path(world: &mut BehaviourWorld) -> PathBuf {

@@ -6,8 +6,47 @@ use clap::FromArgMatches;
 use lns_ipc::{PortPublish, VolumeMount};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{ConfigCommand, ConfigSetArgs, RunArgs};
+use crate::cli::RunArgs;
 use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
+
+#[derive(clap::Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ConfigCommand {
+    #[command(
+        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
+    )]
+    Set(ConfigSetArgs),
+    #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
+    Get(ConfigKeyArgs),
+    #[command(about = "Remove a default.")]
+    Unset(ConfigKeyArgs),
+    #[command(about = "List every configured default.")]
+    List,
+}
+
+const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.env, run.volume, or run.publish.";
+
+#[derive(clap::Args)]
+pub struct ConfigSetArgs {
+    #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: ConfigKey,
+    #[arg(
+        required = true,
+        help = "Value(s) to store; each is validated like the matching `lns run` flag."
+    )]
+    pub values: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct ConfigKeyArgs {
+    #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: ConfigKey,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigKey {
@@ -122,7 +161,7 @@ fn save_atomic(cfg: &ConfigFile, path: &Path) -> Result<()> {
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::cli::ConfigArgs>("config").about(
+    app.subcommand(subcommand::<ConfigArgs>("config").about(
         "Get and set persistent defaults, applied to `lns run` when the matching flag is absent.",
     ))
 }
@@ -136,7 +175,7 @@ pub const SPEC: CommandSpec = CommandSpec {
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::cli::ConfigArgs::from_arg_matches(matches)?;
+        let args = ConfigArgs::from_arg_matches(matches)?;
         let path = default_config_path()?;
         let mut out = ctx.out;
         run(&args.command, &path, &mut out)
@@ -403,7 +442,6 @@ fn merged_publish(defaults: Vec<PortPublish>, flags: Vec<PortPublish>) -> Vec<Po
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ConfigKeyArgs;
     use tempfile::TempDir;
 
     fn set_cmd(key: ConfigKey, values: &[&str]) -> ConfigCommand {
