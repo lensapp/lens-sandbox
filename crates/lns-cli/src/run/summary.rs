@@ -74,8 +74,12 @@ pub fn format_summary(
     let mut s = String::with_capacity(512);
     s.push_str("lns run\n");
     writeln!(s, "  Image:     {}", image_line(args)).unwrap();
-    for vol in &args.volumes {
+    let (volumes, binds) = crate::cli::split_mounts(&args.mounts);
+    for vol in &volumes {
         writeln!(s, "  Volume:    {}", volume_line(vol)).unwrap();
+    }
+    for bind in &binds {
+        writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -113,6 +117,15 @@ fn image_line(args: &RunArgs) -> String {
 fn volume_line(vol: &lns_ipc::VolumeMount) -> String {
     let mode = if vol.read_only { " (ro)" } else { "" };
     format!("{} → {}{mode}", vol.name, vol.target)
+}
+
+fn bind_line(bind: &lns_ipc::BindSpec) -> String {
+    let mode = if bind.read_only {
+        "read-only"
+    } else {
+        "read-write"
+    };
+    format!("{} → {} ({mode})", bind.host_source, bind.target)
 }
 
 fn flags_line(args: &RunArgs) -> String {
@@ -206,7 +219,7 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            volumes: Vec::new(),
+            mounts: Vec::new(),
             cmd: Vec::new(),
         }
     }
@@ -312,17 +325,17 @@ mod tests {
     #[test]
     fn summary_lists_attached_volumes_with_target_and_ro_marker() {
         let mut args = run_args(Some("ubuntu"));
-        args.volumes = vec![
-            lns_ipc::VolumeMount {
+        args.mounts = vec![
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
-            },
-            lns_ipc::VolumeMount {
+            }),
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
                 name: "ro-cfg".into(),
                 target: "/cfg".into(),
                 read_only: true,
-            },
+            }),
         ];
         let s = format_summary(
             &args,
@@ -337,6 +350,26 @@ mod tests {
         assert!(
             s.contains("Volume:    ro-cfg → /cfg (ro)"),
             "missing ro volume line: {s}"
+        );
+    }
+
+    #[test]
+    fn summary_lists_a_host_bind_with_its_mode() {
+        let mut args = run_args(Some("ubuntu"));
+        args.mounts = vec![lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+        })];
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Bind:      /Users/me/proj → /work (read-write)"),
+            "missing bind line: {s}"
         );
     }
 

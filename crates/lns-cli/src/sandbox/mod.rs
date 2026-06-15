@@ -381,6 +381,7 @@ fn render_inspect<W: std::io::Write>(
         "volumes".into(),
         serde_json::to_value(&details.config.volumes)?,
     );
+    config.insert("binds".into(), serde_json::to_value(&details.config.binds)?);
     config.insert(
         "sandboxUser".into(),
         serde_json::to_value(&details.config.sandbox_user)?,

@@ -119,6 +119,17 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     };
     let detach_chord = args.detach_keys.0.clone();
 
+    let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
+    let binds = bind_specs
+        .into_iter()
+        .map(|b| lns_ipc::BindMount {
+            host_source: b.host_source,
+            target: b.target,
+            read_only: b.read_only,
+            dropped_paths: Vec::new(),
+        })
+        .collect();
+
     let request = Request::RunImage(RunImageArgs {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
@@ -136,7 +147,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         initial_winsize,
         detached,
         published_ports: args.publish,
-        volumes: args.volumes,
+        volumes,
+        binds,
     });
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

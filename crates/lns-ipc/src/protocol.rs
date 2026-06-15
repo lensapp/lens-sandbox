@@ -254,6 +254,8 @@ pub struct RunConfig {
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub binds: Vec<BindMount>,
     pub detached: bool,
 }
 
@@ -268,6 +270,7 @@ impl RunConfig {
             env: args.env.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
+            binds: args.binds.clone(),
             detached: args.detached,
         }
     }
@@ -325,6 +328,8 @@ pub struct RunImageArgs {
     pub published_ports: Vec<PortPublish>,
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub binds: Vec<BindMount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +416,88 @@ pub fn validate_run_name(name: &str) -> Result<(), String> {
         )),
         None => Ok(()),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindMount {
+    pub host_source: String,
+    pub target: String,
+    pub read_only: bool,
+    #[serde(default)]
+    pub dropped_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindSpec {
+    pub host_source: String,
+    pub target: String,
+    pub read_only: bool,
+}
+
+impl BindSpec {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let read_only = spec.ends_with(":ro");
+        let body = spec
+            .strip_suffix(":ro")
+            .or_else(|| spec.strip_suffix(":rw"))
+            .unwrap_or(spec);
+        let (source, target) = body
+            .split_once(':')
+            .ok_or_else(|| format!("invalid host bind {spec:?}: expected /host-path:/path[:ro]"))?;
+        validate_volume_target(target)?;
+        validate_bind_source(source)?;
+        Ok(Self {
+            host_source: source.to_string(),
+            target: target.to_string(),
+            read_only,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSpec {
+    Named(VolumeMount),
+    Bind(BindSpec),
+}
+
+impl MountSpec {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        if Self::source_is_path(spec) {
+            BindSpec::parse(spec).map(MountSpec::Bind)
+        } else {
+            VolumeMount::parse(spec).map(MountSpec::Named)
+        }
+    }
+
+    fn source_is_path(spec: &str) -> bool {
+        let body = spec
+            .strip_suffix(":ro")
+            .or_else(|| spec.strip_suffix(":rw"))
+            .unwrap_or(spec);
+        let source = body.split_once(':').map_or(body, |(s, _)| s);
+        source.starts_with('/')
+    }
+
+    pub fn target(&self) -> &str {
+        match self {
+            MountSpec::Named(v) => &v.target,
+            MountSpec::Bind(b) => &b.target,
+        }
+    }
+}
+
+pub fn validate_bind_source(source: &str) -> Result<(), String> {
+    if !source.starts_with('/') {
+        return Err(format!(
+            "invalid host bind source {source:?}: must be an absolute path"
+        ));
+    }
+    if source.chars().any(target_char_forbidden) {
+        return Err(format!(
+            "invalid host bind source {source:?}: must not contain whitespace, quotes, or control characters"
+        ));
+    }
+    Ok(())
 }
 
 fn default_tty() -> bool {
@@ -533,6 +620,7 @@ mod tests {
             detached: false,
             published_ports: vec![mapping],
             volumes: Vec::new(),
+            binds: Vec::new(),
         });
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -540,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn run_image_args_volumes_survive_postcard_round_trip() {
+    fn run_image_args_volumes_and_binds_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
             name: None,
@@ -562,6 +650,12 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: true,
+            }],
+            binds: vec![BindMount {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![".env".into()],
             }],
         };
         let frame = crate::encode_frame(&args).unwrap();
@@ -681,6 +775,12 @@ mod tests {
                 target: "/data".into(),
                 read_only: false,
             }],
+            binds: vec![BindMount {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![],
+            }],
         }
     }
 
@@ -696,6 +796,7 @@ mod tests {
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);
         assert_eq!(config.published_ports, args.published_ports);
         assert_eq!(config.volumes, args.volumes);
+        assert_eq!(config.binds, args.binds);
         assert!(config.detached);
     }
 
@@ -1073,5 +1174,76 @@ mod tests {
         validate_volume_target("/srv/..").unwrap_err();
         validate_volume_target("/../etc").unwrap_err();
         validate_volume_target("/a/./b").unwrap_err();
+    }
+
+    #[test]
+    fn mount_spec_parse_routes_an_absolute_source_to_a_host_bind() {
+        let m = MountSpec::parse("/Users/me/proj:/work").unwrap();
+        assert_eq!(
+            m,
+            MountSpec::Bind(BindSpec {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn mount_spec_parse_routes_a_bare_name_to_a_named_volume() {
+        let m = MountSpec::parse("build-cache:/cache").unwrap();
+        assert_eq!(
+            m,
+            MountSpec::Named(VolumeMount {
+                name: "build-cache".into(),
+                target: "/cache".into(),
+                read_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn mount_spec_target_reads_through_either_variant() {
+        assert_eq!(MountSpec::parse("/h:/work").unwrap().target(), "/work");
+        assert_eq!(MountSpec::parse("vol:/data").unwrap().target(), "/data");
+    }
+
+    #[test]
+    fn bind_spec_parse_honors_ro_and_rw_suffixes() {
+        assert!(BindSpec::parse("/h:/work:ro").unwrap().read_only);
+        assert!(!BindSpec::parse("/h:/work:rw").unwrap().read_only);
+        assert!(!BindSpec::parse("/h:/work").unwrap().read_only);
+    }
+
+    #[test]
+    fn bind_spec_parse_rejects_a_relative_target() {
+        let err = BindSpec::parse("/Users/me/proj:work").unwrap_err();
+        assert!(err.contains("must be an absolute path"), "got: {err}");
+    }
+
+    #[test]
+    fn bind_spec_parse_rejects_a_missing_target_separator() {
+        BindSpec::parse("/Users/me/proj").unwrap_err();
+    }
+
+    #[test]
+    fn a_relative_dot_dot_source_stays_a_named_volume_and_keeps_its_error() {
+        let err = MountSpec::parse("../etc:/data").unwrap_err();
+        assert!(err.contains("invalid volume name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_bind_source_requires_absolute_and_clean_chars() {
+        validate_bind_source("/Users/me/proj").unwrap();
+        assert!(
+            validate_bind_source("relative/path")
+                .unwrap_err()
+                .contains("must be an absolute path")
+        );
+        assert!(
+            validate_bind_source("/has a space")
+                .unwrap_err()
+                .contains("must not contain whitespace")
+        );
     }
 }
