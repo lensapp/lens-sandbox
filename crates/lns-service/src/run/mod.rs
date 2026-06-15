@@ -9,7 +9,18 @@ pub use orchestrator::handle;
 
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
-        Ok(code) => code,
+        Ok(code) => {
+            if code != 0 {
+                let _ = frame_tx
+                    .send(WireFrame::Json(Response::RunLog {
+                        level: lns_ipc::LogLevel::Warn,
+                        verb: None,
+                        message: format!("workload exited with code {code}"),
+                    }))
+                    .await;
+            }
+            code
+        }
         Err(e) => {
             let _ = frame_tx
                 .send(WireFrame::Json(Response::RunLog {
@@ -106,11 +117,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_completion_forwards_nonzero_workload_exit() {
+    async fn emit_completion_nonzero_ok_warns_before_run_exit() {
         for code in [1_i32, 42, 130, 143] {
             let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
             let returned = emit_completion(&tx, Ok(code)).await;
             assert_eq!(returned, code, "return value should mirror input");
+            match rx.recv().await {
+                Some(WireFrame::Json(Response::RunLog {
+                    level: LogLevel::Warn,
+                    verb,
+                    message,
+                })) => {
+                    assert!(verb.is_none(), "the exit announcement carries no verb");
+                    assert!(
+                        message.contains("exited"),
+                        "announcement must say the workload exited: {message}"
+                    );
+                    assert!(
+                        message.contains(&code.to_string()),
+                        "announcement must name the exit code: {message}"
+                    );
+                }
+                other => panic!("expected a RunLog{{Warn}} announcement, got {other:?}"),
+            }
             match rx.recv().await {
                 Some(WireFrame::Json(Response::RunExit { code: c })) => {
                     assert_eq!(c, code, "frame must carry workload's exit code");
