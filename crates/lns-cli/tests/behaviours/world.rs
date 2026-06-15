@@ -27,6 +27,58 @@ pub struct BehaviourWorld {
     pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
+    pub policy_registry: FakePolicyRegistry,
+    pub push_digest: Option<String>,
+    pub pull_digest: Option<String>,
+}
+
+/// An in-memory stand-in for the service-backed OCI registry: push stores the
+/// blob under its reference and returns a content-derived digest; pull returns
+/// what was stored, so a push→pull round-trip is exercised end to end.
+type ArtifactStore =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, String)>>>;
+
+#[derive(Debug, Default, Clone)]
+pub struct FakePolicyRegistry {
+    inner: ArtifactStore,
+}
+
+impl FakePolicyRegistry {
+    fn digest(blob: &[u8]) -> String {
+        let sum: u64 = blob.iter().map(|b| *b as u64).sum();
+        format!("sha256:{sum:016x}")
+    }
+}
+
+impl lns_cli::policy::PolicyRegistry for FakePolicyRegistry {
+    fn push<'a>(
+        &'a self,
+        reference: &'a str,
+        config_blob: &'a [u8],
+    ) -> lns_cli::policy::LocalBoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move {
+            let digest = Self::digest(config_blob);
+            self.inner.lock().unwrap().insert(
+                reference.to_string(),
+                (config_blob.to_vec(), digest.clone()),
+            );
+            Ok(digest)
+        })
+    }
+
+    fn pull<'a>(
+        &'a self,
+        reference: &'a str,
+    ) -> lns_cli::policy::LocalBoxFuture<'a, anyhow::Result<(Vec<u8>, String)>> {
+        Box::pin(async move {
+            self.inner
+                .lock()
+                .unwrap()
+                .get(reference)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no artifact at {reference}"))
+        })
+    }
 }
 
 #[derive(Debug, Default)]

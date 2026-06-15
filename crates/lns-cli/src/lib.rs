@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod auth;
 pub mod chord;
 pub mod cli;
 pub mod config;
@@ -75,7 +76,34 @@ pub async fn run(cli: Cli) -> Result<i32> {
         Command::Update(args) => update::run(args).await?,
         Command::Policy(args) => {
             let cwd = std::env::current_dir()?;
-            policy::run(&args.command, &cwd, &mut std::io::stdout())?
+            if matches!(
+                args.command,
+                cli::PolicyCommand::Push(_) | cli::PolicyCommand::Pull(_)
+            ) {
+                service::require_running().await;
+            }
+            let registry = policy::RealPolicyRegistry::new(service::socket_path()?);
+            policy::run(&args.command, &cwd, &registry, &mut std::io::stdout()).await?
+        }
+        Command::Login(args) => {
+            let store = lns_policy::registry_auth::JsonFileRegistryCredentialStore::new(
+                lns_policy::registry_auth::default_registry_auth_path(),
+            );
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            auth::login(&args, &store, &mut input, &mut std::io::stdout())?
+        }
+        Command::Logout(args) => {
+            let store = lns_policy::registry_auth::JsonFileRegistryCredentialStore::new(
+                lns_policy::registry_auth::default_registry_auth_path(),
+            );
+            auth::logout(&args, &store, &mut std::io::stdout())?
+        }
+        Command::Auth(args) => {
+            let store = lns_policy::registry_auth::JsonFileRegistryCredentialStore::new(
+                lns_policy::registry_auth::default_registry_auth_path(),
+            );
+            auth::run(&args.command, &store, &mut std::io::stdout())?
         }
         Command::Integration(args) => {
             let cwd = std::env::current_dir()?;

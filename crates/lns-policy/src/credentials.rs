@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::secret_file::atomic_write_0600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -62,30 +63,9 @@ impl CredentialStore for JsonFileCredentialStore {
     }
 
     fn save(&self, state: &CredentialStateFile) -> io::Result<()> {
-        use std::io::Write;
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        // Drop any leftover tmp so the next open is create_new — `.mode(0o600)` is ignored on an existing file, so a stale tmp with broader perms (or a planted symlink) would otherwise carry through the rename and leave secrets world-readable.
-        match fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, &self.path)?;
-        Ok(())
+        atomic_write_0600(&self.path, json.as_bytes())
     }
 }
 

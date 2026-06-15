@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod artifact;
 pub mod credentials;
 mod env_subst;
 pub mod integrations;
 pub mod providers;
+pub mod registry_auth;
+mod secret_file;
 #[cfg(test)]
 mod test_env;
 
@@ -102,8 +105,13 @@ impl Policy {
         }
     }
 
+    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
     pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
-        let yaml = serde_yaml::to_string(self)
+        let yaml = self
+            .to_yaml()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()

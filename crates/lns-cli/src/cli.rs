@@ -58,8 +58,16 @@ pub enum Command {
     Service(ServiceArgs),
     #[command(about = "Update `lns` and `lns-service` to the latest release.")]
     Update(UpdateArgs),
-    #[command(about = "Edit network rules in a policy file.")]
+    #[command(
+        about = "Edit network rules in a policy file, and push/pull policies to an OCI registry."
+    )]
     Policy(PolicyArgs),
+    #[command(about = "Authenticate to an OCI registry and store the credential locally.")]
+    Login(LoginArgs),
+    #[command(about = "Remove a stored OCI registry credential.")]
+    Logout(LogoutArgs),
+    #[command(about = "Inspect stored OCI registry credentials.")]
+    Auth(AuthArgs),
     #[command(about = "Manage the credential-integration catalog (connectable services).")]
     Integration(IntegrationArgs),
     #[command(
@@ -421,6 +429,65 @@ pub enum PolicyCommand {
     List(PolicyScopeArgs),
     #[command(about = "Remove the rule matching a destination pattern.")]
     Remove(PolicyRemoveArgs),
+    #[command(about = "Push a policy file to an OCI registry as a typed artifact.")]
+    Push(PolicyPushArgs),
+    #[command(about = "Pull a policy artifact from an OCI registry into a policy file.")]
+    Pull(PolicyPullArgs),
+}
+
+#[derive(clap::Args)]
+pub struct PolicyPushArgs {
+    #[arg(help = "Path to the local policy file to push.")]
+    pub file: PathBuf,
+    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/policies/pii:v1.")]
+    pub reference: String,
+}
+
+#[derive(clap::Args)]
+pub struct PolicyPullArgs {
+    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/policies/pii:v1.")]
+    pub reference: String,
+    #[arg(
+        short,
+        long,
+        help = "Write the pulled policy here; defaults to stdout."
+    )]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct LoginArgs {
+    #[arg(help = "Registry host, e.g. registry.example.com or ghcr.io.")]
+    pub registry: String,
+    #[arg(
+        short,
+        long,
+        help = "Username for the registry (defaults to `any` for token auth)."
+    )]
+    pub username: Option<String>,
+    #[arg(
+        long,
+        help = "Read the token/password from stdin. Required — tokens are never accepted as a flag."
+    )]
+    pub password_stdin: bool,
+}
+
+#[derive(clap::Args)]
+pub struct LogoutArgs {
+    #[arg(help = "Registry host whose stored credential should be removed.")]
+    pub registry: String,
+}
+
+#[derive(clap::Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub command: AuthCommand,
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    #[command(about = "List registries you have stored credentials for (tokens are never shown).")]
+    List,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

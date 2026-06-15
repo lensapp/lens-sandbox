@@ -10,6 +10,7 @@ use crate::oci_layer_cache::LayerCache;
 
 pub(crate) mod manifest_cache;
 mod real;
+pub(crate) use real::RealRegistry;
 pub use real::pull;
 
 pub(crate) trait Registry: Send + Sync {

@@ -1,9 +1,11 @@
+pub mod auth_cli;
 pub mod cli;
 pub mod config_cli;
 pub mod env_file;
 pub mod image_cli;
 pub mod integration_cli;
 pub mod policy_cli;
+pub mod policy_registry;
 pub mod publish;
 pub mod run;
 pub mod run_config_defaults;

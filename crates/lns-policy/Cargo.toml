@@ -18,6 +18,7 @@ libc       = "0.2"
 [dev-dependencies]
 tempfile    = "3"
 serial_test = "3"
+jsonschema  = "0.26"
 
 [lints.clippy]
 cognitive_complexity = { level = "deny", priority = 1 }

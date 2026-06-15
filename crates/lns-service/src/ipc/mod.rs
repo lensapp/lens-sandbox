@@ -230,6 +230,13 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::RunStats must be dispatched via handle_stats, not handle_request"
             )
         }
+        Request::PolicyPush {
+            reference,
+            config_blob,
+        } => push_response(crate::policy_artifact::push(reference, config_blob).await),
+        Request::PolicyPull { reference } => {
+            pull_response(crate::policy_artifact::pull(reference).await)
+        }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -246,6 +253,27 @@ fn image_response(result: anyhow::Result<Response>) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
+}
+
+fn push_response(result: anyhow::Result<String>) -> Response {
+    match result {
+        Ok(digest) => Response::PolicyPushed { digest },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+fn pull_response(result: anyhow::Result<(Vec<u8>, String)>) -> Response {
+    match result {
+        Ok((config_blob, digest)) => Response::PolicyPulled {
+            config_blob,
+            digest,
+        },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
 }
 
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1560,6 +1588,92 @@ mod tests {
         assert!(
             message.contains("invalid image reference"),
             "got: {message}"
+        );
+    }
+
+    #[test]
+    fn push_response_maps_ok_to_pushed_and_err_to_error() {
+        assert_eq!(
+            push_response(Ok("sha256:abc".into())),
+            Response::PolicyPushed {
+                digest: "sha256:abc".into()
+            }
+        );
+        let err = as_json(push_response(Err(anyhow::anyhow!("boom"))));
+        assert_eq!(err["type"], "Error");
+        assert!(
+            err["message"].as_str().unwrap().contains("boom"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn pull_response_maps_ok_to_pulled_and_err_to_error() {
+        assert_eq!(
+            pull_response(Ok((b"{}".to_vec(), "sha256:abc".into()))),
+            Response::PolicyPulled {
+                config_blob: b"{}".to_vec(),
+                digest: "sha256:abc".into()
+            }
+        );
+        let err = as_json(pull_response(Err(anyhow::anyhow!("boom"))));
+        assert_eq!(err["type"], "Error");
+        assert!(
+            err["message"].as_str().unwrap().contains("boom"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_policy_push_of_an_invalid_reference_surfaces_the_parse_error() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _a =
+            crate::test_env::EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", d.path().join("auth.json"));
+        let resp = as_json(
+            handle_request(
+                &Request::PolicyPush {
+                    reference: "###".into(),
+                    config_blob: b"{}".to_vec(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid registry reference"),
+            "got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_policy_pull_of_an_invalid_reference_surfaces_the_parse_error() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _a =
+            crate::test_env::EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", d.path().join("auth.json"));
+        let resp = as_json(
+            handle_request(
+                &Request::PolicyPull {
+                    reference: "###".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid registry reference"),
+            "got: {resp}"
         );
     }
 

@@ -8,32 +8,82 @@ pub enum Request {
     Ping,
     Status,
     Shutdown,
-    Unknown { method: String },
+    Unknown {
+        method: String,
+    },
     RunImage(RunImageArgs),
-    CancelRun { run_id: u32 },
-    RunStdin { run_id: u32, bytes: Vec<u8> },
-    RunResize { run_id: u32, rows: u16, cols: u16 },
-    RunSignal { run_id: u32, signal: SignalKind },
+    CancelRun {
+        run_id: u32,
+    },
+    RunStdin {
+        run_id: u32,
+        bytes: Vec<u8>,
+    },
+    RunResize {
+        run_id: u32,
+        rows: u16,
+        cols: u16,
+    },
+    RunSignal {
+        run_id: u32,
+        signal: SignalKind,
+    },
     ExecImage(ExecImageArgs),
-    Kill { run_id: u32, signal: SignalKind },
+    Kill {
+        run_id: u32,
+        signal: SignalKind,
+    },
     ListRuns,
-    StopRun { run_id: u32, timeout_secs: u64 },
-    InspectRun { run_id: u32 },
-    RunLogs { run_id: u32, follow: bool },
-    AttachRun { run_id: u32 },
-    RunStats { run_id: u32 },
-    RemoveRun { run_id: u32 },
+    StopRun {
+        run_id: u32,
+        timeout_secs: u64,
+    },
+    InspectRun {
+        run_id: u32,
+    },
+    RunLogs {
+        run_id: u32,
+        follow: bool,
+    },
+    AttachRun {
+        run_id: u32,
+    },
+    RunStats {
+        run_id: u32,
+    },
+    RemoveRun {
+        run_id: u32,
+    },
     PruneRuns,
-    BeginIntegrationSignIn { id: String },
+    BeginIntegrationSignIn {
+        id: String,
+    },
     ListVolumes,
-    CreateVolume { name: String },
-    InspectVolume { name: String },
-    RemoveVolume { name: String },
+    CreateVolume {
+        name: String,
+    },
+    InspectVolume {
+        name: String,
+    },
+    RemoveVolume {
+        name: String,
+    },
     PruneVolumes,
-    PullImage { image: String },
+    PullImage {
+        image: String,
+    },
     ListImages,
-    RemoveImage { image: String },
+    RemoveImage {
+        image: String,
+    },
     PruneImages,
+    PolicyPush {
+        reference: String,
+        config_blob: Vec<u8>,
+    },
+    PolicyPull {
+        reference: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +180,13 @@ pub enum Response {
         current: u64,
         /// 0 means the size of the work is unknown (render as indeterminate).
         total: u64,
+    },
+    PolicyPushed {
+        digest: String,
+    },
+    PolicyPulled {
+        config_blob: Vec<u8>,
+        digest: String,
     },
 }
 
@@ -573,6 +630,38 @@ mod tests {
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn policy_artifact_messages_survive_round_trips() {
+        let reqs = [
+            Request::PolicyPush {
+                reference: "registry.example.test/org/acme/policies/pii:v1".into(),
+                config_blob: br#"{"network":{}}"#.to_vec(),
+            },
+            Request::PolicyPull {
+                reference: "registry.example.test/org/acme/policies/pii:v1".into(),
+            },
+        ];
+        for req in reqs {
+            let frame = crate::encode_frame(&req).unwrap();
+            let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, req);
+        }
+        let resps = [
+            Response::PolicyPushed {
+                digest: "sha256:abc".into(),
+            },
+            Response::PolicyPulled {
+                config_blob: br#"{"network":{}}"#.to_vec(),
+                digest: "sha256:abc".into(),
+            },
+        ];
+        for resp in resps {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     fn sample_run_args() -> RunImageArgs {
