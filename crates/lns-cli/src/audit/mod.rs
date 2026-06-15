@@ -9,6 +9,11 @@ use crate::log;
 pub struct AuditArgs {
     #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
     pub run_id: String,
+    #[arg(
+        long,
+        help = "Treat a missing audit anchor as non-fatal. Without it, an absent anchor exits non-zero because truncation and rollback cannot be detected."
+    )]
+    pub allow_missing_anchor: bool,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -34,14 +39,26 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a>
 pub fn run_verify(args: AuditArgs) -> anyhow::Result<i32> {
     let path = lns_ipc::audit_log_for_run(&args.run_id)?;
     log::info!("Verifying", "audit chain at {}", path.display());
-    Ok(report_outcome(verify::verify_chain(&path)?))
+    Ok(report_outcome(
+        verify::verify_chain(&path)?,
+        args.allow_missing_anchor,
+    ))
 }
 
-fn report_outcome(outcome: verify::VerifyOutcome) -> i32 {
+fn report_outcome(outcome: verify::VerifyOutcome, allow_missing_anchor: bool) -> i32 {
     match outcome {
         verify::VerifyOutcome::Ok { line_count } => {
             println!("Verified {line_count} audit events");
             0
+        }
+        verify::VerifyOutcome::NoAnchor { line_count } => {
+            report_no_anchor(line_count, allow_missing_anchor)
+        }
+        verify::VerifyOutcome::AnchorUnreadable { line_count, reason } => {
+            log::error!(
+                "audit anchor present but unreadable ({reason}) — truncation or rollback cannot be verified for {line_count} events"
+            );
+            1
         }
         verify::VerifyOutcome::Broken { at_line, reason } => {
             log::error!("audit chain TAMPERED at line {at_line}: {reason}");
@@ -52,6 +69,14 @@ fn report_outcome(outcome: verify::VerifyOutcome) -> i32 {
             1
         }
     }
+}
+
+fn report_no_anchor(line_count: usize, allow_missing_anchor: bool) -> i32 {
+    println!("Verified {line_count} audit events");
+    log::warn!(
+        "no audit anchor beside the log — chain integrity was checked, but truncation or rollback cannot be detected"
+    );
+    if allow_missing_anchor { 0 } else { 1 }
 }
 
 #[cfg(test)]
@@ -104,6 +129,11 @@ mod tests {
             payload.push('\n');
         }
         std::fs::write(&path, payload).unwrap();
+        std::fs::write(
+            path.with_file_name("audit.anchor"),
+            chain.anchor().unwrap().to_line(),
+        )
+        .unwrap();
 
         assert_eq!(expect_ok(verify::verify_chain(&path).unwrap()), 3);
     }
@@ -129,11 +159,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_audit_log_verifies_ok() {
+    fn empty_audit_log_without_anchor_reports_no_anchor() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("audit.jsonl");
         std::fs::write(&path, "").unwrap();
-        assert_eq!(expect_ok(verify::verify_chain(&path).unwrap()), 0);
+        assert!(matches!(
+            verify::verify_chain(&path).unwrap(),
+            verify::VerifyOutcome::NoAnchor { line_count: 0 }
+        ));
     }
 
     #[test]
@@ -144,24 +177,54 @@ mod tests {
 
     #[test]
     fn report_outcome_clean_chain_returns_zero() {
-        let code = report_outcome(verify::VerifyOutcome::Ok { line_count: 3 });
+        let code = report_outcome(verify::VerifyOutcome::Ok { line_count: 3 }, false);
         assert_eq!(code, 0);
     }
 
     #[test]
     fn report_outcome_tampered_chain_returns_one() {
-        let code = report_outcome(verify::VerifyOutcome::Broken {
-            at_line: 7,
-            reason: "prev_hash mismatch".into(),
-        });
+        let code = report_outcome(
+            verify::VerifyOutcome::Broken {
+                at_line: 7,
+                reason: "prev_hash mismatch".into(),
+            },
+            false,
+        );
         assert_eq!(code, 1);
     }
 
     #[test]
     fn report_outcome_truncated_chain_returns_one() {
-        let code = report_outcome(verify::VerifyOutcome::Truncated {
-            reason: "tail truncated".into(),
-        });
+        let code = report_outcome(
+            verify::VerifyOutcome::Truncated {
+                reason: "tail truncated".into(),
+            },
+            false,
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn report_outcome_missing_anchor_fails_by_default() {
+        let code = report_outcome(verify::VerifyOutcome::NoAnchor { line_count: 2 }, false);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn report_outcome_missing_anchor_is_tolerated_when_explicitly_allowed() {
+        let code = report_outcome(verify::VerifyOutcome::NoAnchor { line_count: 2 }, true);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn report_outcome_unreadable_anchor_returns_one_even_when_missing_is_allowed() {
+        let code = report_outcome(
+            verify::VerifyOutcome::AnchorUnreadable {
+                line_count: 2,
+                reason: "corrupt anchor: trailing data".into(),
+            },
+            true,
+        );
         assert_eq!(code, 1);
     }
 
@@ -186,6 +249,8 @@ mod tests {
                 payload.push('\n');
             }
             std::fs::write(runs_dir.join("audit.jsonl"), payload).unwrap();
+            let anchor = chain.anchor().expect("staged chain has events");
+            std::fs::write(runs_dir.join("audit.anchor"), anchor.to_line()).unwrap();
         }
 
         let _home = crate::test_env::EnvScope::set("HOME", cache_root.path());

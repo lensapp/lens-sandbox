@@ -147,11 +147,13 @@ as hidden aliases; the `lns sandbox` forms are the documented ones.
 Verify the audit chain of a run.
 
 ```bash
-lns audit <RUN_ID>
+lns audit <RUN_ID> [--allow-missing-anchor]
 ```
 
 `RUN_ID` is the identifier surfaced by `lns run` as `✓ started run #<id>`. Exits `0`
-on an intact chain, non-zero if tampering is detected. See [Audit](audit.md).
+on an intact chain, non-zero if tampering is detected, or if the anchor that guards
+against truncation is missing, corrupt, or unreadable. `--allow-missing-anchor`
+accepts a missing anchor (chain-only check) with exit `0`. See [Audit](audit.md).
 
 ## `lns service`
 
