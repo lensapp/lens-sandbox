@@ -65,6 +65,12 @@ impl IntegrationSignIn for RealIntegrationSignIn {
                             expires_in_secs / 60
                         )?;
                     }
+                    Response::OauthBrowserOpened { authorization_url } => {
+                        writeln!(
+                            out,
+                            "Opening your browser to authorize… (if it didn't open, visit {authorization_url})"
+                        )?;
+                    }
                     Response::OauthSignInComplete => return Ok(SignInOutcome::Completed),
                     Response::OauthSignInFailed { reason } => {
                         return Ok(SignInOutcome::Failed(reason));

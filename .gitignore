@@ -9,6 +9,9 @@ coverage
 # Per-package build artifacts
 bin/
 
+# Auto-created when running `lns` from the repo root; a runtime artifact, not source
+/lns-policy.yaml
+
 # Claude Code local settings
 .claude/settings.local.json
 

@@ -2,10 +2,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use futures_util::future::BoxFuture;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-use super::traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
+use super::traits::{
+    AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
+    OauthConfig, PkceConfig, PollOutcome, TokenSet,
+};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_INTERVAL: u64 = 5;
@@ -165,6 +168,131 @@ impl DeviceFlow for RealDeviceFlow {
                     t.error.as_deref().unwrap_or("no access token in response")
                 ),
             }
+        })
+    }
+}
+
+pub struct RealAuthCodeFlow;
+
+#[derive(Serialize)]
+struct ExchangeReq<'a> {
+    code: &'a str,
+    code_verifier: &'a str,
+    code_challenge_method: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ExchangeResp {
+    key: Option<String>,
+    error: Option<String>,
+}
+
+async fn post_json_bytes(
+    url: &str,
+    body: &impl Serialize,
+) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+    let json = serde_json::to_vec(body).context("serializing pkce exchange request")?;
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .body(json)
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading body from {url}"))?;
+    Ok((status, bytes.to_vec()))
+}
+
+impl AuthCodeFlow for RealAuthCodeFlow {
+    fn exchange_code<'a>(
+        &'a self,
+        cfg: &'a PkceConfig,
+        code: &'a str,
+        verifier: &'a str,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let (status, bytes) = post_json_bytes(
+                &cfg.token_endpoint,
+                &ExchangeReq {
+                    code,
+                    code_verifier: verifier,
+                    code_challenge_method: "S256",
+                },
+            )
+            .await?;
+            let r: ExchangeResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
+            match r.key {
+                Some(key) if !key.is_empty() => Ok(key),
+                _ => bail!(
+                    "pkce code exchange at {} failed: {}",
+                    cfg.token_endpoint,
+                    r.error.as_deref().unwrap_or("no key in response")
+                ),
+            }
+        })
+    }
+}
+
+pub struct RealCallbackListener;
+
+struct RealCallbackHandle {
+    listener: tokio::net::TcpListener,
+    redirect_url: String,
+}
+
+impl CallbackListener for RealCallbackListener {
+    fn bind(&self) -> BoxFuture<'_, Result<Box<dyn CallbackHandle>>> {
+        Box::pin(async move {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .context("binding loopback pkce callback listener")?;
+            let port = listener
+                .local_addr()
+                .context("reading pkce callback listener address")?
+                .port();
+            let redirect_url = format!("http://localhost:{port}/callback");
+            Ok(Box::new(RealCallbackHandle {
+                listener,
+                redirect_url,
+            }) as Box<dyn CallbackHandle>)
+        })
+    }
+}
+
+impl CallbackHandle for RealCallbackHandle {
+    fn redirect_url(&self) -> &str {
+        &self.redirect_url
+    }
+
+    fn wait(self: Box<Self>) -> BoxFuture<'static, Result<CallbackParams>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        Box::pin(async move {
+            let (stream, _) = self
+                .listener
+                .accept()
+                .await
+                .context("accepting the pkce callback connection")?;
+            let (read_half, mut write_half) = stream.into_split();
+            let mut request_line = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut request_line)
+                .await
+                .context("reading the pkce callback request line")?;
+            let params = super::parse_callback_target(&request_line);
+            let body = "<html><body>Signed in. You can close this tab and return to your terminal.</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = write_half.write_all(response.as_bytes()).await;
+            let _ = write_half.flush().await;
+            params
         })
     }
 }

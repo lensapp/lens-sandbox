@@ -162,28 +162,44 @@ async fn handle_attach(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()
     crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
-/// Drives an oauth integration's device sign-in host-side, streaming the verification prompt to the client and persisting the obtained token set for the next run to arm.
+/// Drives an integration's interactive sign-in host-side, dispatching on its oauth `flow` and persisting the obtained credential for the next run to arm.
 async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
-    use crate::oauth::{
-        DeviceCode, OauthConfig, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
-    };
+    use lns_policy::integrations::OauthFlow;
 
     let user = lns_policy::integrations::Catalog::load_or_default(
         &lns_policy::integrations::default_integrations_path(),
     )
     .unwrap_or_default();
     let catalog = lns_policy::integrations::effective_integrations(&user);
-    let Some(cfg) = catalog
+    let Some(oauth) = catalog
         .iter()
         .find(|i| i.id == id)
         .and_then(|i| i.oauth.as_ref())
-        .map(OauthConfig::from)
     else {
         let frame = encode_frame(&Response::OauthSignInFailed {
             reason: format!("{id:?} is not an oauth integration"),
         })?;
         stream.write_all(&frame).await?;
         return Ok(());
+    };
+    match oauth.flow {
+        OauthFlow::Device => {
+            handle_device_sign_in(stream, &id, crate::oauth::OauthConfig::from(oauth)).await
+        }
+        OauthFlow::Pkce => {
+            handle_pkce_sign_in(stream, &id, crate::oauth::PkceConfig::from(oauth)).await
+        }
+    }
+}
+
+/// Streams the device-flow verification prompt to the client and persists the obtained token set.
+async fn handle_device_sign_in(
+    mut stream: UnixStream,
+    id: &str,
+    cfg: crate::oauth::OauthConfig,
+) -> anyhow::Result<()> {
+    use crate::oauth::{
+        DeviceCode, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
     };
 
     let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
@@ -212,7 +228,7 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     };
 
     let response = match outcome {
-        Ok(SignIn::Completed(token)) => match persist_oauth_token(&id, &token, &RealClock) {
+        Ok(SignIn::Completed(token)) => match persist_oauth_token(id, &token, &RealClock) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
                 reason: format!("storing the token failed: {e}"),
@@ -240,6 +256,64 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     Ok(())
 }
 
+/// Opens the browser to the PKCE authorization URL (sending it to the client too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
+async fn handle_pkce_sign_in(
+    mut stream: UnixStream,
+    id: &str,
+    cfg: crate::oauth::PkceConfig,
+) -> anyhow::Result<()> {
+    use crate::oauth::{
+        PkceChallenge, PkceSignIn, RealAuthCodeFlow, RealCallbackListener, run_pkce_flow,
+    };
+
+    let challenge = PkceChallenge::generate();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let flow = run_pkce_flow(
+        &RealAuthCodeFlow,
+        &RealCallbackListener,
+        &cfg,
+        &challenge,
+        move |url: &str| {
+            let _ = url_tx.send(url.to_string());
+            crate::browser::open(url);
+        },
+        std::future::pending::<()>(),
+        crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
+    );
+    tokio::pin!(flow);
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            Some(url) = url_rx.recv() => {
+                let frame = encode_frame(&Response::OauthBrowserOpened { authorization_url: url })?;
+                stream.write_all(&frame).await?;
+            }
+            res = &mut flow => break res,
+        }
+    };
+
+    let response = match outcome {
+        Ok(PkceSignIn::Completed(key)) => match persist_pkce_key(id, key) {
+            Ok(()) => Response::OauthSignInComplete,
+            Err(e) => Response::OauthSignInFailed {
+                reason: format!("storing the key failed: {e}"),
+            },
+        },
+        Ok(PkceSignIn::Cancelled) => Response::OauthSignInFailed {
+            reason: "the sign-in was cancelled".into(),
+        },
+        Ok(PkceSignIn::TimedOut) => Response::OauthSignInFailed {
+            reason: "the sign-in timed out before the browser redirected back".into(),
+        },
+        Err(e) => Response::OauthSignInFailed {
+            reason: format!("{e:#}"),
+        },
+    };
+    let frame = encode_frame(&response)?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
 fn persist_oauth_token(
     id: &str,
     token: &crate::oauth::TokenSet,
@@ -251,6 +325,16 @@ fn persist_oauth_token(
     let store = JsonFileCredentialStore::new(default_credentials_path());
     let mut state = store.load()?;
     state.insert(id.to_string(), crate::oauth::entry_from_token(clock, token));
+    store.save(&state)
+}
+
+fn persist_pkce_key(id: &str, key: String) -> std::io::Result<()> {
+    use crate::credential_flow::store::{
+        CredentialEntry, CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+    let store = JsonFileCredentialStore::new(default_credentials_path());
+    let mut state = store.load()?;
+    state.insert(id.to_string(), CredentialEntry::Stored { value: key });
     store.save(&state)
 }
 

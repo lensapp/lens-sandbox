@@ -302,7 +302,7 @@ pub async fn connect(
             args.id
         );
     };
-    // An oauth integration authenticates by an interactive device sign-in the service drives; only on success do we record it in the policy.
+    // An oauth integration authenticates by an interactive sign-in the service drives (a device code or a pkce browser redirect); only on success do we record it in the policy.
     if integ.auth_kind == AuthKind::Oauth {
         match signin.sign_in(&args.id, writer).await? {
             SignInOutcome::ServiceUnavailable => bail!(
@@ -347,7 +347,7 @@ pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::integrations::OauthAuth;
+    use lns_policy::integrations::{OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
 
@@ -471,9 +471,13 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
-                client_id: "Iv1.somesaas".into(),
+                flow: OauthFlow::Device,
+                client_id: Some("Iv1.somesaas".into()),
                 scopes: vec!["repo".into()],
-                device_authorization_endpoint: "https://api.somesaas.com/login/device/code".into(),
+                device_authorization_endpoint: Some(
+                    "https://api.somesaas.com/login/device/code".into(),
+                ),
+                authorization_endpoint: None,
                 token_endpoint: "https://api.somesaas.com/login/oauth/access_token".into(),
                 env_var: "SOMESAAS_TOKEN".into(),
                 placeholder: "lns-somesaas-placeholder".into(),

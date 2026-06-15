@@ -72,7 +72,14 @@ fn then_held_with_connect_prompt(world: &mut BehaviourWorld, id: String) -> Resu
 async fn when_accepts_the_prompt(world: &mut BehaviourWorld) {
     let id = world.oauth_id.clone().expect("an oauth id must be set");
     let session = world.credential().session.clone();
-    session.connect_oauth(&prompt_id(&id)).await;
+    let pid = prompt_id(&id);
+    if world.spawn_connect {
+        world.connect_task = Some(tokio::spawn(async move {
+            let _ = session.connect_oauth(&pid).await;
+        }));
+    } else {
+        session.connect_oauth(&pid).await;
+    }
 }
 
 #[then(regex = r#"^the "([^"]+)" integration is connected live$"#)]

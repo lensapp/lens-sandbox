@@ -56,14 +56,35 @@ pub struct CredentialAuth {
     pub injections: Vec<InjectionDef>,
 }
 
-/// Device-flow (RFC 8628) configuration for an `oauth` integration: how to sign in, plus the same env/placeholder/injection wiring a credential carries for reaching the wire.
+/// Which interactive sign-in an `oauth` integration uses: the RFC 8628 device flow (default) or the browser-redirect authorization-code + PKCE flow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OauthFlow {
+    #[default]
+    Device,
+    Pkce,
+}
+
+impl OauthFlow {
+    fn is_device(&self) -> bool {
+        matches!(self, OauthFlow::Device)
+    }
+}
+
+/// Interactive sign-in configuration for an `oauth` integration: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OauthAuth {
-    pub client_id: String,
+    #[serde(default, skip_serializing_if = "OauthFlow::is_device")]
+    pub flow: OauthFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
-    pub device_authorization_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
     pub token_endpoint: String,
     pub env_var: String,
     pub placeholder: String,
@@ -102,15 +123,32 @@ impl Integration {
         self.name.as_deref().unwrap_or(&self.id)
     }
 
-    /// Each authKind must carry its matching block — `credential:` for credential, `oauth:` for oauth.
+    /// Each authKind must carry its matching block, and an oauth block must carry the endpoint its `flow` needs.
     pub fn validate(&self) -> Result<(), String> {
         match self.auth_kind {
             AuthKind::Credential if self.credential.is_none() => Err(format!(
                 "integration {:?} declares authKind credential but has no `credential:` block",
                 self.id
             )),
-            AuthKind::Oauth if self.oauth.is_none() => Err(format!(
+            AuthKind::Oauth => self.validate_oauth(),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_oauth(&self) -> Result<(), String> {
+        let Some(oauth) = self.oauth.as_ref() else {
+            return Err(format!(
                 "integration {:?} declares authKind oauth but has no `oauth:` block",
+                self.id
+            ));
+        };
+        match oauth.flow {
+            OauthFlow::Device if oauth.device_authorization_endpoint.is_none() => Err(format!(
+                "integration {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
+                self.id
+            )),
+            OauthFlow::Pkce if oauth.authorization_endpoint.is_none() => Err(format!(
+                "integration {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
                 self.id
             )),
             _ => Ok(()),
@@ -251,9 +289,11 @@ mod tests {
 
     fn oauth_auth(env_var: &str, placeholder: &str, domain: &str) -> OauthAuth {
         OauthAuth {
-            client_id: "Iv1.example0000".into(),
+            flow: OauthFlow::Device,
+            client_id: Some("Iv1.example0000".into()),
             scopes: vec!["repo".into()],
-            device_authorization_endpoint: "https://example.com/login/device/code".into(),
+            device_authorization_endpoint: Some("https://example.com/login/device/code".into()),
+            authorization_endpoint: None,
             token_endpoint: "https://example.com/login/oauth/access_token".into(),
             env_var: env_var.into(),
             placeholder: placeholder.into(),
@@ -262,6 +302,40 @@ mod tests {
                 domain: domain.into(),
                 header: None,
             }],
+        }
+    }
+
+    fn pkce_oauth_auth(env_var: &str, placeholder: &str, domain: &str) -> OauthAuth {
+        OauthAuth {
+            flow: OauthFlow::Pkce,
+            client_id: None,
+            scopes: Vec::new(),
+            device_authorization_endpoint: None,
+            authorization_endpoint: Some("https://example.com/auth".into()),
+            token_endpoint: "https://example.com/api/v1/auth/keys".into(),
+            env_var: env_var.into(),
+            placeholder: placeholder.into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: domain.into(),
+                header: None,
+            }],
+        }
+    }
+
+    fn pkce_integration() -> Integration {
+        Integration {
+            id: "examplepkce".into(),
+            name: None,
+            auth_kind: AuthKind::Oauth,
+            routes: vec![route("api.examplepkce.com")],
+            credential: None,
+            oauth: Some(pkce_oauth_auth(
+                "EXAMPLEPKCE_TOKEN",
+                "examplepkce_LNSPLACEHOLDER0000",
+                "api.examplepkce.com",
+            )),
+            token_fallback: None,
         }
     }
 
@@ -388,6 +462,18 @@ mod tests {
         assert_eq!(
             serde_yaml::to_string(&AuthKind::Oauth).unwrap().trim(),
             "oauth"
+        );
+    }
+
+    #[test]
+    fn oauth_flow_serializes_in_snake_case() {
+        assert_eq!(
+            serde_yaml::to_string(&OauthFlow::Device).unwrap().trim(),
+            "device"
+        );
+        assert_eq!(
+            serde_yaml::to_string(&OauthFlow::Pkce).unwrap().trim(),
+            "pkce"
         );
     }
 
@@ -526,6 +612,60 @@ mod tests {
     #[test]
     fn validate_accepts_a_well_formed_oauth_integration() {
         assert!(oauth_integration().validate().is_ok());
+    }
+
+    #[test]
+    fn an_oauth_block_defaults_to_the_device_flow_and_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        assert!(
+            !yaml.contains("flow:"),
+            "the default device flow must not serialize: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.oauth.unwrap().flow, OauthFlow::Device);
+    }
+
+    #[test]
+    fn a_pkce_oauth_integration_round_trips_with_flow_and_an_authorization_endpoint_and_no_client_id()
+     {
+        let i = pkce_integration();
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(yaml.contains("flow: pkce"), "got: {yaml}");
+        assert!(
+            yaml.contains("authorizationEndpoint: https://example.com/auth"),
+            "got: {yaml}"
+        );
+        assert!(
+            !yaml.contains("clientId:"),
+            "a pkce entry needs no client id: {yaml}"
+        );
+        assert!(
+            !yaml.contains("deviceAuthorizationEndpoint:"),
+            "a pkce entry has no device endpoint: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn validate_accepts_a_pkce_oauth_integration_without_a_client_id() {
+        assert!(pkce_integration().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_pkce_oauth_integration_missing_its_authorization_endpoint() {
+        let mut i = pkce_integration();
+        i.oauth.as_mut().unwrap().authorization_endpoint = None;
+        let err = i.validate().unwrap_err();
+        assert!(err.contains("authorizationEndpoint"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_device_oauth_integration_missing_its_device_authorization_endpoint() {
+        let mut i = oauth_integration();
+        i.oauth.as_mut().unwrap().device_authorization_endpoint = None;
+        let err = i.validate().unwrap_err();
+        assert!(err.contains("deviceAuthorizationEndpoint"), "got: {err}");
     }
 
     #[test]

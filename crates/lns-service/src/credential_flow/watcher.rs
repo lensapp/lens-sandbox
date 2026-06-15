@@ -154,7 +154,7 @@ mod tests {
             &SignInPrompt {
                 credential_id: "some-provider".into(),
                 display_name: "GitHub".into(),
-                user_code: "WXYZ-1234".into(),
+                user_code: Some("WXYZ-1234".into()),
                 verification_uri: "https://example.com/device".into(),
                 token_fallback: None,
             },
