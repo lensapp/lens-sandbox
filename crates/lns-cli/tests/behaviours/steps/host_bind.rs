@@ -2,7 +2,9 @@ use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView};
 use cucumber::{given, then, when};
 use lns_cli::cli::{RunArgs, split_mounts};
 use lns_cli::command::parse_args;
-use lns_cli::run::host_bind::{DirScan, resolve_binds};
+use lns_cli::run::host_bind::{DirScan, ResolvedBind, resolve_binds};
+use lns_cli::run::summary::{PolicySource, format_bind_dispositions, format_summary};
+use lns_policy::Policy;
 use lns_policy::host_bind_decisions::{
     HostBindDecisionFile, HostBindDecisionStore, SecretDisposition,
 };
@@ -109,10 +111,27 @@ fn run_resolve(world: &mut BehaviourWorld, flags: &str, interactive: bool) {
     let mut out = Vec::new();
     let result = resolve_binds(&specs, &dir, &store, interactive, &mut input, &mut out)
         .map_err(|e| e.to_string());
+    let summary = match &result {
+        Ok(resolved) => {
+            let mut argv = vec!["lns".to_string(), "run".to_string()];
+            argv.extend(flags.split_whitespace().map(str::to_string));
+            let args: RunArgs = parse_args(&argv).expect("argv must parse");
+            let mut text = format_summary(
+                &args,
+                &Policy::default(),
+                Path::new("./lns-policy.yaml"),
+                &PolicySource::FoundInCwd,
+            );
+            text.push_str(&format_bind_dispositions(resolved));
+            text
+        }
+        Err(_) => String::new(),
+    };
     world.host_bind.outcome = Some(HostBindOutcome {
         result,
         prompt: String::from_utf8(out).unwrap(),
         persisted: store.state.into_inner().unwrap(),
+        summary,
     });
 }
 
@@ -124,7 +143,7 @@ fn outcome(world: &BehaviourWorld) -> Result<&HostBindOutcome, String> {
         .ok_or_else(|| "no host-bind outcome captured".to_string())
 }
 
-fn resolved_binds(world: &BehaviourWorld) -> Result<&[lns_ipc::BindMount], String> {
+fn resolved_binds(world: &BehaviourWorld) -> Result<&[ResolvedBind], String> {
     outcome(world)?
         .result
         .as_deref()
@@ -229,7 +248,7 @@ fn run_starts(world: &mut BehaviourWorld) -> Result<(), String> {
 #[then(regex = r#"^"([^"]+)" is exposed to the guest under "([^"]+)"$"#)]
 fn exposed(world: &mut BehaviourWorld, name: String, _target: String) -> Result<(), String> {
     let b = resolved_binds(world)?;
-    if b.iter().any(|m| m.dropped_paths.contains(&name)) {
+    if b.iter().any(|m| m.dropped.contains(&name)) {
         Err(format!("{name:?} was dropped, expected it kept"))
     } else {
         Ok(())
@@ -239,7 +258,7 @@ fn exposed(world: &mut BehaviourWorld, name: String, _target: String) -> Result<
 #[then(regex = r#"^"([^"]+)" is dropped from the bind$"#)]
 fn dropped(world: &mut BehaviourWorld, name: String) -> Result<(), String> {
     let b = resolved_binds(world)?;
-    if b.iter().any(|m| m.dropped_paths.contains(&name)) {
+    if b.iter().any(|m| m.dropped.contains(&name)) {
         Ok(())
     } else {
         Err(format!("expected {name:?} dropped, binds: {b:?}"))
@@ -303,4 +322,25 @@ fn dropped_reported(world: &mut BehaviourWorld, path: String) -> Result<(), Stri
     } else {
         Err(format!("expected {path:?} reported, got {prompt:?}"))
     }
+}
+
+fn summary_contains(world: &BehaviourWorld, needle: &str) -> Result<(), String> {
+    let summary = &outcome(world)?.summary;
+    if summary.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected summary to contain {needle:?}, got:\n{summary}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the summary shows a bind line "([^"]+)"$"#)]
+fn summary_shows_bind_line(world: &mut BehaviourWorld, line: String) -> Result<(), String> {
+    summary_contains(world, &line)
+}
+
+#[then(regex = r#"^the summary shows "([^"]+)"$"#)]
+fn summary_shows(world: &mut BehaviourWorld, line: String) -> Result<(), String> {
+    summary_contains(world, &line)
 }
