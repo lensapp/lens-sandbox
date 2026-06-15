@@ -10,6 +10,7 @@ pub mod credential_flow;
 pub mod forward;
 pub mod guest_stats;
 pub mod guest_tools;
+mod http_cap;
 pub mod image;
 pub mod image_store;
 pub mod ingest;
