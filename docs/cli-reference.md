@@ -34,7 +34,7 @@ run, which requires a `COMMAND` after `--`.
 | `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
-| `-v`, `--volume <SPEC>`      |                  | Attach a named volume as `name:/path[:ro]` (repeatable); persists across runs. |
+| `-v`, `--volume <SPEC>`      |                  | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. |
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload.                 |
 | `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY.      |

@@ -83,9 +83,10 @@ lns run
 
 You run Lens Sandbox from a project directory — that's where it looks for
 `lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
-make host files available to the workload, attach a volume (see
-[Running workloads](running-workloads.md)). The workload's own working directory
-comes from the image.
+give the workload your actual project files, bind-mount the directory with
+`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for scratch
+space that persists across runs instead, attach a named volume. The workload's own
+working directory comes from the image.
 
 ## What happens on an unknown request
 

@@ -13,8 +13,10 @@ lns run [OPTIONS] [IMAGE] [-- COMMAND...]
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
-`lns-policy.yaml` that governs the run. To expose host files to the workload, attach
-a volume with `-v`.
+`lns-policy.yaml` that governs the run. To expose your actual host files to the
+workload, bind-mount a directory with `-v /host/path:/guest/path` (see
+[Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
+attach a named volume instead.
 
 ### Running an image
 
@@ -181,6 +183,56 @@ lns volume prune               # delete every volume no running sandbox holds
 asks for confirmation unless you pass `-f`/`--force`. Everything else in a
 sandbox is ephemeral by design — volumes are the one place data persists, so
 removing one is permanent.
+
+### Host bind mounts
+
+When the source of a `-v` is an **absolute host path** rather than a name, it's a
+host bind: the workload sees your live host files at the target, Docker-style.
+
+```bash
+lns run -v "$(pwd)":/work ghcr.io/acme/agent        # the agent edits your repo
+lns run -v /etc/myapp:/config:ro ghcr.io/acme/app   # read-only
+```
+
+The format is `/host/path:/absolute/target[:ro]`. The source must be an absolute
+path that already exists (a missing path is refused, not silently created — the one
+deliberate divergence from `docker run`). Binds default to read-write; append `:ro`
+for read-only. Disambiguation is by shape: a leading `/` is a host bind, anything
+else is a named volume, so `-v build-cache:/cache` is still a volume.
+
+#### Secrets in a bind
+
+A bind exposes everything in the directory — including `.env` files, SSH keys, and
+other credentials that the [credential flow](credentials.md) is designed to keep
+*outside* the workload. Before the run starts, `lns` scans the **top level** of each
+bind for secret-shaped files (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.npmrc`,
+`.netrc`, `.ssh/`, `.aws/`, …) and asks you, once per file, whether to **keep** it
+(expose the real file) or **drop** it (hide it from the workload). Your choice is
+remembered per-machine, so later runs don't ask again:
+
+```text
+Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? [k]eep / [D]rop (default):
+```
+
+- **Keep** mounts the real file through; **Drop** masks it so the workload can't
+  read it (the file is never modified or deleted on the host).
+- The default on a bare Enter is **drop** — the safe choice.
+- A non-interactive run (`-d`, or no terminal) drops any undecided secret and notes
+  it on stderr, rather than exposing it unasked.
+- Decisions to **keep** a real secret are per-machine and never written to a shared
+  file. To share a "never expose these" rule with your team, commit a `.lensignore`
+  in the bind directory — one path per line — and those files are dropped with no
+  prompt.
+
+The run summary lists each bind, its mode, and the disposition of every detected
+secret (`kept (exposed)` / `dropped`).
+
+> **The scan is top-level only.** Only the immediate contents of the bind root are
+> checked, so secrets nested in subdirectories (`packages/api/.env`, a key under
+> `server/certs/`, credentials embedded in `.git/config`) are exposed to the
+> workload **without a prompt**. Until the scan descends, treat a bind of a deep
+> tree as exposing everything under it, and use `:ro` or bind a narrower path when a
+> subtree holds secrets you don't want the workload to read.
 
 ### Publishing ports
 
