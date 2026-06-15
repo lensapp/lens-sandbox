@@ -8,11 +8,11 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tracing::Instrument;
 
 use crate::approval_flow::protocol::HostFrame;
@@ -21,8 +21,8 @@ use crate::credential_flow::session::CredentialSession;
 use crate::log;
 
 use super::{
-    buffer_frame, current_credentials, handle_inbound, is_expected_close, seed_frames,
-    validate_authorization_header,
+    AuditBudget, MAX_AUDIT_MESSAGE_BYTES, buffer_frame, current_credentials, handle_inbound,
+    is_expected_close, seed_frames, supersede_connection, validate_authorization_header,
 };
 
 pub(super) async fn accept_loop(
@@ -35,12 +35,16 @@ pub(super) async fn accept_loop(
     user_env: Vec<String>,
 ) {
     let mut conn_tx: Option<mpsc::UnboundedSender<HostFrame>> = None;
+    let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut conn_shutdown: Option<oneshot::Sender<()>> = None;
     let mut pending: Vec<HostFrame> = Vec::new();
+    let budget = AuditBudget::with_defaults();
     loop {
         tokio::select! {
             biased;
             accepted = fd_rx.recv() => {
                 let Some(fd) = accepted else { break };
+                supersede_connection(conn_shutdown.take(), conn_task.take()).await;
                 let (tx, rx) = mpsc::unbounded_channel::<HostFrame>();
                 let seeded = seed_frames(
                     std::mem::take(&mut pending),
@@ -51,13 +55,15 @@ pub(super) async fn accept_loop(
                     let _ = tx.send(frame);
                 }
                 conn_tx = Some(tx);
+                let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
                 let session_c = session.clone();
                 let credential_session_c = credential_session.clone();
                 let token_c = token.clone();
                 let audit_c = audit.clone();
                 let user_env_c = user_env.clone();
+                let budget_c = budget.clone();
                 let span = tracing::Span::current();
-                tokio::spawn(
+                let handle = tokio::spawn(
                     async move {
                         if let Err(e) = handle_connection(
                             fd,
@@ -67,6 +73,8 @@ pub(super) async fn accept_loop(
                             token_c,
                             audit_c,
                             user_env_c,
+                            shutdown_rx,
+                            budget_c,
                         )
                         .await
                         {
@@ -75,6 +83,8 @@ pub(super) async fn accept_loop(
                     }
                     .instrument(span),
                 );
+                conn_shutdown = Some(shutdown_tx);
+                conn_task = Some(handle);
             }
             frame = frame_rx.recv() => {
                 let Some(frame) = frame else { break };
@@ -97,6 +107,7 @@ pub(super) async fn accept_loop(
 }
 
 #[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     fd: RawFd,
     session: Arc<ApprovalSession>,
@@ -105,6 +116,8 @@ async fn handle_connection(
     expected_token: String,
     audit_path: PathBuf,
     user_env: Vec<String>,
+    shutdown: oneshot::Receiver<()>,
+    budget: AuditBudget,
 ) -> Result<()> {
     // SAFETY: `VZVirtioSocketConnection.fileDescriptor` hands us a kernel fd that supports stream read/write.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -118,7 +131,10 @@ async fn handle_connection(
     let auth_ok_cb = auth_ok.clone();
     let expected = format!("Bearer {expected_token}");
 
-    let ws = tokio_tungstenite::accept_hdr_async(
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_AUDIT_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_AUDIT_MESSAGE_BYTES));
+    let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         move |req: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
             let header = req
@@ -137,6 +153,7 @@ async fn handle_connection(
                 Err(resp)
             }
         },
+        Some(ws_config),
     )
     .await
     .context("ws handshake")?;
@@ -178,10 +195,20 @@ async fn handle_connection(
         &mut chain,
         &mut audit_file,
         &mut anchor_sink,
+        shutdown,
+        &budget,
     )
     .await;
     let _ = audit_file.flush().await;
     result
+}
+
+fn log_read_close(e: &tokio_tungstenite::tungstenite::Error) {
+    if is_expected_close(e) {
+        log::debug!("relay closed: {e}");
+    } else {
+        log::warn!(error = %e, "relay read error");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,9 +221,13 @@ async fn serve(
     chain: &mut lns_ipc::AuditChain,
     audit_file: &mut tokio::fs::File,
     anchor_sink: &mut crate::audit::FileAnchorSink,
+    mut shutdown: oneshot::Receiver<()>,
+    budget: &AuditBudget,
 ) -> Result<()> {
     loop {
         tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
             outbound = frame_rx.recv() => {
                 let Some(frame) = outbound else { break; };
                 let json = serde_json::to_string(&frame).context("serialise host frame")?;
@@ -209,15 +240,13 @@ async fn serve(
                 let msg = match msg {
                     Ok(m) => m,
                     Err(e) => {
-                        if is_expected_close(&e) {
-                            log::debug!("relay closed: {e}");
-                        } else {
-                            log::warn!(error = %e, "relay read error");
-                        }
+                        log_read_close(&e);
                         break;
                     }
                 };
-                if handle_inbound(msg, session, credential_session, chain, audit_file, anchor_sink).await? {
+                if handle_inbound(msg, session, credential_session, chain, audit_file, anchor_sink, budget)
+                    .await?
+                {
                     break;
                 }
             }
