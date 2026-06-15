@@ -78,12 +78,25 @@ fn store() -> JsonFileRegistryCredentialStore {
     JsonFileRegistryCredentialStore::new(default_registry_auth_path())
 }
 
+/// Builds the registry client with a protocol derived from the target host: loopback registries (and any in `LNS_REGISTRY_PLAIN_HTTP`) use plain HTTP, everything else HTTPS.
+fn registry_for(reference: &str) -> RealRegistry {
+    let target = reference
+        .parse::<Reference>()
+        .ok()
+        .map(|r| r.resolve_registry().to_string());
+    let protocol = crate::image::registry_protocol(
+        std::env::var("LNS_REGISTRY_PLAIN_HTTP").ok().as_deref(),
+        target.as_deref(),
+    );
+    RealRegistry::with_protocol(protocol)
+}
+
 pub async fn push(reference: &str, config_blob: &[u8]) -> Result<String> {
-    push_with(&RealRegistry::new(), &store(), reference, config_blob).await
+    push_with(&registry_for(reference), &store(), reference, config_blob).await
 }
 
 pub async fn pull(reference: &str) -> Result<(Vec<u8>, String)> {
-    pull_with(&RealRegistry::new(), &store(), reference).await
+    pull_with(&registry_for(reference), &store(), reference).await
 }
 
 #[cfg(test)]

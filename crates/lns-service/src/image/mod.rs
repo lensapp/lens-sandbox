@@ -117,6 +117,38 @@ fn want_arch() -> oci_spec::image::Arch {
     oci_spec::image::Arch::Amd64
 }
 
+/// Loopback registries are served over plain HTTP by convention (as Docker/containerd assume), so we never require TLS for them.
+pub(crate) fn is_loopback_registry(registry: &str) -> bool {
+    let host = registry.rsplit_once(':').map_or(registry, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// HTTPS unless a registry is loopback or named in `LNS_REGISTRY_PLAIN_HTTP` (a comma-separated host[:port] allowlist for non-loopback HTTP dev registries).
+pub(crate) fn registry_protocol(
+    plain_http_env: Option<&str>,
+    target: Option<&str>,
+) -> oci_client::client::ClientProtocol {
+    use oci_client::client::ClientProtocol;
+    let mut hosts: Vec<String> = plain_http_env
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(target) = target.filter(|t| is_loopback_registry(t))
+        && !hosts.iter().any(|h| h == target)
+    {
+        hosts.push(target.to_string());
+    }
+    if hosts.is_empty() {
+        ClientProtocol::Https
+    } else {
+        ClientProtocol::HttpsExcept(hosts)
+    }
+}
+
 pub(crate) fn linux_platform_resolver(
     manifests: &[oci_client::manifest::ImageIndexEntry],
 ) -> Option<String> {
@@ -761,6 +793,54 @@ mod tests {
     #[test]
     fn linux_platform_resolver_returns_none_when_no_match() {
         assert_eq!(linux_platform_resolver(&[]), None);
+    }
+
+    #[test]
+    fn is_loopback_registry_matches_localhost_and_loopback_ips_with_or_without_port() {
+        assert!(is_loopback_registry("localhost"));
+        assert!(is_loopback_registry("localhost:5000"));
+        assert!(is_loopback_registry("127.0.0.1:5000"));
+        assert!(is_loopback_registry("[::1]:5000"));
+        assert!(!is_loopback_registry("ghcr.io"));
+        assert!(!is_loopback_registry("registry.example.test:5000"));
+    }
+
+    #[test]
+    fn registry_protocol_defaults_to_https_for_unset_env_and_non_loopback_targets() {
+        use oci_client::client::ClientProtocol;
+        assert_eq!(registry_protocol(None, None), ClientProtocol::Https);
+        assert_eq!(registry_protocol(Some("  , "), None), ClientProtocol::Https);
+        assert_eq!(
+            registry_protocol(None, Some("ghcr.io")),
+            ClientProtocol::Https
+        );
+    }
+
+    #[test]
+    fn registry_protocol_lists_env_allowlisted_hosts_as_http_exceptions() {
+        use oci_client::client::ClientProtocol;
+        assert_eq!(
+            registry_protocol(Some("reg.dev:5000, other.dev"), None),
+            ClientProtocol::HttpsExcept(vec!["reg.dev:5000".into(), "other.dev".into()])
+        );
+    }
+
+    #[test]
+    fn registry_protocol_auto_enables_http_for_a_loopback_target() {
+        use oci_client::client::ClientProtocol;
+        assert_eq!(
+            registry_protocol(None, Some("localhost:5000")),
+            ClientProtocol::HttpsExcept(vec!["localhost:5000".into()])
+        );
+    }
+
+    #[test]
+    fn registry_protocol_does_not_duplicate_a_loopback_target_already_in_the_env_list() {
+        use oci_client::client::ClientProtocol;
+        assert_eq!(
+            registry_protocol(Some("localhost:5000"), Some("localhost:5000")),
+            ClientProtocol::HttpsExcept(vec!["localhost:5000".into()])
+        );
     }
 
     #[test]
