@@ -1,19 +1,80 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::FromArgMatches;
 use lns_policy::{Policy, RouteRule, Transport, Verdict};
 
-use crate::cli::{PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs, TransportArg};
 use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 use crate::run::summary::policy_path;
 
+#[derive(clap::Args)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: PolicyCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum PolicyCommand {
+    #[command(about = "Add an allow rule for a destination pattern.")]
+    Allow(PolicyRuleArgs),
+    #[command(about = "Add a deny rule for a destination pattern.")]
+    Deny(PolicyRuleArgs),
+    #[command(about = "List the rules in the policy file.")]
+    List(PolicyScopeArgs),
+    #[command(about = "Remove the rule matching a destination pattern.")]
+    Remove(PolicyRemoveArgs),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum TransportArg {
+    Direct,
+    Upstream,
+}
+
+#[derive(clap::Args)]
+pub struct PolicyRuleArgs {
+    #[arg(help = "Destination pattern: host, wildcard (*.example.com), CIDR, or host:port.")]
+    pub pattern: String,
+    #[arg(long, help = "Human-readable note stored alongside the rule.")]
+    pub description: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = TransportArg::Direct,
+        help = "Transport for an allowed connection; ignored for deny rules."
+    )]
+    pub transport: TransportArg,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct PolicyScopeArgs {
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct PolicyRemoveArgs {
+    #[arg(help = "Destination pattern of the rule to remove.")]
+    pub pattern: String,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(
-        subcommand::<crate::cli::PolicyArgs>("policy")
-            .about("Edit network rules in a policy file."),
-    )
+    app.subcommand(subcommand::<PolicyArgs>("policy").about("Edit network rules in a policy file."))
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
@@ -25,7 +86,7 @@ pub const SPEC: CommandSpec = CommandSpec {
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::cli::PolicyArgs::from_arg_matches(matches)?;
+        let args = PolicyArgs::from_arg_matches(matches)?;
         let mut out = ctx.out;
         run(&args.command, &ctx.cwd, &mut out)
     })
