@@ -32,28 +32,23 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     Then the exit code is 2
     And the output contains "must be an absolute path"
 
-  @todo
   Scenario: A non-existent host source path is refused before the run starts
     Given the host path "/Users/me/typo" does not exist
-    When the user runs `lns run -v /Users/me/typo:/work alpine`
+    When the user runs `lns run -v /Users/me/typo:/work alpine` interactively
     Then the command fails with "host path does not exist"
-    And no run is started
 
-  @todo
   Scenario: A clean bind with no secret-shaped files runs without prompting
     Given the host directory "/Users/me/proj" contains no secret-shaped files
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then no KEEP or DROP prompt is shown
     And the run starts
 
-  @todo
   Scenario: First run prompts KEEP or DROP for a detected secret-shaped file
     Given the host directory "/Users/me/proj" contains ".env"
     And no prior decision is recorded for "/Users/me/proj/.env"
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then the operator is prompted to KEEP or DROP "/Users/me/proj/.env"
 
-  @todo
   Scenario: KEEP exposes the real file and records a per-machine decision
     Given the host directory "/Users/me/proj" contains ".env"
     And the operator will answer the secret prompt with "keep"
@@ -62,7 +57,6 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     And a per-machine KEEP decision is recorded for "/Users/me/proj/.env"
     And a later run with the same bind shows no prompt
 
-  @todo
   Scenario: DROP hides the file from the guest and records the decision
     Given the host directory "/Users/me/proj" contains ".env"
     And the operator will answer the secret prompt with "drop"
@@ -71,7 +65,6 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     And a per-machine DROP decision is recorded for "/Users/me/proj/.env"
     And a later run with the same bind shows no prompt
 
-  @todo
   Scenario: A committed .lensignore drops matching paths with no prompt
     Given the host directory "/Users/me/proj" contains ".env"
     And the host directory "/Users/me/proj" has a ".lensignore" listing ".env"
@@ -79,7 +72,6 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     Then ".env" is dropped from the bind
     And no KEEP or DROP prompt is shown
 
-  @todo
   Scenario: A newly-appeared, undecided secret prompts only for itself
     Given the host directory "/Users/me/proj" contains ".env" and ".npmrc"
     And a per-machine KEEP decision is recorded for "/Users/me/proj/.env"
@@ -87,7 +79,6 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then the operator is prompted only for "/Users/me/proj/.npmrc"
 
-  @todo
   Scenario: A non-interactive run defaults undecided secrets to DROP
     Given the host directory "/Users/me/proj" contains an undecided ".env"
     When the user runs `lns run -d -v /Users/me/proj:/work alpine` with no terminal

@@ -99,9 +99,32 @@ fn real_client() -> Result<real::RealServiceClient> {
     ))
 }
 
+fn resolve_host_binds(specs: &[lns_ipc::BindSpec]) -> Result<Vec<lns_ipc::BindMount>> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scan = crate::run::host_bind::RealDirScan;
+    let store = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
+        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
+    );
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    crate::run::host_bind::resolve_binds(
+        specs,
+        &scan,
+        &store,
+        crate::raw_mode::stdin_is_tty(),
+        &mut input,
+        &mut std::io::stderr(),
+    )
+}
+
 pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let resolved_policy = print_run_summary(&args, &cwd, &mut std::io::stderr())?;
+
+    let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
+    let binds = resolve_host_binds(&bind_specs)?;
 
     let client = real_client()?;
     let socket = client.socket();
@@ -118,17 +141,6 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         None
     };
     let detach_chord = args.detach_keys.0.clone();
-
-    let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
-    let binds = bind_specs
-        .into_iter()
-        .map(|b| lns_ipc::BindMount {
-            host_source: b.host_source,
-            target: b.target,
-            read_only: b.read_only,
-            dropped_paths: Vec::new(),
-        })
-        .collect();
 
     let request = Request::RunImage(RunImageArgs {
         cpus: args.effective_cpus(),
