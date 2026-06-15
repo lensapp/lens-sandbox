@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cucumber::{given, then, when};
-use lns_cli::cli::SandboxArgs;
 use lns_cli::command::parse_args;
+use lns_cli::sandbox::SandboxArgs;
 use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{

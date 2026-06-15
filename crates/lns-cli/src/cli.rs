@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use lns_ipc::{PortPublish, Protocol};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -27,98 +27,6 @@ pub struct Cli {
         help = "Log threshold: `warn` (default) shows warnings/errors; `info` adds progress lines; `debug` adds traces and the guest boot transcript; override with `LNS_LOG` or `RUST_LOG`."
     )]
     pub log_level: LogLevel,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxArgs {
-    #[command(subcommand)]
-    pub command: SandboxCommand,
-}
-
-#[derive(Subcommand)]
-pub enum SandboxCommand {
-    #[command(about = "List active runs (`docker ps`-style).")]
-    Ls,
-    #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
-    Exec(ExecArgs),
-    #[command(about = "Send a signal to a running run (`docker kill`-style).")]
-    Kill(KillArgs),
-    #[command(about = "Stop a run gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
-    Stop(SandboxStopArgs),
-    #[command(about = "Print a run's captured output; `-f` streams until the run exits.")]
-    Logs(SandboxLogsArgs),
-    #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
-    Attach(SandboxAttachArgs),
-    #[command(about = "Print a run's state and launch configuration as JSON.")]
-    Inspect(SandboxInspectArgs),
-    #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
-    Stats(SandboxStatsArgs),
-    #[command(
-        about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
-    )]
-    Rm(SandboxRmArgs),
-    #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
-    Prune,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxStopArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        short = 't',
-        long,
-        default_value_t = 10,
-        help = "Seconds to wait for a graceful exit before escalating to SIGKILL."
-    )]
-    pub timeout: u64,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxLogsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = false,
-        help = "Keep streaming new output until the run exits."
-    )]
-    pub follow: bool,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxAttachArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        long,
-        default_value = "ctrl-p,ctrl-q",
-        value_parser = parse_detach_keys_arg,
-        help = "Detach chord; on match the CLI detaches and returns, leaving the run running (docker-attach style — no signal is sent)."
-    )]
-    pub detach_keys: DetachChord,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxInspectArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxStatsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxRmArgs {
-    #[arg(help = "Target finished run id surfaced by `lns sandbox ls`.")]
-    pub run_id: u32,
 }
 
 #[derive(clap::Args)]
@@ -310,7 +218,7 @@ pub struct KillArgs {
 #[derive(Clone, Debug)]
 pub struct DetachChord(pub Vec<u8>);
 
-fn parse_detach_keys_arg(s: &str) -> Result<DetachChord, String> {
+pub(crate) fn parse_detach_keys_arg(s: &str) -> Result<DetachChord, String> {
     crate::chord::parse_detach_keys(s)
         .map(DetachChord)
         .map_err(|e| e.to_string())

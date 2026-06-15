@@ -13,7 +13,7 @@ use crate::service::client::BoxFuture;
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::cli::SandboxArgs::from_arg_matches(matches)?;
+        let args = super::SandboxArgs::from_arg_matches(matches)?;
         crate::service::require_running().await;
         dispatch(args).await
     })
@@ -62,9 +62,9 @@ impl SandboxService for RealSandboxService {
     }
 }
 
-pub async fn dispatch(args: crate::cli::SandboxArgs) -> Result<i32> {
+pub async fn dispatch(args: super::SandboxArgs) -> Result<i32> {
     let command = match args.command {
-        crate::cli::SandboxCommand::Exec(exec_args) => {
+        super::SandboxCommand::Exec(exec_args) => {
             return crate::service::exec_image(exec_args).await;
         }
         other => other,
