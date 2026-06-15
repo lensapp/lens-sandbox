@@ -38,6 +38,27 @@ impl RealRegistry {
             auth: RegistryAuth::Anonymous,
         }
     }
+
+    /// Builds a client for pulling `reference`: loopback/`LNS_REGISTRY_PLAIN_HTTP` protocol and the stored credential for that registry (anonymous if none).
+    pub fn for_reference(reference: &str) -> Self {
+        let target = reference
+            .parse::<Reference>()
+            .ok()
+            .map(|r| r.resolve_registry().to_string());
+        let protocol = super::registry_protocol(
+            std::env::var("LNS_REGISTRY_PLAIN_HTTP").ok().as_deref(),
+            target.as_deref(),
+        );
+        let client = oci_client::Client::new(ClientConfig {
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
+            protocol,
+            ..Default::default()
+        });
+        Self {
+            client,
+            auth: crate::artifact::resolve_auth(reference),
+        }
+    }
 }
 
 impl Default for RealRegistry {
@@ -142,7 +163,10 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
     let _shared = crate::image_store::lock_shared().await;
     let manifests = crate::cache::root()?.join("manifests");
-    let registry = CachingRegistry::new(RealRegistry::new(), ManifestCache::new(manifests));
+    let registry = CachingRegistry::new(
+        RealRegistry::for_reference(image),
+        ManifestCache::new(manifests),
+    );
     let pulled = pull_inner(&registry, image, layer_cache).await?;
     if let Err(e) = crate::image_store::record(&pulled).await {
         crate::log::warn!("image index write failed for {image} ({e:#}); continuing");

@@ -72,6 +72,17 @@ fn resolve(
     Ok((reference, auth))
 }
 
+/// Best-effort auth for an image pull: resolves the stored credential for the reference's registry, falling back to anonymous on any parse/load failure (the pull surfaces its own error if the reference is bad).
+pub(crate) fn resolve_auth(reference: &str) -> RegistryAuth {
+    match reference.parse::<Reference>() {
+        Ok(parsed) => auth_for(
+            parsed.resolve_registry(),
+            &store().load().unwrap_or_default(),
+        ),
+        Err(_) => RegistryAuth::Anonymous,
+    }
+}
+
 async fn push_artifact_with<R: ArtifactRegistry>(
     client: &R,
     store: &dyn RegistryCredentialStore,
@@ -251,6 +262,45 @@ mod tests {
             RegistryAuth::Basic("any".into(), "lns_tok".into())
         );
         assert_eq!(auth_for("absent", &f), RegistryAuth::Anonymous);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn resolve_auth_returns_basic_for_a_stored_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_REGISTRY_AUTH_PATH",
+            dir.path().join("auth.json"),
+        );
+        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
+        let mut file = RegistryAuthFile::new();
+        file.insert(
+            "registry.example.test".into(),
+            RegistryCredential {
+                username: None,
+                token: "lns_tok".into(),
+            },
+        );
+        store.save(&file).unwrap();
+        assert_eq!(
+            resolve_auth("registry.example.test/org/x/agents/a:v1"),
+            RegistryAuth::Basic("any".into(), "lns_tok".into())
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn resolve_auth_is_anonymous_without_a_credential_or_for_a_bad_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_REGISTRY_AUTH_PATH",
+            dir.path().join("absent.json"),
+        );
+        assert_eq!(
+            resolve_auth("registry.example.test/org/x/agents/a:v1"),
+            RegistryAuth::Anonymous
+        );
+        assert_eq!(resolve_auth("::bad::"), RegistryAuth::Anonymous);
     }
 
     #[test]
