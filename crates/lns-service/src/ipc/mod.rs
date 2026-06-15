@@ -182,6 +182,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
+        Request::RegistryLogin {
+            registry,
+            username,
+            secret,
+        } => login_response(crate::image::verify_login(registry, username, secret).await),
         Request::StopRun {
             run_id,
             timeout_secs,
@@ -246,6 +251,15 @@ fn image_response(result: anyhow::Result<Response>) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
+}
+
+fn login_response(result: anyhow::Result<()>) -> Response {
+    match result {
+        Ok(()) => Response::RegistryLoginVerified,
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
 }
 
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1561,6 +1575,42 @@ mod tests {
             message.contains("invalid image reference"),
             "got: {message}"
         );
+    }
+
+    #[test]
+    fn login_response_maps_ok_to_verified() {
+        assert_eq!(login_response(Ok(())), Response::RegistryLoginVerified);
+    }
+
+    #[test]
+    fn login_response_maps_err_to_an_error_carrying_the_reason() {
+        let resp = as_json(login_response(Err(anyhow::anyhow!("credentials rejected"))));
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("credentials rejected"),
+            "got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_registry_login_with_an_invalid_registry_errors_before_any_network() {
+        let resp = as_json(
+            handle_request(
+                &Request::RegistryLogin {
+                    registry: "bad host".into(),
+                    username: "u".into(),
+                    secret: "s".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(message.contains("invalid registry"), "got: {message}");
     }
 
     #[tokio::test]

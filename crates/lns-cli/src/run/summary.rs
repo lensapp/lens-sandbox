@@ -191,6 +191,7 @@ mod tests {
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
             image: image.map(str::to_string),
+            registry: None,
             cpus: None,
             mem: None,
             policy: None,

@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -62,30 +61,9 @@ impl CredentialStore for JsonFileCredentialStore {
     }
 
     fn save(&self, state: &CredentialStateFile) -> io::Result<()> {
-        use std::io::Write;
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        // Drop any leftover tmp so the next open is create_new — `.mode(0o600)` is ignored on an existing file, so a stale tmp with broader perms (or a planted symlink) would otherwise carry through the rename and leave secrets world-readable.
-        match fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, &self.path)?;
-        Ok(())
+        crate::secure_file::write_json_secret_atomic(&self.path, json.as_bytes())
     }
 }
 
@@ -212,100 +190,6 @@ mod tests {
     }
 
     #[test]
-    fn save_creates_parent_directory_when_missing() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let nested = dir.path().join("a/b/c/creds.json");
-        let store = JsonFileCredentialStore::new(nested.clone());
-        store.save(&sample_state()).unwrap();
-        assert!(nested.exists());
-    }
-
-    #[test]
-    fn save_uses_tmp_rename_pattern_leaving_no_stale_tmp() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), "tmp must be renamed away, not left in place");
-    }
-
-    #[test]
-    fn save_writes_file_with_mode_0600_so_real_credentials_are_not_world_readable() {
-        // Must be 0600 regardless of umask (default 022 would yield 0644, readable by other local users) since a stored entry holds a plaintext credential.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "got 0o{mode:o}, want 0o600");
-    }
-
-    #[test]
-    fn save_with_pre_existing_loose_perm_tmp_writes_credentials_at_mode_0600() {
-        // Before the fix: a leftover `creds.json.tmp` with default-umask 0o644 was reused by `create(true).truncate(true)` (which ignores `.mode()` on an existing file), so the rename produced a world-readable credentials file.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, b"stale leftover from a prior crash").unwrap();
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
-
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "stale tmp must not carry its 0o644 perms through the rename, got 0o{mode:o}"
-        );
-    }
-
-    #[test]
-    fn save_propagates_non_not_found_error_when_clearing_leftover_tmp() {
-        // If the tmp path is occupied by a directory (e.g. a stray `creds.json.tmp/` planted by another process), `fs::remove_file` returns a non-NotFound error and `save` must surface it rather than fall through and clobber.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        fs::create_dir(&tmp).unwrap();
-
-        let store = JsonFileCredentialStore::new(path.clone());
-        let err = store.save(&sample_state()).unwrap_err();
-
-        assert_ne!(
-            err.kind(),
-            io::ErrorKind::NotFound,
-            "must propagate a non-NotFound error, got {err:?}"
-        );
-        assert!(
-            !path.exists(),
-            "save must not produce the target file when the tmp clear failed"
-        );
-    }
-
-    #[test]
-    fn save_does_not_follow_a_symlink_planted_at_the_tmp_path() {
-        // Before the fix: open(tmp) followed a symlink and truncated/wrote the credential JSON into whatever the symlink pointed at (attacker_target).
-        let dir = tempfile::TempDir::new().unwrap();
-        let attacker_target = dir.path().join("attacker-target");
-        let attacker_contents = b"victim-data-must-survive";
-        fs::write(&attacker_target, attacker_contents).unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        std::os::unix::fs::symlink(&attacker_target, &tmp).unwrap();
-
-        let store = JsonFileCredentialStore::new(path);
-        let _ = store.save(&sample_state());
-
-        let after = fs::read(&attacker_target).unwrap();
-        assert_eq!(
-            after, attacker_contents,
-            "a symlink at the tmp path must not redirect the credential write"
-        );
-    }
-
-    #[test]
     fn save_overwrites_existing_file_atomically() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("creds.json");
@@ -352,16 +236,5 @@ mod tests {
             default_credentials_path(),
             PathBuf::from(".lns-credentials.json")
         );
-    }
-
-    #[test]
-    fn save_with_bare_filename_path_uses_cwd_without_panic() {
-        // Uses a tempdir rather than `set_current_dir`, which would race with sibling tests.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        store.save(&sample_state()).unwrap();
-        assert!(path.exists());
     }
 }

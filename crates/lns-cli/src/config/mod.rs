@@ -29,7 +29,8 @@ pub enum ConfigCommand {
     List,
 }
 
-const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.env, run.volume, or run.publish.";
+const CONFIG_KEY_HELP: &str =
+    "Config key: run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish.";
 
 #[derive(clap::Args)]
 pub struct ConfigSetArgs {
@@ -52,15 +53,17 @@ pub struct ConfigKeyArgs {
 pub enum ConfigKey {
     RunCpus,
     RunMem,
+    RunRegistry,
     RunEnv,
     RunVolume,
     RunPublish,
 }
 
 impl ConfigKey {
-    pub const ALL: [ConfigKey; 5] = [
+    pub const ALL: [ConfigKey; 6] = [
         ConfigKey::RunCpus,
         ConfigKey::RunMem,
+        ConfigKey::RunRegistry,
         ConfigKey::RunEnv,
         ConfigKey::RunVolume,
         ConfigKey::RunPublish,
@@ -70,11 +73,12 @@ impl ConfigKey {
         match s {
             "run.cpus" => Ok(ConfigKey::RunCpus),
             "run.mem" => Ok(ConfigKey::RunMem),
+            "run.registry" => Ok(ConfigKey::RunRegistry),
             "run.env" => Ok(ConfigKey::RunEnv),
             "run.volume" => Ok(ConfigKey::RunVolume),
             "run.publish" => Ok(ConfigKey::RunPublish),
             other => Err(format!(
-                "unknown config key {other:?}; expected run.cpus, run.mem, run.env, run.volume, or run.publish"
+                "unknown config key {other:?}; expected run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish"
             )),
         }
     }
@@ -83,6 +87,7 @@ impl ConfigKey {
         match self {
             ConfigKey::RunCpus => "run.cpus",
             ConfigKey::RunMem => "run.mem",
+            ConfigKey::RunRegistry => "run.registry",
             ConfigKey::RunEnv => "run.env",
             ConfigKey::RunVolume => "run.volume",
             ConfigKey::RunPublish => "run.publish",
@@ -104,6 +109,8 @@ pub struct RunSection {
     pub cpus: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -252,6 +259,12 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
     match key {
         ConfigKey::RunCpus => cfg.run.cpus = Some(parse_cpus(key, single(key, values)?)?),
         ConfigKey::RunMem => cfg.run.mem = Some(parse_mem(key, single(key, values)?)?),
+        ConfigKey::RunRegistry => {
+            let value = single(key, values)?;
+            lns_policy::registry_auth::validate_registry_host(value)
+                .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))?;
+            cfg.run.registry = Some(value.to_string());
+        }
         ConfigKey::RunEnv => {
             cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
         }
@@ -311,6 +324,7 @@ fn values_of(cfg: &ConfigFile, key: ConfigKey) -> Vec<String> {
     match key {
         ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()).into_iter().collect(),
         ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()).into_iter().collect(),
+        ConfigKey::RunRegistry => cfg.run.registry.clone().into_iter().collect(),
         ConfigKey::RunEnv => cfg.run.env.clone(),
         ConfigKey::RunVolume => cfg.run.volume.clone(),
         ConfigKey::RunPublish => cfg.run.publish.clone(),
@@ -321,6 +335,7 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
     match key {
         ConfigKey::RunCpus => cfg.run.cpus = None,
         ConfigKey::RunMem => cfg.run.mem = None,
+        ConfigKey::RunRegistry => cfg.run.registry = None,
         ConfigKey::RunEnv => cfg.run.env.clear(),
         ConfigKey::RunVolume => cfg.run.volume.clear(),
         ConfigKey::RunPublish => cfg.run.publish.clear(),
@@ -331,6 +346,7 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
 pub struct RunDefaults {
     pub cpus: Option<u8>,
     pub mem: Option<usize>,
+    pub registry: Option<String>,
     pub env: Vec<String>,
     pub volumes: Vec<VolumeMount>,
     pub publish: Vec<PortPublish>,
@@ -341,6 +357,7 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
     Ok(RunDefaults {
         cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
         mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
+        registry: cfg.run.registry,
         env: parsed_defaults(
             ConfigKey::RunEnv,
             &cfg.run.env,
@@ -398,10 +415,34 @@ fn parsed_defaults<T>(
 pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.cpus = args.cpus.or(defaults.cpus);
     args.mem = args.mem.or(defaults.mem);
+    args.registry = args.registry.or(defaults.registry);
+    if let Some(image) = args.image.take() {
+        args.image = Some(resolve_default_registry(&image, args.registry.as_deref()));
+    }
     args.env = merged_env(defaults.env, args.env);
     args.volumes = merged_volumes(defaults.volumes, args.volumes);
     args.publish = merged_publish(defaults.publish, args.publish);
     args
+}
+
+/// Qualifies a bare image reference with the configured default registry; a reference that already names a registry — or a docker.io default, which the parser already assumes — is left untouched so implicit `library/` namespacing is preserved.
+pub fn resolve_default_registry(image: &str, default_registry: Option<&str>) -> String {
+    let Some(registry) = default_registry else {
+        return image.to_string();
+    };
+    if lns_policy::registry_auth::canonical_registry(registry) == "docker.io"
+        || image_has_registry(image)
+    {
+        return image.to_string();
+    }
+    format!("{registry}/{image}")
+}
+
+fn image_has_registry(image: &str) -> bool {
+    match image.split_once('/') {
+        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+        None => false,
+    }
 }
 
 fn merged_env(defaults: Vec<String>, flags: Vec<String>) -> Vec<String> {
@@ -599,9 +640,10 @@ mod tests {
     fn every_key_survives_a_set_get_list_unset_lifecycle() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let seeds: [(ConfigKey, &[&str]); 5] = [
+        let seeds: [(ConfigKey, &[&str]); 6] = [
             (ConfigKey::RunCpus, &["4"]),
             (ConfigKey::RunMem, &["2048"]),
+            (ConfigKey::RunRegistry, &["ghcr.io"]),
             (ConfigKey::RunEnv, &["TZ=UTC", "CI=1"]),
             (ConfigKey::RunVolume, &["cache:/var/cache:ro"]),
             (ConfigKey::RunPublish, &["8080:80"]),
@@ -614,6 +656,7 @@ mod tests {
         for needle in [
             "run.cpus = 4",
             "run.mem = 2048",
+            "run.registry = ghcr.io",
             "run.env = TZ=UTC",
             "run.env = CI=1",
             "run.volume = cache:/var/cache:ro",
@@ -683,6 +726,7 @@ mod tests {
     fn bare_run_args() -> RunArgs {
         RunArgs {
             image: Some("alpine".to_string()),
+            registry: None,
             cpus: None,
             mem: None,
             policy: None,
@@ -807,6 +851,115 @@ mod tests {
         );
         assert_eq!(resolved.cpus, Some(2));
         assert_eq!(resolved.mem, Some(1024));
+    }
+
+    #[test]
+    fn store_rejects_an_invalid_registry_host() {
+        let mut cfg = ConfigFile::default();
+        let err = store(
+            &mut cfg,
+            ConfigKey::RunRegistry,
+            &["https://ghcr.io".to_string()],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("run.registry"), "got: {msg}");
+        assert!(msg.contains("URL"), "got: {msg}");
+    }
+
+    #[test]
+    fn resolve_default_registry_leaves_an_image_untouched_without_a_default() {
+        assert_eq!(resolve_default_registry("alpine", None), "alpine");
+    }
+
+    #[test]
+    fn resolve_default_registry_does_not_prepend_a_docker_io_default() {
+        // docker.io is the parser's own default; prepending it would break the implicit `library/` namespacing.
+        for d in ["docker.io", "index.docker.io"] {
+            assert_eq!(resolve_default_registry("alpine", Some(d)), "alpine");
+        }
+    }
+
+    #[test]
+    fn resolve_default_registry_qualifies_a_bare_reference_with_a_non_docker_default() {
+        assert_eq!(
+            resolve_default_registry("alpine", Some("ghcr.io")),
+            "ghcr.io/alpine"
+        );
+        assert_eq!(
+            resolve_default_registry("alpine:3.20", Some("ghcr.io")),
+            "ghcr.io/alpine:3.20"
+        );
+        assert_eq!(
+            resolve_default_registry("org/app", Some("ghcr.io")),
+            "ghcr.io/org/app"
+        );
+    }
+
+    #[test]
+    fn resolve_default_registry_leaves_a_fully_qualified_reference_alone() {
+        for image in [
+            "myreg.io/app",
+            "localhost:5000/app",
+            "localhost/app",
+            "registry.example.test/team/app:1",
+        ] {
+            assert_eq!(resolve_default_registry(image, Some("ghcr.io")), image);
+        }
+    }
+
+    #[test]
+    fn apply_run_defaults_qualifies_a_bare_image_with_the_configured_registry() {
+        let resolved = apply_run_defaults(
+            bare_run_args(),
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("ghcr.io/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_prefers_the_registry_flag_over_the_configured_default() {
+        let mut args = bare_run_args();
+        args.registry = Some("quay.io".into());
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("quay.io/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_leaves_a_qualified_image_untouched() {
+        let mut args = bare_run_args();
+        args.image = Some("docker.io/library/alpine".into());
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("docker.io/library/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_keeps_an_imageless_run_imageless() {
+        let mut args = bare_run_args();
+        args.image = None;
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image, None);
     }
 
     #[test]

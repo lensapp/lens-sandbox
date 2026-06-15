@@ -8,6 +8,8 @@ pub mod credentials;
 mod env_subst;
 pub mod integrations;
 pub mod providers;
+pub mod registry_auth;
+mod secure_file;
 #[cfg(test)]
 mod test_env;
 
