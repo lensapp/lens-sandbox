@@ -21,6 +21,15 @@ pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile) + Send + Sync>;
 /// Invoked when an un-connected catalog integration is accepted, to connect it live (allow its routes + persist `integrations:`).
 pub type ConnectEmitter = Box<dyn Fn(&str) + Send + Sync>;
 
+/// Opens a URL in the developer's browser; injected so the pkce flow drives the real opener in production and records it in tests.
+pub type BrowserOpener = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Mints a fresh PKCE challenge; injected so tests can pin a known verifier and state.
+pub type ChallengeGen = Box<dyn Fn() -> crate::oauth::PkceChallenge + Send + Sync>;
+
+/// How long a pkce browser sign-in may run before the held request is failed closed.
+pub const PKCE_SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPendingPrompt {
     pub id: String,
@@ -36,7 +45,8 @@ pub struct CredentialPendingPrompt {
 pub struct SignInPrompt {
     pub credential_id: String,
     pub display_name: String,
-    pub user_code: String,
+    /// Some(code) for a device sign-in the user types; None for a pkce sign-in that redirects through the browser with no code to enter.
+    pub user_code: Option<String>,
     pub verification_uri: String,
     /// Some when the integration declares a token fallback, so the sign-in card can offer "use a token instead" to a user blocked from the browser dance.
     pub token_fallback: Option<TokenFallback>,
@@ -55,9 +65,10 @@ pub trait CredentialNotifier: Send + Sync {
         cancel: tokio::sync::oneshot::Sender<crate::oauth::SignInPivot>,
     ) {
         let _ = cancel;
+        let code = prompt.user_code.as_deref().unwrap_or("");
         self.inform(&format!(
-            "To connect {}, open {} and enter code {}",
-            prompt.display_name, prompt.verification_uri, prompt.user_code
+            "To connect {}, open {} {code}",
+            prompt.display_name, prompt.verification_uri
         ));
     }
     /// Removes the sign-in card for `credential_id` once its flow resolves; the default is a no-op for notifiers that don't model one.
@@ -108,6 +119,12 @@ pub struct CredentialSession {
     token_fallbacks: HashMap<String, TokenFallback>,
     device_flow: Option<Arc<dyn crate::oauth::DeviceFlow>>,
     clock: Option<Arc<dyn crate::oauth::Clock>>,
+    pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
+    pkce_flow: Option<Arc<dyn crate::oauth::AuthCodeFlow>>,
+    callback_listener: Option<Arc<dyn crate::oauth::CallbackListener>>,
+    open_browser: BrowserOpener,
+    pkce_challenge_gen: ChallengeGen,
+    pkce_timeout: Duration,
 }
 
 impl CredentialSession {
@@ -145,6 +162,12 @@ impl CredentialSession {
             token_fallbacks: HashMap::new(),
             device_flow: None,
             clock: None,
+            pkce_configs: HashMap::new(),
+            pkce_flow: None,
+            callback_listener: None,
+            open_browser: Box::new(|_| {}),
+            pkce_challenge_gen: Box::new(crate::oauth::PkceChallenge::generate),
+            pkce_timeout: PKCE_SIGN_IN_TIMEOUT,
         }
     }
 
@@ -158,6 +181,25 @@ impl CredentialSession {
         self.oauth_configs = oauth_configs;
         self.device_flow = Some(device_flow);
         self.clock = Some(clock);
+        self
+    }
+
+    /// Wires the PKCE engine, per-integration pkce configs, the loopback callback listener, the browser opener, and the challenge generator so an accepted pkce prompt can run a browser-redirect sign-in.
+    pub fn with_pkce(
+        mut self,
+        pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
+        pkce_flow: Arc<dyn crate::oauth::AuthCodeFlow>,
+        callback_listener: Arc<dyn crate::oauth::CallbackListener>,
+        open_browser: BrowserOpener,
+        challenge_gen: ChallengeGen,
+        timeout: Duration,
+    ) -> Self {
+        self.pkce_configs = pkce_configs;
+        self.pkce_flow = Some(pkce_flow);
+        self.callback_listener = Some(callback_listener);
+        self.open_browser = open_browser;
+        self.pkce_challenge_gen = challenge_gen;
+        self.pkce_timeout = timeout;
         self
     }
 
@@ -178,6 +220,12 @@ impl CredentialSession {
             .get(credential_id)
             .cloned()
             .unwrap_or_else(|| credential_id.to_string())
+    }
+
+    /// True when the integration authenticates by an interactive sign-in — a device grant or a pkce browser redirect — rather than a pasted value.
+    fn is_signin(&self, credential_id: &str) -> bool {
+        self.oauth_configs.contains_key(credential_id)
+            || self.pkce_configs.contains_key(credential_id)
     }
 
     /// Captures the run's custom providers once at construction so a mid-run policy edit can't retroactively change a running workload's placeholder set.
@@ -234,8 +282,7 @@ impl CredentialSession {
         );
         drop(pending);
         let oauth_display_name = self
-            .oauth_configs
-            .contains_key(&req.credential_id)
+            .is_signin(&req.credential_id)
             .then(|| self.display_name_for(&req.credential_id));
         let token_fallback = self.token_fallbacks.get(&req.credential_id).cloned();
         let action = if self.connectable.contains(&req.credential_id) {
@@ -322,7 +369,7 @@ impl CredentialSession {
         let pending = self.pending.lock().expect("pending mutex poisoned");
         pending
             .iter()
-            .any(|(id, e)| e.prompt_id == prompt_id && self.oauth_configs.contains_key(id))
+            .any(|(id, e)| e.prompt_id == prompt_id && self.is_signin(id))
     }
 
     /// Drives a device sign-in for an accepted oauth prompt: on success connects the integration live and arms the token set, releasing held requests; denial, expiry, or error fails them closed without persisting (the next use re-prompts).
@@ -331,7 +378,7 @@ impl CredentialSession {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(prompt_id);
-        let connected = self.run_oauth_connect(&credential_id).await;
+        let connected = self.run_signin_connect(&credential_id).await;
         self.notifier
             .connect_finished(&self.display_name_for(&credential_id));
         if connected {
@@ -346,8 +393,8 @@ impl CredentialSession {
 
     /// Connects integration `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
     pub async fn connect_integration_now(&self, id: &str) -> bool {
-        if self.oauth_configs.contains_key(id) {
-            let ok = self.run_oauth_connect(id).await;
+        if self.is_signin(id) {
+            let ok = self.run_signin_connect(id).await;
             if ok {
                 // The same connect arms the token, so any placeholder card already held for this integration is satisfied too — don't ask for it separately.
                 self.release_armed_holds(id);
@@ -384,6 +431,77 @@ impl CredentialSession {
         }
     }
 
+    /// Routes an accepted interactive sign-in to its flow: the pkce browser redirect when one is wired for `credential_id`, otherwise the device grant.
+    async fn run_signin_connect(&self, credential_id: &str) -> bool {
+        if let (Some(cfg), Some(flow), Some(listener)) = (
+            self.pkce_configs.get(credential_id),
+            self.pkce_flow.as_ref(),
+            self.callback_listener.as_ref(),
+        ) {
+            return self
+                .run_pkce_connect(credential_id, cfg, flow.as_ref(), listener.as_ref())
+                .await;
+        }
+        self.run_oauth_connect(credential_id).await
+    }
+
+    /// Runs the pkce browser-redirect sign-in and, on success, arms the obtained key as a durable credential and connects the integration live; returns whether a key was obtained. Cancel, timeout, or error yields false.
+    async fn run_pkce_connect(
+        &self,
+        credential_id: &str,
+        cfg: &crate::oauth::PkceConfig,
+        flow: &dyn crate::oauth::AuthCodeFlow,
+        listener: &dyn crate::oauth::CallbackListener,
+    ) -> bool {
+        let display_name = self.display_name_for(credential_id);
+        let token_fallback = self.token_fallbacks.get(credential_id).cloned();
+        let challenge = (self.pkce_challenge_gen)();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
+        let card_id = credential_id.to_string();
+        let on_authorization_url = move |auth_url: &str| {
+            self.notifier.present_sign_in(
+                &SignInPrompt {
+                    credential_id: card_id,
+                    display_name,
+                    user_code: None,
+                    verification_uri: auth_url.to_string(),
+                    token_fallback,
+                },
+                cancel_tx,
+            );
+            (self.open_browser)(auth_url);
+        };
+        let cancel = async move {
+            // A dropped sender means the notifier has no cancel surface, so the sign-in runs to its natural end.
+            if cancel_rx.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        let result = crate::oauth::run_pkce_flow(
+            flow,
+            listener,
+            cfg,
+            &challenge,
+            on_authorization_url,
+            cancel,
+            self.pkce_timeout,
+        )
+        .await;
+        self.notifier.dismiss_sign_in(credential_id);
+        match result {
+            Ok(crate::oauth::PkceSignIn::Completed(key)) => {
+                self.arm_connected(credential_id, CredentialEntry::Stored { value: key });
+                true
+            }
+            Ok(crate::oauth::PkceSignIn::Cancelled | crate::oauth::PkceSignIn::TimedOut) => false,
+            Err(e) => {
+                self.notifier
+                    .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
+                false
+            }
+        }
+    }
+
     /// Runs the device sign-in for an oauth integration and, on success, arms the token set and connects it live; returns whether a token was obtained. A missing config, denial, expiry, cancel, or error yields false.
     async fn run_oauth_connect(&self, credential_id: &str) -> bool {
         let (Some(cfg), Some(flow), Some(clock)) = (
@@ -402,7 +520,7 @@ impl CredentialSession {
                 &SignInPrompt {
                     credential_id: card_id,
                     display_name,
-                    user_code: code.user_code.clone(),
+                    user_code: Some(code.user_code.clone()),
                     verification_uri: code.verification_uri.clone(),
                     token_fallback,
                 },
@@ -513,7 +631,7 @@ impl CredentialSession {
         };
         self.notifier.dismiss(prompt_id);
         // A consent clicked into a sign-in right as it expired leaves a placeholder no later sign-in will resolve; take it down with the prompt.
-        if self.oauth_configs.contains_key(&credential_id) {
+        if self.is_signin(&credential_id) {
             self.notifier
                 .connect_finished(&self.display_name_for(&credential_id));
         }
@@ -1678,7 +1796,7 @@ mod tests {
         let sign_ins = n.sign_ins.lock().unwrap();
         assert_eq!(sign_ins.len(), 1, "the verification step is presented once");
         assert_eq!(sign_ins[0].display_name, "GitHub");
-        assert_eq!(sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
         assert_eq!(sign_ins[0].verification_uri, "https://example.com/device");
         drop(sign_ins);
         assert_eq!(
@@ -1985,6 +2103,179 @@ mod tests {
             "the held placeholder request is released once the token arms the slot"
         );
         assert!(n.dismissed.lock().unwrap().contains(&"cred1".to_string()));
+    }
+
+    struct FakePkceFlow {
+        result: StdMutex<Option<anyhow::Result<String>>>,
+    }
+    impl crate::oauth::AuthCodeFlow for FakePkceFlow {
+        fn exchange_code<'a>(
+            &'a self,
+            _cfg: &'a crate::oauth::PkceConfig,
+            _code: &'a str,
+            _verifier: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<String>> {
+            Box::pin(async move {
+                self.result
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("exchange scripted")
+            })
+        }
+    }
+    struct FakePkceListener {
+        state: String,
+    }
+    impl crate::oauth::CallbackListener for FakePkceListener {
+        fn bind(&self) -> BoxFuture<'_, anyhow::Result<Box<dyn crate::oauth::CallbackHandle>>> {
+            let state = self.state.clone();
+            Box::pin(async move {
+                Ok(Box::new(FakePkceHandle { state }) as Box<dyn crate::oauth::CallbackHandle>)
+            })
+        }
+    }
+    struct FakePkceHandle {
+        state: String,
+    }
+    impl crate::oauth::CallbackHandle for FakePkceHandle {
+        fn redirect_url(&self) -> &str {
+            "http://localhost:0/callback"
+        }
+        fn wait(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, anyhow::Result<crate::oauth::CallbackParams>> {
+            Box::pin(async move {
+                Ok(crate::oauth::CallbackParams {
+                    code: "code".into(),
+                    state: self.state,
+                })
+            })
+        }
+    }
+    fn fixed_pkce_challenge() -> crate::oauth::PkceChallenge {
+        crate::oauth::PkceChallenge {
+            verifier: "v".into(),
+            challenge: "c".into(),
+            state: "st".into(),
+        }
+    }
+
+    type PkceFixture = (
+        CredentialSession,
+        Arc<RecordingNotifier>,
+        Arc<CapturingStore>,
+        mpsc::UnboundedReceiver<HostFrame>,
+        Arc<StdMutex<Vec<String>>>,
+        Arc<StdMutex<Vec<String>>>,
+    );
+
+    fn pkce_session(exchange: anyhow::Result<String>) -> PkceFixture {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(StdMutex::new(Vec::new()));
+        let connected_cb = connected.clone();
+        let opened = Arc::new(StdMutex::new(Vec::new()));
+        let opened_cb = opened.clone();
+        let configs = HashMap::from([(
+            "some-pkce".to_string(),
+            crate::oauth::PkceConfig {
+                authorization_endpoint: "https://some-pkce.example/auth".into(),
+                token_endpoint: "https://some-pkce.example/keys".into(),
+                scopes: Vec::new(),
+            },
+        )]);
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            store.clone(),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_connect_emitter(
+            HashSet::from(["some-pkce".to_string()]),
+            Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
+        )
+        .with_pkce(
+            configs,
+            Arc::new(FakePkceFlow {
+                result: StdMutex::new(Some(exchange)),
+            }),
+            Arc::new(FakePkceListener { state: "st".into() }),
+            Box::new(move |url| opened_cb.lock().unwrap().push(url.to_string())),
+            Box::new(fixed_pkce_challenge),
+            Duration::from_secs(30),
+        );
+        (session, notifier, store, rx, connected, opened)
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_for_a_pkce_prompt_opens_the_browser_arms_a_stored_key_and_releases() {
+        let (s, n, store, mut rx, connected, opened) = pkce_session(Ok("openrouter-key".into()));
+        s.submit_pending(pending("c1", "some-pkce"), Instant::now());
+        assert!(
+            s.is_oauth_prompt("c1"),
+            "a pkce prompt routes through the interactive sign-in path"
+        );
+
+        s.connect_oauth("c1").await;
+
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["some-pkce".to_string()],
+            "a completed pkce sign-in connects the integration live"
+        );
+        assert_eq!(
+            store.saves.lock().unwrap().last().unwrap().get("some-pkce"),
+            Some(&CredentialEntry::Stored {
+                value: "openrouter-key".into(),
+            }),
+            "the captured key is armed as a durable Stored value"
+        );
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Allow
+        );
+        let opened = opened.lock().unwrap();
+        assert_eq!(
+            opened.len(),
+            1,
+            "the browser is opened to the authorization URL"
+        );
+        assert!(opened[0].contains("code_challenge=c"), "got: {opened:?}");
+        assert_eq!(
+            n.sign_ins.lock().unwrap()[0].user_code,
+            None,
+            "a pkce sign-in card carries no code to type"
+        );
+        assert_eq!(
+            n.dismissed_sign_ins.lock().unwrap().as_slice(),
+            &["some-pkce".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_for_a_pkce_prompt_surfaces_a_failed_exchange_and_fails_held_requests() {
+        let (s, n, store, mut rx, connected, _opened) =
+            pkce_session(Err(anyhow::anyhow!("the authorization code was rejected")));
+        s.submit_pending(pending("c1", "some-pkce"), Instant::now());
+
+        s.connect_oauth("c1").await;
+
+        assert!(connected.lock().unwrap().is_empty());
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny
+        );
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("failed"))
+        );
     }
 
     fn armed_session(

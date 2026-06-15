@@ -744,19 +744,30 @@ fn render_sign_in_card(
             .color(window::TEXT_ACCENT),
     );
     ui.add_space(8.0);
-    ui.label(
-        RichText::new("Enter this code on the page that opens:")
-            .size(12.0)
-            .color(window::TEXT_MUTED),
-    );
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(&card.user_code)
-            .size(28.0)
-            .strong()
-            .monospace()
-            .color(window::TEXT_ACCENT),
-    );
+    match &card.user_code {
+        Some(user_code) => {
+            ui.label(
+                RichText::new("Enter this code on the page that opens:")
+                    .size(12.0)
+                    .color(window::TEXT_MUTED),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(user_code)
+                    .size(28.0)
+                    .strong()
+                    .monospace()
+                    .color(window::TEXT_ACCENT),
+            );
+        }
+        None => {
+            ui.label(
+                RichText::new("Your browser is opening to finish signing in…")
+                    .size(12.0)
+                    .color(window::TEXT_MUTED),
+            );
+        }
+    }
 
     ui.add_space(18.0);
     ui.add(egui::Separator::default().spacing(0.0));

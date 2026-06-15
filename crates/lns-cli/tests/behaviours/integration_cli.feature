@@ -32,3 +32,24 @@ Feature: connecting integrations from the CLI
     When the developer runs "lns integration list"
     Then "some-oauth" is listed as authenticating by oauth
     And "gitlab" is listed as authenticating by credential
+
+  Scenario: Connecting a pkce integration opens the browser and then records it
+    Given a user catalog declares the "some-pkce" pkce integration
+    And the background service is available to sign in
+    When the developer runs "lns integration connect some-pkce"
+    Then the browser is opened to the authorization page
+    And no user code is shown
+    And "some-pkce" is recorded under integrations in lns-policy.yaml
+    And lns-policy.yaml carries no credential material
+
+  Scenario: Connecting a pkce integration fails clearly when the service is unavailable
+    Given a user catalog declares the "some-pkce" pkce integration
+    And the background service is not available
+    When the developer runs "lns integration connect some-pkce"
+    Then the command fails noting the service is needed to sign in
+    And "some-pkce" is not recorded in lns-policy.yaml
+
+  Scenario: The catalog listing shows a pkce integration as authenticating by oauth
+    Given a user catalog declares the "some-pkce" pkce integration
+    When the developer runs "lns integration list"
+    Then "some-pkce" is listed as authenticating by oauth

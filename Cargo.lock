@@ -3257,6 +3257,7 @@ version = "0.0.0"
 dependencies = [
  "anstyle",
  "anyhow",
+ "base64",
  "block2 0.6.2",
  "cucumber",
  "dirs 5.0.1",
@@ -3264,6 +3265,7 @@ dependencies = [
  "eframe",
  "egui",
  "flate2",
+ "form_urlencoded",
  "futures-util",
  "hex",
  "libc",

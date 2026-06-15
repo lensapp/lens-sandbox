@@ -244,7 +244,7 @@ mod tests {
         SignInPrompt {
             credential_id: "some-oauth".into(),
             display_name: "GitHub".into(),
-            user_code: "WXYZ-1234".into(),
+            user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
@@ -260,7 +260,7 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.sign_ins.len(), 1);
         assert_eq!(snap.sign_ins[0].display_name, "GitHub");
-        assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(snap.sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
         assert_eq!(
             snap.sign_ins[0].token_fallback,
             Some(lns_policy::integrations::TokenFallback {

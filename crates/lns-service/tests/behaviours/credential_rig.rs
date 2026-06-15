@@ -11,9 +11,12 @@ use lns_service::credential_flow::providers::DefProvider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
 use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
-    CredentialStateFile, CredentialStore, JsonFileCredentialStore,
+    CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
-use lns_service::oauth::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
+use lns_service::oauth::{
+    AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
+    OauthConfig, PkceChallenge, PkceConfig, PollOutcome, TokenSet,
+};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -80,6 +83,7 @@ pub struct CredentialRig {
     pub credentials_path: PathBuf,
     pub timeout: Duration,
     pub connected: Arc<Mutex<Vec<String>>>,
+    pub opened: Arc<Mutex<Vec<String>>>,
     _tempdir: TempDir,
 }
 
@@ -130,6 +134,7 @@ impl CredentialRig {
             credentials_path,
             timeout,
             connected: Arc::new(Mutex::new(Vec::new())),
+            opened: Arc::new(Mutex::new(Vec::new())),
             _tempdir: dir,
         }
     }
@@ -296,7 +301,244 @@ impl CredentialRig {
             credentials_path,
             timeout,
             connected,
+            opened: Arc::new(Mutex::new(Vec::new())),
             _tempdir: dir,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum RigPkce {
+    Completes,
+    ExchangeFails,
+    NeverArrives,
+    Cancelled,
+}
+
+pub const RIG_PKCE_STATE: &str = "rig-state";
+
+struct RigAuthCodeFlow {
+    result: Mutex<Option<anyhow::Result<String>>>,
+}
+impl AuthCodeFlow for RigAuthCodeFlow {
+    fn exchange_code<'a>(
+        &'a self,
+        _cfg: &'a PkceConfig,
+        _code: &'a str,
+        _verifier: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move {
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("exchange scripted once")
+        })
+    }
+}
+
+enum RigCallback {
+    Returns(String),
+    Pends,
+}
+struct RigCallbackListener {
+    plan: Mutex<Option<RigCallback>>,
+}
+impl CallbackListener for RigCallbackListener {
+    fn bind(&self) -> BoxFuture<'_, anyhow::Result<Box<dyn CallbackHandle>>> {
+        let plan = self.plan.lock().unwrap().take().expect("bind once");
+        Box::pin(async move { Ok(Box::new(RigCallbackHandle { plan }) as Box<dyn CallbackHandle>) })
+    }
+}
+struct RigCallbackHandle {
+    plan: RigCallback,
+}
+impl CallbackHandle for RigCallbackHandle {
+    fn redirect_url(&self) -> &str {
+        "http://localhost:0/callback"
+    }
+    fn wait(self: Box<Self>) -> BoxFuture<'static, anyhow::Result<CallbackParams>> {
+        Box::pin(async move {
+            match self.plan {
+                RigCallback::Returns(state) => Ok(CallbackParams {
+                    code: "rig-code".into(),
+                    state,
+                }),
+                RigCallback::Pends => std::future::pending().await,
+            }
+        })
+    }
+}
+
+struct RigShared {
+    window_state: Arc<WindowState>,
+    host_values: Arc<Mutex<HashMap<String, String>>>,
+    store: Arc<FlakyCredentialStore>,
+    frames: mpsc::UnboundedReceiver<HostFrame>,
+    credentials_path: PathBuf,
+    dir: TempDir,
+}
+
+/// The notifier/store/window/emitter scaffolding shared by the pkce rigs (mirrors `new`/`oauth`).
+fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession, RigShared) {
+    let dir = TempDir::new().expect("create tempdir");
+    let credentials_path = dir.path().join("lns-credentials.json");
+    let window_state = WindowState::new();
+    let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let detector_values = host_values.clone();
+    let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+    let notifier = Arc::new(WindowCredentialNotifier::new(
+        window_state.clone(),
+        decision_tx,
+        None,
+        Arc::new(move |id: &str| detector_values.lock().unwrap().contains_key(id)),
+    ));
+    let store = Arc::new(FlakyCredentialStore::new(credentials_path.clone()));
+    let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+    let frame_tx_for_emitter = frame_tx.clone();
+    let host_values_for_emitter = host_values.clone();
+    let session = CredentialSession::with_policy_emitter(
+        state,
+        notifier,
+        store.clone(),
+        frame_tx,
+        timeout,
+        Box::new(move |state| {
+            let values = host_values_for_emitter.lock().unwrap().clone();
+            let credentials =
+                expand_credentials_with_custom(state, &[], &|id: &str| values.get(id).cloned());
+            let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
+                network: None,
+                credentials: Some(credentials),
+            }));
+        }),
+    );
+    (
+        session,
+        RigShared {
+            window_state,
+            host_values,
+            store,
+            frames: frame_rx,
+            credentials_path,
+            dir,
+        },
+    )
+}
+
+impl CredentialRig {
+    /// A rig whose session is wired with one connectable pkce integration `id` and a fake authorization-code flow + loopback listener scripted to `outcome`.
+    pub fn pkce(id: &str, outcome: RigPkce) -> Self {
+        let (exchange, callback, pkce_timeout): (anyhow::Result<String>, RigCallback, Duration) =
+            match outcome {
+                RigPkce::Completes => (
+                    Ok("openrouter-key".into()),
+                    RigCallback::Returns(RIG_PKCE_STATE.into()),
+                    Duration::from_secs(30),
+                ),
+                RigPkce::ExchangeFails => (
+                    Err(anyhow::anyhow!("the authorization code was rejected")),
+                    RigCallback::Returns(RIG_PKCE_STATE.into()),
+                    Duration::from_secs(30),
+                ),
+                RigPkce::NeverArrives => (
+                    Err(anyhow::anyhow!("must not exchange")),
+                    RigCallback::Pends,
+                    Duration::from_millis(50),
+                ),
+                RigPkce::Cancelled => (
+                    Err(anyhow::anyhow!("must not exchange")),
+                    RigCallback::Pends,
+                    Duration::from_secs(30),
+                ),
+            };
+        let (session, shared) = scaffold(CredentialStateFile::new(), Duration::from_secs(30));
+        let connected = Arc::new(Mutex::new(Vec::new()));
+        let connected_cb = connected.clone();
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let opened_cb = opened.clone();
+        let configs = HashMap::from([(
+            id.to_string(),
+            PkceConfig {
+                authorization_endpoint: format!("https://{id}.example/auth"),
+                token_endpoint: format!("https://{id}.example/api/v1/auth/keys"),
+                scopes: Vec::new(),
+            },
+        )]);
+        let session = Arc::new(
+            session
+                .with_connect_emitter(
+                    HashSet::from([id.to_string()]),
+                    Box::new(move |cid| connected_cb.lock().unwrap().push(cid.to_string())),
+                )
+                .with_pkce(
+                    configs,
+                    Arc::new(RigAuthCodeFlow {
+                        result: Mutex::new(Some(exchange)),
+                    }),
+                    Arc::new(RigCallbackListener {
+                        plan: Mutex::new(Some(callback)),
+                    }),
+                    Box::new(move |url: &str| opened_cb.lock().unwrap().push(url.to_string())),
+                    Box::new(|| PkceChallenge {
+                        verifier: "rig-verifier".into(),
+                        challenge: "rig-challenge".into(),
+                        state: RIG_PKCE_STATE.into(),
+                    }),
+                    pkce_timeout,
+                )
+                .with_oauth_display_names(HashMap::from([(
+                    id.to_string(),
+                    "OpenRouter".to_string(),
+                )])),
+        );
+        Self {
+            session,
+            window_state: shared.window_state,
+            frames: shared.frames,
+            host_values: shared.host_values,
+            store: shared.store,
+            credentials_path: shared.credentials_path,
+            timeout: Duration::from_secs(30),
+            connected,
+            opened,
+            _tempdir: shared.dir,
+        }
+    }
+
+    /// A rig with `id` already connected and its pkce key stored, plus the custom provider that injects it, so a fresh run's request to its host is armed without any sign-in.
+    pub fn pkce_connected(id: &str) -> Self {
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            id.to_string(),
+            CredentialEntry::Stored {
+                value: "openrouter-key".into(),
+            },
+        );
+        let (session, shared) = scaffold(state, Duration::from_secs(30));
+        let provider = DefProvider::new(ProviderDef {
+            id: id.into(),
+            env_var: "OPENROUTER_API_KEY".into(),
+            placeholder: "sk-or-LNSPLACEHOLDER0000000000000000".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.some-pkce.example".into(),
+                header: None,
+            }],
+        });
+        let session = Arc::new(session.with_custom_providers(Arc::new(vec![provider])));
+        Self {
+            session,
+            window_state: shared.window_state,
+            frames: shared.frames,
+            host_values: shared.host_values,
+            store: shared.store,
+            credentials_path: shared.credentials_path,
+            timeout: Duration::from_secs(30),
+            connected: Arc::new(Mutex::new(Vec::new())),
+            opened: Arc::new(Mutex::new(Vec::new())),
+            _tempdir: shared.dir,
         }
     }
 }

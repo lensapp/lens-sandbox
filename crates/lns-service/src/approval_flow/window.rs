@@ -42,12 +42,12 @@ pub struct CredentialCardPrompt {
     pub token_fallback: Option<TokenFallback>,
 }
 
-/// The device-flow verification card: which service, the code to type, and where to type it. `token_fallback` is `Some` when the integration lets a blocked user pivot to a pasted token.
+/// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the integration lets a blocked user pivot to a pasted token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignInCard {
     pub credential_id: String,
     pub display_name: String,
-    pub user_code: String,
+    pub user_code: Option<String>,
     pub verification_uri: String,
     pub token_fallback: Option<TokenFallback>,
 }
@@ -973,7 +973,7 @@ mod tests {
         SignInCard {
             credential_id: credential_id.into(),
             display_name: "GitHub".into(),
-            user_code: "WXYZ-1234".into(),
+            user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: None,
         }
@@ -987,7 +987,7 @@ mod tests {
         let snap = s.snapshot();
         assert_eq!(snap.sign_ins.len(), 1);
         assert_eq!(snap.sign_ins[0].display_name, "GitHub");
-        assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(snap.sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
         assert_eq!(s.pending_count(), 1, "a sign-in card keeps the window up");
     }
 

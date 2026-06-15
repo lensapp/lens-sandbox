@@ -5,6 +5,7 @@ pub mod forward;
 pub mod image_management;
 pub mod ipc;
 pub mod oauth_integration;
+pub mod pkce_integration;
 pub mod run_lifecycle;
 pub mod volume_management;
 pub mod volumes;

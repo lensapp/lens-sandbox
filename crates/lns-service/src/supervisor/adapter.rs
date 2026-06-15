@@ -370,6 +370,7 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 /// The per-integration oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by integration id.
 struct OauthWiring {
     configs: HashMap<String, crate::oauth::OauthConfig>,
+    pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
     display_names: HashMap<String, String>,
     token_fallbacks: HashMap<String, lns_policy::integrations::TokenFallback>,
 }
@@ -426,6 +427,14 @@ async fn start_credential_subsystem(
             oauth.configs,
             Arc::new(crate::oauth::RealDeviceFlow),
             Arc::new(crate::oauth::RealClock),
+        )
+        .with_pkce(
+            oauth.pkce_configs,
+            Arc::new(crate::oauth::RealAuthCodeFlow),
+            Arc::new(crate::oauth::RealCallbackListener),
+            Box::new(crate::browser::open),
+            Box::new(crate::oauth::PkceChallenge::generate),
+            crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
         )
         .with_oauth_display_names(oauth.display_names)
         .with_token_fallbacks(oauth.token_fallbacks),
@@ -513,6 +522,12 @@ pub(super) async fn start(
         .chain(connectable.oauth_configs.iter())
         .map(|(id, auth)| (id.clone(), crate::oauth::OauthConfig::from(auth)))
         .collect();
+    let pkce_configs: HashMap<String, crate::oauth::PkceConfig> = applied
+        .pkce_configs
+        .iter()
+        .chain(connectable.pkce_configs.iter())
+        .map(|(id, auth)| (id.clone(), crate::oauth::PkceConfig::from(auth)))
+        .collect();
     let oauth_display_names: HashMap<String, String> = catalog
         .iter()
         .filter(|i| i.oauth.is_some())
@@ -530,6 +545,7 @@ pub(super) async fn start(
         connectable_routes,
         OauthWiring {
             configs: oauth_configs,
+            pkce_configs,
             display_names: oauth_display_names,
             token_fallbacks,
         },
@@ -1114,9 +1130,11 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
-                client_id: "Iv1.x".into(),
+                flow: lns_policy::integrations::OauthFlow::Device,
+                client_id: Some("Iv1.x".into()),
                 scopes: vec![],
-                device_authorization_endpoint: "https://example.com/device/code".into(),
+                device_authorization_endpoint: Some("https://example.com/device/code".into()),
+                authorization_endpoint: None,
                 token_endpoint: "https://example.com/oauth/token".into(),
                 env_var: "SOME_OAUTH_TOKEN".into(),
                 placeholder: "some-oauth-placeholder".into(),

@@ -45,10 +45,12 @@ on the host, store a specific value at the boundary, or deny (requests carrying 
 placeholder then fail at the boundary). The decision is remembered for next time.
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
-than a pasted secret it's a self-renewing **token set** obtained by an interactive
-device sign-in (`lns integration connect <id>`), refreshed automatically and
-re-prompted when the grant can no longer be refreshed. It lives in the same per-machine
-file and is never written to `lns-policy.yaml`.
+than a pasted secret it's obtained by an interactive **sign-in**
+(`lns integration connect <id>`). A device-flow integration yields a self-renewing
+**token set**, refreshed automatically and re-prompted when the grant can no longer be
+refreshed; a pkce integration yields a **durable key** captured through your browser,
+with no refresh or expiry. Either way it lives in the same per-machine file and is
+never written to `lns-policy.yaml`.
 
 ## Injection kinds
 

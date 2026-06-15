@@ -137,6 +137,9 @@ pub enum Response {
         user_code: String,
         expires_in_secs: u64,
     },
+    OauthBrowserOpened {
+        authorization_url: String,
+    },
     OauthSignInComplete,
     OauthSignInFailed {
         reason: String,
@@ -805,6 +808,9 @@ mod tests {
                 verification_uri: "https://example.com/login/device".into(),
                 user_code: "WDJB-MJHT".into(),
                 expires_in_secs: 900,
+            },
+            Response::OauthBrowserOpened {
+                authorization_url: "https://example.com/auth?code_challenge=abc".into(),
             },
             Response::OauthSignInComplete,
             Response::OauthSignInFailed {

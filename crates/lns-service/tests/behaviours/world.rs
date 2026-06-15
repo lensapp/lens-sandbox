@@ -23,6 +23,12 @@ pub struct BehaviourWorld {
     /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
     pub oauth_id: Option<String>,
 
+    /// Set when a sign-in scenario needs the accept step to spawn the sign-in so a later step can cancel it mid-flight.
+    pub spawn_connect: bool,
+
+    /// The in-flight sign-in spawned by an accept step, awaited by the cancel step.
+    pub connect_task: Option<tokio::task::JoinHandle<()>>,
+
     pub image_env: Option<Vec<String>>,
     pub image_workdir: Option<String>,
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
