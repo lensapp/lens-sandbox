@@ -38,6 +38,7 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
         }
     };
     let resolved = config::apply_run_defaults(args, defaults);
+    let (volumes, binds) = lns_cli::cli::split_mounts(&resolved.mounts);
     world.resolved_run = Some(ResolvedRunView {
         summary: format_summary(
             &resolved,
@@ -46,12 +47,18 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
             &PolicySource::FoundInCwd,
         ),
         env: resolved.env.clone(),
-        volumes: resolved
-            .volumes
+        volumes: volumes
             .iter()
             .map(|v| {
                 let ro = if v.read_only { ":ro" } else { "" };
                 format!("{}:{}{ro}", v.name, v.target)
+            })
+            .collect(),
+        binds: binds
+            .iter()
+            .map(|b| {
+                let ro = if b.read_only { ":ro" } else { "" };
+                format!("{} -> {}{ro}", b.host_source, b.target)
             })
             .collect(),
         publish: resolved
@@ -87,7 +94,7 @@ fn resolved_env_is(world: &mut BehaviourWorld, expected: String) -> Result<(), S
     expect_exactly("env", &resolved(world)?.env, &expected)
 }
 
-#[then(regex = r#"^the resolved volumes are exactly "([^"]+)"$"#)]
+#[then(regex = r#"^the resolved volumes are exactly "([^"]*)"$"#)]
 fn resolved_volumes_are(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
     expect_exactly("volumes", &resolved(world)?.volumes, &expected)
 }

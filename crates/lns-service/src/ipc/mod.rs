@@ -529,6 +529,7 @@ mod tests {
                 detached: false,
                 published_ports: vec![],
                 volumes: vec![],
+                binds: vec![],
             }),
             Instant::now(),
         )

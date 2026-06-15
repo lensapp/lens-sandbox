@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::FromArgMatches;
-use lns_ipc::{PortPublish, VolumeMount};
+use lns_ipc::{MountSpec, PortPublish};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::RunArgs;
@@ -270,8 +270,7 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
             cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
         }
         ConfigKey::RunVolume => {
-            cfg.run.volume =
-                validated(key, values, |s| lns_ipc::VolumeMount::parse(s).map(|_| ()))?;
+            cfg.run.volume = validated(key, values, |s| lns_ipc::MountSpec::parse(s).map(|_| ()))?;
         }
         ConfigKey::RunPublish => {
             cfg.run.publish = validated(key, values, |s| {
@@ -349,7 +348,7 @@ pub struct RunDefaults {
     pub mem: Option<usize>,
     pub registry: Option<String>,
     pub env: Vec<String>,
-    pub volumes: Vec<VolumeMount>,
+    pub mounts: Vec<MountSpec>,
     pub publish: Vec<PortPublish>,
 }
 
@@ -365,11 +364,11 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
             path,
             crate::cli::parse_env_kv,
         )?,
-        volumes: parsed_defaults(
+        mounts: parsed_defaults(
             ConfigKey::RunVolume,
             &cfg.run.volume,
             path,
-            VolumeMount::parse,
+            MountSpec::parse,
         )?,
         publish: parsed_defaults(
             ConfigKey::RunPublish,
@@ -421,7 +420,7 @@ pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
         args.image = Some(resolve_default_registry(&image, args.registry.as_deref()));
     }
     args.env = merged_env(defaults.env, args.env);
-    args.volumes = merged_volumes(defaults.volumes, args.volumes);
+    args.mounts = merged_mounts(defaults.mounts, args.mounts);
     args.publish = merged_publish(defaults.publish, args.publish);
     args
 }
@@ -459,10 +458,10 @@ fn env_key(entry: &str) -> &str {
     entry.split_once('=').map_or(entry, |(key, _)| key)
 }
 
-fn merged_volumes(defaults: Vec<VolumeMount>, flags: Vec<VolumeMount>) -> Vec<VolumeMount> {
-    let mut merged: Vec<VolumeMount> = defaults
+fn merged_mounts(defaults: Vec<MountSpec>, flags: Vec<MountSpec>) -> Vec<MountSpec> {
+    let mut merged: Vec<MountSpec> = defaults
         .into_iter()
-        .filter(|d| !flags.iter().any(|f| f.target == d.target))
+        .filter(|d| !flags.iter().any(|f| f.target() == d.target()))
         .collect();
     merged.extend(flags);
     merged
@@ -742,7 +741,7 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            volumes: Vec::new(),
+            mounts: Vec::new(),
             cmd: Vec::new(),
         }
     }
@@ -757,10 +756,31 @@ mod tests {
         )
         .unwrap();
         let defaults = load_run_defaults(&path).unwrap();
-        assert_eq!(defaults.volumes[0].target, "/var/cache");
-        assert!(defaults.volumes[0].read_only);
+        match &defaults.mounts[0] {
+            MountSpec::Named(v) => {
+                assert_eq!(v.target, "/var/cache");
+                assert!(v.read_only);
+            }
+            other => panic!("expected a named volume, got {other:?}"),
+        }
         assert_eq!(defaults.publish[0].host_port, 8080);
         assert_eq!(defaults.publish[0].container_port, 80);
+    }
+
+    #[test]
+    fn load_run_defaults_parses_a_host_bind_entry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  volume:\n    - /srv/data:/data:ro\n").unwrap();
+        let defaults = load_run_defaults(&path).unwrap();
+        match &defaults.mounts[0] {
+            MountSpec::Bind(b) => {
+                assert_eq!(b.host_source, "/srv/data");
+                assert_eq!(b.target, "/data");
+                assert!(b.read_only);
+            }
+            other => panic!("expected a host bind, got {other:?}"),
+        }
     }
 
     #[test]
@@ -971,14 +991,21 @@ mod tests {
     }
 
     #[test]
-    fn merged_volumes_keeps_the_same_volume_mounted_at_two_different_targets() {
-        let mount = |spec: &str| VolumeMount::parse(spec).unwrap();
-        let merged = merged_volumes(vec![mount("cache:/a")], vec![mount("cache:/b")]);
+    fn merged_mounts_keeps_the_same_volume_mounted_at_two_different_targets() {
+        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
+        let merged = merged_mounts(vec![mount("cache:/a")], vec![mount("cache:/b")]);
         assert_eq!(
             merged.len(),
             2,
             "same name at distinct targets is not a conflict"
         );
+    }
+
+    #[test]
+    fn merged_mounts_lets_a_flag_override_the_configured_mount_at_the_same_target() {
+        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
+        let merged = merged_mounts(vec![mount("cache:/data")], vec![mount("/srv/data:/data")]);
+        assert_eq!(merged, vec![mount("/srv/data:/data")]);
     }
 
     #[test]

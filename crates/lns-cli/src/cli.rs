@@ -152,10 +152,10 @@ pub struct RunArgs {
     #[arg(
         short = 'v',
         long = "volume",
-        value_parser = lns_ipc::VolumeMount::parse,
-        help = "Attach a named volume as `name:/path[:ro]`; its contents persist across runs (Docker -v style)."
+        value_parser = lns_ipc::MountSpec::parse,
+        help = "Mount into the workload (Docker -v style): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files)."
     )]
-    pub volumes: Vec<lns_ipc::VolumeMount>,
+    pub mounts: Vec<lns_ipc::MountSpec>,
 
     #[arg(
         last = true,
@@ -175,6 +175,20 @@ impl RunArgs {
     pub fn effective_mem(&self) -> usize {
         self.mem.unwrap_or(DEFAULT_MEM_MIB)
     }
+}
+
+pub fn split_mounts(
+    mounts: &[lns_ipc::MountSpec],
+) -> (Vec<lns_ipc::VolumeMount>, Vec<lns_ipc::BindSpec>) {
+    let mut volumes = Vec::new();
+    let mut binds = Vec::new();
+    for mount in mounts {
+        match mount {
+            lns_ipc::MountSpec::Named(v) => volumes.push(v.clone()),
+            lns_ipc::MountSpec::Bind(b) => binds.push(b.clone()),
+        }
+    }
+    (volumes, binds)
 }
 
 #[derive(clap::Args)]

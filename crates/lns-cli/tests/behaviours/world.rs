@@ -36,6 +36,7 @@ pub struct ResolvedRunView {
     pub summary: String,
     pub env: Vec<String>,
     pub volumes: Vec<String>,
+    pub binds: Vec<String>,
     pub publish: Vec<String>,
 }
 
