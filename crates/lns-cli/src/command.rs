@@ -2,7 +2,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgMatches, CommandFactory};
 
 use crate::cli::Cli;
@@ -12,9 +12,19 @@ pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<i32>> + 'a>>;
 /// Real-I/O primitives a command's wiring draws from; faked in unit tests of the measured commands.
 pub struct RunCtx<'a> {
     pub debug: bool,
-    pub cwd: PathBuf,
+    pub cwd: Option<PathBuf>,
     pub input: &'a mut dyn std::io::BufRead,
     pub out: &'a mut dyn std::io::Write,
+}
+
+impl RunCtx<'_> {
+    /// The directory a command edits relative to: the injected one in tests, else the process cwd.
+    pub fn cwd(&self) -> Result<PathBuf> {
+        match &self.cwd {
+            Some(cwd) => Ok(cwd.clone()),
+            None => std::env::current_dir().context("reading current directory"),
+        }
+    }
 }
 
 /// One `lns <name>` subcommand, declared entirely in its own module and registered in `registry()`.
@@ -80,6 +90,32 @@ where
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn cwd_prefers_an_injected_directory() {
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = RunCtx {
+            debug: false,
+            cwd: Some(PathBuf::from("/injected")),
+            input: &mut input,
+            out: &mut out,
+        };
+        assert_eq!(ctx.cwd().unwrap(), PathBuf::from("/injected"));
+    }
+
+    #[test]
+    fn cwd_falls_back_to_the_process_directory_when_unset() {
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = RunCtx {
+            debug: false,
+            cwd: None,
+            input: &mut input,
+            out: &mut out,
+        };
+        assert_eq!(ctx.cwd().unwrap(), std::env::current_dir().unwrap());
+    }
 
     #[test]
     fn every_spec_name_is_unique() {

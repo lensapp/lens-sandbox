@@ -30,14 +30,13 @@ pub async fn run_from_matches(matches: clap::ArgMatches, debug: bool) -> Result<
     if spec.announces_update_check && update_check::announce_enabled(|k| std::env::var(k).ok()) {
         let _ = update_check::real::run_announce();
     }
-    let cwd = std::env::current_dir()?;
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let ctx = command::RunCtx {
         debug,
-        cwd,
+        cwd: None,
         input: &mut input,
         out: &mut out,
     };

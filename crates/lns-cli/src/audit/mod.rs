@@ -198,7 +198,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let ctx = crate::command::RunCtx {
             debug: false,
-            cwd: std::path::PathBuf::from("/"),
+            cwd: None,
             input: &mut input,
             out: &mut out,
         };
