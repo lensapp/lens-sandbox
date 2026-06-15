@@ -1537,6 +1537,7 @@ mod tests {
             "some-oauth".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.test".into(),
+                client_secret: String::new(),
                 scopes: vec![],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),
@@ -1678,6 +1679,7 @@ mod tests {
         let flow = FakeFlow::polling(vec![]);
         let cfg = crate::oauth::OauthConfig {
             client_id: "Iv1.test".into(),
+            client_secret: String::new(),
             scopes: vec![],
             device_authorization_endpoint: "https://example.com/device/code".into(),
             token_endpoint: "https://example.com/oauth/token".into(),
@@ -1712,6 +1714,7 @@ mod tests {
             "some-oauth".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.test".into(),
+                client_secret: String::new(),
                 scopes: vec!["repo".into()],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),

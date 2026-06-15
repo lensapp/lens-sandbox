@@ -1132,6 +1132,7 @@ mod tests {
             oauth: Some(OauthAuth {
                 flow: lns_policy::integrations::OauthFlow::Device,
                 client_id: Some("Iv1.x".into()),
+                client_secret: None,
                 scopes: vec![],
                 device_authorization_endpoint: Some("https://example.com/device/code".into()),
                 authorization_endpoint: None,
@@ -1433,6 +1434,7 @@ mod tests {
             "acme".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.acme".into(),
+                client_secret: String::new(),
                 scopes: vec![],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),
@@ -1499,6 +1501,7 @@ mod tests {
             "acme".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.acme".into(),
+                client_secret: String::new(),
                 scopes: vec![],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),
@@ -1574,6 +1577,7 @@ mod tests {
             "acme".to_string(),
             crate::oauth::OauthConfig {
                 client_id: "Iv1.acme".into(),
+                client_secret: String::new(),
                 scopes: vec![],
                 device_authorization_endpoint: "https://example.com/device/code".into(),
                 token_endpoint: "https://example.com/oauth/token".into(),
@@ -1629,6 +1633,7 @@ mod tests {
         use crate::oauth::DeviceFlow;
         let cfg = crate::oauth::OauthConfig {
             client_id: "x".into(),
+            client_secret: String::new(),
             scopes: vec![],
             device_authorization_endpoint: "https://example.com/device/code".into(),
             token_endpoint: "https://example.com/oauth/token".into(),

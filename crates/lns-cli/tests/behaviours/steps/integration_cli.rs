@@ -106,6 +106,7 @@ fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
             oauth: Some(OauthAuth {
                 flow: OauthFlow::Device,
                 client_id: Some("Iv1.some-oauth".into()),
+                client_secret: None,
                 scopes: vec!["repo".into()],
                 device_authorization_endpoint: Some("https://example.com/device/code".into()),
                 authorization_endpoint: None,
@@ -149,6 +150,7 @@ fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
             oauth: Some(OauthAuth {
                 flow: OauthFlow::Pkce,
                 client_id: None,
+                client_secret: None,
                 scopes: Vec::new(),
                 device_authorization_endpoint: None,
                 authorization_endpoint: Some("https://api.some-pkce.example/auth".into()),

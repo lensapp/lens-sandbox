@@ -32,6 +32,7 @@ pub struct RealDeviceFlow;
 struct DeviceCodeResp {
     device_code: String,
     user_code: String,
+    #[serde(alias = "verification_url")]
     verification_uri: String,
     interval: Option<u64>,
     expires_in: Option<u64>,
@@ -75,6 +76,17 @@ fn parse_json<T: DeserializeOwned>(
         .with_context(|| format!("parsing response from {url} (HTTP {status})"))
 }
 
+/// Confidential device clients (e.g. Google) must send `client_secret` in the token exchange; public clients (e.g. GitHub) leave it empty and omit it.
+fn with_client_secret<'a>(
+    mut form: Vec<(&'a str, &'a str)>,
+    secret: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    if !secret.is_empty() {
+        form.push(("client_secret", secret));
+    }
+    form
+}
+
 impl DeviceFlow for RealDeviceFlow {
     fn request_device_code<'a>(
         &'a self,
@@ -113,11 +125,14 @@ impl DeviceFlow for RealDeviceFlow {
         Box::pin(async move {
             let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
-                &[
-                    ("client_id", cfg.client_id.as_str()),
-                    ("device_code", device_code),
-                    ("grant_type", DEVICE_CODE_GRANT),
-                ],
+                &with_client_secret(
+                    vec![
+                        ("client_id", cfg.client_id.as_str()),
+                        ("device_code", device_code),
+                        ("grant_type", DEVICE_CODE_GRANT),
+                    ],
+                    &cfg.client_secret,
+                ),
             )
             .await?;
             let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
@@ -149,11 +164,14 @@ impl DeviceFlow for RealDeviceFlow {
         Box::pin(async move {
             let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
-                &[
-                    ("client_id", cfg.client_id.as_str()),
-                    ("grant_type", "refresh_token"),
-                    ("refresh_token", refresh_token),
-                ],
+                &with_client_secret(
+                    vec![
+                        ("client_id", cfg.client_id.as_str()),
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh_token),
+                    ],
+                    &cfg.client_secret,
+                ),
             )
             .await?;
             let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
@@ -294,5 +312,39 @@ impl CallbackHandle for RealCallbackHandle {
             let _ = write_half.flush().await;
             params
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_confidential_client_appends_its_secret_to_the_token_form() {
+        let form = with_client_secret(vec![("client_id", "some-id")], "some-secret");
+        assert_eq!(
+            form,
+            vec![("client_id", "some-id"), ("client_secret", "some-secret")]
+        );
+    }
+
+    #[test]
+    fn a_public_client_omits_the_secret_from_the_token_form() {
+        let form = with_client_secret(vec![("client_id", "some-id")], "");
+        assert_eq!(form, vec![("client_id", "some-id")]);
+    }
+
+    #[test]
+    fn a_device_code_response_accepts_a_providers_nonstandard_verification_url_key() {
+        let body = r#"{"device_code":"some-device","user_code":"SOME-CODE","verification_url":"https://example.com/device"}"#;
+        let d: DeviceCodeResp = serde_json::from_str(body).unwrap();
+        assert_eq!(d.verification_uri, "https://example.com/device");
+    }
+
+    #[test]
+    fn a_device_code_response_accepts_the_rfc8628_verification_uri_key() {
+        let body = r#"{"device_code":"some-device","user_code":"SOME-CODE","verification_uri":"https://example.com/device"}"#;
+        let d: DeviceCodeResp = serde_json::from_str(body).unwrap();
+        assert_eq!(d.verification_uri, "https://example.com/device");
     }
 }
