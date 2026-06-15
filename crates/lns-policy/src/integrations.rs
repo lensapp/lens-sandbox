@@ -895,6 +895,42 @@ mod tests {
     }
 
     #[test]
+    fn bundled_catalog_ships_openrouter_as_a_pkce_integration() {
+        let or = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "openrouter")
+            .expect("openrouter is bundled");
+        assert_eq!(or.auth_kind, AuthKind::Oauth);
+        let oauth = or.oauth.as_ref().expect("oauth block present");
+        assert_eq!(
+            oauth.flow,
+            OauthFlow::Pkce,
+            "OpenRouter signs in by the browser-redirect PKCE flow"
+        );
+        assert_eq!(oauth.env_var, "OPENROUTER_API_KEY");
+        assert!(
+            oauth.client_id.is_none(),
+            "OpenRouter's PKCE flow takes no client id"
+        );
+        assert_eq!(
+            oauth.authorization_endpoint.as_deref(),
+            Some("https://openrouter.ai/auth")
+        );
+        assert_eq!(
+            oauth.token_endpoint,
+            "https://openrouter.ai/api/v1/auth/keys"
+        );
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "openrouter.ai"),
+            "OpenRouter keys are sent as Authorization: Bearer, got: {:?}",
+            oauth.injections
+        );
+    }
+
+    #[test]
     fn no_bundled_integration_commits_a_literal_oauth_client_id() {
         let raw = include_str!("integrations.yaml");
         for line in raw.lines() {

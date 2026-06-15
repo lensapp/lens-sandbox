@@ -102,3 +102,17 @@ integrations:
       injections:
         - kind: uri_placeholder
           domain: api.telegram.org
+  - id: openrouter
+    name: OpenRouter
+    authKind: oauth
+    routes:
+      - match: openrouter.ai
+    oauth:
+      flow: pkce
+      authorizationEndpoint: https://openrouter.ai/auth
+      tokenEndpoint: https://openrouter.ai/api/v1/auth/keys
+      envVar: OPENROUTER_API_KEY
+      placeholder: sk-or-v1-LNSPLACEHOLDER0000000000000000000000000000000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: openrouter.ai
