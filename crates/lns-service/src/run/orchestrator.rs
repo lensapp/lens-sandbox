@@ -101,8 +101,14 @@ async fn orchestrate(
         Ok::<_, anyhow::Error>((guest_tools, session, initrd))
     };
     let image_fut = async {
-        let image =
-            ingest::run(args.image.as_deref(), &args.cmd, &layer_cache, image::pull).await?;
+        let image = ingest::run(
+            args.image.as_deref(),
+            &args.cmd,
+            &image::want_arch(),
+            &layer_cache,
+            image::pull,
+        )
+        .await?;
         log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(image)
     };
