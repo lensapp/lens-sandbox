@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::Instrument;
@@ -18,6 +18,45 @@ use lns_policy::Policy;
 mod adapter;
 
 pub const VSOCK_PORT: u32 = 1024;
+
+const MAX_AUDIT_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_AUDIT_EVENTS_PER_RUN: u32 = 100_000;
+const MAX_AUDIT_BYTES_PER_RUN: usize = 64 * 1024 * 1024;
+
+#[derive(Clone)]
+pub(super) struct AuditBudget {
+    inner: Arc<Mutex<BudgetState>>,
+}
+
+struct BudgetState {
+    events_remaining: u32,
+    bytes_remaining: usize,
+}
+
+impl AuditBudget {
+    pub(super) fn with_defaults() -> Self {
+        Self::new(MAX_AUDIT_EVENTS_PER_RUN, MAX_AUDIT_BYTES_PER_RUN)
+    }
+
+    fn new(events_remaining: u32, bytes_remaining: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BudgetState {
+                events_remaining,
+                bytes_remaining,
+            })),
+        }
+    }
+
+    pub(super) fn try_charge(&self, line_len: usize) -> bool {
+        let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.events_remaining == 0 || line_len > state.bytes_remaining {
+            return false;
+        }
+        state.events_remaining -= 1;
+        state.bytes_remaining -= line_len;
+        true
+    }
+}
 
 fn audit_path(run_id: u32) -> Result<PathBuf> {
     let path = lns_ipc::audit_log_for_run(&format!("{run_id}"))?;
@@ -148,12 +187,14 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     chain: &mut lns_ipc::AuditChain,
     audit_file: &mut L,
     anchor_sink: &mut S,
+    budget: &AuditBudget,
 ) -> Result<bool> {
     let text = match msg {
         Message::Text(text) => text,
         Message::Close(_) => return Ok(true),
         _ => return Ok(false),
     };
+    let frame_len = text.len();
     // Dispatch on the parsed top-level `type` so a `request_pending` embedding the literal `"type":"audit_event"` can't be misrouted into the audit chain.
     let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(text.as_str()) else {
         return Ok(false);
@@ -164,6 +205,12 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
             let Some(stamped) = stamp_guest_audit_event(obj) else {
                 return Ok(false);
             };
+            if !budget.try_charge(frame_len) {
+                crate::log::warn!(
+                    "per-run audit-event budget exhausted; dropping guest audit_event"
+                );
+                return Ok(false);
+            }
             let bytes = chain.augment_obj(stamped);
             write_chain_line(&bytes, chain, audit_file, anchor_sink).await?;
         }
@@ -184,6 +231,18 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
         _ => {}
     }
     Ok(false)
+}
+
+pub(super) async fn supersede_connection(
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(shutdown) = shutdown {
+        let _ = shutdown.send(());
+    }
+    if let Some(task) = task {
+        let _ = task.await;
+    }
 }
 
 pub(super) fn seed_frames(
@@ -579,6 +638,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -618,6 +678,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -656,6 +717,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -683,6 +745,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -784,6 +847,7 @@ mod tests {
         let mut anchor = MemAnchor::default();
 
         let raw = r#"{"type":"credential_pending","id":"c1","credentialId":"some-provider","action":"use of some-provider placeholder","reason":"placeholder-unauthorized"}"#;
+        let exhausted_budget = AuditBudget::new(0, 0);
         let stop = handle_inbound(
             Message::Text(raw.into()),
             &session,
@@ -791,6 +855,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &exhausted_budget,
         )
         .await
         .unwrap();
@@ -839,6 +904,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .unwrap();
@@ -863,6 +929,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -887,6 +954,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("handle_inbound");
@@ -913,6 +981,7 @@ mod tests {
                 &mut chain,
                 &mut log,
                 &mut anchor,
+                &AuditBudget::with_defaults(),
             )
             .await
             .expect("handle_inbound");
@@ -935,6 +1004,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("malformed audit_event must NOT propagate as an error");
@@ -971,6 +1041,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .unwrap();
@@ -1001,6 +1072,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &AuditBudget::with_defaults(),
         )
         .await
         .expect("unknown type must not error");
@@ -1071,5 +1143,98 @@ mod tests {
         let e =
             tungstenite::Error::Protocol(tungstenite::error::ProtocolError::HandshakeIncomplete);
         assert!(!is_expected_close(&e));
+    }
+
+    #[test]
+    fn audit_budget_rejects_once_the_event_ceiling_is_reached() {
+        let budget = AuditBudget::new(2, 1_000_000);
+        assert!(budget.try_charge(10));
+        assert!(budget.try_charge(10));
+        assert!(
+            !budget.try_charge(10),
+            "a run cannot append past its per-run event ceiling"
+        );
+    }
+
+    #[test]
+    fn audit_budget_rejects_once_the_byte_ceiling_would_be_exceeded() {
+        let budget = AuditBudget::new(100, 50);
+        assert!(budget.try_charge(40));
+        assert!(
+            !budget.try_charge(20),
+            "a charge crossing the byte ceiling is refused and consumes nothing"
+        );
+        assert!(
+            budget.try_charge(10),
+            "a smaller charge that still fits is accepted after the refusal"
+        );
+    }
+
+    #[test]
+    fn audit_budget_is_shared_across_clones_so_the_ceiling_is_per_run_not_per_connection() {
+        let budget = AuditBudget::new(2, 1_000_000);
+        let reconnect = budget.clone();
+        assert!(budget.try_charge(10));
+        assert!(
+            reconnect.try_charge(10),
+            "a reconnecting connection draws from the same per-run budget"
+        );
+        assert!(
+            !reconnect.try_charge(10),
+            "reconnecting cannot mint a fresh budget — the per-run ceiling holds across connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_audit_event_over_budget_is_dropped_without_fsync_or_anchor() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        let budget = AuditBudget::new(0, 1_000_000);
+        let stop = handle_inbound(
+            Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut chain,
+            &mut log,
+            &mut anchor,
+            &budget,
+        )
+        .await
+        .expect("handle_inbound");
+        assert!(
+            !stop,
+            "dropping an over-budget event must not kill the relay"
+        );
+        assert_eq!(log.syncs, 0, "an over-budget audit_event is never appended");
+        assert!(log.bytes.is_empty());
+        assert!(
+            anchor.anchors.is_empty(),
+            "an over-budget drop must not advance the anchor"
+        );
+    }
+
+    #[tokio::test]
+    async fn supersede_connection_waits_for_the_prior_task_to_finish_before_returning() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_c = finished.clone();
+        let handle = tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            finished_c.store(true, Ordering::SeqCst);
+        });
+        supersede_connection(Some(shutdown_tx), Some(handle)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the prior connection must fully relinquish the chain — finishing any in-flight \
+             append — before the superseding connection proceeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn supersede_connection_without_a_prior_connection_is_a_noop() {
+        supersede_connection(None, None).await;
     }
 }
