@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CredentialEntry {
     HostDetect,
@@ -24,6 +24,25 @@ pub enum CredentialEntry {
 }
 
 pub type CredentialStateFile = HashMap<String, CredentialEntry>;
+
+impl std::fmt::Debug for CredentialEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialEntry::HostDetect => f.write_str("HostDetect"),
+            CredentialEntry::Stored { .. } => f
+                .debug_struct("Stored")
+                .field("value", &"<redacted>")
+                .finish(),
+            CredentialEntry::Deny => f.write_str("Deny"),
+            CredentialEntry::Oauth { expires_at, .. } => f
+                .debug_struct("Oauth")
+                .field("access_token", &"<redacted>")
+                .field("refresh_token", &"<redacted>")
+                .field("expires_at", expires_at)
+                .finish(),
+        }
+    }
+}
 
 pub trait CredentialStore: Send + Sync {
     fn load(&self) -> io::Result<CredentialStateFile>;
@@ -90,6 +109,38 @@ mod tests {
         let entry = CredentialEntry::HostDetect;
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v, json!({"kind": "host-detect"}));
+    }
+
+    #[test]
+    fn debug_redacts_secret_values_for_every_variant() {
+        let stored = format!(
+            "{:?}",
+            CredentialEntry::Stored {
+                value: "sk-secret".into()
+            }
+        );
+        assert!(!stored.contains("sk-secret"), "{stored}");
+        assert!(stored.contains("redacted"), "{stored}");
+
+        let oauth = format!(
+            "{:?}",
+            CredentialEntry::Oauth {
+                access_token: "gho_secret".into(),
+                refresh_token: "ghr_secret".into(),
+                expires_at: 123,
+            }
+        );
+        assert!(
+            !oauth.contains("gho_secret") && !oauth.contains("ghr_secret"),
+            "{oauth}"
+        );
+        assert!(
+            oauth.contains("123"),
+            "a non-secret expiry stays visible: {oauth}"
+        );
+
+        assert_eq!(format!("{:?}", CredentialEntry::HostDetect), "HostDetect");
+        assert_eq!(format!("{:?}", CredentialEntry::Deny), "Deny");
     }
 
     #[test]
