@@ -69,46 +69,6 @@ pub struct ConfigKeyArgs {
 }
 
 #[derive(clap::Args)]
-pub struct VolumeArgs {
-    #[command(subcommand)]
-    pub command: VolumeCommand,
-}
-
-#[derive(Subcommand)]
-pub enum VolumeCommand {
-    #[command(about = "List named volumes with their on-disk size, age, and holder.")]
-    Ls,
-    #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
-    Create(VolumeNameArg),
-    #[command(about = "Show a volume's details as JSON.")]
-    Inspect(VolumeNameArg),
-    #[command(about = "Remove a named volume; refused while a run holds it.")]
-    Rm(VolumeNameArg),
-    #[command(about = "Remove every volume not attached to a running sandbox.")]
-    Prune(VolumePruneArgs),
-}
-
-#[derive(clap::Args)]
-pub struct VolumeNameArg {
-    #[arg(
-        value_parser = parse_volume_name,
-        help = "Volume name, as used with `lns run -v name:/path`."
-    )]
-    pub name: String,
-}
-
-#[derive(clap::Args)]
-pub struct VolumePruneArgs {
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = false,
-        help = "Skip the confirmation prompt."
-    )]
-    pub force: bool,
-}
-
-#[derive(clap::Args)]
 pub struct ImageArgs {
     #[command(subcommand)]
     pub command: ImageCommand,
@@ -141,11 +101,6 @@ pub struct ImagePruneArgs {
         help = "Skip the confirmation prompt."
     )]
     pub force: bool,
-}
-
-fn parse_volume_name(s: &str) -> Result<String, String> {
-    lns_ipc::validate_volume_name(s)?;
-    Ok(s.to_string())
 }
 
 #[derive(clap::Args)]
