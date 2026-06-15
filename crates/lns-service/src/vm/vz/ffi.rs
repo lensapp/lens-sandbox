@@ -220,6 +220,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
     let composefs_descriptor = spec.composefs_descriptor.clone();
     let upper_disk = spec.upper_disk.clone();
     let volumes = spec.volumes.clone();
+    let binds = spec.binds.clone();
     let vsock = spec.vsock;
     let connector_tx = spec.connector_tx;
     let console_fd = spec.console_fd;
@@ -237,6 +238,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             composefs_descriptor: &composefs_descriptor,
             upper_disk: &upper_disk,
             volumes: &volumes,
+            binds: &binds,
             vsock: vsock.as_ref(),
             console_fd,
             cmdline: &cmdline,
@@ -275,6 +277,7 @@ struct BuildInputs<'a> {
     composefs_descriptor: &'a Path,
     upper_disk: &'a Path,
     volumes: &'a [crate::vm::VolumeAttachment],
+    binds: &'a [crate::vm::BindAttachment],
     vsock: Option<&'a crate::vm::VsockChannel>,
     console_fd: std::os::fd::RawFd,
     cmdline: &'a str,
@@ -445,8 +448,38 @@ unsafe fn build_config(
             &NSString::from_str(inputs.content_tag),
         );
         fs_dev.setShare(Some(&*single_share));
+        let mut share_devs: Vec<Retained<VZDirectorySharingDeviceConfiguration>> =
+            vec![Retained::cast_unchecked(fs_dev)];
+        for (i, bind) in inputs.binds.iter().enumerate() {
+            if !bind.host_source.exists() {
+                bail!(
+                    "host bind source does not exist: {}",
+                    bind.host_source.display()
+                );
+            }
+            let bind_url = NSURL::fileURLWithPath_isDirectory(
+                &NSString::from_str(&bind.host_source.to_string_lossy()),
+                true,
+            );
+            let bind_shared = VZSharedDirectory::initWithURL_readOnly(
+                VZSharedDirectory::alloc(),
+                &bind_url,
+                bind.read_only,
+            );
+            let bind_single: Retained<VZDirectoryShare> =
+                Retained::cast_unchecked(VZSingleDirectoryShare::initWithDirectory(
+                    VZSingleDirectoryShare::alloc(),
+                    &bind_shared,
+                ));
+            let bind_dev = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                VZVirtioFileSystemDeviceConfiguration::alloc(),
+                &NSString::from_str(&crate::vm::bind_share_tag(i)),
+            );
+            bind_dev.setShare(Some(&*bind_single));
+            share_devs.push(Retained::cast_unchecked(bind_dev));
+        }
         let dirs: Retained<NSArray<VZDirectorySharingDeviceConfiguration>> =
-            NSArray::from_retained_slice(&[Retained::cast_unchecked(fs_dev)]);
+            NSArray::from_retained_slice(&share_devs);
         config.setDirectorySharingDevices(&dirs);
 
         // Vz preserves array order in setStorageDevices; upper_disk must be first (→ /dev/vda) and composefs_descriptor second (→ /dev/vdb) to match the cmdline keys.
