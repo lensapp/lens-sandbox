@@ -509,4 +509,14 @@ mod tests {
         let p = CmdlineParams::parse("upper.dev=/dev/vda");
         assert!(p.binds.is_empty());
     }
+
+    #[test]
+    fn a_stray_bind_field_with_neither_tag_nor_target_is_skipped() {
+        let p = CmdlineParams::parse("bind.0.ro=1");
+        assert!(p.binds.is_empty());
+        assert!(
+            p.incomplete_binds.is_empty(),
+            "a bare ro flag is not a truncated bind"
+        );
+    }
 }

@@ -2091,14 +2091,14 @@ mod tests {
             "/newroot",
         )
         .unwrap();
+        let calls = sys.calls();
         assert!(
-            sys.calls().iter().any(
+            calls.iter().any(
                 |c| matches!(c, Call::Mount { source, target, fstype, flags, .. }
                 if source == "lns-bind-0" && target == "/newroot/work" && fstype == "virtiofs"
                 && *flags == MountFlags::none().nosuid().nodev())
             ),
-            "expected a writable virtiofs mount at /newroot/work: {:?}",
-            sys.calls()
+            "expected a writable virtiofs mount at /newroot/work: {calls:?}"
         );
     }
 
@@ -2128,13 +2128,13 @@ mod tests {
             "/newroot",
         )
         .unwrap();
+        let calls = sys.calls();
         assert!(
-            sys.calls()
+            calls
                 .iter()
                 .any(|c| matches!(c, Call::Mount { source, target, flags, .. }
                 if source == DEV_NULL && target == "/newroot/work/.env" && flags.bind)),
-            "a dropped file must be masked by a /dev/null bind: {:?}",
-            sys.calls()
+            "a dropped file must be masked by a /dev/null bind: {calls:?}"
         );
     }
 
@@ -2147,14 +2147,14 @@ mod tests {
             "/newroot",
         )
         .unwrap();
+        let calls = sys.calls();
         assert!(
-            sys.calls()
+            calls
                 .iter()
                 .any(|c| matches!(c, Call::Mount { target, fstype, data, .. }
                 if target == "/newroot/work/.ssh" && fstype == "tmpfs"
                 && data.as_deref() == Some("mode=0000,size=4k"))),
-            "a dropped directory must be masked by an empty tmpfs: {:?}",
-            sys.calls()
+            "a dropped directory must be masked by an empty tmpfs: {calls:?}"
         );
     }
 

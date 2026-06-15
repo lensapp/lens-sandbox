@@ -280,6 +280,21 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn record_bind_attached_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_bind_attached(123, "/Users/me/proj", "/work").unwrap();
+        let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
+        assert!(
+            content.contains("\"source\":\"/Users/me/proj\""),
+            "{content}"
+        );
+        assert!(content.contains("\"target\":\"/work\""), "{content}");
+    }
+
+    #[test]
     fn successive_events_form_a_valid_hash_chain() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
