@@ -9,16 +9,31 @@ use std::path::Path;
 #[derive(Debug)]
 pub enum VerifyOutcome {
     Ok { line_count: usize },
+    NoAnchor { line_count: usize },
+    AnchorUnreadable { line_count: usize, reason: String },
     Broken { at_line: usize, reason: String },
     Truncated { reason: String },
+}
+
+enum AnchorState {
+    Present(Anchor),
+    Absent,
+    Unreadable(String),
 }
 
 fn anchor_path_for(path: &Path) -> std::path::PathBuf {
     path.with_file_name("audit.anchor")
 }
 
-fn read_anchor(path: &Path) -> Option<Anchor> {
-    Anchor::parse(&std::fs::read_to_string(path).ok()?).ok()
+fn read_anchor_state(path: &Path) -> AnchorState {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match Anchor::parse(&text) {
+            Ok(anchor) => AnchorState::Present(anchor),
+            Err(e) => AnchorState::Unreadable(format!("corrupt anchor: {e}")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AnchorState::Absent,
+        Err(e) => AnchorState::Unreadable(e.to_string()),
+    }
 }
 
 struct ChainWalk {
@@ -92,21 +107,21 @@ fn check_line(line: &str, idx: usize, expected_prev: &str) -> Option<VerifyOutco
 }
 
 pub fn verify_chain(path: &Path) -> Result<VerifyOutcome> {
-    verify_chain_against_anchor(path, read_anchor(&anchor_path_for(path)))
+    verify_chain_against_anchor(path, read_anchor_state(&anchor_path_for(path)))
 }
 
-fn verify_chain_against_anchor(path: &Path, anchor: Option<Anchor>) -> Result<VerifyOutcome> {
+fn verify_chain_against_anchor(path: &Path, anchor: AnchorState) -> Result<VerifyOutcome> {
     let walk = match walk_chain(path)? {
         Ok(w) => w,
         Err(broken) => return Ok(broken),
     };
-    if let Some(anchor) = anchor
-        && let Some(truncated) = check_anchor(&walk, &anchor)
-    {
-        return Ok(truncated);
-    }
-    Ok(VerifyOutcome::Ok {
-        line_count: walk.line_count as usize,
+    let line_count = walk.line_count as usize;
+    Ok(match anchor {
+        AnchorState::Present(anchor) => {
+            check_anchor(&walk, &anchor).unwrap_or(VerifyOutcome::Ok { line_count })
+        }
+        AnchorState::Absent => VerifyOutcome::NoAnchor { line_count },
+        AnchorState::Unreadable(reason) => VerifyOutcome::AnchorUnreadable { line_count, reason },
     })
 }
 
@@ -197,13 +212,14 @@ mod tests {
     fn good_chain_reports_ok_with_count() {
         let d = tempfile::TempDir::new().unwrap();
         let path = d.path().join("audit.jsonl");
-        write_chain_to(
+        let anchor = write_chain_to(
             &path,
             &[
                 r#"{"type":"audit_event","seq":1}"#,
                 r#"{"type":"audit_event","seq":2}"#,
             ],
         );
+        write_anchor_beside(&path, &anchor);
         assert_eq!(expect_ok(verify_chain(&path).unwrap()), 2);
     }
 
@@ -238,11 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_is_ok() {
+    fn an_empty_log_without_an_anchor_reports_no_anchor() {
         let d = tempfile::TempDir::new().unwrap();
         let path = d.path().join("audit.jsonl");
         std::fs::write(&path, "").unwrap();
-        assert_eq!(expect_ok(verify_chain(&path).unwrap()), 0);
+        let outcome = verify_chain(&path).unwrap();
+        assert!(
+            matches!(outcome, VerifyOutcome::NoAnchor { line_count: 0 }),
+            "an empty log with no anchor must report NoAnchor: {outcome:?}"
+        );
     }
 
     #[test]
@@ -329,12 +349,45 @@ mod tests {
     }
 
     #[test]
-    fn a_garbage_anchor_file_is_ignored_and_the_chain_still_verifies() {
+    fn a_missing_anchor_is_surfaced_as_no_anchor_not_clean_ok() {
+        let d = tempfile::TempDir::new().unwrap();
+        let path = d.path().join("audit.jsonl");
+        write_chain_to(&path, &[r#"{"type":"audit_event","seq":1}"#]);
+        let outcome = verify_chain(&path).unwrap();
+        assert!(
+            matches!(outcome, VerifyOutcome::NoAnchor { line_count: 1 }),
+            "a chain with no anchor beside it must report NoAnchor: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_anchor_file_is_surfaced_as_anchor_unreadable() {
         let d = tempfile::TempDir::new().unwrap();
         let path = d.path().join("audit.jsonl");
         write_chain_to(&path, &[r#"{"type":"audit_event","seq":1}"#]);
         std::fs::write(anchor_path_for(&path), "not-an-anchor").unwrap();
-        assert_eq!(expect_ok(verify_chain(&path).unwrap()), 1);
+        let outcome = verify_chain(&path).unwrap();
+        assert!(
+            matches!(&outcome, VerifyOutcome::AnchorUnreadable { line_count: 1, reason } if reason.contains("corrupt")),
+            "a garbage anchor must report AnchorUnreadable, never clean Ok: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_anchor_io_error_is_surfaced_as_anchor_unreadable() {
+        let d = tempfile::TempDir::new().unwrap();
+        let path = d.path().join("audit.jsonl");
+        write_chain_to(&path, &[r#"{"type":"audit_event","seq":1}"#]);
+        std::fs::create_dir(anchor_path_for(&path)).unwrap();
+        let outcome = verify_chain(&path).unwrap();
+        let unreadable = matches!(
+            &outcome,
+            VerifyOutcome::AnchorUnreadable { line_count: 1, .. }
+        );
+        assert!(
+            unreadable,
+            "an anchor path that cannot be read must report AnchorUnreadable: {outcome:?}"
+        );
     }
 
     #[test]
@@ -360,6 +413,7 @@ mod tests {
         payload.push_str(std::str::from_utf8(&line2).unwrap());
         payload.push('\n');
         std::fs::write(&path, payload).unwrap();
+        write_anchor_beside(&path, &c.anchor().expect("chain has events"));
         assert_eq!(expect_ok(verify_chain(&path).unwrap()), 2);
     }
 }
