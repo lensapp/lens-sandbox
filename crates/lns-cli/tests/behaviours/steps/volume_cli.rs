@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::cli::VolumeArgs;
 use lns_cli::command::parse_args;
 use lns_cli::integration::LocalBoxFuture;
+use lns_cli::volume::VolumeArgs;
 use lns_cli::volume::{self, VolumeService};
 use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};
 
