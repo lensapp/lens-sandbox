@@ -107,12 +107,12 @@ impl PullProgress {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn want_arch() -> oci_spec::image::Arch {
+pub(crate) fn want_arch() -> oci_spec::image::Arch {
     oci_spec::image::Arch::ARM64
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn want_arch() -> oci_spec::image::Arch {
+pub(crate) fn want_arch() -> oci_spec::image::Arch {
     oci_spec::image::Arch::Amd64
 }
 
