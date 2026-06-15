@@ -303,6 +303,7 @@ where
             _ = early_exit_rx.recv() => {
                 break exit_code_after_detach(
                     detach,
+                    tty,
                     &mut stream,
                     stdout,
                     stderr,
@@ -324,7 +325,8 @@ where
                         stderr.flush().await.ok();
                     }
                     WireFrame::Json(Response::RunLog { level, verb, message }) => {
-                        render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
+                        render_attached_run_log(level, verb.as_deref(), &message, tty, stderr)
+                            .await?;
                     }
                     WireFrame::Json(Response::RunProgress { .. }) => {}
                     WireFrame::Json(Response::RunExit { code }) => break code,
@@ -362,6 +364,7 @@ async fn render_attached_run_log<E>(
     level: LogLevel,
     verb: Option<&str>,
     message: &str,
+    tty: bool,
     stderr: &mut E,
 ) -> Result<()>
 where
@@ -373,13 +376,28 @@ where
     }
     let mut line = Vec::<u8>::new();
     render_status_line(level, verb, message, &mut line)?;
+    if tty {
+        line = lf_to_crlf(&line);
+    }
     stderr.write_all(&line).await?;
     stderr.flush().await.ok();
     Ok(())
 }
 
+fn lf_to_crlf(line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len() + 2);
+    for &b in line {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
+}
+
 async fn exit_code_after_detach<S, O, E>(
     detach: DetachBehaviour,
+    tty: bool,
     stream: &mut S,
     stdout: &mut O,
     stderr: &mut E,
@@ -392,7 +410,7 @@ where
 {
     match detach {
         DetachBehaviour::SignalAndDrain => {
-            drain_after_chord(stream, stdout, stderr, last_stdout_byte).await
+            drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte).await
         }
         DetachBehaviour::LeaveRunning => 0,
     }
@@ -400,6 +418,7 @@ where
 
 async fn drain_after_chord<S, O, E>(
     stream: &mut S,
+    tty: bool,
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
@@ -411,7 +430,7 @@ where
 {
     match timeout(
         Duration::from_secs(5),
-        drain_to_exit(stream, stdout, stderr, last_stdout_byte),
+        drain_to_exit(stream, tty, stdout, stderr, last_stdout_byte),
     )
     .await
     {
@@ -429,6 +448,7 @@ where
 
 async fn drain_to_exit<S, O, E>(
     stream: &mut S,
+    tty: bool,
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
@@ -457,7 +477,7 @@ where
                 verb,
                 message,
             }) => {
-                render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
+                render_attached_run_log(level, verb.as_deref(), &message, tty, stderr).await?;
             }
             WireFrame::Json(Response::RunExit { code }) => return Ok(code),
             WireFrame::Json(Response::Error { message }) => {
@@ -1122,9 +1142,15 @@ mod tests {
     #[tokio::test]
     async fn render_attached_run_log_keeps_debug_frames_off_the_user_writer() {
         let mut stderr = Vec::<u8>::new();
-        render_attached_run_log(LogLevel::Debug, None, "broker handshake", &mut stderr)
-            .await
-            .expect("render debug");
+        render_attached_run_log(
+            LogLevel::Debug,
+            None,
+            "broker handshake",
+            false,
+            &mut stderr,
+        )
+        .await
+        .expect("render debug");
         assert!(
             stderr.is_empty(),
             "debug run-log must not reach the user's status writer: {stderr:?}",
@@ -1134,10 +1160,45 @@ mod tests {
     #[tokio::test]
     async fn render_attached_run_log_writes_info_status_to_the_writer() {
         let mut stderr = Vec::<u8>::new();
-        render_attached_run_log(LogLevel::Info, Some("Finished"), "in 1.10s", &mut stderr)
-            .await
-            .expect("render info");
+        render_attached_run_log(
+            LogLevel::Info,
+            Some("Finished"),
+            "in 1.10s",
+            false,
+            &mut stderr,
+        )
+        .await
+        .expect("render info");
         assert_eq!(stderr, b"\xe2\x9c\x93 finished in 1.10s\n");
+    }
+
+    #[tokio::test]
+    async fn render_attached_run_log_uses_crlf_when_the_terminal_is_raw() {
+        let mut stderr = Vec::<u8>::new();
+        render_attached_run_log(
+            LogLevel::Warn,
+            None,
+            "workload exited with code 1",
+            true,
+            &mut stderr,
+        )
+        .await
+        .expect("render warn");
+        let rendered = String::from_utf8(stderr).expect("utf8");
+        assert!(
+            rendered.ends_with("\r\n"),
+            "in raw mode a status line must carriage-return so the next line starts at column 0: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("\n\r") && rendered.matches('\n').count() == 1,
+            "exactly one CRLF, no stray bare LF: {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn lf_to_crlf_expands_every_newline_and_leaves_other_bytes() {
+        assert_eq!(lf_to_crlf(b"a\nb\n"), b"a\r\nb\r\n");
+        assert_eq!(lf_to_crlf(b"no newline"), b"no newline");
     }
 
     #[test]
@@ -1199,6 +1260,7 @@ mod tests {
         let mut last = None;
         let code = exit_code_after_detach(
             DetachBehaviour::LeaveRunning,
+            false,
             &mut client,
             &mut captured,
             &mut status,
@@ -1231,6 +1293,7 @@ mod tests {
         let mut last = None;
         let code = exit_code_after_detach(
             DetachBehaviour::SignalAndDrain,
+            true,
             &mut client,
             &mut captured,
             &mut status,
