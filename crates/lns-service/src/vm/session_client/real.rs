@@ -3,7 +3,6 @@
 use crate::log;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result};
 use lns_ipc::WireFrame;
@@ -57,24 +56,24 @@ async fn run_session(
         .context("send OpenSession to broker")?;
     log::debug!("OpenSession sent; waiting for ExitStatus");
 
-    let exit_code = Arc::new(AtomicI32::new(137));
     let (stop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-    let frame_tx_for_reader = frame_tx.clone();
-    let exit_for_reader = exit_code.clone();
     let stop_for_reader = stop_tx.clone();
     let reader_handle = tokio::spawn(async move {
-        let _ = read_server_frames(read_half, frame_tx_for_reader, exit_for_reader).await;
+        let outcome = read_server_frames(read_half, frame_tx).await;
         // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
         let _ = stop_for_reader.send(());
+        outcome
     });
 
     log::info!("SessionReady", "");
 
     pump_session_input(writer.clone(), input_rx, stop_tx.subscribe()).await;
 
-    let _ = reader_handle.await;
-    Ok(exit_code.load(Ordering::SeqCst))
+    let outcome = reader_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("broker session reader task panicked: {e}"))?;
+    super::session_exit_code(outcome)
 }
 
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
