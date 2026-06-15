@@ -27,45 +27,6 @@ pub struct Cli {
         help = "Log threshold: `warn` (default) shows warnings/errors; `info` adds progress lines; `debug` adds traces and the guest boot transcript; override with `LNS_LOG` or `RUST_LOG`."
     )]
     pub log_level: LogLevel,
-
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Subcommand)]
-pub enum Command {
-    #[command(about = "Run an OCI image in a microVM.")]
-    Run(RunArgs),
-    #[command(hide = true)]
-    Exec(ExecArgs),
-    #[command(hide = true)]
-    Kill(KillArgs),
-    #[command(hide = true)]
-    Ls,
-    #[command(about = "Manage the named volumes used with `lns run -v` (`docker volume`-style).")]
-    Volume(VolumeArgs),
-    #[command(
-        about = "Manage the cached OCI images that `lns run` boots from (`docker image`-style)."
-    )]
-    Image(ImageArgs),
-    #[command(
-        about = "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune."
-    )]
-    Sandbox(SandboxArgs),
-    #[command(about = "Verify the audit chain of a completed run.")]
-    Audit(AuditArgs),
-    #[command(about = "Manage the Lens Sandbox background service.")]
-    Service(ServiceArgs),
-    #[command(about = "Update `lns` and `lns-service` to the latest release.")]
-    Update(UpdateArgs),
-    #[command(about = "Edit network rules in a policy file.")]
-    Policy(PolicyArgs),
-    #[command(about = "Manage the credential-integration catalog (connectable services).")]
-    Integration(IntegrationArgs),
-    #[command(
-        about = "Get and set persistent defaults, applied to `lns run` when the matching flag is absent."
-    )]
-    Config(ConfigArgs),
 }
 
 #[derive(clap::Args)]
@@ -471,23 +432,6 @@ pub struct PolicyRemoveArgs {
 }
 
 #[derive(clap::Args)]
-pub struct UpdateArgs {
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Re-install even if the running version matches, e.g. when the binary is corrupt or its codesign was invalidated."
-    )]
-    pub force: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network."
-    )]
-    pub dry_run: bool,
-}
-
-#[derive(clap::Args)]
 pub struct ServiceArgs {
     #[command(subcommand)]
     pub command: ServiceCommand,
@@ -507,12 +451,6 @@ pub enum ServiceCommand {
     Enable,
     #[command(about = "Stop the service and unregister the per-user login agent.")]
     Disable,
-}
-
-#[derive(clap::Args)]
-pub struct AuditArgs {
-    #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
-    pub run_id: String,
 }
 
 #[derive(clap::Args)]

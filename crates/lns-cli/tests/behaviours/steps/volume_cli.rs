@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::VolumeArgs;
+use lns_cli::command::parse_args;
 use lns_cli::integration::LocalBoxFuture;
 use lns_cli::volume::{self, VolumeService};
 use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};
@@ -140,11 +140,8 @@ fn prompt_answer(world: &mut BehaviourWorld, answer: String) {
 async fn run_volume(world: &mut BehaviourWorld, tail: String) {
     let mut argv = vec!["lns".to_string(), "volume".to_string()];
     argv.extend(tail.split_whitespace().map(str::to_string));
-    let run = match Cli::try_parse_from(&argv) {
-        Ok(cli) => {
-            let Command::Volume(args) = cli.command else {
-                panic!("expected a volume command");
-            };
+    let run = match parse_args::<VolumeArgs, _, _>(&argv) {
+        Ok(args) => {
             let svc = FakeVolumeService::from_world(world);
             let stdin_text = world
                 .volume

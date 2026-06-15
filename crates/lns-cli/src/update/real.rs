@@ -1,8 +1,17 @@
 use anyhow::{Context, Result};
+use clap::FromArgMatches;
 use lns_ipc::{PlatformInfo, Uname, shell_basename_from, uname_fields_with};
 
-use crate::cli::UpdateArgs;
+use crate::command::{RunCtx, RunFuture};
 use crate::service::real::RealServiceClient;
+use crate::update::UpdateArgs;
+
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = UpdateArgs::from_arg_matches(matches)?;
+        run(args).await
+    })
+}
 
 struct RealUname;
 

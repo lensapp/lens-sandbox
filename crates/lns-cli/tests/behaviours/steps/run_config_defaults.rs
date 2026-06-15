@@ -1,8 +1,8 @@
 use crate::runner::CliRun;
 use crate::world::{BehaviourWorld, ResolvedRunView};
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::RunArgs;
+use lns_cli::command::parse_args;
 use lns_cli::config;
 use lns_cli::run::summary::{PolicySource, format_summary};
 use lns_policy::Policy;
@@ -26,10 +26,7 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
     let path = config_path(world);
     let mut argv = vec!["lns".to_string(), "run".to_string()];
     argv.extend(image_and_flags.split_whitespace().map(str::to_string));
-    let cli = Cli::try_parse_from(&argv).expect("argv must parse against the CLI grammar");
-    let Command::Run(args) = cli.command else {
-        panic!("scenario must resolve a run command");
-    };
+    let args: RunArgs = parse_args(&argv).expect("argv must parse against the CLI grammar");
     let defaults = match config::load_run_defaults(&path) {
         Ok(d) => d,
         Err(e) => {

@@ -2,10 +2,34 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use clap::FromArgMatches;
 use lns_policy::{Policy, RouteRule, Transport, Verdict};
 
 use crate::cli::{PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs, TransportArg};
+use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 use crate::run::summary::policy_path;
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<crate::cli::PolicyArgs>("policy")
+            .about("Edit network rules in a policy file."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "policy",
+    augment,
+    run: run_command,
+    announces_update_check: true,
+};
+
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = crate::cli::PolicyArgs::from_arg_matches(matches)?;
+        let mut out = ctx.out;
+        run(&args.command, &ctx.cwd, &mut out)
+    })
+}
 
 pub fn run(cmd: &PolicyCommand, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
     match cmd {
@@ -163,6 +187,32 @@ mod tests {
                 .allowed_routes
                 .iter()
                 .any(|r| r.match_pattern == "evil.example" && r.verdict == Verdict::Deny)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_applies_clap_matches_against_the_ctx_cwd() {
+        let dir = TempDir::new().unwrap();
+        let matches = crate::command::build_cli()
+            .try_get_matches_from(["lns", "policy", "allow", "api.acme.corp"])
+            .unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = RunCtx {
+            debug: false,
+            cwd: dir.path().to_path_buf(),
+            input: &mut input,
+            out: &mut out,
+        };
+        assert_eq!(run_command(sub, ctx).await.unwrap(), 0);
+        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        assert!(
+            policy
+                .network
+                .allowed_routes
+                .iter()
+                .any(|r| r.match_pattern == "api.acme.corp" && r.verdict == Verdict::Allow)
         );
     }
 

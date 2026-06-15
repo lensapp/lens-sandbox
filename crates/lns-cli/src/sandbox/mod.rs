@@ -11,9 +11,23 @@ use crate::cli::{
     KillArgs, SandboxAttachArgs, SandboxCommand, SandboxInspectArgs, SandboxLogsArgs,
     SandboxRmArgs, SandboxStatsArgs, SandboxStopArgs,
 };
+use crate::command::{CommandSpec, subcommand};
 use crate::service::client::BoxFuture;
 
 pub mod real;
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(subcommand::<crate::cli::SandboxArgs>("sandbox").about(
+        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune.",
+    ))
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "sandbox",
+    augment,
+    run: real::run,
+    announces_update_check: true,
+};
 
 pub trait SandboxService: Send + Sync {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;

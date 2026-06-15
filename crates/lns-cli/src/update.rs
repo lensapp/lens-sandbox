@@ -6,13 +6,44 @@ use std::time::Duration;
 
 use lns_ipc::{Method, PlatformInfo};
 
-use crate::cli::UpdateArgs;
+use crate::command::{CommandSpec, subcommand};
 use crate::log;
 use crate::service::ServiceClient;
 
 mod real;
 
 pub use real::run;
+
+#[derive(clap::Args)]
+pub struct UpdateArgs {
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Re-install even if the running version matches, e.g. when the binary is corrupt or its codesign was invalidated."
+    )]
+    pub force: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network."
+    )]
+    pub dry_run: bool,
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<UpdateArgs>("update")
+            .about("Update `lns` and `lns-service` to the latest release."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "update",
+    augment,
+    run: real::run_command,
+    announces_update_check: false,
+};
 
 pub(in crate::update) const DEFAULT_CDN_BASE: &str = "https://get.lns.run";
 const MANIFEST_NAME: &str = "lns-latest.json";

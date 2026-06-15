@@ -2,10 +2,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use clap::FromArgMatches;
 use lns_ipc::{PortPublish, VolumeMount};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{ConfigCommand, ConfigSetArgs, RunArgs};
+use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigKey {
@@ -117,6 +119,28 @@ fn save_atomic(cfg: &ConfigFile, path: &Path) -> Result<()> {
     std::fs::rename(&tmp, path)
         .with_context(|| format!("installing config at {}", path.display()))?;
     Ok(())
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(subcommand::<crate::cli::ConfigArgs>("config").about(
+        "Get and set persistent defaults, applied to `lns run` when the matching flag is absent.",
+    ))
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "config",
+    augment,
+    run: run_command,
+    announces_update_check: true,
+};
+
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = crate::cli::ConfigArgs::from_arg_matches(matches)?;
+        let path = default_config_path()?;
+        let mut out = ctx.out;
+        run(&args.command, &path, &mut out)
+    })
 }
 
 pub fn run(cmd: &ConfigCommand, path: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -393,6 +417,30 @@ mod tests {
         let mut buf = Vec::new();
         let code = run(cmd, path, &mut buf).expect("command succeeds");
         (code, String::from_utf8(buf).unwrap())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn run_command_resolves_the_default_path_and_writes_a_stored_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let _scope = crate::test_env::EnvScope::set("LNS_CONFIG_PATH", &cfg);
+
+        let set = crate::command::build_cli()
+            .try_get_matches_from(["lns", "config", "set", "run.cpus", "4"])
+            .unwrap();
+        let (_, set_sub) = set.subcommand().unwrap();
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = RunCtx {
+            debug: false,
+            cwd: dir.path().to_path_buf(),
+            input: &mut input,
+            out: &mut out,
+        };
+        assert_eq!(run_command(set_sub, ctx).await.unwrap(), 0);
+
+        assert_eq!(load(&cfg).unwrap().run.cpus, Some(4));
     }
 
     #[test]

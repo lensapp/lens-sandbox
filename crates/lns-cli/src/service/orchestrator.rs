@@ -12,12 +12,60 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use clap::FromArgMatches;
+
 use crate::chord::{DetachChordDetector, FeedAction};
 use crate::cli::{ExecArgs, KillArgs, RunArgs};
+use crate::command::{RunCtx, RunFuture};
 use lns_ipc::{ExecImageArgs, RunImageArgs};
 
 use super::{client::ServiceClient, real, require_running_check};
 use crate::run::summary::print_run_summary;
+
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let mut args = RunArgs::from_arg_matches(matches)?;
+        args.env = crate::run::env_file::merged_run_env(&args.env_file, &args.env)?;
+        let config_path = crate::config::default_config_path()?;
+        let defaults = crate::config::load_run_defaults(&config_path)?;
+        let args = crate::config::apply_run_defaults(args, defaults);
+        require_running().await;
+        run_image(args, ctx.debug).await
+    })
+}
+
+pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = ExecArgs::from_arg_matches(matches)?;
+        require_running().await;
+        exec_image(args).await
+    })
+}
+
+pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = KillArgs::from_arg_matches(matches)?;
+        require_running().await;
+        kill(args).await?;
+        Ok(0)
+    })
+}
+
+pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        require_running().await;
+        ls().await?;
+        Ok(0)
+    })
+}
+
+pub fn service_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = crate::cli::ServiceArgs::from_arg_matches(matches)?;
+        dispatch(&args.command).await?;
+        Ok(0)
+    })
+}
 
 pub async fn dispatch(cmd: &crate::cli::ServiceCommand) -> Result<()> {
     let client = real_client()?;
