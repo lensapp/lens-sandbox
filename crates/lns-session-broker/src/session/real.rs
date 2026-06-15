@@ -4,8 +4,11 @@ use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_long, c_uint};
 use std::ptr;
 use std::sync::mpsc::SyncSender;
+use std::time::Duration;
 
 use lns_session::{ClientFrame, ServerFrame, Winsize, encode_frame};
+
+const PTY_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 use super::{
     LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close, dispatch_frame,
@@ -188,9 +191,11 @@ fn drive_session_tty(
         return Err(SessionError::Io(io::Error::last_os_error()));
     }
 
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel::<()>();
     let conn_for_out = conn.clone();
     let out_thread = std::thread::spawn(move || {
         pump_fd_to_vsock_stdout(out_dup, conn_for_out);
+        let _ = drained_tx.send(());
     });
 
     let conn_for_ctrl = conn.clone();
@@ -200,12 +205,13 @@ fn drive_session_tty(
 
     let exit_code = forker.wait(child_pid)?;
 
+    // Wait for the pump to flush the workload's final output, bounded because a daemonized child holding the slave open never EOFs the master and an unbounded join would hang.
+    let _ = drained_rx.recv_timeout(PTY_DRAIN_GRACE);
+
     send_exit(&conn, exit_code);
 
     shutdown_read(conn.raw());
     let _ = ctrl_thread.join();
-
-    // A daemonized child can keep the PTY slave open, so read(out_dup) would block forever; drop the handle rather than join to avoid hanging teardown.
     drop(out_thread);
 
     Ok(SessionOutcome { exit_code })
