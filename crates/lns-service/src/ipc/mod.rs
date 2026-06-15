@@ -230,13 +230,21 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::RunStats must be dispatched via handle_stats, not handle_request"
             )
         }
-        Request::PolicyPush {
+        Request::PushArtifact {
             reference,
+            artifact_type,
+            config_media_type,
             config_blob,
-        } => push_response(crate::policy_artifact::push(reference, config_blob).await),
-        Request::PolicyPull { reference } => {
-            pull_response(crate::policy_artifact::pull(reference).await)
-        }
+        } => push_response(
+            crate::artifact::push_artifact(
+                reference,
+                artifact_type,
+                config_media_type,
+                config_blob,
+            )
+            .await,
+        ),
+        Request::Pull { reference } => pull_response(crate::artifact::pull(reference).await),
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
@@ -257,19 +265,25 @@ fn image_response(result: anyhow::Result<Response>) -> Response {
 
 fn push_response(result: anyhow::Result<String>) -> Response {
     match result {
-        Ok(digest) => Response::PolicyPushed { digest },
+        Ok(digest) => Response::Pushed { digest },
         Err(e) => Response::Error {
             message: format!("{e:#}"),
         },
     }
 }
 
-fn pull_response(result: anyhow::Result<(Vec<u8>, String)>) -> Response {
+fn pull_response(result: anyhow::Result<crate::artifact::Pulled>) -> Response {
     match result {
-        Ok((config_blob, digest)) => Response::PolicyPulled {
+        Ok(crate::artifact::Pulled::Artifact {
+            artifact_type,
+            config_blob,
+            digest,
+        }) => Response::PulledArtifact {
+            artifact_type,
             config_blob,
             digest,
         },
+        Ok(crate::artifact::Pulled::Image { digest }) => Response::PulledImage { digest },
         Err(e) => Response::Error {
             message: format!("{e:#}"),
         },
@@ -1595,7 +1609,7 @@ mod tests {
     fn push_response_maps_ok_to_pushed_and_err_to_error() {
         assert_eq!(
             push_response(Ok("sha256:abc".into())),
-            Response::PolicyPushed {
+            Response::Pushed {
                 digest: "sha256:abc".into()
             }
         );
@@ -1608,12 +1622,25 @@ mod tests {
     }
 
     #[test]
-    fn pull_response_maps_ok_to_pulled_and_err_to_error() {
+    fn pull_response_maps_artifact_image_and_err() {
         assert_eq!(
-            pull_response(Ok((b"{}".to_vec(), "sha256:abc".into()))),
-            Response::PolicyPulled {
+            pull_response(Ok(crate::artifact::Pulled::Artifact {
+                artifact_type: "application/vnd.lens.policy.v1+json".into(),
                 config_blob: b"{}".to_vec(),
-                digest: "sha256:abc".into()
+                digest: "sha256:abc".into(),
+            })),
+            Response::PulledArtifact {
+                artifact_type: "application/vnd.lens.policy.v1+json".into(),
+                config_blob: b"{}".to_vec(),
+                digest: "sha256:abc".into(),
+            }
+        );
+        assert_eq!(
+            pull_response(Ok(crate::artifact::Pulled::Image {
+                digest: "sha256:img".into(),
+            })),
+            Response::PulledImage {
+                digest: "sha256:img".into()
             }
         );
         let err = as_json(pull_response(Err(anyhow::anyhow!("boom"))));
@@ -1626,15 +1653,17 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn handle_request_policy_push_of_an_invalid_reference_surfaces_the_parse_error() {
+    async fn handle_request_push_artifact_of_an_invalid_reference_surfaces_the_parse_error() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _a =
             crate::test_env::EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", d.path().join("auth.json"));
         let resp = as_json(
             handle_request(
-                &Request::PolicyPush {
+                &Request::PushArtifact {
                     reference: "###".into(),
+                    artifact_type: "application/vnd.lens.policy.v1+json".into(),
+                    config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                     config_blob: b"{}".to_vec(),
                 },
                 Instant::now(),
@@ -1653,14 +1682,14 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn handle_request_policy_pull_of_an_invalid_reference_surfaces_the_parse_error() {
+    async fn handle_request_generic_pull_of_an_invalid_reference_surfaces_the_parse_error() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _a =
             crate::test_env::EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", d.path().join("auth.json"));
         let resp = as_json(
             handle_request(
-                &Request::PolicyPull {
+                &Request::Pull {
                     reference: "###".into(),
                 },
                 Instant::now(),

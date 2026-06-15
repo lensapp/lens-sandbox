@@ -15,13 +15,10 @@ fn cwd(world: &mut BehaviourWorld) -> PathBuf {
     world.cwd.as_ref().unwrap().path().to_path_buf()
 }
 
-async fn run_policy(world: &mut BehaviourWorld, cmd: PolicyCommand) {
+fn run_policy(world: &mut BehaviourWorld, cmd: PolicyCommand) {
     let dir = cwd(world);
-    // The local policy-editing commands never touch the registry; pass the
-    // shared fake (exercised by the policy-registry feature) to satisfy the seam.
-    let registry = world.policy_registry.clone();
     let mut buf = Vec::<u8>::new();
-    let run = match policy::run(&cmd, &dir, &registry, &mut buf).await {
+    let run = match policy::run(&cmd, &dir, &mut buf) {
         Ok(exit_code) => CliRun {
             exit_code,
             output: String::from_utf8_lossy(&buf).into_owned(),
@@ -102,19 +99,19 @@ fn policy_has_no_rule(world: &mut BehaviourWorld, file: String, _pattern: String
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" to "([^"]+)"$"#)]
-async fn add_allow_to_file(world: &mut BehaviourWorld, pattern: String, file: String) {
+fn add_allow_to_file(world: &mut BehaviourWorld, pattern: String, file: String) {
     let args = rule_args(world, &pattern, Some(PathBuf::from(file)));
-    run_policy(world, PolicyCommand::Allow(args)).await;
+    run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" without passing --policy$"#)]
-async fn add_allow_default_path(world: &mut BehaviourWorld, pattern: String) {
+fn add_allow_default_path(world: &mut BehaviourWorld, pattern: String) {
     let args = rule_args(world, &pattern, None);
-    run_policy(world, PolicyCommand::Allow(args)).await;
+    run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" with --policy "([^"]+)"$"#)]
-async fn add_allow_explicit_path(world: &mut BehaviourWorld, pattern: String, path: String) {
+fn add_allow_explicit_path(world: &mut BehaviourWorld, pattern: String, path: String) {
     // Map the scenario's illustrative absolute path onto a cwd-local file so the
     // test stays isolated; the behaviour under test is "explicit path is honoured".
     let basename = Path::new(&path)
@@ -122,28 +119,24 @@ async fn add_allow_explicit_path(world: &mut BehaviourWorld, pattern: String, pa
         .expect("explicit path has a file name");
     let explicit = cwd(world).join(basename);
     let args = rule_args(world, &pattern, Some(explicit));
-    run_policy(world, PolicyCommand::Allow(args)).await;
+    run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" with description "([^"]+)"$"#)]
-async fn add_allow_with_description(
-    world: &mut BehaviourWorld,
-    pattern: String,
-    description: String,
-) {
+fn add_allow_with_description(world: &mut BehaviourWorld, pattern: String, description: String) {
     let mut args = rule_args(world, &pattern, None);
     args.description = Some(description);
-    run_policy(world, PolicyCommand::Allow(args)).await;
+    run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r"^the developer lists rules$")]
-async fn list_rules(world: &mut BehaviourWorld) {
+fn list_rules(world: &mut BehaviourWorld) {
     let _ = cwd(world);
-    run_policy(world, PolicyCommand::List(PolicyScopeArgs { policy: None })).await;
+    run_policy(world, PolicyCommand::List(PolicyScopeArgs { policy: None }));
 }
 
 #[when(regex = r#"^the developer removes the rule matching "([^"]+)"$"#)]
-async fn remove_rule(world: &mut BehaviourWorld, pattern: String) {
+fn remove_rule(world: &mut BehaviourWorld, pattern: String) {
     let _ = cwd(world);
     run_policy(
         world,
@@ -151,12 +144,11 @@ async fn remove_rule(world: &mut BehaviourWorld, pattern: String) {
             pattern,
             policy: None,
         }),
-    )
-    .await;
+    );
 }
 
 #[when(regex = r#"^the developer tries to remove a rule for "([^"]+)"$"#)]
-async fn try_remove_rule(world: &mut BehaviourWorld, pattern: String) {
+fn try_remove_rule(world: &mut BehaviourWorld, pattern: String) {
     let _ = cwd(world);
     run_policy(
         world,
@@ -164,8 +156,7 @@ async fn try_remove_rule(world: &mut BehaviourWorld, pattern: String) {
             pattern,
             policy: None,
         }),
-    )
-    .await;
+    );
 }
 
 #[then(regex = r#"^"([^"]+)" contains an allow rule for "([^"]+)"$"#)]

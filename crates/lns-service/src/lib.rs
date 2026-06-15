@@ -1,4 +1,5 @@
 pub mod approval_flow;
+pub mod artifact;
 pub mod audit;
 mod base64;
 pub mod browser;
@@ -20,7 +21,6 @@ pub mod log;
 pub mod oauth;
 pub mod oci_layer_cache;
 pub mod paths;
-pub mod policy_artifact;
 pub mod relay;
 pub mod run;
 pub mod run_log;

@@ -5,13 +5,14 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use super::registry::{LocalBoxFuture, PolicyRegistry};
+use super::{Pulled, RegistryClient};
+use crate::integration::LocalBoxFuture;
 
-pub struct RealPolicyRegistry {
+pub struct RealRegistryClient {
     socket: PathBuf,
 }
 
-impl RealPolicyRegistry {
+impl RealRegistryClient {
     pub fn new(socket: PathBuf) -> Self {
         Self { socket }
     }
@@ -32,37 +33,47 @@ impl RealPolicyRegistry {
     }
 }
 
-impl PolicyRegistry for RealPolicyRegistry {
-    fn push<'a>(
+impl RegistryClient for RealRegistryClient {
+    fn push_artifact<'a>(
         &'a self,
         reference: &'a str,
+        artifact_type: &'a str,
+        config_media_type: &'a str,
         config_blob: &'a [u8],
     ) -> LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let request = Request::PolicyPush {
+            let request = Request::PushArtifact {
                 reference: reference.to_string(),
+                artifact_type: artifact_type.to_string(),
+                config_media_type: config_media_type.to_string(),
                 config_blob: config_blob.to_vec(),
             };
             match self.round_trip(request).await? {
-                Response::PolicyPushed { digest } => Ok(digest),
+                Response::Pushed { digest } => Ok(digest),
                 Response::Error { message } => bail!("{message}"),
-                other => bail!("unexpected response to policy push: {other:?}"),
+                other => bail!("unexpected response to push: {other:?}"),
             }
         })
     }
 
-    fn pull<'a>(&'a self, reference: &'a str) -> LocalBoxFuture<'a, Result<(Vec<u8>, String)>> {
+    fn pull<'a>(&'a self, reference: &'a str) -> LocalBoxFuture<'a, Result<Pulled>> {
         Box::pin(async move {
-            let request = Request::PolicyPull {
+            let request = Request::Pull {
                 reference: reference.to_string(),
             };
             match self.round_trip(request).await? {
-                Response::PolicyPulled {
+                Response::PulledArtifact {
+                    artifact_type,
                     config_blob,
                     digest,
-                } => Ok((config_blob, digest)),
+                } => Ok(Pulled::Artifact {
+                    artifact_type,
+                    config_blob,
+                    digest,
+                }),
+                Response::PulledImage { digest } => Ok(Pulled::Image { digest }),
                 Response::Error { message } => bail!("{message}"),
-                other => bail!("unexpected response to policy pull: {other:?}"),
+                other => bail!("unexpected response to pull: {other:?}"),
             }
         })
     }

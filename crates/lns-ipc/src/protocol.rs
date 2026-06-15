@@ -77,11 +77,13 @@ pub enum Request {
         image: String,
     },
     PruneImages,
-    PolicyPush {
+    PushArtifact {
         reference: String,
+        artifact_type: String,
+        config_media_type: String,
         config_blob: Vec<u8>,
     },
-    PolicyPull {
+    Pull {
         reference: String,
     },
 }
@@ -181,11 +183,15 @@ pub enum Response {
         /// 0 means the size of the work is unknown (render as indeterminate).
         total: u64,
     },
-    PolicyPushed {
+    Pushed {
         digest: String,
     },
-    PolicyPulled {
+    PulledArtifact {
+        artifact_type: String,
         config_blob: Vec<u8>,
+        digest: String,
+    },
+    PulledImage {
         digest: String,
     },
 }
@@ -633,13 +639,15 @@ mod tests {
     }
 
     #[test]
-    fn policy_artifact_messages_survive_round_trips() {
+    fn registry_messages_survive_round_trips() {
         let reqs = [
-            Request::PolicyPush {
+            Request::PushArtifact {
                 reference: "registry.example.test/org/acme/policies/pii:v1".into(),
+                artifact_type: "application/vnd.lens.policy.v1+json".into(),
+                config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                 config_blob: br#"{"network":{}}"#.to_vec(),
             },
-            Request::PolicyPull {
+            Request::Pull {
                 reference: "registry.example.test/org/acme/policies/pii:v1".into(),
             },
         ];
@@ -649,12 +657,16 @@ mod tests {
             assert_eq!(decoded, req);
         }
         let resps = [
-            Response::PolicyPushed {
+            Response::Pushed {
                 digest: "sha256:abc".into(),
             },
-            Response::PolicyPulled {
+            Response::PulledArtifact {
+                artifact_type: "application/vnd.lens.policy.v1+json".into(),
                 config_blob: br#"{"network":{}}"#.to_vec(),
                 digest: "sha256:abc".into(),
+            },
+            Response::PulledImage {
+                digest: "sha256:def".into(),
             },
         ];
         for resp in resps {

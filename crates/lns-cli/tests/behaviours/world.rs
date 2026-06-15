@@ -27,40 +27,47 @@ pub struct BehaviourWorld {
     pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
-    pub policy_registry: FakePolicyRegistry,
+    pub registry: FakeRegistryClient,
     pub push_digest: Option<String>,
     pub pull_digest: Option<String>,
 }
 
 /// An in-memory stand-in for the service-backed OCI registry: push stores the
-/// blob under its reference and returns a content-derived digest; pull returns
-/// what was stored, so a push→pull round-trip is exercised end to end.
+/// blob (and its artifactType) under its reference and returns a content-derived
+/// digest; pull returns what was stored, so a push→pull round-trip is exercised
+/// end to end.
 type ArtifactStore =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, String)>>>;
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (String, Vec<u8>, String)>>>;
 
 #[derive(Debug, Default, Clone)]
-pub struct FakePolicyRegistry {
+pub struct FakeRegistryClient {
     inner: ArtifactStore,
 }
 
-impl FakePolicyRegistry {
+impl FakeRegistryClient {
     fn digest(blob: &[u8]) -> String {
         let sum: u64 = blob.iter().map(|b| *b as u64).sum();
         format!("sha256:{sum:016x}")
     }
 }
 
-impl lns_cli::policy::PolicyRegistry for FakePolicyRegistry {
-    fn push<'a>(
+impl lns_cli::registry::RegistryClient for FakeRegistryClient {
+    fn push_artifact<'a>(
         &'a self,
         reference: &'a str,
+        artifact_type: &'a str,
+        _config_media_type: &'a str,
         config_blob: &'a [u8],
-    ) -> lns_cli::policy::LocalBoxFuture<'a, anyhow::Result<String>> {
+    ) -> lns_cli::integration::LocalBoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let digest = Self::digest(config_blob);
             self.inner.lock().unwrap().insert(
                 reference.to_string(),
-                (config_blob.to_vec(), digest.clone()),
+                (
+                    artifact_type.to_string(),
+                    config_blob.to_vec(),
+                    digest.clone(),
+                ),
             );
             Ok(digest)
         })
@@ -69,14 +76,19 @@ impl lns_cli::policy::PolicyRegistry for FakePolicyRegistry {
     fn pull<'a>(
         &'a self,
         reference: &'a str,
-    ) -> lns_cli::policy::LocalBoxFuture<'a, anyhow::Result<(Vec<u8>, String)>> {
+    ) -> lns_cli::integration::LocalBoxFuture<'a, anyhow::Result<lns_cli::registry::Pulled>> {
         Box::pin(async move {
-            self.inner
-                .lock()
-                .unwrap()
-                .get(reference)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no artifact at {reference}"))
+            let stored = self.inner.lock().unwrap().get(reference).cloned();
+            match stored {
+                Some((artifact_type, config_blob, digest)) => {
+                    Ok(lns_cli::registry::Pulled::Artifact {
+                        artifact_type,
+                        config_blob,
+                        digest,
+                    })
+                }
+                None => anyhow::bail!("no artifact at {reference}"),
+            }
         })
     }
 }

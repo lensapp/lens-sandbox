@@ -58,10 +58,14 @@ pub enum Command {
     Service(ServiceArgs),
     #[command(about = "Update `lns` and `lns-service` to the latest release.")]
     Update(UpdateArgs),
-    #[command(
-        about = "Edit network rules in a policy file, and push/pull policies to an OCI registry."
-    )]
+    #[command(about = "Edit network rules in a policy file.")]
     Policy(PolicyArgs),
+    #[command(
+        about = "Push a file (typed artifact) or a cached image to an OCI registry reference."
+    )]
+    Push(PushArgs),
+    #[command(about = "Pull an artifact or image from an OCI registry reference.")]
+    Pull(PullArgs),
     #[command(about = "Authenticate to an OCI registry and store the credential locally.")]
     Login(LoginArgs),
     #[command(about = "Remove a stored OCI registry credential.")]
@@ -429,28 +433,33 @@ pub enum PolicyCommand {
     List(PolicyScopeArgs),
     #[command(about = "Remove the rule matching a destination pattern.")]
     Remove(PolicyRemoveArgs),
-    #[command(about = "Push a policy file to an OCI registry as a typed artifact.")]
-    Push(PolicyPushArgs),
-    #[command(about = "Pull a policy artifact from an OCI registry into a policy file.")]
-    Pull(PolicyPullArgs),
 }
 
 #[derive(clap::Args)]
-pub struct PolicyPushArgs {
-    #[arg(help = "Path to the local policy file to push.")]
-    pub file: PathBuf,
-    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/policies/pii:v1.")]
+pub struct PushArgs {
+    #[arg(
+        help = "A local file (pushed as a typed artifact) or a cached image reference (pushed as an image)."
+    )]
+    pub source: String,
+    #[arg(
+        help = "Target registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1."
+    )]
     pub reference: String,
+    #[arg(
+        long,
+        help = "Artifact family (agent, policy, tool, …); inferred from the reference path when omitted."
+    )]
+    pub family: Option<String>,
 }
 
 #[derive(clap::Args)]
-pub struct PolicyPullArgs {
-    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/policies/pii:v1.")]
+pub struct PullArgs {
+    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1.")]
     pub reference: String,
     #[arg(
         short,
         long,
-        help = "Write the pulled policy here; defaults to stdout."
+        help = "Write a pulled artifact here; defaults to stdout. Ignored for images (cached)."
     )]
     pub output: Option<PathBuf>,
 }

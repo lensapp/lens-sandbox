@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use lns_policy::artifact::POLICY_ARTIFACT_TYPE;
+use lns_policy::artifact::Family;
 use lns_policy::registry_auth::{
     JsonFileRegistryCredentialStore, RegistryAuthFile, RegistryCredentialStore,
     default_registry_auth_path,
@@ -9,19 +9,45 @@ use oci_client::secrets::RegistryAuth;
 
 use crate::image::RealRegistry;
 
-pub(crate) trait PolicyArtifactRegistry: Send + Sync {
-    fn push_policy_artifact(
+pub struct ManifestHead {
+    pub config_media_type: String,
+    pub artifact_type: Option<String>,
+    pub config_blob: Vec<u8>,
+    pub digest: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pulled {
+    Artifact {
+        artifact_type: String,
+        config_blob: Vec<u8>,
+        digest: String,
+    },
+    Image {
+        digest: String,
+    },
+}
+
+pub(crate) trait ArtifactRegistry: Send + Sync {
+    fn push_artifact(
         &self,
         reference: &Reference,
+        artifact_type: &str,
+        config_media_type: &str,
         config_blob: &[u8],
         auth: &RegistryAuth,
     ) -> impl std::future::Future<Output = Result<String>> + Send;
 
-    fn pull_artifact(
+    fn pull_head(
         &self,
         reference: &Reference,
         auth: &RegistryAuth,
-    ) -> impl std::future::Future<Output = Result<(Option<String>, Vec<u8>, String)>> + Send;
+    ) -> impl std::future::Future<Output = Result<ManifestHead>> + Send;
+
+    fn pull_image_to_cache(
+        &self,
+        reference: &str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
 fn auth_for(registry: &str, file: &RegistryAuthFile) -> RegistryAuth {
@@ -46,39 +72,47 @@ fn resolve(
     Ok((reference, auth))
 }
 
-async fn push_with<R: PolicyArtifactRegistry>(
+async fn push_artifact_with<R: ArtifactRegistry>(
     client: &R,
     store: &dyn RegistryCredentialStore,
     reference: &str,
+    artifact_type: &str,
+    config_media_type: &str,
     config_blob: &[u8],
 ) -> Result<String> {
     let (reference, auth) = resolve(reference, store)?;
     client
-        .push_policy_artifact(&reference, config_blob, &auth)
+        .push_artifact(
+            &reference,
+            artifact_type,
+            config_media_type,
+            config_blob,
+            &auth,
+        )
         .await
 }
 
-async fn pull_with<R: PolicyArtifactRegistry>(
+async fn pull_with<R: ArtifactRegistry>(
     client: &R,
     store: &dyn RegistryCredentialStore,
     reference: &str,
-) -> Result<(Vec<u8>, String)> {
-    let (reference, auth) = resolve(reference, store)?;
-    let (artifact_type, config_blob, digest) = client.pull_artifact(&reference, &auth).await?;
-    if artifact_type.as_deref() != Some(POLICY_ARTIFACT_TYPE) {
-        anyhow::bail!(
-            "{reference} is not a policy artifact (artifactType {}, expected {POLICY_ARTIFACT_TYPE})",
-            artifact_type.as_deref().unwrap_or("<none>")
-        );
+) -> Result<Pulled> {
+    let (parsed, auth) = resolve(reference, store)?;
+    let head = client.pull_head(&parsed, &auth).await?;
+    if Family::from_config_media_type(&head.config_media_type).is_some() {
+        Ok(Pulled::Artifact {
+            artifact_type: head
+                .artifact_type
+                .unwrap_or_else(|| head.config_media_type.clone()),
+            config_blob: head.config_blob,
+            digest: head.digest,
+        })
+    } else {
+        let digest = client.pull_image_to_cache(reference).await?;
+        Ok(Pulled::Image { digest })
     }
-    Ok((config_blob, digest))
 }
 
-fn store() -> JsonFileRegistryCredentialStore {
-    JsonFileRegistryCredentialStore::new(default_registry_auth_path())
-}
-
-/// Builds the registry client with a protocol derived from the target host: loopback registries (and any in `LNS_REGISTRY_PLAIN_HTTP`) use plain HTTP, everything else HTTPS.
 fn registry_for(reference: &str) -> RealRegistry {
     let target = reference
         .parse::<Reference>()
@@ -91,11 +125,28 @@ fn registry_for(reference: &str) -> RealRegistry {
     RealRegistry::with_protocol(protocol)
 }
 
-pub async fn push(reference: &str, config_blob: &[u8]) -> Result<String> {
-    push_with(&registry_for(reference), &store(), reference, config_blob).await
+fn store() -> JsonFileRegistryCredentialStore {
+    JsonFileRegistryCredentialStore::new(default_registry_auth_path())
 }
 
-pub async fn pull(reference: &str) -> Result<(Vec<u8>, String)> {
+pub async fn push_artifact(
+    reference: &str,
+    artifact_type: &str,
+    config_media_type: &str,
+    config_blob: &[u8],
+) -> Result<String> {
+    push_artifact_with(
+        &registry_for(reference),
+        &store(),
+        reference,
+        artifact_type,
+        config_media_type,
+        config_blob,
+    )
+    .await
+}
+
+pub async fn pull(reference: &str) -> Result<Pulled> {
     pull_with(&registry_for(reference), &store(), reference).await
 }
 
@@ -108,15 +159,20 @@ mod tests {
     #[derive(Default)]
     struct FakeRegistry {
         digest: String,
-        pull: Option<(Option<String>, Vec<u8>, String)>,
+        head: Option<ManifestHead>,
+        image_digest: String,
         fail: bool,
+        image_fail: bool,
         seen_auth: Mutex<Option<RegistryAuth>>,
+        image_pulled: Mutex<Option<String>>,
     }
 
-    impl PolicyArtifactRegistry for FakeRegistry {
-        async fn push_policy_artifact(
+    impl ArtifactRegistry for FakeRegistry {
+        async fn push_artifact(
             &self,
             _reference: &Reference,
+            _artifact_type: &str,
+            _config_media_type: &str,
             _config_blob: &[u8],
             auth: &RegistryAuth,
         ) -> Result<String> {
@@ -127,23 +183,46 @@ mod tests {
             Ok(self.digest.clone())
         }
 
-        async fn pull_artifact(
+        async fn pull_head(
             &self,
             _reference: &Reference,
             auth: &RegistryAuth,
-        ) -> Result<(Option<String>, Vec<u8>, String)> {
+        ) -> Result<ManifestHead> {
             *self.seen_auth.lock().unwrap() = Some(auth.clone());
             if self.fail {
                 anyhow::bail!("registry refused the pull");
             }
-            Ok(self.pull.clone().expect("canned pull result"))
+            let head = self.head.as_ref().expect("canned head");
+            Ok(ManifestHead {
+                config_media_type: head.config_media_type.clone(),
+                artifact_type: head.artifact_type.clone(),
+                config_blob: head.config_blob.clone(),
+                digest: head.digest.clone(),
+            })
+        }
+
+        async fn pull_image_to_cache(&self, reference: &str) -> Result<String> {
+            *self.image_pulled.lock().unwrap() = Some(reference.to_string());
+            if self.image_fail {
+                anyhow::bail!("image pull failed");
+            }
+            Ok(self.image_digest.clone())
         }
     }
 
-    /// A path that never exists, so the real store's `load()` returns an empty map (→ anonymous auth) without a temp dir to keep alive.
+    fn head(config_media_type: &str, artifact_type: Option<&str>) -> ManifestHead {
+        ManifestHead {
+            config_media_type: config_media_type.into(),
+            artifact_type: artifact_type.map(str::to_string),
+            config_blob: br#"{"network":{}}"#.to_vec(),
+            digest: "sha256:abc".into(),
+        }
+    }
+
+    /// A path that never exists, so the real store's `load()` returns an empty map (→ anonymous).
     fn empty_store() -> JsonFileRegistryCredentialStore {
         JsonFileRegistryCredentialStore::new(
-            std::env::temp_dir().join("lns-policy-artifact-cov-absent.json"),
+            std::env::temp_dir().join("lns-artifact-cov-absent.json"),
         )
     }
 
@@ -153,9 +232,12 @@ mod tests {
     }
 
     const REF: &str = "registry.example.test/org/acme/policies/pii:v1";
+    const POLICY_CMT: &str = "application/vnd.lens.policy.config.v1+json";
+    const POLICY_AT: &str = "application/vnd.lens.policy.v1+json";
+    const OCI_CMT: &str = "application/vnd.oci.image.config.v1+json";
 
     #[test]
-    fn auth_for_builds_basic_from_a_stored_credential_defaulting_the_username() {
+    fn auth_for_builds_basic_defaulting_username_else_anonymous() {
         let mut f = RegistryAuthFile::new();
         f.insert(
             "reg.example".into(),
@@ -168,6 +250,7 @@ mod tests {
             auth_for("reg.example", &f),
             RegistryAuth::Basic("any".into(), "lns_tok".into())
         );
+        assert_eq!(auth_for("absent", &f), RegistryAuth::Anonymous);
     }
 
     #[test]
@@ -183,17 +266,8 @@ mod tests {
         assert!(matches!(auth_for("reg.example", &f), RegistryAuth::Basic(u, _) if u == "ci-bot"));
     }
 
-    #[test]
-    fn auth_for_is_anonymous_when_no_credential_is_stored() {
-        let f = RegistryAuthFile::new();
-        assert!(matches!(
-            auth_for("reg.example", &f),
-            RegistryAuth::Anonymous
-        ));
-    }
-
     #[tokio::test]
-    async fn push_with_sends_the_stored_credential_as_basic_auth_and_returns_the_digest() {
+    async fn push_sends_basic_auth_from_the_store_and_returns_the_digest() {
         let client = FakeRegistry {
             digest: "sha256:abc".into(),
             ..Default::default()
@@ -210,7 +284,9 @@ mod tests {
         );
         store.save(&file).unwrap();
 
-        let digest = push_with(&client, &store, REF, b"{}").await.unwrap();
+        let digest = push_artifact_with(&client, &store, REF, POLICY_AT, POLICY_CMT, b"{}")
+            .await
+            .unwrap();
         assert_eq!(digest, "sha256:abc");
         assert_eq!(
             *client.seen_auth.lock().unwrap(),
@@ -219,12 +295,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_with_falls_back_to_anonymous_when_no_credential_is_stored() {
-        let client = FakeRegistry {
-            digest: "sha256:def".into(),
-            ..Default::default()
-        };
-        push_with(&client, &empty_store(), REF, b"{}")
+    async fn push_falls_back_to_anonymous_without_a_stored_credential() {
+        let client = FakeRegistry::default();
+        push_artifact_with(&client, &empty_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
             .await
             .unwrap();
         assert_eq!(
@@ -234,25 +307,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_with_rejects_an_invalid_reference_before_touching_the_registry() {
+    async fn push_rejects_an_invalid_reference_before_touching_the_registry() {
         let client = FakeRegistry::default();
-        let err = push_with(&client, &empty_store(), "::bad::", b"{}")
-            .await
-            .unwrap_err();
+        let err = push_artifact_with(
+            &client,
+            &empty_store(),
+            "::bad::",
+            POLICY_AT,
+            POLICY_CMT,
+            b"{}",
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid registry reference"),
             "got: {err:#}"
         );
-        assert!(
-            client.seen_auth.lock().unwrap().is_none(),
-            "registry must not be called"
-        );
+        assert!(client.seen_auth.lock().unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn push_with_surfaces_a_credential_store_load_error() {
+    async fn push_surfaces_a_credential_store_load_error() {
         let client = FakeRegistry::default();
-        let err = push_with(&client, &failing_store(), REF, b"{}")
+        let err = push_artifact_with(&client, &failing_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
             .await
             .unwrap_err();
         assert!(
@@ -262,12 +339,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_with_propagates_a_registry_push_failure() {
+    async fn push_propagates_a_registry_failure() {
         let client = FakeRegistry {
             fail: true,
             ..Default::default()
         };
-        let err = push_with(&client, &empty_store(), REF, b"{}")
+        let err = push_artifact_with(&client, &empty_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
             .await
             .unwrap_err();
         assert!(
@@ -277,56 +354,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_with_returns_the_config_blob_and_digest_for_a_policy_artifact() {
+    async fn pull_returns_an_artifact_when_the_config_media_type_is_a_lens_family() {
         let client = FakeRegistry {
-            pull: Some((
-                Some(POLICY_ARTIFACT_TYPE.into()),
-                br#"{"network":{}}"#.to_vec(),
-                "sha256:abc".into(),
-            )),
+            head: Some(head(POLICY_CMT, Some(POLICY_AT))),
             ..Default::default()
         };
-        let (blob, digest) = pull_with(&client, &empty_store(), REF).await.unwrap();
-        assert_eq!(blob, br#"{"network":{}}"#);
-        assert_eq!(digest, "sha256:abc");
+        let pulled = pull_with(&client, &empty_store(), REF).await.unwrap();
+        assert_eq!(
+            pulled,
+            Pulled::Artifact {
+                artifact_type: POLICY_AT.into(),
+                config_blob: br#"{"network":{}}"#.to_vec(),
+                digest: "sha256:abc".into(),
+            }
+        );
+        assert!(client.image_pulled.lock().unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn pull_with_rejects_an_artifact_that_is_not_a_policy() {
+    async fn pull_falls_back_to_the_config_media_type_when_artifact_type_is_absent() {
         let client = FakeRegistry {
-            pull: Some((
-                Some("application/vnd.lens.agent.v1+json".into()),
-                b"{}".to_vec(),
-                "sha256:abc".into(),
-            )),
+            head: Some(head(POLICY_CMT, None)),
             ..Default::default()
         };
-        let err = pull_with(&client, &empty_store(), REF).await.unwrap_err();
+        let pulled = pull_with(&client, &empty_store(), REF).await.unwrap();
         assert!(
-            format!("{err:#}").contains("not a policy artifact"),
-            "got: {err:#}"
+            matches!(pulled, Pulled::Artifact { artifact_type, .. } if artifact_type == POLICY_CMT)
         );
     }
 
     #[tokio::test]
-    async fn pull_with_reports_a_missing_artifact_type_as_not_a_policy() {
+    async fn pull_pulls_an_image_into_the_cache_when_the_config_is_an_oci_image() {
         let client = FakeRegistry {
-            pull: Some((None, b"{}".to_vec(), "sha256:abc".into())),
+            head: Some(head(OCI_CMT, None)),
+            image_digest: "sha256:img".into(),
             ..Default::default()
         };
-        let err = pull_with(&client, &empty_store(), REF).await.unwrap_err();
-        assert!(format!("{err:#}").contains("<none>"), "got: {err:#}");
+        let pulled = pull_with(&client, &empty_store(), REF).await.unwrap();
+        assert!(matches!(pulled, Pulled::Image { digest } if digest == "sha256:img"));
+        assert_eq!(client.image_pulled.lock().unwrap().as_deref(), Some(REF));
     }
 
     #[tokio::test]
-    async fn pull_with_propagates_a_registry_pull_failure() {
+    async fn pull_propagates_a_head_fetch_error() {
         let client = FakeRegistry {
             fail: true,
+            head: Some(head(OCI_CMT, None)),
             ..Default::default()
         };
         let err = pull_with(&client, &empty_store(), REF).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("refused the pull"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_propagates_an_image_pull_failure() {
+        let client = FakeRegistry {
+            head: Some(head(OCI_CMT, None)),
+            image_fail: true,
+            ..Default::default()
+        };
+        let err = pull_with(&client, &empty_store(), REF).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("image pull failed"),
             "got: {err:#}"
         );
     }
@@ -339,7 +431,9 @@ mod tests {
             "LNS_REGISTRY_AUTH_PATH",
             dir.path().join("auth.json"),
         );
-        let err = push("::bad::", b"{}").await.unwrap_err();
+        let err = push_artifact("::bad::", POLICY_AT, POLICY_CMT, b"{}")
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid registry reference"),
             "got: {err:#}"

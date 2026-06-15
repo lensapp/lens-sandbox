@@ -8,6 +8,7 @@ pub mod integration;
 pub mod log;
 pub mod policy;
 pub mod raw_mode;
+pub mod registry;
 pub mod run;
 pub mod sandbox;
 pub mod service;
@@ -76,14 +77,18 @@ pub async fn run(cli: Cli) -> Result<i32> {
         Command::Update(args) => update::run(args).await?,
         Command::Policy(args) => {
             let cwd = std::env::current_dir()?;
-            if matches!(
-                args.command,
-                cli::PolicyCommand::Push(_) | cli::PolicyCommand::Pull(_)
-            ) {
-                service::require_running().await;
-            }
-            let registry = policy::RealPolicyRegistry::new(service::socket_path()?);
-            policy::run(&args.command, &cwd, &registry, &mut std::io::stdout()).await?
+            policy::run(&args.command, &cwd, &mut std::io::stdout())?
+        }
+        Command::Push(args) => {
+            let cwd = std::env::current_dir()?;
+            service::require_running().await;
+            let client = registry::RealRegistryClient::new(service::socket_path()?);
+            registry::push(&args, &cwd, &client, &mut std::io::stdout()).await?
+        }
+        Command::Pull(args) => {
+            service::require_running().await;
+            let client = registry::RealRegistryClient::new(service::socket_path()?);
+            registry::pull(&args, &client, &mut std::io::stdout()).await?
         }
         Command::Login(args) => {
             let store = lns_policy::registry_auth::JsonFileRegistryCredentialStore::new(

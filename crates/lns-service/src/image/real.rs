@@ -76,60 +76,66 @@ impl Registry for RealRegistry {
     }
 }
 
-impl crate::policy_artifact::PolicyArtifactRegistry for RealRegistry {
-    async fn push_policy_artifact(
+impl crate::artifact::ArtifactRegistry for RealRegistry {
+    async fn push_artifact(
         &self,
         reference: &Reference,
+        artifact_type: &str,
+        config_media_type: &str,
         config_blob: &[u8],
         auth: &RegistryAuth,
     ) -> Result<String> {
-        use lns_policy::artifact::{POLICY_ARTIFACT_TYPE, POLICY_CONFIG_MEDIA_TYPE};
         use oci_client::client::Config;
         use oci_client::manifest::OCI_IMAGE_MEDIA_TYPE;
         use sha2::{Digest, Sha256};
 
-        let config = Config::new(
-            config_blob.to_vec(),
-            POLICY_CONFIG_MEDIA_TYPE.to_string(),
-            None,
-        );
+        let config = Config::new(config_blob.to_vec(), config_media_type.to_string(), None);
         let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(config_blob)));
         let manifest = OciImageManifest {
             schema_version: 2,
             media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
             config: OciDescriptor {
-                media_type: POLICY_CONFIG_MEDIA_TYPE.to_string(),
+                media_type: config_media_type.to_string(),
                 digest: config_digest,
                 size: config_blob.len() as i64,
                 ..Default::default()
             },
             layers: Vec::new(),
-            artifact_type: Some(POLICY_ARTIFACT_TYPE.to_string()),
+            artifact_type: Some(artifact_type.to_string()),
             ..Default::default()
         };
         self.client
             .push(reference, &[], config, auth, Some(manifest))
             .await
-            .with_context(|| format!("pushing policy artifact to {reference}"))?;
+            .with_context(|| format!("pushing artifact to {reference}"))?;
         self.client
             .fetch_manifest_digest(reference, auth)
             .await
             .with_context(|| format!("reading pushed manifest digest for {reference}"))
     }
 
-    async fn pull_artifact(
+    async fn pull_head(
         &self,
         reference: &Reference,
         auth: &RegistryAuth,
-    ) -> Result<(Option<String>, Vec<u8>, String)> {
+    ) -> Result<crate::artifact::ManifestHead> {
         let (manifest, digest, config) = self
             .client
             .pull_manifest_and_config(reference, auth)
             .await
-            .with_context(|| format!("pulling policy artifact {reference}"))?;
+            .with_context(|| format!("pulling manifest for {reference}"))?;
         let manifest_bytes = serialized_len(&manifest).unwrap_or(usize::MAX);
         enforce_manifest_doc_size(&reference.to_string(), manifest_bytes, config.len())?;
-        Ok((manifest.artifact_type, config.into_bytes(), digest))
+        Ok(crate::artifact::ManifestHead {
+            config_media_type: manifest.config.media_type,
+            artifact_type: manifest.artifact_type,
+            config_blob: config.into_bytes(),
+            digest,
+        })
+    }
+
+    async fn pull_image_to_cache(&self, reference: &str) -> Result<String> {
+        Ok(crate::image_store::pull(reference).await?.digest)
     }
 }
 

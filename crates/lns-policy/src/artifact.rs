@@ -1,188 +1,202 @@
-//! Encoding of a `Policy` as the registry's typed-artifact config blob; the wire shape mirrors the `policy` JSON Schema the registry serves at `GET /ext/v1/types`.
+//! The lns-registry typed-artifact contract: the family taxonomy, its OCI media types, and the file→config-blob conversion. The registry is the schema authority (it validates the blob on push); this module only produces a well-formed blob and names the right media types.
 
-use serde::{Deserialize, Serialize};
+use std::io;
 
-use crate::Policy;
-
-pub const POLICY_ARTIFACT_TYPE: &str = "application/vnd.lens.policy.v1+json";
-pub const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.lens.policy.config.v1+json";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(flatten)]
-    pub policy: Policy,
+/// One of the registry's typed-artifact families (`GET /ext/v1/types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Agent,
+    Policy,
+    Tool,
+    Workflow,
+    Sandbox,
+    Knowledge,
+    Integration,
+    Bundle,
 }
 
-pub fn encode(
-    policy: &Policy,
-    name: Option<&str>,
-    version: Option<&str>,
-) -> serde_json::Result<Vec<u8>> {
-    let config = PolicyConfig {
-        name: name.map(str::to_string),
-        version: version.map(str::to_string),
-        policy: policy.clone(),
-    };
-    serde_json::to_vec(&config)
+impl Family {
+    pub const ALL: [Family; 8] = [
+        Family::Agent,
+        Family::Policy,
+        Family::Tool,
+        Family::Workflow,
+        Family::Sandbox,
+        Family::Knowledge,
+        Family::Integration,
+        Family::Bundle,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Family::Agent => "agent",
+            Family::Policy => "policy",
+            Family::Tool => "tool",
+            Family::Workflow => "workflow",
+            Family::Sandbox => "sandbox",
+            Family::Knowledge => "knowledge",
+            Family::Integration => "integration",
+            Family::Bundle => "bundle",
+        }
+    }
+
+    /// The repository path segment convention (`org/<org>/<segment>/<name>`); plural except the mass-noun `knowledge`.
+    pub fn path_segment(self) -> &'static str {
+        match self {
+            Family::Agent => "agents",
+            Family::Policy => "policies",
+            Family::Tool => "tools",
+            Family::Workflow => "workflows",
+            Family::Sandbox => "sandboxes",
+            Family::Knowledge => "knowledge",
+            Family::Integration => "integrations",
+            Family::Bundle => "bundles",
+        }
+    }
+
+    pub fn artifact_type(self) -> String {
+        format!("application/vnd.lens.{}.v1+json", self.slug())
+    }
+
+    pub fn config_media_type(self) -> String {
+        format!("application/vnd.lens.{}.config.v1+json", self.slug())
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Family> {
+        Family::ALL.into_iter().find(|f| f.slug() == slug)
+    }
+
+    pub fn from_path_segment(segment: &str) -> Option<Family> {
+        Family::ALL
+            .into_iter()
+            .find(|f| f.path_segment() == segment)
+    }
+
+    pub fn from_artifact_type(media_type: &str) -> Option<Family> {
+        let slug = media_type
+            .strip_prefix("application/vnd.lens.")?
+            .strip_suffix(".v1+json")?;
+        Family::from_slug(slug)
+    }
+
+    pub fn from_config_media_type(media_type: &str) -> Option<Family> {
+        let slug = media_type
+            .strip_prefix("application/vnd.lens.")?
+            .strip_suffix(".config.v1+json")?;
+        Family::from_slug(slug)
+    }
+
+    /// Infers the family from a registry reference's repository path (`…/<segment>/<name>[:tag|@digest]`); the trailing name segment is skipped, so its tag/digest is irrelevant.
+    pub fn infer_from_reference(reference: &str) -> Option<Family> {
+        reference
+            .split('/')
+            .rev()
+            .skip(1)
+            .find_map(Family::from_path_segment)
+    }
 }
 
-pub fn decode(bytes: &[u8]) -> serde_json::Result<(Policy, Option<String>, Option<String>)> {
-    let config: PolicyConfig = serde_json::from_slice(bytes)?;
-    Ok((config.policy, config.name, config.version))
+/// Normalizes an authored artifact file (YAML or JSON) into the canonical JSON config blob the registry stores and validates.
+pub fn to_config_blob(file_bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let value: serde_json::Value = serde_yaml::from_slice(file_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    serde_json::to_vec(&value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NetworkPolicy, RouteRule, Transport, Verdict};
-    use serde_json::{Value, json};
+    use serde_json::json;
 
-    fn sample_policy() -> Policy {
-        Policy {
-            network: NetworkPolicy {
-                allowed_routes: vec![RouteRule {
-                    match_pattern: "api.example.test".into(),
-                    verdict: Verdict::Allow,
-                    transport: Transport::Upstream,
-                    scheme: None,
-                    description: Some("an allowed host".into()),
-                    tls_terminate: false,
-                    rules: Vec::new(),
-                }],
-                default_verdict: Verdict::Ask,
-                default_transport: Transport::Direct,
-            },
-            integrations: vec!["some-integration".into()],
+    #[test]
+    fn media_types_match_the_registry_formula_for_every_family() {
+        assert_eq!(
+            Family::Policy.artifact_type(),
+            "application/vnd.lens.policy.v1+json"
+        );
+        assert_eq!(
+            Family::Policy.config_media_type(),
+            "application/vnd.lens.policy.config.v1+json"
+        );
+        assert_eq!(
+            Family::Agent.artifact_type(),
+            "application/vnd.lens.agent.v1+json"
+        );
+        assert_eq!(
+            Family::Bundle.config_media_type(),
+            "application/vnd.lens.bundle.config.v1+json"
+        );
+        // Every family round-trips slug <-> media types.
+        for f in Family::ALL {
+            assert_eq!(Family::from_artifact_type(&f.artifact_type()), Some(f));
+            assert_eq!(
+                Family::from_config_media_type(&f.config_media_type()),
+                Some(f)
+            );
+            assert_eq!(Family::from_slug(f.slug()), Some(f));
+            assert_eq!(Family::from_path_segment(f.path_segment()), Some(f));
         }
     }
 
-    fn policy_schema() -> Value {
-        json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "version": { "type": "string" },
-                "network": {
-                    "type": "object",
-                    "properties": {
-                        "allowedRoutes": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["match", "verdict"],
-                                "properties": {
-                                    "match": { "type": "string", "minLength": 1 },
-                                    "verdict": { "enum": ["allow", "deny", "ask"] },
-                                    "transport": { "enum": ["upstream", "direct"] },
-                                    "scheme": { "enum": ["http", "https"] },
-                                    "description": { "type": "string" },
-                                    "tlsTerminate": { "type": "boolean" },
-                                    "rules": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "method": { "type": "string" },
-                                                "path": { "type": "string" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        "defaultVerdict": { "enum": ["allow", "deny", "ask"] },
-                        "defaultTransport": { "enum": ["upstream", "direct"] }
-                    }
-                },
-                "integrations": { "type": "array", "items": { "type": "string" } }
-            }
-        })
-    }
-
-    fn assert_schema_valid(blob: &[u8]) {
-        let schema = policy_schema();
-        let instance: Value = serde_json::from_slice(blob).expect("blob is JSON");
-        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
-        let errors: Vec<String> = validator
-            .iter_errors(&instance)
-            .map(|e| e.to_string())
-            .collect();
-        assert!(
-            errors.is_empty(),
-            "config blob must satisfy the registry policy schema: {errors:?}"
-        );
-    }
-
     #[test]
-    fn encode_produces_a_blob_that_satisfies_the_registry_policy_schema() {
-        let blob = encode(&sample_policy(), Some("pii"), Some("v1")).unwrap();
-        assert_schema_valid(&blob);
-    }
-
-    #[test]
-    fn default_policy_blob_is_also_schema_valid() {
-        let blob = encode(&Policy::default(), None, None).unwrap();
-        assert_schema_valid(&blob);
-    }
-
-    #[test]
-    fn encode_flattens_network_and_integrations_to_the_top_level_alongside_name_and_version() {
-        let blob = encode(&sample_policy(), Some("pii"), Some("v1")).unwrap();
-        let v: Value = serde_json::from_slice(&blob).unwrap();
-        assert_eq!(v["name"], json!("pii"));
-        assert_eq!(v["version"], json!("v1"));
-        assert!(v.get("network").is_some(), "network at top level: {v}");
+    fn media_type_parsers_reject_foreign_types() {
         assert_eq!(
-            v["network"]["allowedRoutes"][0]["match"],
-            json!("api.example.test")
+            Family::from_config_media_type("application/vnd.oci.image.config.v1+json"),
+            None
         );
-        assert_eq!(v["network"]["allowedRoutes"][0]["verdict"], json!("allow"));
-        assert_eq!(v["integrations"], json!(["some-integration"]));
-    }
-
-    #[test]
-    fn encode_omits_name_and_version_when_absent() {
-        let blob = encode(&sample_policy(), None, None).unwrap();
-        let v: Value = serde_json::from_slice(&blob).unwrap();
-        assert!(v.get("name").is_none(), "name must be omitted: {v}");
-        assert!(v.get("version").is_none(), "version must be omitted: {v}");
-    }
-
-    #[test]
-    fn encode_then_decode_round_trips_the_policy_and_metadata() {
-        let policy = sample_policy();
-        let blob = encode(&policy, Some("pii"), Some("v1")).unwrap();
-        let (decoded, name, version) = decode(&blob).unwrap();
-        assert_eq!(decoded, policy);
-        assert_eq!(name.as_deref(), Some("pii"));
-        assert_eq!(version.as_deref(), Some("v1"));
-    }
-
-    #[test]
-    fn decode_defaults_metadata_to_none_when_the_blob_carries_only_a_policy() {
-        let blob = encode(&sample_policy(), None, None).unwrap();
-        let (_, name, version) = decode(&blob).unwrap();
-        assert!(name.is_none());
-        assert!(version.is_none());
-    }
-
-    #[test]
-    fn decode_rejects_a_malformed_blob() {
-        let err = decode(b"not json at all").unwrap_err();
-        assert!(err.is_syntax() || err.is_data(), "got: {err}");
-    }
-
-    #[test]
-    fn media_type_constants_match_the_registry_contract() {
-        assert_eq!(POLICY_ARTIFACT_TYPE, "application/vnd.lens.policy.v1+json");
         assert_eq!(
-            POLICY_CONFIG_MEDIA_TYPE,
-            "application/vnd.lens.policy.config.v1+json"
+            Family::from_artifact_type("application/vnd.lens.ghost.v1+json"),
+            None
         );
+        assert_eq!(Family::from_slug("ghost"), None);
+        assert_eq!(Family::from_path_segment("widgets"), None);
+    }
+
+    #[test]
+    fn infer_from_reference_reads_the_family_segment_before_the_name() {
+        assert_eq!(
+            Family::infer_from_reference("registry.example.com/org/acme/policies/pii:v1"),
+            Some(Family::Policy)
+        );
+        assert_eq!(
+            Family::infer_from_reference("localhost:5000/org/acme/agents/hermes@sha256:abc"),
+            Some(Family::Agent)
+        );
+        assert_eq!(
+            Family::infer_from_reference("localhost:5000/org/acme/agents/hermes"),
+            Some(Family::Agent)
+        );
+    }
+
+    #[test]
+    fn infer_from_reference_is_none_without_a_known_segment() {
+        assert_eq!(
+            Family::infer_from_reference("docker.io/library/alpine:3.20"),
+            None
+        );
+        assert_eq!(
+            Family::infer_from_reference("localhost:5000/just-a-name"),
+            None
+        );
+    }
+
+    #[test]
+    fn to_config_blob_accepts_yaml_and_emits_json() {
+        let blob = to_config_blob(b"network:\n  defaultVerdict: ask\n").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        assert_eq!(v, json!({"network": {"defaultVerdict": "ask"}}));
+    }
+
+    #[test]
+    fn to_config_blob_accepts_json_unchanged_in_meaning() {
+        let blob = to_config_blob(br#"{"name":"pii","network":{}}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        assert_eq!(v, json!({"name": "pii", "network": {}}));
+    }
+
+    #[test]
+    fn to_config_blob_rejects_a_malformed_file() {
+        let err = to_config_blob(b": : not yaml or json : :").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
