@@ -83,6 +83,10 @@ pub enum Request {
         config_media_type: String,
         config_blob: Vec<u8>,
     },
+    PushImage {
+        source_reference: String,
+        target_reference: String,
+    },
     Pull {
         reference: String,
     },
@@ -646,6 +650,10 @@ mod tests {
                 artifact_type: "application/vnd.lens.policy.v1+json".into(),
                 config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                 config_blob: br#"{"network":{}}"#.to_vec(),
+            },
+            Request::PushImage {
+                source_reference: "docker.io/library/alpine:3.20".into(),
+                target_reference: "registry.example.test/org/acme/images/alpine:3.20".into(),
             },
             Request::Pull {
                 reference: "registry.example.test/org/acme/policies/pii:v1".into(),

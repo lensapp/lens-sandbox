@@ -56,6 +56,24 @@ impl RegistryClient for RealRegistryClient {
         })
     }
 
+    fn push_image<'a>(
+        &'a self,
+        source_reference: &'a str,
+        target_reference: &'a str,
+    ) -> LocalBoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let request = Request::PushImage {
+                source_reference: source_reference.to_string(),
+                target_reference: target_reference.to_string(),
+            };
+            match self.round_trip(request).await? {
+                Response::Pushed { digest } => Ok(digest),
+                Response::Error { message } => bail!("{message}"),
+                other => bail!("unexpected response to image push: {other:?}"),
+            }
+        })
+    }
+
     fn pull<'a>(&'a self, reference: &'a str) -> LocalBoxFuture<'a, Result<Pulled>> {
         Box::pin(async move {
             let request = Request::Pull {

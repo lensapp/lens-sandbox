@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use lns_policy::artifact::{self, Family};
 
 use crate::cli::{PullArgs, PushArgs};
@@ -29,6 +29,12 @@ pub trait RegistryClient {
         artifact_type: &'a str,
         config_media_type: &'a str,
         config_blob: &'a [u8],
+    ) -> LocalBoxFuture<'a, Result<String>>;
+
+    fn push_image<'a>(
+        &'a self,
+        source_reference: &'a str,
+        target_reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<String>>;
 
     fn pull<'a>(&'a self, reference: &'a str) -> LocalBoxFuture<'a, Result<Pulled>>;
@@ -63,10 +69,9 @@ pub async fn push(
         cwd.join(&args.source)
     };
     if !path.exists() {
-        bail!(
-            "image push is not yet supported; {:?} is not a local file to push as an artifact",
-            args.source
-        );
+        let digest = client.push_image(&args.source, &args.reference).await?;
+        writeln!(writer, "Pushed image {} to {}", digest, args.reference)?;
+        return Ok(0);
     }
     let family = resolve_family(args.family.as_deref(), &args.reference)?;
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -128,18 +133,35 @@ pub async fn pull(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::bail;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
     #[derive(Default)]
     struct FakeClient {
         pushed: Mutex<Option<(String, String, Vec<u8>)>>,
+        image_pushed: Mutex<Option<(String, String)>>,
         push_digest: String,
         pull: Option<Pulled>,
         fail: Option<String>,
     }
 
     impl RegistryClient for FakeClient {
+        fn push_image<'a>(
+            &'a self,
+            source_reference: &'a str,
+            target_reference: &'a str,
+        ) -> LocalBoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                if let Some(msg) = &self.fail {
+                    bail!("{msg}");
+                }
+                *self.image_pushed.lock().unwrap() =
+                    Some((source_reference.into(), target_reference.into()));
+                Ok(self.push_digest.clone())
+            })
+        }
+
         fn push_artifact<'a>(
             &'a self,
             reference: &'a str,
@@ -313,22 +335,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_rejects_a_non_file_source_as_unsupported_image_push() {
+    async fn push_treats_a_non_file_source_as_an_image_push() {
         let dir = TempDir::new().unwrap();
+        let client = FakeClient {
+            push_digest: "sha256:img".into(),
+            ..Default::default()
+        };
+        let args = push_args(
+            "docker.io/library/alpine:3.20",
+            "localhost:5000/org/x/images/alpine:3.20",
+            None,
+        );
+        let mut out = Vec::new();
+        assert_eq!(push(&args, dir.path(), &client, &mut out).await.unwrap(), 0);
+        assert_eq!(
+            client.image_pushed.lock().unwrap().clone().unwrap(),
+            (
+                "docker.io/library/alpine:3.20".to_string(),
+                "localhost:5000/org/x/images/alpine:3.20".to_string()
+            )
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("Pushed image sha256:img")
+        );
+    }
+
+    #[tokio::test]
+    async fn push_image_surfaces_a_registry_error() {
+        let dir = TempDir::new().unwrap();
+        let client = FakeClient {
+            fail: Some("registry said no".into()),
+            ..Default::default()
+        };
         let err = push(
             &push_args(
+                "docker.io/library/alpine:3.20",
                 "localhost:5000/org/x/images/alpine:3.20",
-                "localhost:5000/org/x/y:v1",
                 None,
             ),
             dir.path(),
-            &FakeClient::default(),
+            &client,
             &mut Vec::new(),
         )
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("image push is not yet supported"),
+            format!("{err:#}").contains("registry said no"),
             "got: {err:#}"
         );
     }

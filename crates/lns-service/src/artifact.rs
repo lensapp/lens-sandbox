@@ -48,6 +48,13 @@ pub(crate) trait ArtifactRegistry: Send + Sync {
         &self,
         reference: &str,
     ) -> impl std::future::Future<Output = Result<String>> + Send;
+
+    fn push_image_from_cache(
+        &self,
+        source_reference: &str,
+        target: &Reference,
+        auth: &RegistryAuth,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
 fn auth_for(registry: &str, file: &RegistryAuthFile) -> RegistryAuth {
@@ -124,6 +131,18 @@ async fn pull_with<R: ArtifactRegistry>(
     }
 }
 
+async fn push_image_with<R: ArtifactRegistry>(
+    client: &R,
+    store: &dyn RegistryCredentialStore,
+    source_reference: &str,
+    target_reference: &str,
+) -> Result<String> {
+    let (target, auth) = resolve(target_reference, store)?;
+    client
+        .push_image_from_cache(source_reference, &target, &auth)
+        .await
+}
+
 fn registry_for(reference: &str) -> RealRegistry {
     let target = reference
         .parse::<Reference>()
@@ -157,6 +176,16 @@ pub async fn push_artifact(
     .await
 }
 
+pub async fn push_image(source_reference: &str, target_reference: &str) -> Result<String> {
+    push_image_with(
+        &registry_for(target_reference),
+        &store(),
+        source_reference,
+        target_reference,
+    )
+    .await
+}
+
 pub async fn pull(reference: &str) -> Result<Pulled> {
     pull_with(&registry_for(reference), &store(), reference).await
 }
@@ -176,6 +205,7 @@ mod tests {
         image_fail: bool,
         seen_auth: Mutex<Option<RegistryAuth>>,
         image_pulled: Mutex<Option<String>>,
+        image_pushed: Mutex<Option<(String, String)>>,
     }
 
     impl ArtifactRegistry for FakeRegistry {
@@ -216,6 +246,21 @@ mod tests {
             *self.image_pulled.lock().unwrap() = Some(reference.to_string());
             if self.image_fail {
                 anyhow::bail!("image pull failed");
+            }
+            Ok(self.image_digest.clone())
+        }
+
+        async fn push_image_from_cache(
+            &self,
+            source_reference: &str,
+            target: &Reference,
+            auth: &RegistryAuth,
+        ) -> Result<String> {
+            *self.seen_auth.lock().unwrap() = Some(auth.clone());
+            *self.image_pushed.lock().unwrap() =
+                Some((source_reference.into(), target.to_string()));
+            if self.fail {
+                anyhow::bail!("registry refused the image push");
             }
             Ok(self.image_digest.clone())
         }
@@ -404,6 +449,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_image_resolves_target_auth_and_returns_the_digest() {
+        let client = FakeRegistry {
+            image_digest: "sha256:img".into(),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
+        let mut file = RegistryAuthFile::new();
+        file.insert(
+            "registry.example.test".into(),
+            RegistryCredential {
+                username: None,
+                token: "lns_tok".into(),
+            },
+        );
+        store.save(&file).unwrap();
+
+        let digest = push_image_with(&client, &store, "docker.io/library/alpine:3.20", REF)
+            .await
+            .unwrap();
+        assert_eq!(digest, "sha256:img");
+        assert_eq!(
+            client.image_pushed.lock().unwrap().as_ref().unwrap().0,
+            "docker.io/library/alpine:3.20"
+        );
+        assert_eq!(
+            *client.seen_auth.lock().unwrap(),
+            Some(RegistryAuth::Basic("any".into(), "lns_tok".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn push_image_rejects_an_invalid_target_reference() {
+        let client = FakeRegistry::default();
+        let err = push_image_with(&client, &empty_store(), "alpine:3.20", "::bad::")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid registry reference"),
+            "got: {err:#}"
+        );
+        assert!(client.image_pushed.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn push_image_propagates_a_registry_failure() {
+        let client = FakeRegistry {
+            fail: true,
+            ..Default::default()
+        };
+        let err = push_image_with(&client, &empty_store(), "alpine:3.20", REF)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refused the image push"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn pull_returns_an_artifact_when_the_config_media_type_is_a_lens_family() {
         let client = FakeRegistry {
             head: Some(head(POLICY_CMT, Some(POLICY_AT))),
@@ -484,6 +589,21 @@ mod tests {
         let err = push_artifact("::bad::", POLICY_AT, POLICY_CMT, b"{}")
             .await
             .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid registry reference"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn public_push_image_wires_real_registry_and_fails_fast_on_a_bad_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_REGISTRY_AUTH_PATH",
+            dir.path().join("auth.json"),
+        );
+        let err = push_image("alpine:3.20", "::bad::").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid registry reference"),
             "got: {err:#}"

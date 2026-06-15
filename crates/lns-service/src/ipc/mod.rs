@@ -244,6 +244,10 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             )
             .await,
         ),
+        Request::PushImage {
+            source_reference,
+            target_reference,
+        } => push_response(crate::artifact::push_image(source_reference, target_reference).await),
         Request::Pull { reference } => pull_response(crate::artifact::pull(reference).await),
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
@@ -1665,6 +1669,33 @@ mod tests {
                     artifact_type: "application/vnd.lens.policy.v1+json".into(),
                     config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                     config_blob: b"{}".to_vec(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid registry reference"),
+            "got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_push_image_of_an_invalid_target_surfaces_the_parse_error() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _a =
+            crate::test_env::EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", d.path().join("auth.json"));
+        let resp = as_json(
+            handle_request(
+                &Request::PushImage {
+                    source_reference: "alpine:3.20".into(),
+                    target_reference: "###".into(),
                 },
                 Instant::now(),
             )

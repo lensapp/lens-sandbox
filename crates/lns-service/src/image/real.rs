@@ -145,6 +145,47 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
     async fn pull_image_to_cache(&self, reference: &str) -> Result<String> {
         Ok(crate::image_store::pull(reference).await?.digest)
     }
+
+    async fn push_image_from_cache(
+        &self,
+        source_reference: &str,
+        target: &Reference,
+        auth: &RegistryAuth,
+    ) -> Result<String> {
+        use oci_client::client::{Config, ImageLayer};
+
+        let manifests = crate::cache::root()?.join("manifests");
+        let cached = ManifestCache::new(manifests)
+            .get(source_reference)
+            .with_context(|| {
+                format!("{source_reference} is not in the local image cache; pull it first")
+            })?;
+        let layer_cache = LayerCache::new(crate::cache::root()?.join("layers"));
+        let mut layers = Vec::with_capacity(cached.manifest.layers.len());
+        for descriptor in &cached.manifest.layers {
+            let bytes = layer_cache
+                .read(&descriptor.digest)
+                .with_context(|| format!("reading cached layer {}", descriptor.digest))?;
+            layers.push(ImageLayer::new(
+                bytes,
+                descriptor.media_type.clone(),
+                descriptor.annotations.clone(),
+            ));
+        }
+        let config = Config::new(
+            cached.config.into_bytes(),
+            cached.manifest.config.media_type.clone(),
+            cached.manifest.config.annotations.clone(),
+        );
+        self.client
+            .push(target, &layers, config, auth, Some(cached.manifest))
+            .await
+            .with_context(|| format!("pushing image to {target}"))?;
+        self.client
+            .fetch_manifest_digest(target, auth)
+            .await
+            .with_context(|| format!("reading pushed manifest digest for {target}"))
+    }
 }
 
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {

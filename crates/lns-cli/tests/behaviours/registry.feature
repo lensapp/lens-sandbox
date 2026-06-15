@@ -18,6 +18,10 @@ Feature: pushing and pulling artifacts to an OCI registry
     When the developer pushes "p.yaml" to "localhost:5000/anything:v1" with family "policy"
     Then the push reports a sha256 digest
 
+  Scenario: A non-file source is pushed as an image
+    When the developer pushes "docker.io/library/alpine:3.20" to "localhost:5000/org/acme/images/alpine:3.20"
+    Then the push reports a sha256 digest
+
   Scenario: Pushing a file whose family cannot be inferred fails
     Given a policy file "p.yaml"
     When the developer pushes "p.yaml" to "localhost:5000/just-a-name:v1"

@@ -52,6 +52,14 @@ impl FakeRegistryClient {
 }
 
 impl lns_cli::registry::RegistryClient for FakeRegistryClient {
+    fn push_image<'a>(
+        &'a self,
+        source_reference: &'a str,
+        _target_reference: &'a str,
+    ) -> lns_cli::integration::LocalBoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move { Ok(Self::digest(source_reference.as_bytes())) })
+    }
+
     fn push_artifact<'a>(
         &'a self,
         reference: &'a str,
