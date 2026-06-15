@@ -28,6 +28,7 @@ run, which requires a `COMMAND` after `--`.
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
 | `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
+| `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare image reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
 | `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
@@ -82,6 +83,31 @@ lns image pull <IMAGE> | ls | rm <IMAGE> | prune [-f]
 | `prune`        | Remove every cached image not used by a running sandbox. Prompts unless `-f`/`--force`.  |
 
 See [Running workloads — images](running-workloads.md#managing-the-image-cache).
+
+## `lns login` / `lns logout`
+
+Store credentials for a private OCI registry so `lns run` and `lns image pull`
+can fetch its images. Credentials are verified against the registry before they
+are saved (the background service must be running), and multiple registries can
+be logged in at once.
+
+```bash
+echo "$TOKEN" | lns login -u <USERNAME> --password-stdin <REGISTRY>
+lns login --list
+lns logout <REGISTRY>
+```
+
+| Form                                  | Meaning                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `docker.io`). Pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `--password`. |
+| `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
+| `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
+
+The registry is matched by host: a bare `lns run alpine` uses the `run.registry`
+default (or Docker Hub), while a fully-qualified `lns run ghcr.io/org/app` always
+targets that registry and uses its stored login if present. Credentials live in
+a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
+`LNS_REGISTRY_AUTH_PATH`), separate from any shareable policy.
 
 ## `lns sandbox`
 
@@ -228,6 +254,7 @@ lns config list
 | ------------- | ------------- | ---------------------------------------------------------- |
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
+| `run.registry`| `--registry`  | Default registry host for bare image references (e.g. `ghcr.io`). |
 | `run.env`     | `-e`          | `KEY=VALUE` (multiple values allowed).                     |
 | `run.volume`  | `-v`          | `name:/path[:ro]` (multiple values allowed).               |
 | `run.publish` | `-p`          | `[host_ip:]hostport:containerport[/proto]` (multiple values allowed). |

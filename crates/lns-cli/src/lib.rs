@@ -6,6 +6,7 @@ pub mod config;
 pub mod image;
 pub mod integration;
 pub mod log;
+pub mod login;
 pub mod policy;
 pub mod raw_mode;
 pub mod run;

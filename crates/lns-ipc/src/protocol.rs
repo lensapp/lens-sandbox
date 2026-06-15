@@ -8,32 +8,80 @@ pub enum Request {
     Ping,
     Status,
     Shutdown,
-    Unknown { method: String },
+    Unknown {
+        method: String,
+    },
     RunImage(RunImageArgs),
-    CancelRun { run_id: u32 },
-    RunStdin { run_id: u32, bytes: Vec<u8> },
-    RunResize { run_id: u32, rows: u16, cols: u16 },
-    RunSignal { run_id: u32, signal: SignalKind },
+    CancelRun {
+        run_id: u32,
+    },
+    RunStdin {
+        run_id: u32,
+        bytes: Vec<u8>,
+    },
+    RunResize {
+        run_id: u32,
+        rows: u16,
+        cols: u16,
+    },
+    RunSignal {
+        run_id: u32,
+        signal: SignalKind,
+    },
     ExecImage(ExecImageArgs),
-    Kill { run_id: u32, signal: SignalKind },
+    Kill {
+        run_id: u32,
+        signal: SignalKind,
+    },
     ListRuns,
-    StopRun { run_id: u32, timeout_secs: u64 },
-    InspectRun { run_id: u32 },
-    RunLogs { run_id: u32, follow: bool },
-    AttachRun { run_id: u32 },
-    RunStats { run_id: u32 },
-    RemoveRun { run_id: u32 },
+    StopRun {
+        run_id: u32,
+        timeout_secs: u64,
+    },
+    InspectRun {
+        run_id: u32,
+    },
+    RunLogs {
+        run_id: u32,
+        follow: bool,
+    },
+    AttachRun {
+        run_id: u32,
+    },
+    RunStats {
+        run_id: u32,
+    },
+    RemoveRun {
+        run_id: u32,
+    },
     PruneRuns,
-    BeginIntegrationSignIn { id: String },
+    BeginIntegrationSignIn {
+        id: String,
+    },
     ListVolumes,
-    CreateVolume { name: String },
-    InspectVolume { name: String },
-    RemoveVolume { name: String },
+    CreateVolume {
+        name: String,
+    },
+    InspectVolume {
+        name: String,
+    },
+    RemoveVolume {
+        name: String,
+    },
     PruneVolumes,
-    PullImage { image: String },
+    PullImage {
+        image: String,
+    },
     ListImages,
-    RemoveImage { image: String },
+    RemoveImage {
+        image: String,
+    },
     PruneImages,
+    RegistryLogin {
+        registry: String,
+        username: String,
+        secret: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +141,7 @@ pub enum Response {
     OauthSignInFailed {
         reason: String,
     },
+    RegistryLoginVerified,
     VolumeList {
         volumes: Vec<VolumeInfo>,
     },
@@ -816,6 +865,26 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    #[test]
+    fn registry_login_request_survives_a_round_trip() {
+        let req = Request::RegistryLogin {
+            registry: "ghcr.io".into(),
+            username: "octocat".into(),
+            secret: "ghp_real_token".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn registry_login_verified_response_survives_a_round_trip() {
+        let resp = Response::RegistryLoginVerified;
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

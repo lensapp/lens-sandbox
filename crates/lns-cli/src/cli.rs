@@ -38,6 +38,12 @@ pub struct RunArgs {
 
     #[arg(
         long,
+        help = "Registry to qualify a bare image reference (e.g. ghcr.io); falls back to the `run.registry` config default. A fully-qualified reference is used as-is."
+    )]
+    pub registry: Option<String>,
+
+    #[arg(
+        long,
         value_parser = clap::value_parser!(u8).range(1..),
         help = "Number of vCPUs; falls back to the `run.cpus` config default, then 1."
     )]
