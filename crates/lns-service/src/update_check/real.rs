@@ -1,7 +1,9 @@
 use super::UpdateStatus;
 use super::traits::{Clock, Fetcher, StateStore};
+use crate::http_cap::CappedBuffer;
 use crate::shutdown::Shutdown;
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use lns_ipc::{Method, PlatformInfo, Uname, shell_basename_from, uname_fields_with};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,7 +59,7 @@ impl Clock for RealClock {
 struct RealFetcher;
 impl Fetcher for RealFetcher {
     async fn get_manifest(&self, url: &str, user_agent: &str, install_id: &str) -> Result<Vec<u8>> {
-        let bytes = reqwest::Client::new()
+        let resp = reqwest::Client::new()
             .get(url)
             .timeout(FETCH_TIMEOUT)
             .header("user-agent", user_agent)
@@ -66,11 +68,13 @@ impl Fetcher for RealFetcher {
             .await
             .with_context(|| format!("checking {url}"))?
             .error_for_status()
-            .with_context(|| format!("HTTP error from {url}"))?
-            .bytes()
-            .await
-            .with_context(|| format!("reading body from {url}"))?;
-        Ok(bytes.to_vec())
+            .with_context(|| format!("HTTP error from {url}"))?;
+        let mut buf = CappedBuffer::new(resp.content_length(), super::MAX_MANIFEST_BYTES, url)?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            buf.push(chunk.map(|b| b.to_vec()), url)?;
+        }
+        Ok(buf.into_inner())
     }
 }
 

@@ -15,6 +15,8 @@ const ARCH: &str = "x86_64";
 
 const CDN_BASE: &str = "https://get.lns.run";
 
+pub(super) const MAX_KERNEL_BYTES: u64 = 64 * 1024 * 1024;
+
 mod real;
 mod traits;
 use real::{RealFetcher, RealFs};

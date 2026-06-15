@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use std::io;
 use std::path::Path;
 
-use super::{Fetcher, Fs, WritableFile};
+use futures_util::StreamExt;
+
+use super::{Fetcher, Fs, MAX_KERNEL_BYTES, WritableFile};
+use crate::http_cap::CappedBuffer;
 
 pub(super) struct RealFetcher;
 
@@ -13,11 +16,12 @@ impl Fetcher for RealFetcher {
             .with_context(|| format!("downloading {url}"))?
             .error_for_status()
             .with_context(|| format!("HTTP error from {url}"))?;
-        let bytes = resp
-            .bytes()
-            .await
-            .with_context(|| format!("reading body from {url}"))?;
-        Ok(bytes.to_vec())
+        let mut buf = CappedBuffer::new(resp.content_length(), MAX_KERNEL_BYTES, url)?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            buf.push(chunk.map(|b| b.to_vec()), url)?;
+        }
+        Ok(buf.into_inner())
     }
 }
 

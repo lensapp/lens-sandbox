@@ -3200,6 +3200,7 @@ dependencies = [
  "cucumber",
  "dirs 5.0.1",
  "flate2",
+ "futures-util",
  "httpmock",
  "libc",
  "lns-ipc",
