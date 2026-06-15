@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::SandboxArgs;
+use lns_cli::command::parse_args;
 use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{
@@ -257,10 +257,7 @@ fn stream_opens_with_error(w: &mut BehaviourWorld, _run_id: u32, message: String
 async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
-    let cli = Cli::try_parse_from(&argv).expect("sandbox argv must parse");
-    let Command::Sandbox(args) = cli.command else {
-        panic!("expected a sandbox subcommand");
-    };
+    let args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
 
     let svc = FakeSandboxService {
         response: w.sandbox.response.clone(),

@@ -1,7 +1,7 @@
 use crate::world::{BehaviourWorld, CannedSequence, PhasePipe};
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::RunArgs;
+use lns_cli::command::parse_args;
 use lns_cli::run::progress::ProgressRenderer;
 use lns_cli::run::summary::print_run_summary;
 use lns_cli::service::{
@@ -129,10 +129,10 @@ fn require_cwd(world: &BehaviourWorld) -> &std::path::Path {
         .path()
 }
 
-fn parse_argv(argv: &[String]) -> Cli {
+fn parse_argv(argv: &[String]) -> RunArgs {
     let mut full = vec!["lns".to_string()];
     full.extend(argv.iter().cloned());
-    Cli::try_parse_from(&full).expect("argv must parse against the CLI grammar")
+    parse_args(&full).expect("argv must parse against the CLI grammar")
 }
 
 #[given(regex = r"^the user invokes `lns run ([^`]+)` from an interactive terminal$")]
@@ -214,10 +214,7 @@ fn the_command_is(world: &mut BehaviourWorld, args_after_run: String) {
 #[when(regex = r"^(?:the command starts|the summary is printed|the run starts)$")]
 async fn the_run_starts(world: &mut BehaviourWorld) {
     let cwd = require_cwd(world).to_path_buf();
-    let cli = parse_argv(&world.argv);
-    let Command::Run(args) = cli.command else {
-        panic!("Layer-2 rig only drives `lns run`; got a different subcommand");
-    };
+    let args = parse_argv(&world.argv);
     let mut buf = Vec::<u8>::new();
     print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
@@ -507,10 +504,7 @@ fn image_cannot_be_resolved(_world: &mut BehaviourWorld) {}
 #[when(regex = r"^resolution fails$")]
 async fn resolution_fails(world: &mut BehaviourWorld) {
     let cwd = require_cwd(world).to_path_buf();
-    let cli = parse_argv(&world.argv);
-    let Command::Run(args) = cli.command else {
-        panic!("rig only drives `lns run`");
-    };
+    let args = parse_argv(&world.argv);
     let mut sbuf = Vec::<u8>::new();
     print_run_summary(&args, &cwd, &mut sbuf).expect("print_run_summary");
     world.summary_output = String::from_utf8(sbuf).expect("non-utf8 summary");

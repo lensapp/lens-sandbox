@@ -1,8 +1,8 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::IntegrationArgs;
+use lns_cli::command::parse_args;
 use lns_cli::integration::{self, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 use lns_policy::Policy;
 use std::io::Write;
@@ -51,11 +51,8 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
     };
     let mut full = vec!["lns".to_string(), "integration".to_string()];
     full.extend(tail.iter().map(|s| s.to_string()));
-    let run = match Cli::try_parse_from(&full) {
-        Ok(cli) => {
-            let Command::Integration(args) = cli.command else {
-                panic!("expected an integration command");
-            };
+    let run = match parse_args::<IntegrationArgs, _, _>(&full) {
+        Ok(args) => {
             let mut buf = Vec::<u8>::new();
             match integration::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
                 Ok(exit_code) => CliRun {

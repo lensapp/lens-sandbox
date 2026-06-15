@@ -1,8 +1,8 @@
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::gherkin::Step;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::RunArgs;
+use lns_cli::command::parse_args;
 use lns_cli::run::env_file::merged_run_env;
 use std::path::PathBuf;
 
@@ -33,10 +33,7 @@ fn assemble_run_env(world: &mut BehaviourWorld, args_after_run: String) {
     let dir = cwd(world);
     let mut argv = vec!["lns".to_string(), "run".to_string()];
     argv.extend(args_after_run.split_whitespace().map(str::to_string));
-    let cli = Cli::try_parse_from(&argv).expect("argv must parse against the CLI grammar");
-    let Command::Run(args) = cli.command else {
-        panic!("env-file rig only drives `lns run`");
-    };
+    let args: RunArgs = parse_args(&argv).expect("argv must parse against the CLI grammar");
     let files: Vec<PathBuf> = args.env_file.iter().map(|p| dir.join(p)).collect();
     world.merged_env = Some(merged_run_env(&files, &args.env).map_err(|e| format!("{e:#}")));
 }

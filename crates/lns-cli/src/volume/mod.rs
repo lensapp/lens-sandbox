@@ -4,11 +4,26 @@ use anyhow::{Result, bail};
 use lns_ipc::{Request, Response, VolumeInfo};
 
 use crate::cli::VolumeCommand;
+use crate::command::{CommandSpec, subcommand};
 use crate::integration::LocalBoxFuture;
 
 mod real;
 
 pub use real::RealVolumeService;
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<crate::cli::VolumeArgs>("volume")
+            .about("Manage the named volumes used with `lns run -v` (`docker volume`-style)."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "volume",
+    augment,
+    run: real::run,
+    announces_update_check: true,
+};
 
 /// Sends one volume request to the running service; `None` means the service did not answer.
 pub trait VolumeService {

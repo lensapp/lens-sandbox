@@ -1,19 +1,4 @@
 use super::*;
-use crate::cli::{Command, UpdateArgs};
-
-#[test]
-fn update_command_skips_the_announce_so_it_does_not_nag_during_an_upgrade() {
-    let update = Command::Update(UpdateArgs {
-        force: false,
-        dry_run: false,
-    });
-    assert!(!should_announce(&update));
-}
-
-#[test]
-fn other_commands_announce() {
-    assert!(should_announce(&Command::Ls));
-}
 
 #[test]
 fn announce_is_suppressed_when_the_kill_switch_is_set() {

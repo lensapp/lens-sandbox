@@ -1,7 +1,35 @@
 pub mod verify;
 
-use crate::cli::AuditArgs;
+use clap::FromArgMatches;
+
+use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 use crate::log;
+
+#[derive(clap::Args)]
+pub struct AuditArgs {
+    #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
+    pub run_id: String,
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<AuditArgs>("audit").about("Verify the audit chain of a completed run."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "audit",
+    augment,
+    run,
+    announces_update_check: true,
+};
+
+pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = AuditArgs::from_arg_matches(matches)?;
+        run_verify(args)
+    })
+}
 
 pub fn run_verify(args: AuditArgs) -> anyhow::Result<i32> {
     let path = lns_ipc::audit_log_for_run(&args.run_id)?;
@@ -137,9 +165,9 @@ mod tests {
         assert_eq!(code, 1);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial_test::serial(env)]
-    fn run_verify_happy_path_walks_chain_under_overridden_cache_root() {
+    async fn run_dispatches_clap_matches_through_to_chain_verification() {
         let cache_root = tempfile::TempDir::new().unwrap();
         let run_id = "424242";
         let macos_cache = cache_root.path().join("Library").join("Caches");
@@ -162,11 +190,20 @@ mod tests {
 
         let _home = crate::test_env::EnvScope::set("HOME", cache_root.path());
         let _xdg = crate::test_env::EnvScope::set("XDG_CACHE_HOME", &linux_cache);
-        let args = crate::cli::AuditArgs {
-            run_id: run_id.to_string(),
+        let matches = crate::command::build_cli()
+            .try_get_matches_from(["lns", "audit", run_id])
+            .unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = crate::command::RunCtx {
+            debug: false,
+            cwd: std::path::PathBuf::from("/"),
+            input: &mut input,
+            out: &mut out,
         };
-        let result = run_verify(args);
-        assert_eq!(result.expect("run_verify on valid chain"), 0);
+        let code = run(sub, ctx).await.expect("audit run on valid chain");
+        assert_eq!(code, 0);
     }
 
     #[test]

@@ -1,14 +1,17 @@
 use anyhow::Result;
-use clap::Parser;
-use lns_cli::cli::Cli;
+use lns_cli::cli::LogLevel;
 use lns_cli::log;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     reset_sigpipe();
-    let cli = Cli::parse();
-    log::init(cli.log_level);
-    let code = lns_cli::run(cli).await?;
+    let matches = lns_cli::build_cli().get_matches();
+    let log_level = matches
+        .get_one::<LogLevel>("log_level")
+        .copied()
+        .unwrap_or(LogLevel::Warn);
+    log::init(log_level);
+    let code = lns_cli::run_from_matches(matches, log_level == LogLevel::Debug).await?;
     std::process::exit(code);
 }
 

@@ -12,6 +12,7 @@ use lns_policy::providers::is_self_identifying;
 use crate::cli::{
     ConnectArgs, DisconnectArgs, IntegrationAddArgs, IntegrationCommand, IntegrationRemoveArgs,
 };
+use crate::command::{CommandSpec, subcommand};
 use crate::run::summary::policy_path;
 
 mod real;
@@ -19,6 +20,20 @@ mod sign_in;
 
 pub use real::RealIntegrationSignIn;
 pub use sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<crate::cli::IntegrationArgs>("integration")
+            .about("Manage the credential-integration catalog (connectable services)."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "integration",
+    augment,
+    run: real::run,
+    announces_update_check: true,
+};
 
 pub async fn run(
     cmd: &IntegrationCommand,

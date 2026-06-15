@@ -4,11 +4,27 @@ use anyhow::{Result, bail};
 use lns_ipc::{ImageInfo, Request, Response};
 
 use crate::cli::ImageCommand;
+use crate::command::{CommandSpec, subcommand};
 use crate::integration::LocalBoxFuture;
 
 mod real;
 
 pub use real::RealImageService;
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<crate::cli::ImageArgs>("image").about(
+            "Manage the cached OCI images that `lns run` boots from (`docker image`-style).",
+        ),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "image",
+    augment,
+    run: real::run,
+    announces_update_check: true,
+};
 
 /// Sends one image request to the running service; `None` means the service did not answer.
 pub trait ImageService {

@@ -19,8 +19,46 @@ const NOT_RUNNING_MESSAGE: &str =
 mod orchestrator;
 pub use orchestrator::{
     DetachBehaviour, PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers,
-    drive_pre_phase, exec_image, kill, ls, pre_phase_step, render_started_run, render_status_line,
-    require_running, run_image,
+    drive_pre_phase, exec_command, exec_image, kill, ls, pre_phase_step, render_started_run,
+    render_status_line, require_running, run_command, run_image,
+};
+
+use crate::command::{CommandSpec, subcommand};
+
+pub fn augment_kill(app: clap::Command) -> clap::Command {
+    app.subcommand(subcommand::<crate::cli::KillArgs>("kill").hide(true))
+}
+
+pub const KILL_SPEC: CommandSpec = CommandSpec {
+    name: "kill",
+    augment: augment_kill,
+    run: orchestrator::kill_command,
+    announces_update_check: true,
+};
+
+pub fn augment_ls(app: clap::Command) -> clap::Command {
+    app.subcommand(clap::Command::new("ls").hide(true))
+}
+
+pub const LS_SPEC: CommandSpec = CommandSpec {
+    name: "ls",
+    augment: augment_ls,
+    run: orchestrator::ls_command,
+    announces_update_check: true,
+};
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<crate::cli::ServiceArgs>("service")
+            .about("Manage the Lens Sandbox background service."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "service",
+    augment,
+    run: orchestrator::service_command,
+    announces_update_check: true,
 };
 
 fn require_running_check(alive: bool) -> Result<(), &'static str> {
