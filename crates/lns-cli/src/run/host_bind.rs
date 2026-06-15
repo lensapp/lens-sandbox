@@ -122,7 +122,7 @@ pub fn resolve_binds(
         let mut dropped = Vec::new();
         for name in scan_secrets(scan, root) {
             if is_ignored(&name, &ignore) {
-                dropped.push(name);
+                push_drop(&mut dropped, name)?;
                 continue;
             }
             let key = root.join(&name).to_string_lossy().into_owned();
@@ -144,7 +144,7 @@ pub fn resolve_binds(
             };
             match disposition {
                 SecretDisposition::Keep => kept.push(name),
-                SecretDisposition::Drop => dropped.push(name),
+                SecretDisposition::Drop => push_drop(&mut dropped, name)?,
             }
         }
         resolved.push(ResolvedBind {
@@ -161,6 +161,17 @@ pub fn resolve_binds(
             .context("saving host-bind decisions")?;
     }
     Ok(resolved)
+}
+
+/// A dropped path travels to the guest on the kernel cmdline, which is whitespace-tokenized; a name with whitespace would be silently split and mis-masked, so we refuse it loudly rather than risk exposing the very secret the operator chose to drop.
+fn push_drop(dropped: &mut Vec<String>, name: String) -> Result<()> {
+    if name.contains(char::is_whitespace) {
+        bail!(
+            "cannot drop secret-shaped file {name:?}: its name contains whitespace, which can't be carried to the guest safely — rename it or move it out of the bind"
+        );
+    }
+    dropped.push(name);
+    Ok(())
 }
 
 fn prompt_disposition(
@@ -482,6 +493,18 @@ mod tests {
             0,
             "a fallback drop is not recorded"
         );
+    }
+
+    #[test]
+    fn resolve_binds_refuses_to_drop_a_secret_whose_name_has_whitespace() {
+        let dir = FakeDir {
+            entries: vec![".env backup".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "drop\n");
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("whitespace"), "got: {err}");
     }
 
     #[test]
