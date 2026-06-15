@@ -20,13 +20,6 @@ pub struct RealRegistry {
 }
 
 impl RealRegistry {
-    pub fn new() -> Self {
-        Self::with_protocol(super::registry_protocol(
-            std::env::var("LNS_REGISTRY_PLAIN_HTTP").ok().as_deref(),
-            None,
-        ))
-    }
-
     pub fn with_protocol(protocol: oci_client::client::ClientProtocol) -> Self {
         let client = oci_client::Client::new(ClientConfig {
             platform_resolver: Some(Box::new(linux_platform_resolver)),
@@ -58,12 +51,6 @@ impl RealRegistry {
             client,
             auth: crate::artifact::resolve_auth(reference),
         }
-    }
-}
-
-impl Default for RealRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
