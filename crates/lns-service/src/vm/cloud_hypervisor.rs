@@ -44,6 +44,7 @@ mod tests {
             descriptor_sha256: None,
             upper_disk: PathBuf::from("/upper"),
             volumes: vec![],
+            binds: vec![],
             debug: false,
             exec: ExecSpec {
                 kernel_env: Vec::new(),

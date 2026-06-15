@@ -26,6 +26,7 @@ pub struct VmSpec {
     pub descriptor_sha256: Option<String>,
     pub upper_disk: PathBuf,
     pub volumes: Vec<VolumeAttachment>,
+    pub binds: Vec<BindAttachment>,
     #[cfg(target_os = "macos")]
     pub vsock: Option<VsockChannel>,
     #[cfg(target_os = "macos")]
@@ -41,6 +42,19 @@ pub struct VolumeAttachment {
     pub host_image: PathBuf,
     pub target: String,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindAttachment {
+    pub host_source: PathBuf,
+    pub target: String,
+    pub read_only: bool,
+    pub dropped_paths: Vec<String>,
+}
+
+/// The virtio-fs tag the host shares a bind under and the guest mounts it by; one per bind, distinct from the content share.
+pub fn bind_share_tag(index: usize) -> String {
+    format!("lns-bind-{index}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +233,7 @@ pub fn resolve_run_as(
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+#[allow(clippy::too_many_arguments)] // a flat list of independent cmdline inputs reads clearer than a one-shot params struct
 pub fn build_kernel_cmdline(
     exec: &ExecSpec,
     console: &str,
@@ -227,6 +242,7 @@ pub fn build_kernel_cmdline(
     descriptor_sha256: Option<&str>,
     debug: bool,
     volumes: &[VolumeAttachment],
+    binds: &[BindAttachment],
 ) -> String {
     let mut parts = vec![format!("console={console}"), "rw".to_string()];
     if !debug {
@@ -249,6 +265,14 @@ pub fn build_kernel_cmdline(
         parts.push(format!("volume.{i}.dev={dev}"));
         parts.push(format!("volume.{i}.target={}", v.target));
         parts.push(format!("volume.{i}.ro={}", u8::from(v.read_only)));
+    }
+    for (i, b) in binds.iter().enumerate() {
+        parts.push(format!("bind.{i}.tag={}", bind_share_tag(i)));
+        parts.push(format!("bind.{i}.target={}", b.target));
+        parts.push(format!("bind.{i}.ro={}", u8::from(b.read_only)));
+        for (j, dropped) in b.dropped_paths.iter().enumerate() {
+            parts.push(format!("bind.{i}.drop.{j}={dropped}"));
+        }
     }
     for (k, v) in &exec.kernel_env {
         debug_assert!(
@@ -349,6 +373,7 @@ mod tests {
             None,
             /*debug*/ false,
             &[],
+            &[],
         );
         let toks: Vec<&str> = quiet.split_whitespace().collect();
         assert!(toks.contains(&"quiet"), "expected `quiet` at debug=false");
@@ -364,6 +389,7 @@ mod tests {
             "lns-content",
             None,
             /*debug*/ true,
+            &[],
             &[],
         );
         let toks: Vec<&str> = loud.split_whitespace().collect();
@@ -388,6 +414,7 @@ mod tests {
             None,
             false,
             &[],
+            &[],
         );
         let toks: Vec<&str> = with_pci.split_whitespace().collect();
         assert!(
@@ -402,6 +429,7 @@ mod tests {
             "lns-content",
             None,
             false,
+            &[],
             &[],
         );
         let toks: Vec<&str> = no_pci.split_whitespace().collect();
@@ -421,6 +449,7 @@ mod tests {
             "lns-content",
             Some("deadbeef"),
             false,
+            &[],
             &[],
         );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
@@ -461,10 +490,60 @@ mod tests {
     #[test]
     fn build_kernel_cmdline_no_volumes_emits_no_volume_keys() {
         let exec = ExecSpec::from_image_config(None, &["true".into()]);
-        let cmdline = build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[]);
+        let cmdline =
+            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &[]);
         assert!(
             !cmdline.contains("volume."),
             "no volume keys when none attached: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("bind."),
+            "no bind keys when none attached: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn bind_share_tag_is_distinct_per_index() {
+        assert_eq!(bind_share_tag(0), "lns-bind-0");
+        assert_eq!(bind_share_tag(1), "lns-bind-1");
+        assert_ne!(bind_share_tag(0), bind_share_tag(1));
+    }
+
+    #[test]
+    fn build_kernel_cmdline_emits_tag_target_ro_and_drops_per_bind() {
+        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let binds = [
+            BindAttachment {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![".env".into(), ".npmrc".into()],
+            },
+            BindAttachment {
+                host_source: "/Users/me/cfg".into(),
+                target: "/cfg".into(),
+                read_only: true,
+                dropped_paths: vec![],
+            },
+        ];
+        let cmdline =
+            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &binds);
+        let toks: Vec<&str> = cmdline.split_whitespace().collect();
+        for expected in [
+            "bind.0.tag=lns-bind-0",
+            "bind.0.target=/work",
+            "bind.0.ro=0",
+            "bind.0.drop.0=.env",
+            "bind.0.drop.1=.npmrc",
+            "bind.1.tag=lns-bind-1",
+            "bind.1.target=/cfg",
+            "bind.1.ro=1",
+        ] {
+            assert!(toks.contains(&expected), "missing {expected}: {toks:?}");
+        }
+        assert!(
+            toks.contains(&"content.tag=lns-content"),
+            "content share tag must be left untouched: {toks:?}"
         );
     }
 
@@ -483,8 +562,16 @@ mod tests {
                 read_only: true,
             },
         ];
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &volumes);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            &volumes,
+            &[],
+        );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
         for expected in [
             "volume.0.dev=/dev/vdc",
@@ -546,8 +633,16 @@ mod tests {
                 read_only: true,
             },
         ];
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &volumes);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            &volumes,
+            &[],
+        );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
         for expected in [
             "volume.0.dev=/dev/vdc",
@@ -803,6 +898,7 @@ mod tests {
             descriptor_sha256: None,
             upper_disk: PathBuf::from("/dev/null"),
             volumes: vec![],
+            binds: vec![],
             #[cfg(target_os = "macos")]
             vsock: None,
             #[cfg(target_os = "macos")]
