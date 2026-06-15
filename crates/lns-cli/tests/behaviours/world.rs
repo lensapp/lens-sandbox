@@ -29,6 +29,27 @@ pub struct BehaviourWorld {
     pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
+    pub host_bind: HostBindRig,
+}
+
+use lns_policy::host_bind_decisions::SecretDisposition;
+
+/// Scripted host directory + recorded decisions for driving `resolve_binds`.
+#[derive(Debug, Default)]
+pub struct HostBindRig {
+    pub entries: Vec<String>,
+    pub lensignore: Option<String>,
+    pub missing: bool,
+    pub decisions: std::collections::HashMap<String, SecretDisposition>,
+    pub answer: Option<String>,
+    pub outcome: Option<HostBindOutcome>,
+}
+
+#[derive(Debug)]
+pub struct HostBindOutcome {
+    pub result: Result<Vec<lns_ipc::BindMount>, String>,
+    pub prompt: String,
+    pub persisted: std::collections::HashMap<String, SecretDisposition>,
 }
 
 #[derive(Debug, Default)]

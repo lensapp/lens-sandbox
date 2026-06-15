@@ -1,6 +1,11 @@
+use std::io::{BufRead, Write};
 use std::path::Path;
 
+use anyhow::{Context, Result, bail};
+use lns_policy::host_bind_decisions::{HostBindDecisionStore, SecretDisposition};
+
 pub trait DirScan {
+    fn exists(&self, path: &Path) -> bool;
     fn entries(&self, dir: &Path) -> Vec<String>;
     fn read_to_string(&self, path: &Path) -> Option<String>;
 }
@@ -8,6 +13,10 @@ pub trait DirScan {
 pub struct RealDirScan;
 
 impl DirScan for RealDirScan {
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
     fn entries(&self, dir: &Path) -> Vec<String> {
         let Ok(read) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -70,17 +79,103 @@ pub fn is_ignored(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| p == name)
 }
 
+/// Scans each bind for secret-shaped files and resolves a KEEP/DROP for every one — honoring `.lensignore`, reusing recorded decisions, prompting for the rest (or defaulting to DROP when there is no terminal) — and returns wire binds whose `dropped_paths` the guest will mask.
+pub fn resolve_binds(
+    specs: &[lns_ipc::BindSpec],
+    scan: &dyn DirScan,
+    store: &dyn HostBindDecisionStore,
+    interactive: bool,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<Vec<lns_ipc::BindMount>> {
+    let mut decisions = store.load().context("loading host-bind decisions")?;
+    let mut recorded = false;
+    let mut resolved = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let root = Path::new(&spec.host_source);
+        if !scan.exists(root) {
+            bail!("host path does not exist: {}", spec.host_source);
+        }
+        let ignore = lensignore_patterns(scan, root);
+        let mut dropped = Vec::new();
+        for name in scan_secrets(scan, root) {
+            if is_ignored(&name, &ignore) {
+                dropped.push(name);
+                continue;
+            }
+            let key = root.join(&name).to_string_lossy().into_owned();
+            let disposition = match decisions.get(&key).copied() {
+                Some(d) => d,
+                None if interactive => {
+                    let chosen = prompt_disposition(&key, input, output)?;
+                    decisions.insert(key.clone(), chosen);
+                    recorded = true;
+                    chosen
+                }
+                None => {
+                    writeln!(
+                        output,
+                        "lns: no terminal to ask — dropping secret-shaped file {key} from the bind (run interactively to keep it)"
+                    )?;
+                    SecretDisposition::Drop
+                }
+            };
+            if disposition == SecretDisposition::Drop {
+                dropped.push(name);
+            }
+        }
+        resolved.push(lns_ipc::BindMount {
+            host_source: spec.host_source.clone(),
+            target: spec.target.clone(),
+            read_only: spec.read_only,
+            dropped_paths: dropped,
+        });
+    }
+    if recorded {
+        store
+            .save(&decisions)
+            .context("saving host-bind decisions")?;
+    }
+    Ok(resolved)
+}
+
+fn prompt_disposition(
+    secret_path: &str,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<SecretDisposition> {
+    write!(
+        output,
+        "Host bind: {secret_path} looks like a secret. Expose it to the workload? [k]eep / [D]rop (default): "
+    )?;
+    output.flush()?;
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(if answer == "k" || answer == "keep" {
+        SecretDisposition::Keep
+    } else {
+        SecretDisposition::Drop
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::host_bind_decisions::HostBindDecisionFile;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct FakeDir {
         entries: Vec<String>,
         files: HashMap<String, String>,
+        missing: Vec<String>,
     }
     impl DirScan for FakeDir {
+        fn exists(&self, path: &Path) -> bool {
+            !self.missing.contains(&path.to_string_lossy().into_owned())
+        }
         fn entries(&self, _dir: &Path) -> Vec<String> {
             self.entries.clone()
         }
@@ -89,6 +184,43 @@ mod tests {
                 .get(&path.to_string_lossy().into_owned())
                 .cloned()
         }
+    }
+
+    #[derive(Default)]
+    struct FakeStore {
+        state: Mutex<HostBindDecisionFile>,
+        saves: Mutex<usize>,
+    }
+    impl HostBindDecisionStore for FakeStore {
+        fn load(&self) -> std::io::Result<HostBindDecisionFile> {
+            Ok(self.state.lock().unwrap().clone())
+        }
+        fn save(&self, state: &HostBindDecisionFile) -> std::io::Result<()> {
+            *self.state.lock().unwrap() = state.clone();
+            *self.saves.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    fn bind(src: &str, target: &str) -> lns_ipc::BindSpec {
+        lns_ipc::BindSpec {
+            host_source: src.into(),
+            target: target.into(),
+            read_only: false,
+        }
+    }
+
+    fn resolve(
+        specs: &[lns_ipc::BindSpec],
+        dir: &FakeDir,
+        store: &FakeStore,
+        interactive: bool,
+        answer: &str,
+    ) -> (Result<Vec<lns_ipc::BindMount>>, String) {
+        let mut input = std::io::Cursor::new(answer.to_string());
+        let mut out = Vec::new();
+        let r = resolve_binds(specs, dir, store, interactive, &mut input, &mut out);
+        (r, String::from_utf8(out).unwrap())
     }
 
     #[test]
@@ -174,6 +306,8 @@ mod tests {
         std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         std::fs::write(dir.path().join(".lensignore"), ".env\n").unwrap();
         let scan = RealDirScan;
+        assert!(scan.exists(&dir.path().join(".env")));
+        assert!(!scan.exists(&dir.path().join("absent")));
         assert!(scan.entries(dir.path()).contains(&".env".to_string()));
         assert_eq!(
             scan.read_to_string(&dir.path().join(".lensignore")),
@@ -181,5 +315,155 @@ mod tests {
         );
         assert_eq!(scan.read_to_string(&dir.path().join("absent")), None);
         assert!(scan.entries(Path::new("/no/such/dir")).is_empty());
+    }
+
+    #[test]
+    fn resolve_binds_leaves_a_clean_bind_untouched_and_never_prompts() {
+        let dir = FakeDir {
+            entries: vec!["src".into(), "Cargo.toml".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        let binds = out.unwrap();
+        assert_eq!(binds.len(), 1);
+        assert!(binds[0].dropped_paths.is_empty());
+        assert!(prompt.is_empty(), "clean bind must not prompt: {prompt:?}");
+        assert_eq!(*store.saves.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_binds_keep_exposes_the_file_and_records_the_decision() {
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "keep\n");
+        let binds = out.unwrap();
+        assert!(binds[0].dropped_paths.is_empty(), "KEEP must not drop");
+        assert!(prompt.contains("/proj/.env"), "prompt names the secret");
+        assert_eq!(
+            store.state.lock().unwrap().get("/proj/.env").copied(),
+            Some(SecretDisposition::Keep)
+        );
+        assert_eq!(*store.saves.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn resolve_binds_drop_hides_the_file_and_records_the_decision() {
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "drop\n");
+        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert_eq!(
+            store.state.lock().unwrap().get("/proj/.env").copied(),
+            Some(SecretDisposition::Drop)
+        );
+    }
+
+    #[test]
+    fn resolve_binds_empty_answer_defaults_to_drop() {
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "\n");
+        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn resolve_binds_reuses_a_recorded_decision_without_prompting() {
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .insert("/proj/.env".into(), SecretDisposition::Keep);
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        assert!(out.unwrap()[0].dropped_paths.is_empty());
+        assert!(prompt.is_empty(), "a recorded decision must not re-prompt");
+        assert_eq!(*store.saves.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_binds_prompts_only_for_the_newly_appeared_secret() {
+        let dir = FakeDir {
+            entries: vec![".env".into(), ".npmrc".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .insert("/proj/.env".into(), SecretDisposition::Keep);
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "keep\n");
+        out.unwrap();
+        assert!(prompt.contains("/proj/.npmrc"), "must prompt for .npmrc");
+        assert!(
+            !prompt.contains("/proj/.env"),
+            "must not re-prompt the decided .env: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_binds_lensignore_drops_without_prompting() {
+        let mut files = HashMap::new();
+        files.insert("/proj/.lensignore".to_string(), ".env\n".to_string());
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            files,
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert!(prompt.is_empty(), ".lensignore must pre-empt the prompt");
+        assert_eq!(
+            *store.saves.lock().unwrap(),
+            0,
+            ".lensignore is not a decision"
+        );
+    }
+
+    #[test]
+    fn resolve_binds_non_interactive_defaults_to_drop_and_reports() {
+        let dir = FakeDir {
+            entries: vec![".env".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, report) = resolve(&[bind("/proj", "/work")], &dir, &store, false, "");
+        assert_eq!(out.unwrap()[0].dropped_paths, vec![".env".to_string()]);
+        assert!(
+            report.contains("/proj/.env"),
+            "drop is reported: {report:?}"
+        );
+        assert_eq!(
+            *store.saves.lock().unwrap(),
+            0,
+            "a fallback drop is not recorded"
+        );
+    }
+
+    #[test]
+    fn resolve_binds_refuses_a_missing_host_path_before_any_run() {
+        let dir = FakeDir {
+            missing: vec!["/proj".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("host path does not exist"), "got: {err}");
     }
 }
