@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use lns_policy::Policy;
@@ -9,9 +9,6 @@ use lns_policy::integrations::{
 };
 use lns_policy::providers::is_self_identifying;
 
-use crate::cli::{
-    ConnectArgs, DisconnectArgs, IntegrationAddArgs, IntegrationCommand, IntegrationRemoveArgs,
-};
 use crate::command::{CommandSpec, subcommand};
 use crate::run::summary::policy_path;
 
@@ -21,9 +18,135 @@ mod sign_in;
 pub use real::RealIntegrationSignIn;
 pub use sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 
+#[derive(clap::Args)]
+pub struct IntegrationArgs {
+    #[command(subcommand)]
+    pub command: IntegrationCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum IntegrationCommand {
+    #[command(about = "Declare a credential integration in your machine-global catalog.")]
+    Add(IntegrationAddArgs),
+    #[command(about = "List the bundled and user-declared integrations.")]
+    List,
+    #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
+    Remove(IntegrationRemoveArgs),
+    #[command(
+        about = "Connect an integration to this directory's policy (oauth integrations sign in)."
+    )]
+    Connect(ConnectArgs),
+    #[command(about = "Disconnect an integration from this directory's policy.")]
+    Disconnect(DisconnectArgs),
+}
+
+#[derive(clap::Args)]
+pub struct IntegrationAddArgs {
+    #[arg(
+        help = "New integration id; must not collide with a bundled or existing user integration."
+    )]
+    pub id: String,
+    #[arg(long, help = "Environment variable the placeholder is seeded into.")]
+    pub env_var: String,
+    #[arg(
+        long = "inject",
+        required = true,
+        value_parser = parse_injection,
+        help = "Per-domain injection as KIND:DOMAIN (api_key_header needs KIND:DOMAIN:HEADER). Repeatable."
+    )]
+    pub inject: Vec<lns_policy::providers::InjectionDef>,
+    #[arg(
+        long = "route",
+        help = "A host pattern the integration needs reachable. Repeatable."
+    )]
+    pub route: Vec<String>,
+    #[arg(
+        long,
+        help = "Placeholder value; auto-generated (self-identifying) when omitted."
+    )]
+    pub placeholder: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct IntegrationRemoveArgs {
+    #[arg(help = "User-declared integration id to remove.")]
+    pub id: String,
+}
+
+#[derive(clap::Args)]
+pub struct ConnectArgs {
+    #[arg(help = "Integration id to connect (from `lns integration list`).")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct DisconnectArgs {
+    #[arg(help = "Integration id to disconnect.")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
+    use lns_policy::providers::{InjectionDef, InjectionKind};
+    let mut parts = s.splitn(3, ':');
+    let kind_str = parts
+        .next()
+        .ok_or_else(|| format!("expected KIND:DOMAIN, got {s:?}"))?;
+    let domain = parts
+        .next()
+        .ok_or_else(|| format!("expected KIND:DOMAIN, got {s:?}"))?;
+    if domain.is_empty() {
+        return Err(format!("injection {s:?} is missing a domain"));
+    }
+    let header_segment = parts.next();
+    let kind = match kind_str {
+        "bearer_header" => InjectionKind::BearerHeader,
+        "uri_placeholder" => InjectionKind::UriPlaceholder,
+        "token_header" => InjectionKind::TokenHeader,
+        "basic_x_access_token" => InjectionKind::BasicXAccessToken,
+        "api_key_header" => InjectionKind::ApiKeyHeader,
+        "awsSigv4" | "aws_sigv4" => {
+            return Err(
+                "awsSigv4 carries real STS material and is not declarable from the CLI".to_string(),
+            );
+        }
+        other => {
+            return Err(format!(
+                "unknown injection kind {other:?}; use bearer_header, uri_placeholder, token_header, basic_x_access_token, or api_key_header"
+            ));
+        }
+    };
+    let header = match (kind, header_segment) {
+        (InjectionKind::ApiKeyHeader, Some(h)) if !h.is_empty() => Some(h.to_string()),
+        (InjectionKind::ApiKeyHeader, _) => {
+            return Err("api_key_header requires a header name (KIND:DOMAIN:HEADER)".to_string());
+        }
+        (_, Some(_)) => {
+            return Err(format!(
+                "kind {kind_str} does not take a header name; expected KIND:DOMAIN"
+            ));
+        }
+        (_, None) => None,
+    };
+    Ok(InjectionDef {
+        kind,
+        domain: domain.to_string(),
+        header,
+    })
+}
+
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
-        subcommand::<crate::cli::IntegrationArgs>("integration")
+        subcommand::<IntegrationArgs>("integration")
             .about("Manage the credential-integration catalog (connectable services)."),
     )
 }
@@ -227,6 +350,86 @@ mod tests {
     use lns_policy::integrations::OauthAuth;
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
+
+    #[test]
+    fn parse_injection_accepts_the_two_declarable_kinds() {
+        let bearer = parse_injection("bearer_header:api.acme.corp").unwrap();
+        assert_eq!(bearer.kind, InjectionKind::BearerHeader);
+        assert_eq!(bearer.domain, "api.acme.corp");
+        let uri = parse_injection("uri_placeholder:api.rocket.example").unwrap();
+        assert_eq!(uri.kind, InjectionKind::UriPlaceholder);
+    }
+
+    #[test]
+    fn parse_injection_rejects_awssigv4_with_a_clear_reason() {
+        let err = parse_injection("awsSigv4:*.amazonaws.com").unwrap_err();
+        assert!(err.contains("awsSigv4"), "got: {err}");
+        assert!(parse_injection("aws_sigv4:x").is_err());
+    }
+
+    #[test]
+    fn parse_injection_rejects_an_unknown_kind() {
+        let err = parse_injection("basic_auth:api.acme.corp").unwrap_err();
+        assert!(err.contains("unknown injection kind"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_injection_requires_a_kind_and_domain() {
+        assert!(
+            parse_injection("bearer_header")
+                .unwrap_err()
+                .contains("KIND:DOMAIN")
+        );
+        assert!(
+            parse_injection("bearer_header:")
+                .unwrap_err()
+                .contains("missing a domain")
+        );
+    }
+
+    #[test]
+    fn parse_injection_accepts_token_header() {
+        let inj = parse_injection("token_header:api.example.com").unwrap();
+        assert_eq!(inj.kind, InjectionKind::TokenHeader);
+        assert_eq!(inj.domain, "api.example.com");
+        assert_eq!(inj.header, None);
+    }
+
+    #[test]
+    fn parse_injection_accepts_basic_x_access_token() {
+        let inj = parse_injection("basic_x_access_token:example.com").unwrap();
+        assert_eq!(inj.kind, InjectionKind::BasicXAccessToken);
+        assert_eq!(inj.domain, "example.com");
+        assert_eq!(inj.header, None);
+    }
+
+    #[test]
+    fn parse_injection_accepts_api_key_header_with_header_name() {
+        let inj = parse_injection("api_key_header:api.example.test:x-api-key").unwrap();
+        assert_eq!(inj.kind, InjectionKind::ApiKeyHeader);
+        assert_eq!(inj.domain, "api.example.test");
+        assert_eq!(inj.header.as_deref(), Some("x-api-key"));
+    }
+
+    #[test]
+    fn parse_injection_rejects_api_key_header_without_a_header_name() {
+        let err = parse_injection("api_key_header:api.example.test").unwrap_err();
+        assert!(
+            err.contains("api_key_header") && err.contains("header name"),
+            "got: {err}"
+        );
+        let err = parse_injection("api_key_header:api.example.test:").unwrap_err();
+        assert!(
+            err.contains("api_key_header") && err.contains("header name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_injection_rejects_a_header_segment_on_kinds_that_do_not_use_one() {
+        let err = parse_injection("bearer_header:api.acme.corp:x-api-key").unwrap_err();
+        assert!(err.contains("does not take a header name"), "got: {err}");
+    }
 
     fn add_args(id: &str) -> IntegrationAddArgs {
         IntegrationAddArgs {

@@ -1,8 +1,8 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::cli::IntegrationArgs;
 use lns_cli::command::parse_args;
+use lns_cli::integration::IntegrationArgs;
 use lns_cli::integration::{self, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 use lns_policy::Policy;
 use std::io::Write;
