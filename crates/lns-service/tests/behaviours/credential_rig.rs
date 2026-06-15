@@ -255,6 +255,7 @@ impl CredentialRig {
             id.to_string(),
             OauthConfig {
                 client_id: format!("Iv1.{id}"),
+                client_secret: String::new(),
                 scopes: vec!["repo".into()],
                 device_authorization_endpoint: format!("https://example.com/{id}/device/code"),
                 token_endpoint: format!("https://example.com/{id}/oauth/token"),

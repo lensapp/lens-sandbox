@@ -217,6 +217,7 @@ mod tests {
             oauth: Some(OauthAuth {
                 flow: OauthFlow::Device,
                 client_id: Some(format!("Iv1.{id}")),
+                client_secret: None,
                 scopes: vec!["repo".into()],
                 device_authorization_endpoint: Some(format!("https://{domain}/login/device/code")),
                 authorization_endpoint: None,
@@ -249,6 +250,7 @@ mod tests {
             oauth: Some(OauthAuth {
                 flow: OauthFlow::Pkce,
                 client_id: None,
+                client_secret: None,
                 scopes: Vec::new(),
                 device_authorization_endpoint: None,
                 authorization_endpoint: Some(format!("https://{domain}/auth")),

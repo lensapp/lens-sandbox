@@ -154,6 +154,12 @@ jobs:
       # true secret) is baked into the official binary; fork builds ship
       # without it and fall back to a pasted PAT.
       LNS_OAUTH_CLIENT_ID_GITHUB: ${{ secrets.OAUTH_CLIENT_ID_GITHUB }}
+      # Google's device flow is a confidential client: its id AND secret
+      # are baked into the official binary (extractable, treated as a
+      # public client per RFC 8252). Fork builds ship without them and
+      # fall back to a pasted token.
+      LNS_OAUTH_CLIENT_ID_GOOGLE: ${{ secrets.OAUTH_CLIENT_ID_GOOGLE }}
+      LNS_OAUTH_CLIENT_SECRET_GOOGLE: ${{ secrets.OAUTH_CLIENT_SECRET_GOOGLE }}
       # build.rs already defaults to rust-lld; pinning here documents
       # intent and survives an org-level env override that picks a
       # nonexistent toolchain like `aarch64-linux-musl-gcc`.

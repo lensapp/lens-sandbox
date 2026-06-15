@@ -9,6 +9,7 @@ use lns_policy::integrations::OauthAuth;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OauthConfig {
     pub client_id: String,
+    pub client_secret: String,
     pub scopes: Vec<String>,
     pub device_authorization_endpoint: String,
     pub token_endpoint: String,
@@ -18,6 +19,7 @@ impl From<&OauthAuth> for OauthConfig {
     fn from(o: &OauthAuth) -> Self {
         Self {
             client_id: o.client_id.clone().unwrap_or_default(),
+            client_secret: o.client_secret.clone().unwrap_or_default(),
             scopes: o.scopes.clone(),
             device_authorization_endpoint: o
                 .device_authorization_endpoint

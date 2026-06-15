@@ -474,6 +474,7 @@ mod tests {
             oauth: Some(OauthAuth {
                 flow: OauthFlow::Device,
                 client_id: Some("Iv1.somesaas".into()),
+                client_secret: None,
                 scopes: vec!["repo".into()],
                 device_authorization_endpoint: Some(
                     "https://api.somesaas.com/login/device/code".into(),

@@ -71,7 +71,7 @@ impl OauthFlow {
     }
 }
 
-/// Interactive sign-in configuration for an `oauth` integration: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce.
+/// Interactive sign-in configuration for an `oauth` integration: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce; `clientSecret` is set only for confidential device clients (e.g. Google) that require it in the token exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OauthAuth {
@@ -79,6 +79,8 @@ pub struct OauthAuth {
     pub flow: OauthFlow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +293,7 @@ mod tests {
         OauthAuth {
             flow: OauthFlow::Device,
             client_id: Some("Iv1.example0000".into()),
+            client_secret: None,
             scopes: vec!["repo".into()],
             device_authorization_endpoint: Some("https://example.com/login/device/code".into()),
             authorization_endpoint: None,
@@ -309,6 +312,7 @@ mod tests {
         OauthAuth {
             flow: OauthFlow::Pkce,
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
             device_authorization_endpoint: None,
             authorization_endpoint: Some("https://example.com/auth".into()),
@@ -502,6 +506,28 @@ mod tests {
         );
         let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_oauth_integration_round_trips_an_optional_client_secret() {
+        let mut i = oauth_integration();
+        i.oauth.as_mut().unwrap().client_secret = Some("some-client-secret".into());
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(
+            yaml.contains("clientSecret: some-client-secret"),
+            "got: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_oauth_integration_without_a_client_secret_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        assert!(
+            !yaml.contains("clientSecret"),
+            "a public-client oauth entry must not serialize an empty client secret: {yaml}"
+        );
     }
 
     #[test]
@@ -931,6 +957,45 @@ mod tests {
     }
 
     #[test]
+    fn bundled_google_signs_in_via_oauth_device_flow_with_a_client_secret_and_injects_a_bearer_header()
+     {
+        let google = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "google")
+            .expect("google is bundled");
+        assert_eq!(google.auth_kind, AuthKind::Oauth);
+        let oauth = google.oauth.as_ref().expect("oauth block present");
+        assert_eq!(oauth.flow, OauthFlow::Device);
+        assert_eq!(oauth.env_var, "GOOGLE_OAUTH_ACCESS_TOKEN");
+        assert_eq!(
+            oauth.device_authorization_endpoint.as_deref(),
+            Some("https://oauth2.googleapis.com/device/code")
+        );
+        assert_eq!(oauth.token_endpoint, "https://oauth2.googleapis.com/token");
+        assert!(
+            oauth.client_secret.is_some(),
+            "Google's device flow requires a client secret in the token exchange"
+        );
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "www.googleapis.com"),
+            "Google APIs take Authorization: Bearer, got: {:?}",
+            oauth.injections
+        );
+        assert!(
+            google
+                .token_fallback
+                .as_ref()
+                .and_then(|f| f.help.as_deref())
+                .is_some_and(|h| h.starts_with("https://")),
+            "an unconfigured build must let the user pivot to a pasted token, got: {:?}",
+            google.token_fallback
+        );
+    }
+
+    #[test]
     fn no_bundled_integration_commits_a_literal_oauth_client_id() {
         let raw = include_str!("integrations.yaml");
         for line in raw.lines() {
@@ -939,6 +1004,20 @@ mod tests {
                 assert!(
                     value.starts_with("\"${") && value.ends_with("}\""),
                     "clientId must be a build-time env reference, never a committed literal: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_bundled_integration_commits_a_literal_oauth_client_secret() {
+        let raw = include_str!("integrations.yaml");
+        for line in raw.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("clientSecret:") {
+                let value = rest.trim();
+                assert!(
+                    value.starts_with("\"${") && value.ends_with("}\""),
+                    "clientSecret must be a build-time env reference, never a committed literal: {line:?}"
                 );
             }
         }
