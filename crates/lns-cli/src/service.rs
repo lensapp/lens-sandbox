@@ -25,6 +25,28 @@ pub use orchestrator::{
 
 use crate::command::{CommandSpec, subcommand};
 
+#[derive(clap::Args)]
+pub struct ServiceArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ServiceCommand {
+    #[command(about = "Start the Lens Sandbox background service.")]
+    Start,
+    #[command(about = "Stop the Lens Sandbox background service.")]
+    Stop,
+    #[command(about = "Show status of the Lens Sandbox background service.")]
+    Status,
+    #[command(
+        about = "Register a per-user login agent and start the service now and on every login."
+    )]
+    Enable,
+    #[command(about = "Stop the service and unregister the per-user login agent.")]
+    Disable,
+}
+
 pub fn augment_kill(app: clap::Command) -> clap::Command {
     app.subcommand(subcommand::<crate::cli::KillArgs>("kill").hide(true))
 }
@@ -49,8 +71,7 @@ pub const LS_SPEC: CommandSpec = CommandSpec {
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
-        subcommand::<crate::cli::ServiceArgs>("service")
-            .about("Manage the Lens Sandbox background service."),
+        subcommand::<ServiceArgs>("service").about("Manage the Lens Sandbox background service."),
     )
 }
 

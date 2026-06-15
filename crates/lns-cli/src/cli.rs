@@ -432,28 +432,6 @@ pub struct PolicyRemoveArgs {
 }
 
 #[derive(clap::Args)]
-pub struct ServiceArgs {
-    #[command(subcommand)]
-    pub command: ServiceCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ServiceCommand {
-    #[command(about = "Start the Lens Sandbox background service.")]
-    Start,
-    #[command(about = "Stop the Lens Sandbox background service.")]
-    Stop,
-    #[command(about = "Show status of the Lens Sandbox background service.")]
-    Status,
-    #[command(
-        about = "Register a per-user login agent and start the service now and on every login."
-    )]
-    Enable,
-    #[command(about = "Stop the service and unregister the per-user login agent.")]
-    Disable,
-}
-
-#[derive(clap::Args)]
 pub struct RunArgs {
     #[arg(
         help = "OCI image reference (e.g. alpine:3.20); omit for imageless mode, which requires a command after `--`."

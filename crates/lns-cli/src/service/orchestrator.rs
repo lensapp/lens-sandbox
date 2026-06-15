@@ -61,20 +61,20 @@ pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFu
 
 pub fn service_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::cli::ServiceArgs::from_arg_matches(matches)?;
+        let args = super::ServiceArgs::from_arg_matches(matches)?;
         dispatch(&args.command).await?;
         Ok(0)
     })
 }
 
-pub async fn dispatch(cmd: &crate::cli::ServiceCommand) -> Result<()> {
+pub async fn dispatch(cmd: &super::ServiceCommand) -> Result<()> {
     let client = real_client()?;
     match cmd {
-        crate::cli::ServiceCommand::Start => super::cmd_start(&client).await,
-        crate::cli::ServiceCommand::Stop => super::cmd_stop(&client).await,
-        crate::cli::ServiceCommand::Status => super::cmd_status(&client).await,
-        crate::cli::ServiceCommand::Enable => super::cmd_enable(&client).await,
-        crate::cli::ServiceCommand::Disable => super::cmd_disable(&client).await,
+        super::ServiceCommand::Start => super::cmd_start(&client).await,
+        super::ServiceCommand::Stop => super::cmd_stop(&client).await,
+        super::ServiceCommand::Status => super::cmd_status(&client).await,
+        super::ServiceCommand::Enable => super::cmd_enable(&client).await,
+        super::ServiceCommand::Disable => super::cmd_disable(&client).await,
     }
 }
 
