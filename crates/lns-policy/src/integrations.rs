@@ -595,6 +595,26 @@ mod tests {
     }
 
     #[test]
+    fn bundled_bedrock_injects_a_bearer_header_on_the_regional_runtime_and_control_planes() {
+        let bedrock = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "bedrock")
+            .expect("bedrock is bundled");
+        assert_eq!(bedrock.auth_kind, AuthKind::Credential);
+        let cred = bedrock.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "AWS_BEARER_TOKEN_BEDROCK");
+        for domain in ["bedrock-runtime.*.amazonaws.com", "bedrock.*.amazonaws.com"] {
+            assert!(
+                cred.injections
+                    .iter()
+                    .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == domain),
+                "the Bedrock API key rides as Authorization: Bearer to {domain}, got: {:?}",
+                cred.injections
+            );
+        }
+    }
+
+    #[test]
     fn bundled_linear_injects_a_bearer_header() {
         let linear = bundled_integrations()
             .iter()

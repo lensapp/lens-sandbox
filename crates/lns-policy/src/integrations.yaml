@@ -68,6 +68,20 @@ integrations:
           header: x-api-key
         - kind: bearer_header
           domain: api.anthropic.com
+  - id: bedrock
+    name: Amazon Bedrock
+    authKind: credential
+    routes:
+      - match: bedrock-runtime.*.amazonaws.com
+      - match: bedrock.*.amazonaws.com
+    credential:
+      envVar: AWS_BEARER_TOKEN_BEDROCK
+      placeholder: ABSKLNSPLACEHOLDER000000000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: bedrock-runtime.*.amazonaws.com
+        - kind: bearer_header
+          domain: bedrock.*.amazonaws.com
   - id: linear
     authKind: credential
     routes:

@@ -25,9 +25,9 @@ isn't configured for is not rewritten — the placeholder goes nowhere useful.
 
 Every credential provider is an [integration](integrations.md): a named service that
 bundles its placeholder, environment variable, and per-domain injection with the
-routes it needs. `openai`, `anthropic`, `linear`, `telegram`, `gitlab`, and
-`huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
-(device sign-in). Declare your own for an internal API with `lns integration add`
+routes it needs. `openai`, `anthropic`, `bedrock`, `linear`, `telegram`, `gitlab`,
+and `huggingface` ship in the bundled catalog; `github` ships as an `oauth`
+integration (device sign-in). Declare your own for an internal API with `lns integration add`
 (see [Integrations](integrations.md)). Connect one to a project with
 `lns integration connect <id>`, which records it under `integrations:` in that
 directory's `lns-policy.yaml`.
