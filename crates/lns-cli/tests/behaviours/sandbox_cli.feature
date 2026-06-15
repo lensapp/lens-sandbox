@@ -15,6 +15,7 @@ Feature: managing running sandboxes from the CLI
     And the output contains "inspect"
     And the output contains "stats"
     And the output contains "rm"
+    And the output contains "rename"
     And the output contains "prune"
 
   Scenario: the flat ls, exec, and kill verbs stay usable but leave the front page

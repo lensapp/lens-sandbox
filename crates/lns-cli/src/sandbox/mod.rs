@@ -41,14 +41,19 @@ pub enum SandboxCommand {
         about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
     )]
     Rm(SandboxRmArgs),
+    #[command(about = "Rename a run (`docker rename`-style); the new name resolves immediately.")]
+    Rename(SandboxRenameArgs),
     #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
     Prune,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxStopArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 
     #[arg(
         short = 't',
@@ -61,8 +66,11 @@ pub struct SandboxStopArgs {
 
 #[derive(clap::Args)]
 pub struct SandboxLogsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 
     #[arg(
         short = 'f',
@@ -75,8 +83,11 @@ pub struct SandboxLogsArgs {
 
 #[derive(clap::Args)]
 pub struct SandboxAttachArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 
     #[arg(
         long,
@@ -89,25 +100,46 @@ pub struct SandboxAttachArgs {
 
 #[derive(clap::Args)]
 pub struct SandboxInspectArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxStatsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
-    #[arg(help = "Target finished run id surfaced by `lns sandbox ls`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target finished run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxRenameArgs {
+    #[arg(value_name = "RUN", help = "Run to rename, by current id or name.")]
+    pub run: String,
+
+    #[arg(
+        value_name = "NEW_NAME",
+        help = "New name; must not be all digits and must be unique among listed runs."
+    )]
+    pub new_name: String,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(subcommand::<SandboxArgs>("sandbox").about(
-        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune.",
+        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.",
     ))
 }
 
@@ -156,7 +188,16 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
+        SandboxCommand::Rename(args) => rename(svc, args, out).await,
         SandboxCommand::Prune => prune(svc, out).await,
+    }
+}
+
+pub(crate) fn run_label(run: &str) -> String {
+    if !run.is_empty() && run.bytes().all(|b| b.is_ascii_digit()) {
+        format!("#{run}")
+    } else {
+        run.to_string()
     }
 }
 
@@ -181,13 +222,13 @@ async fn kill<W: std::io::Write>(
     let signal = crate::service::parse_signal_name(&args.signal)?;
     let response = svc
         .one_shot(Request::Kill {
-            run_id: args.run_id,
+            run: args.run.clone(),
             signal,
         })
         .await?;
     match response {
         Response::Acknowledged => {
-            writeln!(out, "killed run #{}", args.run_id)?;
+            writeln!(out, "killed run {}", run_label(&args.run))?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -202,20 +243,21 @@ async fn stop<W: std::io::Write>(
 ) -> Result<i32> {
     let response = svc
         .one_shot(Request::StopRun {
-            run_id: args.run_id,
+            run: args.run.clone(),
             timeout_secs: args.timeout,
         })
         .await?;
     match response {
         Response::RunStopped { forced: false } => {
-            writeln!(out, "stopped run #{}", args.run_id)?;
+            writeln!(out, "stopped run {}", run_label(&args.run))?;
             Ok(0)
         }
         Response::RunStopped { forced: true } => {
             writeln!(
                 out,
-                "killed run #{} after the {}s timeout",
-                args.run_id, args.timeout
+                "killed run {} after the {}s timeout",
+                run_label(&args.run),
+                args.timeout
             )?;
             Ok(0)
         }
@@ -231,12 +273,38 @@ async fn rm<W: std::io::Write>(
 ) -> Result<i32> {
     let response = svc
         .one_shot(Request::RemoveRun {
-            run_id: args.run_id,
+            run: args.run.clone(),
         })
         .await?;
     match response {
         Response::Acknowledged => {
-            writeln!(out, "removed run #{}", args.run_id)?;
+            writeln!(out, "removed run {}", run_label(&args.run))?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn rename<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxRenameArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::RenameRun {
+            run: args.run.clone(),
+            new_name: args.new_name.clone(),
+        })
+        .await?;
+    match response {
+        Response::Acknowledged => {
+            writeln!(
+                out,
+                "renamed run {} to {}",
+                run_label(&args.run),
+                args.new_name
+            )?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -270,7 +338,7 @@ async fn inspect<W: std::io::Write>(
 ) -> Result<i32> {
     let response = svc
         .one_shot(Request::InspectRun {
-            run_id: args.run_id,
+            run: args.run.clone(),
         })
         .await?;
     match response {
@@ -345,7 +413,7 @@ async fn stats<W: std::io::Write>(
 ) -> Result<i32> {
     let response = svc
         .one_shot(Request::RunStats {
-            run_id: args.run_id,
+            run: args.run.clone(),
         })
         .await?;
     match response {
@@ -402,7 +470,7 @@ where
 {
     let mut stream = svc
         .open_stream(Request::RunLogs {
-            run_id: args.run_id,
+            run: args.run.clone(),
             follow: args.follow,
         })
         .await?;
@@ -424,7 +492,7 @@ where
 {
     let mut stream = svc
         .open_stream(Request::AttachRun {
-            run_id: args.run_id,
+            run: args.run.clone(),
         })
         .await?;
     let run_id = expect_run_started(&mut stream).await?;
@@ -536,7 +604,7 @@ mod tests {
 
     fn stop_args(run_id: u32) -> SandboxStopArgs {
         SandboxStopArgs {
-            run_id,
+            run: run_id.to_string(),
             timeout: 10,
         }
     }
@@ -545,7 +613,7 @@ mod tests {
     async fn run_with_writers_refuses_the_interactive_exec_verb() {
         let svc = CannedService::new(Response::Pong);
         let cmd = SandboxCommand::Exec(crate::cli::ExecArgs {
-            run_id: 1,
+            run: "1".into(),
             interactive: false,
             tty: false,
             detach_keys: crate::cli::DetachChord(Vec::new()),
@@ -594,7 +662,7 @@ mod tests {
         let err = kill(
             &svc,
             &crate::cli::KillArgs {
-                run_id: 1,
+                run: "1".into(),
                 signal: "TERM".into(),
             },
             &mut out,
@@ -611,7 +679,7 @@ mod tests {
         let err = kill(
             &svc,
             &crate::cli::KillArgs {
-                run_id: 1,
+                run: "1".into(),
                 signal: "TERM".into(),
             },
             &mut out,
@@ -633,7 +701,7 @@ mod tests {
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run_id: 1 }, &mut out)
+        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
@@ -645,7 +713,7 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run_id: 1 }, &mut out)
+        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
@@ -655,7 +723,7 @@ mod tests {
     async fn stats_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run_id: 1 }, &mut out)
+        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
@@ -667,7 +735,7 @@ mod tests {
             message: "macOS-only".into(),
         });
         let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run_id: 1 }, &mut out)
+        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("macOS-only"));
@@ -677,10 +745,48 @@ mod tests {
     async fn rm_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = rm(&svc, &SandboxRmArgs { run_id: 1 }, &mut out)
+        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = rename(
+            &svc,
+            &SandboxRenameArgs {
+                run: "reviewer".into(),
+                new_name: "auditor".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn rename_confirms_with_the_handle_and_new_name() {
+        let svc = CannedService::new(Response::Acknowledged);
+        let mut out = Vec::new();
+        let code = rename(
+            &svc,
+            &SandboxRenameArgs {
+                run: "reviewer".into(),
+                new_name: "auditor".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "renamed run reviewer to auditor\n"
+        );
     }
 
     #[tokio::test]
@@ -783,7 +889,7 @@ mod tests {
         let err = logs(
             &svc,
             &SandboxLogsArgs {
-                run_id: 1,
+                run: "1".into(),
                 follow: false,
             },
             &mut stdout,
@@ -806,7 +912,7 @@ mod tests {
         let code = attach(
             &svc,
             &SandboxAttachArgs {
-                run_id: 9,
+                run: "9".into(),
                 detach_keys: crate::cli::DetachChord(Vec::new()),
             },
             TermInfo::default(),
@@ -829,6 +935,7 @@ mod tests {
             details: Box::new(RunDetails {
                 summary: lns_ipc::RunSummary {
                     id: 1,
+                    name: "reviewer".into(),
                     image: "some-image".into(),
                     command: String::new(),
                     status: lns_ipc::RunStatus::Running,
@@ -841,7 +948,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, &SandboxInspectArgs { run_id: 1 }, &mut out)
+        let code = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
             .await
             .unwrap();
         assert_eq!(code, 0);

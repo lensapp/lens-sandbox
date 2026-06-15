@@ -30,29 +30,33 @@ pub enum Request {
     },
     ExecImage(ExecImageArgs),
     Kill {
-        run_id: u32,
+        run: String,
         signal: SignalKind,
     },
     ListRuns,
     StopRun {
-        run_id: u32,
+        run: String,
         timeout_secs: u64,
     },
     InspectRun {
-        run_id: u32,
+        run: String,
     },
     RunLogs {
-        run_id: u32,
+        run: String,
         follow: bool,
     },
     AttachRun {
-        run_id: u32,
+        run: String,
     },
     RunStats {
-        run_id: u32,
+        run: String,
     },
     RemoveRun {
-        run_id: u32,
+        run: String,
+    },
+    RenameRun {
+        run: String,
+        new_name: String,
     },
     PruneRuns,
     BeginIntegrationSignIn {
@@ -213,6 +217,7 @@ pub struct ImageInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub id: u32,
+    pub name: String,
     pub image: String,
     pub command: String,
     pub status: RunStatus,
@@ -293,6 +298,8 @@ pub struct PortPublish {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
     pub policy_path: Option<String>,
@@ -389,6 +396,23 @@ fn name_char_allowed(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
+pub fn validate_run_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("invalid run name: must not be empty".to_string());
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "invalid run name {name:?}: a name must not be all digits (those address a run by id)"
+        ));
+    }
+    match name.chars().find(|c| !name_char_allowed(*c)) {
+        Some(bad) => Err(format!(
+            "invalid run name {name:?}: character {bad:?} not allowed"
+        )),
+        None => Ok(()),
+    }
+}
+
 fn default_tty() -> bool {
     true
 }
@@ -399,7 +423,7 @@ fn default_stdin() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecImageArgs {
-    pub run_id: u32,
+    pub run: String,
     pub argv: Vec<String>,
     pub env: Vec<String>,
     #[serde(default = "default_tty")]
@@ -426,7 +450,7 @@ mod tests {
     #[test]
     fn exec_image_args_tty_defaults_to_true_when_missing() {
         let frame = serde_json::json!({
-            "run_id": 1,
+            "run": "1",
             "argv": ["sh"],
             "env": []
         });
@@ -493,6 +517,7 @@ mod tests {
         };
         let req = Request::RunImage(RunImageArgs {
             image: Some("prism".into()),
+            name: None,
             cpus: 1,
             mem: 512,
             policy_path: None,
@@ -518,6 +543,7 @@ mod tests {
     fn run_image_args_volumes_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
+            name: None,
             cpus: 1,
             mem: 512,
             policy_path: None,
@@ -619,7 +645,7 @@ mod tests {
     #[test]
     fn stop_run_survives_a_request_round_trip() {
         let req = Request::StopRun {
-            run_id: 7,
+            run: "7".into(),
             timeout_secs: 10,
         };
         let frame = crate::encode_frame(&req).unwrap();
@@ -630,6 +656,7 @@ mod tests {
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
             image: Some("some-image:1".into()),
+            name: None,
             cpus: 2,
             mem: 1024,
             policy_path: Some("/work/lns-policy.yaml".into()),
@@ -674,7 +701,7 @@ mod tests {
 
     #[test]
     fn inspect_run_survives_a_request_round_trip() {
-        let req = Request::InspectRun { run_id: 3 };
+        let req = Request::InspectRun { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -683,7 +710,10 @@ mod tests {
     #[test]
     fn run_logs_survives_a_request_round_trip() {
         for follow in [false, true] {
-            let req = Request::RunLogs { run_id: 3, follow };
+            let req = Request::RunLogs {
+                run: "3".into(),
+                follow,
+            };
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, req);
@@ -692,7 +722,7 @@ mod tests {
 
     #[test]
     fn attach_run_survives_a_request_round_trip() {
-        let req = Request::AttachRun { run_id: 3 };
+        let req = Request::AttachRun { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -700,7 +730,7 @@ mod tests {
 
     #[test]
     fn run_stats_survives_a_request_and_response_round_trip() {
-        let req = Request::RunStats { run_id: 3 };
+        let req = Request::RunStats { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -723,6 +753,7 @@ mod tests {
             details: Box::new(RunDetails {
                 summary: RunSummary {
                     id: 3,
+                    name: "reviewer".into(),
                     image: "some-image:1".into(),
                     command: "echo hi".into(),
                     status: RunStatus::Running,
@@ -770,10 +801,41 @@ mod tests {
 
     #[test]
     fn remove_run_survives_a_request_round_trip() {
-        let req = Request::RemoveRun { run_id: 7 };
+        let req = Request::RemoveRun { run: "7".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn rename_run_survives_a_request_round_trip() {
+        let req = Request::RenameRun {
+            run: "reviewer".into(),
+            new_name: "auditor".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_image_args_name_survives_a_round_trip_and_defaults_to_none() {
+        let mut args = sample_run_args();
+        args.name = Some("reviewer".into());
+        let frame = crate::encode_frame(&args).unwrap();
+        let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded.name.as_deref(), Some("reviewer"));
+
+        let frame = serde_json::json!({
+            "image": "alpine",
+            "cpus": 1,
+            "mem": 512,
+            "policy_path": null,
+            "cmd": [],
+            "debug": false
+        });
+        let parsed: RunImageArgs = serde_json::from_value(frame).unwrap();
+        assert_eq!(parsed.name, None);
     }
 
     #[test]
@@ -958,6 +1020,29 @@ mod tests {
     fn volume_mount_parse_rejects_target_with_a_double_quote() {
         let err = VolumeMount::parse(r#"data:/d"x"#).unwrap_err();
         assert!(err.contains("must not contain whitespace"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_run_name_accepts_the_volume_charset() {
+        for ok in ["reviewer", "build-cache", "agent.v2_3", "a", "x7"] {
+            validate_run_name(ok).unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_run_name_rejects_all_digit_names_so_ids_stay_unambiguous() {
+        let err = validate_run_name("7").unwrap_err();
+        assert!(err.contains("all digits"), "got: {err}");
+        validate_run_name("0042").unwrap_err();
+    }
+
+    #[test]
+    fn validate_run_name_rejects_empty_and_illegal_characters() {
+        validate_run_name("").unwrap_err();
+        let err = validate_run_name("has space").unwrap_err();
+        assert!(err.contains("not allowed"), "got: {err}");
+        validate_run_name("a/b").unwrap_err();
+        validate_run_name("a:b").unwrap_err();
     }
 
     #[test]

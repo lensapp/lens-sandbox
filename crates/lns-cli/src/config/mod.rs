@@ -726,6 +726,7 @@ mod tests {
     fn bare_run_args() -> RunArgs {
         RunArgs {
             image: Some("alpine".to_string()),
+            name: None,
             registry: None,
             cpus: None,
             mem: None,

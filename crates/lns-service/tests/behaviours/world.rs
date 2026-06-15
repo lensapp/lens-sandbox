@@ -48,6 +48,15 @@ pub struct BehaviourWorld {
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<u32>,
+
+    /// Run id registered by a naming scenario, addressable later by name or id.
+    pub naming_run: Option<u32>,
+    /// Name a naming scenario last assigned or observed.
+    pub naming_name: Option<String>,
+    /// First auto-generated name captured when comparing auto-name uniqueness.
+    pub naming_first_name: Option<String>,
+    /// Refusal message from the last registration / rename in a naming scenario.
+    pub naming_error: Option<String>,
 }
 
 impl BehaviourWorld {
