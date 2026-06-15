@@ -112,6 +112,15 @@ impl Syscalls for RealSyscalls {
         }
     }
 
+    fn is_dir(&self, path: &CStr) -> bool {
+        // SAFETY: all-zero is a valid libc::stat; stat(2) overwrites it and only reads *path.
+        unsafe {
+            let mut buf = std::mem::zeroed::<libc::stat>();
+            libc::stat(path.as_ptr(), &mut buf) == 0
+                && (buf.st_mode & libc::S_IFMT) == libc::S_IFDIR
+        }
+    }
+
     fn open_ro(&self, path: &CStr) -> io::Result<RawFd> {
         // SAFETY: path is a valid NUL-terminated C string.
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };

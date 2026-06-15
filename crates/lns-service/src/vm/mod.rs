@@ -270,6 +270,7 @@ pub fn build_kernel_cmdline(
         parts.push(format!("bind.{i}.tag={}", bind_share_tag(i)));
         parts.push(format!("bind.{i}.target={}", b.target));
         parts.push(format!("bind.{i}.ro={}", u8::from(b.read_only)));
+        parts.push(format!("bind.{i}.drops={}", b.dropped_paths.len()));
         for (j, dropped) in b.dropped_paths.iter().enumerate() {
             parts.push(format!("bind.{i}.drop.{j}={dropped}"));
         }
@@ -533,11 +534,13 @@ mod tests {
             "bind.0.tag=lns-bind-0",
             "bind.0.target=/work",
             "bind.0.ro=0",
+            "bind.0.drops=2",
             "bind.0.drop.0=.env",
             "bind.0.drop.1=.npmrc",
             "bind.1.tag=lns-bind-1",
             "bind.1.target=/cfg",
             "bind.1.ro=1",
+            "bind.1.drops=0",
         ] {
             assert!(toks.contains(&expected), "missing {expected}: {toks:?}");
         }
