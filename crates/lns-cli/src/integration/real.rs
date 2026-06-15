@@ -12,7 +12,7 @@ use crate::command::{RunCtx, RunFuture};
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::cli::IntegrationArgs::from_arg_matches(matches)?;
+        let args = super::IntegrationArgs::from_arg_matches(matches)?;
         let catalog_path = lns_policy::integrations::default_integrations_path();
         let signin = RealIntegrationSignIn::new(crate::service::socket_path()?);
         let mut out = ctx.out;
