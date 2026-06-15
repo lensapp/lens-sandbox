@@ -68,6 +68,7 @@ fn details_with(image: &str, config: RunConfig) -> Response {
         details: Box::new(RunDetails {
             summary: RunSummary {
                 id: 3,
+                name: "reviewer".into(),
                 image: image.to_string(),
                 command: "some-command".into(),
                 status: RunStatus::Running,
@@ -118,7 +119,9 @@ fn canned_pruned_empty(w: &mut BehaviourWorld) {
 #[then(regex = r"^the service received a RemoveRun request for run (\d+)$")]
 fn then_remove_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::RemoveRun { run_id };
+    let expected = Request::RemoveRun {
+        run: run_id.to_string(),
+    };
     if requests.contains(&expected) {
         Ok(())
     } else {
@@ -141,6 +144,7 @@ fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
     w.sandbox.response = Some(Response::RunList {
         runs: vec![RunSummary {
             id: run_id,
+            name: String::new(),
             image,
             command: "some-command".into(),
             status: RunStatus::Running,
@@ -163,7 +167,7 @@ fn then_list_runs_request(w: &mut BehaviourWorld) -> Result<(), String> {
 fn then_kill_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
     let expected = Request::Kill {
-        run_id,
+        run: run_id.to_string(),
         signal: lns_ipc::SignalKind::Kill,
     };
     if requests.contains(&expected) {
@@ -297,7 +301,7 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
 fn then_stop_request(w: &mut BehaviourWorld, run_id: u32, timeout: u64) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
     let expected = Request::StopRun {
-        run_id,
+        run: run_id.to_string(),
         timeout_secs: timeout,
     };
     if requests.contains(&expected) {
@@ -311,7 +315,7 @@ fn then_stop_request(w: &mut BehaviourWorld, run_id: u32, timeout: u64) -> Resul
 fn then_logs_request(w: &mut BehaviourWorld, run_id: u32, mode: String) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
     let expected = Request::RunLogs {
-        run_id,
+        run: run_id.to_string(),
         follow: mode == "with",
     };
     if requests.contains(&expected) {
@@ -324,7 +328,9 @@ fn then_logs_request(w: &mut BehaviourWorld, run_id: u32, mode: String) -> Resul
 #[then(regex = r"^the service received an AttachRun request for run (\d+)$")]
 fn then_attach_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::AttachRun { run_id };
+    let expected = Request::AttachRun {
+        run: run_id.to_string(),
+    };
     if requests.contains(&expected) {
         Ok(())
     } else {
@@ -341,5 +347,54 @@ fn then_workload_stdout(w: &mut BehaviourWorld, needle: String) -> Result<(), St
         Err(format!(
             "expected workload stdout to contain {needle:?}, got {text:?}"
         ))
+    }
+}
+
+#[given(
+    regex = r#"^the service reports a run listing with run (\d+) named "([^"]+)" of image "([^"]+)" running$"#
+)]
+fn canned_named_run_listing(w: &mut BehaviourWorld, run_id: u32, name: String, image: String) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: run_id,
+            name,
+            image,
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }],
+    });
+}
+
+#[then(regex = r#"^the service received a StopRun request for run "([^"]+)" with timeout (\d+)$"#)]
+fn then_stop_request_by_handle(
+    w: &mut BehaviourWorld,
+    run: String,
+    timeout: u64,
+) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::StopRun {
+        run,
+        timeout_secs: timeout,
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then(regex = r#"^the service received a RenameRun request for run "([^"]+)" to "([^"]+)"$"#)]
+fn then_rename_request(
+    w: &mut BehaviourWorld,
+    run: String,
+    new_name: String,
+) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::RenameRun { run, new_name };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
     }
 }

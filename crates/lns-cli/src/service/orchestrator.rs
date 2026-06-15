@@ -123,6 +123,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
         image: args.image,
+        name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user: args.sandbox_user,
         sandbox_uid: args.sandbox_uid,
@@ -185,7 +186,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         .await
         .with_context(|| format!("connecting to {}", socket.display()))?;
 
-    let target_run_id = args.run_id;
+    let target_run = args.run;
     let tty = args.tty && crate::raw_mode::stdin_is_tty();
     let stdin = args.interactive;
     let initial_winsize = if tty {
@@ -196,7 +197,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     let detach_chord = args.detach_keys.0.clone();
 
     let request = Request::ExecImage(ExecImageArgs {
-        run_id: target_run_id,
+        run: target_run,
         argv: args.cmd,
         env: Vec::new(),
         tty,
@@ -228,7 +229,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     let response = real::send_request(
         &socket,
         &Request::Kill {
-            run_id: args.run_id,
+            run: args.run.clone(),
             signal,
         },
     )
@@ -236,7 +237,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
     match response {
         Response::Acknowledged => {
-            println!("killed run #{}", args.run_id);
+            println!("killed run {}", crate::sandbox::run_label(&args.run));
             Ok(())
         }
         Response::Error { message } => anyhow::bail!("daemon error: {message}"),

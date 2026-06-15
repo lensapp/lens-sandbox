@@ -245,6 +245,7 @@ mod tests {
             runs: vec![
                 crate::RunSummary {
                     id: 7,
+                    name: "reviewer".into(),
                     image: "alpine:latest".into(),
                     command: "sleep 30".into(),
                     status: crate::RunStatus::Running,
@@ -252,6 +253,7 @@ mod tests {
                 },
                 crate::RunSummary {
                     id: 8,
+                    name: "auditor".into(),
                     image: "<imageless>".into(),
                     command: String::new(),
                     status: crate::RunStatus::Exited { code: 143 },

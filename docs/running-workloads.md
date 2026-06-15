@@ -96,6 +96,23 @@ with `-w` (an absolute guest path, created inside the sandbox if missing):
 lns run -w /workspace ghcr.io/acme/agent
 ```
 
+### Naming a run
+
+Every run has a numeric id (`run #7`) **and** a name. Pass `--name` to choose
+one; omit it and Lens Sandbox assigns a memorable `adjective_noun` name. Either
+handle works anywhere a run id is accepted:
+
+```bash
+lns run -d --name reviewer ghcr.io/acme/agent
+lns sandbox logs reviewer
+lns sandbox stop reviewer
+```
+
+A name may contain letters, digits, `_`, `.`, and `-`, and must not be all
+digits (so it is never mistaken for an id). Names are unique among the runs
+`lns sandbox ls` shows, and free up once the run is removed. Rename a run at any
+time with `lns sandbox rename <run> <new-name>`.
+
 ### Persistent defaults
 
 Settings you'd otherwise repeat on every run can be stored once with
@@ -231,12 +248,14 @@ lns sandbox logs -f 7          # ...and keep following until it exits
 lns sandbox attach 7           # re-join a detached run live
 lns sandbox inspect 7          # state + launch config as JSON
 lns sandbox stats 7            # CPU share and memory, sampled over 1s
+lns sandbox rename 7 reviewer  # name a run (or rename it), docker-rename style
 lns sandbox rm 7               # drop one finished run from the list
 lns sandbox prune              # drop every finished run from the list
 ```
 
-The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
-as hidden aliases.
+Every verb takes a run's **name** as readily as its numeric id — `lns sandbox
+stop reviewer` and `lns sandbox stop 7` are equivalent. The pre-namespace
+spellings `lns ls`, `lns exec`, and `lns kill` keep working as hidden aliases.
 
 ### Exec — another session inside a run
 

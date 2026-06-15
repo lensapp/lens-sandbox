@@ -38,6 +38,12 @@ pub struct RunArgs {
 
     #[arg(
         long,
+        help = "Name the run, addressable in place of its id by every `lns sandbox` verb. Auto-generated (adjective_noun) when omitted; must not be all digits."
+    )]
+    pub name: Option<String>,
+
+    #[arg(
+        long,
         help = "Registry to qualify a bare image reference (e.g. ghcr.io); falls back to the `run.registry` config default. A fully-qualified reference is used as-is."
     )]
     pub registry: Option<String>,
@@ -173,8 +179,11 @@ impl RunArgs {
 
 #[derive(clap::Args)]
 pub struct ExecArgs {
-    #[arg(help = "Target run id surfaced by `lns ls` or `lns run -d`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 
     #[arg(
         short = 'i',
@@ -209,8 +218,8 @@ pub struct ExecArgs {
 
 #[derive(clap::Args)]
 pub struct KillArgs {
-    #[arg(help = "Target run id.")]
-    pub run_id: u32,
+    #[arg(value_name = "RUN", help = "Target run id or name.")]
+    pub run: String,
 
     #[arg(
         long,

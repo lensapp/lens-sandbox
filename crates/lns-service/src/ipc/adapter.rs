@@ -150,16 +150,23 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
-        Request::RunLogs { run_id, follow } => handle_logs(stream, run_id, follow).await,
-        Request::AttachRun { run_id } => handle_attach(stream, run_id).await,
-        Request::RunStats { run_id } => handle_stats(stream, run_id).await,
+        Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
+        Request::AttachRun { run } => handle_attach(stream, run).await,
+        Request::RunStats { run } => handle_stats(stream, run).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
 }
 
 #[cfg(target_os = "macos")]
-async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let response = match crate::run_registry::connector(run_id) {
         None => Response::Error {
             message: format!("no active run with id {run_id}"),
@@ -178,16 +185,23 @@ async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()>
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
     let _ = write_error(
         &mut stream,
-        format!("sampling stats for run {run_id} is macOS-only in this build"),
+        format!("sampling stats for run {run} is macOS-only in this build"),
     )
     .await;
     Ok(())
 }
 
-async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyhow::Result<()> {
+async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
@@ -197,7 +211,14 @@ async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyho
     crate::run_log::stream_to(&buffer, &mut stream, follow, 0).await
 }
 
-async fn handle_attach(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
@@ -406,6 +427,13 @@ async fn handle_one_shot(
 const FRAME_CHAN_BUF: usize = 512;
 
 async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyhow::Result<()> {
+    if let Some(name) = &args.name
+        && let Err(message) = crate::run_registry::ensure_name_available(name)
+    {
+        let _ = write_error(&mut stream, message).await;
+        return Ok(());
+    }
+
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
 
@@ -421,6 +449,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         .unwrap_or_else(|| "<imageless>".to_string());
     let command_label = args.cmd.join(" ");
     let started_label = rfc3339_now();
+    let requested_name = args.name.clone();
     let config = lns_ipc::RunConfig::from_run_args(&args);
 
     let logs = Arc::new(crate::run_log::RunLogBuffer::default());
@@ -442,8 +471,10 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         }
     });
 
-    crate::run_registry::register(
+    let abort = run_task.abort_handle();
+    let registered = crate::run_registry::register_named(
         run_id,
+        requested_name,
         crate::run_registry::RunHandle {
             cancel_tx,
             task: run_task,
@@ -451,6 +482,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             input_tx: Some(input_tx),
             #[cfg(target_os = "macos")]
             connector: None,
+            name: String::new(),
             image: image_label,
             command: command_label,
             started: started_label,
@@ -459,6 +491,11 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             config,
         },
     );
+    if let Err(message) = registered {
+        abort.abort();
+        let _ = write_error(&mut stream, message).await;
+        return Ok(());
+    }
 
     drop(frame_tx);
 
@@ -505,7 +542,13 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 
 #[cfg(target_os = "macos")]
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
-    let target_run_id = args.run_id;
+    let target_run_id = match crate::run_registry::resolve(&args.run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(connector) = crate::run_registry::connector(target_run_id) else {
         let _ = write_error(
             &mut stream,

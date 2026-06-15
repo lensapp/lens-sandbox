@@ -123,9 +123,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::RunSignal { run_id, signal } => {
             forward_session_input(*run_id, session_input_from_signal(*signal), "RunSignal").await
         }
-        Request::Kill { run_id, signal } => {
-            forward_session_input(*run_id, session_input_from_signal(*signal), "Kill").await
-        }
+        Request::Kill { run, signal } => kill_request(run, *signal).await,
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
         },
@@ -191,37 +189,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             username,
             secret,
         } => login_response(crate::image::verify_login(registry, username, secret).await),
-        Request::StopRun {
-            run_id,
-            timeout_secs,
-        } => {
-            let id = *run_id;
-            stop_run_with(
-                id,
-                std::time::Duration::from_secs(*timeout_secs),
-                KILL_GRACE,
-                |signal| forward_session_input(id, session_input_from_signal(signal), "StopRun"),
-            )
-            .await
-        }
-        Request::InspectRun { run_id } => match crate::run_registry::inspect(*run_id) {
-            Some(details) => Response::RunInspect {
-                details: Box::new(details),
-            },
-            None => Response::Error {
-                message: format!("no active run with id {run_id}"),
-            },
-        },
-        Request::RemoveRun { run_id } => match crate::run_registry::remove_if_exited(*run_id) {
-            crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
-            crate::run_registry::RemoveOutcome::Running => Response::Error {
-                message: format!(
-                    "run {run_id} is still running; stop it first with `lns sandbox stop {run_id}`"
-                ),
-            },
-            crate::run_registry::RemoveOutcome::NotFound => Response::Error {
-                message: format!("no run with id {run_id}"),
-            },
+        Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
+        Request::InspectRun { run } => inspect_run_request(run),
+        Request::RemoveRun { run } => remove_run_request(run),
+        Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
+            Ok(()) => Response::Acknowledged,
+            Err(message) => Response::Error { message },
         },
         Request::PruneRuns => Response::RunsPruned {
             removed: crate::run_registry::prune_exited(),
@@ -241,6 +214,59 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         }
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
+        },
+    }
+}
+
+async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
+    match crate::run_registry::resolve(run) {
+        Ok(id) => forward_session_input(id, session_input_from_signal(signal), "Kill").await,
+        Err(message) => Response::Error { message },
+    }
+}
+
+async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    stop_run_with(
+        id,
+        std::time::Duration::from_secs(timeout_secs),
+        KILL_GRACE,
+        |signal| forward_session_input(id, session_input_from_signal(signal), "StopRun"),
+    )
+    .await
+}
+
+fn inspect_run_request(run: &str) -> Response {
+    match crate::run_registry::resolve(run) {
+        Ok(id) => match crate::run_registry::inspect(id) {
+            Some(details) => Response::RunInspect {
+                details: Box::new(details),
+            },
+            None => Response::Error {
+                message: format!("no active run with id {id}"),
+            },
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
+fn remove_run_request(run: &str) -> Response {
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    match crate::run_registry::remove_if_exited(id) {
+        crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+        crate::run_registry::RemoveOutcome::Running => Response::Error {
+            message: format!(
+                "run {id} is still running; stop it first with `lns sandbox stop {id}`"
+            ),
+        },
+        crate::run_registry::RemoveOutcome::NotFound => Response::Error {
+            message: format!("no run with id {id}"),
         },
     }
 }
@@ -391,7 +417,7 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
             "lns exec -t/-i against run #{} is not yet supported (input \
              routing for exec sessions awaits an IPC discriminator); for now lns exec \
              supports non-interactive commands only",
-            args.run_id
+            args.run
         ));
     }
     Ok(())
@@ -478,6 +504,7 @@ mod tests {
         let _ = handle_request(
             &Request::RunImage(lns_ipc::RunImageArgs {
                 image: None,
+                name: None,
                 cpus: 1,
                 mem: 0,
                 policy_path: None,
@@ -734,6 +761,7 @@ mod tests {
                 task,
                 input_tx: Some(input_tx),
                 connector: None,
+                name: String::new(),
                 image: String::new(),
                 command: String::new(),
                 started: String::new(),
@@ -956,7 +984,7 @@ mod tests {
     async fn handle_request_kill_for_unregistered_run_returns_error() {
         let response = handle_request(
             &Request::Kill {
-                run_id: 999_999,
+                run: "999999".into(),
                 signal: lns_ipc::SignalKind::Kill,
             },
             Instant::now(),
@@ -966,10 +994,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_request_addressing_an_unknown_name_reports_no_such_run() {
+        for req in [
+            Request::Kill {
+                run: "ghost".into(),
+                signal: lns_ipc::SignalKind::Term,
+            },
+            Request::InspectRun {
+                run: "ghost".into(),
+            },
+            Request::RemoveRun {
+                run: "ghost".into(),
+            },
+        ] {
+            match handle_request(&req, Instant::now()).await {
+                Response::Error { message } => {
+                    assert!(message.contains("no such run: ghost"), "got: {message}");
+                }
+                other => unreachable!("expected Error for {req:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     #[should_panic(expected = "ExecImage must be dispatched via handle_exec")]
     async fn exec_image_via_handle_request_panics() {
         let req = Request::ExecImage(lns_ipc::ExecImageArgs {
-            run_id: 1,
+            run: "1".into(),
             argv: vec![],
             env: vec![],
             tty: false,
@@ -1021,6 +1072,7 @@ mod tests {
             input_tx: None,
             #[cfg(target_os = "macos")]
             connector: None,
+            name: String::new(),
             image: "test-image".into(),
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
@@ -1049,6 +1101,7 @@ mod tests {
             task,
             input_tx: Some(input_tx),
             connector: None,
+            name: String::new(),
             image: "closed-channel-test".into(),
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
@@ -1165,6 +1218,7 @@ mod tests {
                 input_tx: None,
                 #[cfg(target_os = "macos")]
                 connector: None,
+                name: "reviewer".into(),
                 image: "stop-test".into(),
                 command: String::new(),
                 started: "1970-01-01T00:00:00Z".into(),
@@ -1199,7 +1253,7 @@ mod tests {
     async fn run_logs_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunLogs {
-                run_id: 1,
+                run: "1".into(),
                 follow: false,
             },
             Instant::now(),
@@ -1210,18 +1264,24 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Request::AttachRun must be dispatched via handle_attach")]
     async fn attach_run_via_handle_request_panics() {
-        let _ = handle_request(&Request::AttachRun { run_id: 1 }, Instant::now()).await;
+        let _ = handle_request(&Request::AttachRun { run: "1".into() }, Instant::now()).await;
     }
 
     #[tokio::test]
     #[should_panic(expected = "Request::RunStats must be dispatched via handle_stats")]
     async fn run_stats_via_handle_request_panics() {
-        let _ = handle_request(&Request::RunStats { run_id: 1 }, Instant::now()).await;
+        let _ = handle_request(&Request::RunStats { run: "1".into() }, Instant::now()).await;
     }
 
     #[tokio::test]
     async fn handle_request_inspect_run_for_unknown_run_returns_error() {
-        let resp = handle_request(&Request::InspectRun { run_id: 999_998 }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::InspectRun {
+                run: "999998".into(),
+            },
+            Instant::now(),
+        )
+        .await;
         match resp {
             Response::Error { message } => {
                 assert!(message.contains("no active run"), "got: {message}");
@@ -1235,7 +1295,13 @@ mod tests {
         let id = crate::run_registry::allocate_run_id();
         register_running(id);
 
-        let resp = handle_request(&Request::InspectRun { run_id: id }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::InspectRun {
+                run: id.to_string(),
+            },
+            Instant::now(),
+        )
+        .await;
 
         match resp {
             Response::RunInspect { details } => {
@@ -1273,7 +1339,7 @@ mod tests {
     async fn handle_request_stop_run_for_unknown_run_returns_error() {
         let resp = handle_request(
             &Request::StopRun {
-                run_id: 999_999,
+                run: "999999".into(),
                 timeout_secs: 1,
             },
             Instant::now(),
@@ -1451,6 +1517,7 @@ mod tests {
                 task,
                 input_tx: Some(input_tx),
                 connector: None,
+                name: String::new(),
                 image: String::new(),
                 command: String::new(),
                 started: String::new(),
@@ -1471,7 +1538,7 @@ mod tests {
 
         let resp = handle_request(
             &Request::StopRun {
-                run_id: id,
+                run: id.to_string(),
                 timeout_secs: 10,
             },
             Instant::now(),
@@ -1491,7 +1558,7 @@ mod tests {
 
         let resp = handle_request(
             &Request::StopRun {
-                run_id: id,
+                run: id.to_string(),
                 timeout_secs: 1,
             },
             Instant::now(),
@@ -1510,7 +1577,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn exec_args(argv: Vec<String>, tty: bool, stdin: bool) -> lns_ipc::ExecImageArgs {
         lns_ipc::ExecImageArgs {
-            run_id: 42,
+            run: "42".into(),
             argv,
             env: Vec::new(),
             tty,
@@ -1548,7 +1615,7 @@ mod tests {
     #[test]
     fn build_session_params_maps_fields_and_winsize() {
         let args = lns_ipc::ExecImageArgs {
-            run_id: 1,
+            run: "1".into(),
             argv: vec!["echo".into()],
             env: vec!["A=B".into()],
             tty: false,

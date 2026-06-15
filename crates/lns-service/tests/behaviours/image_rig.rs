@@ -162,6 +162,7 @@ impl ImageRig {
         self.holder_run_id = Some(run_id);
         self.active.push(lns_ipc::RunSummary {
             id: run_id,
+            name: String::new(),
             image: reference.to_string(),
             command: String::new(),
             status: lns_ipc::RunStatus::Running,
