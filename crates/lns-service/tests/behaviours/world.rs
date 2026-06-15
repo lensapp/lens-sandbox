@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
+use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
@@ -43,6 +44,8 @@ pub struct BehaviourWorld {
     pub forward_error: Option<String>,
 
     pub volume: Option<VolumeRig>,
+
+    pub bind: Option<BindRig>,
 
     pub image: Option<ImageRig>,
 
@@ -89,6 +92,13 @@ impl BehaviourWorld {
             self.volume = Some(VolumeRig::new());
         }
         self.volume.as_mut().expect("volume rig must exist")
+    }
+
+    pub fn bind(&mut self) -> &mut BindRig {
+        if self.bind.is_none() {
+            self.bind = Some(BindRig::new());
+        }
+        self.bind.as_mut().expect("bind rig must exist")
     }
 
     pub fn image(&mut self) -> &mut ImageRig {

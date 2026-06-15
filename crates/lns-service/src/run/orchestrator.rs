@@ -146,6 +146,20 @@ async fn orchestrate(
         crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
     }
 
+    let bind_attachments: Vec<vm::BindAttachment> = args
+        .binds
+        .iter()
+        .map(|b| vm::BindAttachment {
+            host_source: std::path::PathBuf::from(&b.host_source),
+            target: b.target.clone(),
+            read_only: b.read_only,
+            dropped_paths: b.dropped_paths.clone(),
+        })
+        .collect();
+    for bind in &args.binds {
+        crate::audit::record_bind_attached(run_id, &bind.host_source, &bind.target)?;
+    }
+
     let imageless = args.image.is_none();
     let runtime_layer = runtime_layer::for_run(
         imageless,
@@ -228,6 +242,7 @@ async fn orchestrate(
         descriptor_sha256: Some(descriptor.descriptor_sha256.clone()),
         upper_disk: upper_disk_path,
         volumes: volume_attachments,
+        binds: bind_attachments,
         #[cfg(target_os = "macos")]
         vsock: session.as_ref().map(|s| vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,

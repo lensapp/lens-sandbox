@@ -210,6 +210,26 @@ pub fn record_volume_attached(run_id: u32, name: &str, target: &str) -> Result<(
     record_volume_attached_at(&audit_path(run_id)?, name, target)
 }
 
+fn bind_attached_obj(source: &str, target: &str) -> Map<String, Value> {
+    let mut obj = Map::new();
+    obj.insert(
+        "type".to_string(),
+        Value::String("bind_attached".to_string()),
+    );
+    obj.insert("origin".to_string(), Value::String("host".to_string()));
+    obj.insert("source".to_string(), Value::String(source.to_string()));
+    obj.insert("target".to_string(), Value::String(target.to_string()));
+    obj
+}
+
+pub fn record_bind_attached_at(path: &Path, source: &str, target: &str) -> Result<()> {
+    append_event_at(path, bind_attached_obj(source, target))
+}
+
+pub fn record_bind_attached(run_id: u32, source: &str, target: &str) -> Result<()> {
+    record_bind_attached_at(&audit_path(run_id)?, source, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +261,22 @@ mod tests {
             content.contains(&format!("\"prev_hash\":\"{}\"", lns_ipc::GENESIS_PREV_HASH)),
             "first line must be genesis: {content}"
         );
+    }
+
+    #[test]
+    fn record_bind_attached_writes_host_source_and_target() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_bind_attached_at(&path, "/Users/me/proj", "/work").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"type\":\"bind_attached\""), "{content}");
+        assert!(content.contains("\"origin\":\"host\""), "{content}");
+        assert!(
+            content.contains("\"source\":\"/Users/me/proj\""),
+            "{content}"
+        );
+        assert!(content.contains("\"target\":\"/work\""), "{content}");
     }
 
     #[test]

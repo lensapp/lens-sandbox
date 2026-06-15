@@ -205,6 +205,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
         spec.descriptor_sha256.as_deref(),
         spec.debug,
         &spec.volumes,
+        &spec.binds,
     );
 
     let queue = DispatchQueue::new("lns.vz", DispatchQueueAttr::SERIAL);
