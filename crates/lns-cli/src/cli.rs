@@ -30,45 +30,6 @@ pub struct Cli {
 }
 
 #[derive(clap::Args)]
-pub struct ConfigArgs {
-    #[command(subcommand)]
-    pub command: ConfigCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ConfigCommand {
-    #[command(
-        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
-    )]
-    Set(ConfigSetArgs),
-    #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
-    Get(ConfigKeyArgs),
-    #[command(about = "Remove a default.")]
-    Unset(ConfigKeyArgs),
-    #[command(about = "List every configured default.")]
-    List,
-}
-
-const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.env, run.volume, or run.publish.";
-
-#[derive(clap::Args)]
-pub struct ConfigSetArgs {
-    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
-    pub key: crate::config::ConfigKey,
-    #[arg(
-        required = true,
-        help = "Value(s) to store; each is validated like the matching `lns run` flag."
-    )]
-    pub values: Vec<String>,
-}
-
-#[derive(clap::Args)]
-pub struct ConfigKeyArgs {
-    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
-    pub key: crate::config::ConfigKey,
-}
-
-#[derive(clap::Args)]
 pub struct SandboxArgs {
     #[command(subcommand)]
     pub command: SandboxCommand,
