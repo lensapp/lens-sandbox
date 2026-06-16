@@ -218,6 +218,9 @@ pub struct PulledImage {
     pub layers: Vec<oci_client::client::ImageLayer>,
     pub config: oci_client::config::ConfigFile,
     pub layer_digests: Vec<String>,
+    /// The raw manifest + config blob, kept so a cached image can be re-pushed (`lns push`) without re-fetching.
+    pub manifest: OciImageManifest,
+    pub config_blob: String,
 }
 
 #[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
@@ -392,6 +395,8 @@ pub(crate) async fn pull_inner<R: Registry>(
         layers,
         config,
         layer_digests,
+        manifest,
+        config_blob: config_str,
     })
 }
 

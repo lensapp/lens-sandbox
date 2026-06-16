@@ -86,6 +86,8 @@ mod tests {
             ],
             config,
             layer_digests: vec!["sha256:aaaa".to_string(), "sha256:bbbb".to_string()],
+            manifest: oci_client::manifest::OciImageManifest::default(),
+            config_blob: String::new(),
         }
     }
 

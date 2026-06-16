@@ -125,6 +125,8 @@ impl ImageRig {
                 size_bytes: size,
             }],
             pulled_unix_secs: 1_765_022_400,
+            manifest: None,
+            config: None,
         };
         match image_store::pull_with(&self.fs, &self.images_root, &record, &self.active).await {
             Ok(info) => {
@@ -149,6 +151,8 @@ impl ImageRig {
                 })
                 .collect(),
             pulled_unix_secs: 1_765_022_400,
+            manifest: None,
+            config: None,
         };
         self.caches.add_layer(digest, size);
         image_store::record_with(&self.fs, &self.images_root, &record)

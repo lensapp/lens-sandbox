@@ -18,6 +18,11 @@ pub struct ImageRecord {
     pub digest: String,
     pub layers: Vec<LayerRef>,
     pub pulled_unix_secs: u64,
+    /// Raw manifest + config JSON, kept so the image can be re-pushed (`lns push`) from cache; `None` on records written before this was added → re-pull to populate.
+    #[serde(default)]
+    pub manifest: Option<String>,
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +69,28 @@ pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
             })
             .collect(),
         pulled_unix_secs,
+        manifest: serde_json::to_string(&pulled.manifest).ok(),
+        config: Some(pulled.config_blob.clone()),
     }
+}
+
+pub async fn read_record_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    reference: &str,
+) -> Result<Option<ImageRecord>> {
+    let path = record_path(images_root, &normalize_reference(reference)?);
+    match fs.read(&path).await {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes).context("parsing image record")?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).context("reading image record"),
+    }
+}
+
+pub async fn read_record(reference: &str) -> Result<Option<ImageRecord>> {
+    read_record_with(&real::RealFs, &images_root()?, reference).await
 }
 
 pub async fn record_with<F: Fs>(fs: &F, images_root: &Path, record: &ImageRecord) -> Result<()> {
@@ -398,6 +424,8 @@ mod tests {
                 })
                 .collect(),
             pulled_unix_secs: 1_765_022_400,
+            manifest: None,
+            config: None,
         }
     }
 
@@ -452,6 +480,15 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "a".repeat(64))],
+            manifest: oci_client::manifest::OciImageManifest {
+                config: oci_client::manifest::OciDescriptor {
+                    media_type: "application/vnd.oci.image.config.v1+json".into(),
+                    digest: "sha256:cfg".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            config_blob: r#"{"architecture":"arm64"}"#.into(),
         };
         let record = record_for(&pulled, 42);
         assert_eq!(record.reference, "docker.io/library/some-image:1.0");
@@ -464,6 +501,64 @@ mod tests {
                 size_bytes: 7,
             }]
         );
+        assert_eq!(
+            record.config.as_deref(),
+            Some(r#"{"architecture":"arm64"}"#)
+        );
+        let stored: oci_client::manifest::OciImageManifest =
+            serde_json::from_str(record.manifest.as_deref().unwrap()).unwrap();
+        assert_eq!(stored.config.digest, "sha256:cfg");
+    }
+
+    #[tokio::test]
+    async fn read_record_round_trips_by_normalized_reference_and_is_none_when_absent() {
+        let fs = FakeFs::default();
+        let mut record = rec("registry.example.test/some/image:1.0", &[("sha256:aa", 3)]);
+        record.config = Some(r#"{"x":1}"#.into());
+        record.manifest = Some(r#"{"schemaVersion":2,"config":{},"layers":[]}"#.into());
+        record_with(&fs, Path::new(ROOT), &record).await.unwrap();
+
+        let got = read_record_with(&fs, Path::new(ROOT), "registry.example.test/some/image:1.0")
+            .await
+            .unwrap();
+        assert_eq!(got, Some(record));
+        assert!(
+            read_record_with(&fs, Path::new(ROOT), "registry.example.test/absent:1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_record_surfaces_a_non_not_found_read_error() {
+        let fs = FakeFs {
+            fail_read: true,
+            ..Default::default()
+        };
+        let err = read_record_with(&fs, Path::new(ROOT), "some-image:1.0")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading image record"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_record_back_compat_old_record_without_manifest_or_config_is_none() {
+        let fs = FakeFs::default();
+        // A pre-existing record written before the manifest/config fields were added.
+        let old = r#"{"reference":"docker.io/library/some-image:1.0","digest":"sha256:x","layers":[],"pulled_unix_secs":1}"#;
+        fs.put(
+            &record_path(Path::new(ROOT), "docker.io/library/some-image:1.0"),
+            old.as_bytes(),
+        );
+        let got = read_record_with(&fs, Path::new(ROOT), "some-image:1.0")
+            .await
+            .unwrap()
+            .expect("record present");
+        assert!(got.manifest.is_none() && got.config.is_none());
     }
 
     #[tokio::test]
@@ -895,8 +990,16 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "e".repeat(64))],
+            manifest: oci_client::manifest::OciImageManifest::default(),
+            config_blob: String::new(),
         };
         record(&pulled).await.unwrap();
+
+        let got = read_record("registry.example.test/cov/lifecycle:1")
+            .await
+            .unwrap()
+            .expect("record present");
+        assert_eq!(got.reference, "registry.example.test/cov/lifecycle:1");
 
         let listed = list().await.unwrap();
         assert_eq!(listed.len(), 1);

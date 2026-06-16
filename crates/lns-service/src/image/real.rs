@@ -154,15 +154,20 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
     ) -> Result<String> {
         use oci_client::client::{Config, ImageLayer};
 
-        let manifests = crate::cache::root()?.join("manifests");
-        let cached = ManifestCache::new(manifests)
-            .get(source_reference)
-            .with_context(|| {
-                format!("{source_reference} is not in the local image cache; pull it first")
-            })?;
+        let record = crate::image_store::read_record(source_reference)
+            .await?
+            .filter(|r| r.manifest.is_some());
+        let record = record.with_context(|| {
+            format!("{source_reference} is not in the local image cache; pull it first")
+        })?;
+        let manifest: OciImageManifest =
+            serde_json::from_str(&record.manifest.expect("filtered to Some above"))
+                .with_context(|| format!("parsing cached manifest for {source_reference}"))?;
+        let config_blob = record.config.unwrap_or_default();
+
         let layer_cache = LayerCache::new(crate::cache::root()?.join("layers"));
-        let mut layers = Vec::with_capacity(cached.manifest.layers.len());
-        for descriptor in &cached.manifest.layers {
+        let mut layers = Vec::with_capacity(manifest.layers.len());
+        for descriptor in &manifest.layers {
             let bytes = layer_cache
                 .read(&descriptor.digest)
                 .with_context(|| format!("reading cached layer {}", descriptor.digest))?;
@@ -173,12 +178,12 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
             ));
         }
         let config = Config::new(
-            cached.config.into_bytes(),
-            cached.manifest.config.media_type.clone(),
-            cached.manifest.config.annotations.clone(),
+            config_blob.into_bytes(),
+            manifest.config.media_type.clone(),
+            manifest.config.annotations.clone(),
         );
         self.client
-            .push(target, &layers, config, auth, Some(cached.manifest))
+            .push(target, &layers, config, auth, Some(manifest))
             .await
             .with_context(|| format!("pushing image to {target}"))?;
         self.client
