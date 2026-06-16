@@ -219,10 +219,16 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
 }
 
 async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
-    match crate::run_registry::resolve(run) {
-        Ok(id) => forward_session_input(id, session_input_from_signal(signal), "Kill").await,
-        Err(message) => Response::Error { message },
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    if crate::run_registry::status(id).is_none() {
+        return Response::Error {
+            message: format!("no active run with id {id}"),
+        };
     }
+    forward_session_input(id, session_input_from_signal(signal), "Kill").await
 }
 
 async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
@@ -990,7 +996,37 @@ mod tests {
             Instant::now(),
         )
         .await;
-        assert!(matches!(response, Response::Error { .. }));
+        match response {
+            Response::Error { message } => assert!(
+                message.contains("no active run with id 999999"),
+                "an unknown run must report no-active-run, not a capability error; got: {message}"
+            ),
+            other => panic!("expected an unknown-run error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_kill_for_a_registered_run_passes_existence_and_forwards() {
+        let id = 557799;
+        register_running(id);
+        let response = handle_request(
+            &Request::Kill {
+                run: id.to_string(),
+                signal: lns_ipc::SignalKind::Kill,
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::run_registry::deregister(id);
+        match response {
+            Response::Error { message } => assert!(
+                !message.contains("no active run with id"),
+                "a registered run clears the existence check and reaches forwarding; got: {message}"
+            ),
+            other => panic!(
+                "expected a forwarding outcome for a sessionless registered run, got {other:?}"
+            ),
+        }
     }
 
     #[tokio::test]
