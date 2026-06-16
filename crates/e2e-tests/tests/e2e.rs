@@ -55,7 +55,7 @@ async fn main() {
 
     E2eWorld::cucumber()
         .fail_on_skipped()
-        .filter_run(features_dir, |feat, _, sc| {
+        .filter_run_and_exit(features_dir, |feat, _, sc| {
             let headless_excluded = |t: &String| t == "gui" || t == "microvm";
             !feat.tags.iter().any(headless_excluded) && !sc.tags.iter().any(headless_excluded)
         })
