@@ -148,13 +148,6 @@ pub fn assert_contains(haystack: &str, needle: &str, label: &str) -> Result<(), 
     }
 }
 
-pub const VALID_AUDIT_CHAIN: &str = concat!(
-    r#"{"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","seq":1,"type":"audit_event"}"#,
-    "\n",
-    r#"{"prev_hash":"11fa0b79ccf362f88562d142feac7c5cd5866e21b097b1b05a1c3816c8395c3f","seq":2,"type":"audit_event"}"#,
-    "\n",
-);
-
 pub const TAMPERED_AUDIT_CHAIN: &str = concat!(
     r#"{"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","seq":1,"type":"audit_event"}"#,
     "\n",
