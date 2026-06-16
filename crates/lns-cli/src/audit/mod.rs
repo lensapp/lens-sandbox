@@ -27,6 +27,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {

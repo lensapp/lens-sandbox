@@ -58,6 +58,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 /// Sends one image request to the running service; `None` means the service did not answer.

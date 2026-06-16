@@ -148,6 +148,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub trait SandboxService: Send + Sync {

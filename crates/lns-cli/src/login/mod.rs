@@ -79,6 +79,7 @@ pub const LOGIN_SPEC: CommandSpec = CommandSpec {
     augment: augment_login,
     run: real::run_login,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub fn augment_logout(app: clap::Command) -> clap::Command {
@@ -92,6 +93,7 @@ pub const LOGOUT_SPEC: CommandSpec = CommandSpec {
     augment: augment_logout,
     run: real::run_logout,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub async fn run(

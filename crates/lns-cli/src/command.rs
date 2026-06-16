@@ -33,6 +33,8 @@ pub struct CommandSpec {
     pub augment: fn(clap::Command) -> clap::Command,
     pub run: for<'a> fn(&'a ArgMatches, RunCtx<'a>) -> RunFuture<'a>,
     pub announces_update_check: bool,
+    /// True for commands that drive the tty over async tokio stdin/stdout, so the dispatcher must not hold the blocking std stdin/stdout locks.
+    pub owns_terminal: bool,
 }
 
 /// Add a derive-`Args` subcommand named `name` to `app`.
@@ -163,5 +165,24 @@ mod tests {
     fn spec_for_finds_a_registered_command_and_rejects_an_unknown_one() {
         assert!(spec_for("volume").is_some());
         assert!(spec_for("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn only_run_and_exec_own_the_terminal() {
+        for spec in registry() {
+            if matches!(spec.name, "run" | "exec") {
+                assert!(
+                    spec.owns_terminal,
+                    "{} drives the tty over tokio stdin/stdout; the dispatcher must not hold the std locks for it",
+                    spec.name
+                );
+            } else {
+                assert!(
+                    !spec.owns_terminal,
+                    "{} runs synchronously and relies on the dispatcher holding the std stdin/stdout locks",
+                    spec.name
+                );
+            }
+        }
     }
 }

@@ -56,6 +56,7 @@ pub const KILL_SPEC: CommandSpec = CommandSpec {
     augment: augment_kill,
     run: orchestrator::kill_command,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub fn augment_ls(app: clap::Command) -> clap::Command {
@@ -67,6 +68,7 @@ pub const LS_SPEC: CommandSpec = CommandSpec {
     augment: augment_ls,
     run: orchestrator::ls_command,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -80,6 +82,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: orchestrator::service_command,
     announces_update_check: true,
+    owns_terminal: false,
 };
 
 fn require_running_check(alive: bool) -> Result<(), &'static str> {
