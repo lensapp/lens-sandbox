@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.11.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.10.0...lns-v0.11.0) (2026-06-16)
+
+
+### Features
+
+* add lns login for OCI registries ([4c2c387](https://github.com/lensapp/lens-sandbox/commit/4c2c387d1675b19a1ef3518fe45ffe7bf656bf19))
+* address runs by name across the lifecycle ([40a32ab](https://github.com/lensapp/lens-sandbox/commit/40a32ab558e69c87e4424cfb7110fb7948509e96))
+* **integrations:** add an OAuth 2.0 PKCE sign-in flow ([3d39867](https://github.com/lensapp/lens-sandbox/commit/3d398678b3960119159d4a0df9f40cf48eb8cf19))
+* **integrations:** add Google as a device-flow oauth integration ([ad11029](https://github.com/lensapp/lens-sandbox/commit/ad1102907a60704046e07d15cd7a21bb08da69cd))
+* **integrations:** ship OpenRouter as a bundled pkce integration ([e49a805](https://github.com/lensapp/lens-sandbox/commit/e49a805c1dea018bc649ea41dac3d1c9619c9c72))
+
+
+### Bug Fixes
+
+* cap HTTP download bodies before buffering them into memory ([adb7b08](https://github.com/lensapp/lens-sandbox/commit/adb7b0882befd6d9ed3a50d55fdd11334c95de23))
+* **cli:** emit CRLF for attached run-log status lines in raw tty ([7f01bce](https://github.com/lensapp/lens-sandbox/commit/7f01bce45e2f25974a82cdd7e487b3d2eb2bd05b))
+* **lns-cli:** don't hold std stdin/stdout locks across interactive run/exec ([8afcdb4](https://github.com/lensapp/lens-sandbox/commit/8afcdb4aeb0c91dbe1610e835c46346303148536))
+* **lns-cli:** surface missing/corrupt audit anchor instead of silent clean verify ([5f02c2b](https://github.com/lensapp/lens-sandbox/commit/5f02c2b3b0bbe9386f54a71721706e73932e7b41))
+
 ## [0.10.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.9.0...lns-v0.10.0) (2026-06-12)
 
 
