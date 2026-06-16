@@ -44,6 +44,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run_command,
     announces_update_check: false,
+    owns_terminal: false,
 };
 
 pub(in crate::update) const DEFAULT_CDN_BASE: &str = "https://get.lns.run";

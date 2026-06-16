@@ -13,6 +13,7 @@ pub const RUN_SPEC: CommandSpec = CommandSpec {
     augment,
     run: crate::service::run_command,
     announces_update_check: true,
+    owns_terminal: true,
 };
 
 pub fn augment_exec(app: clap::Command) -> clap::Command {
@@ -24,4 +25,5 @@ pub const EXEC_SPEC: CommandSpec = CommandSpec {
     augment: augment_exec,
     run: crate::service::exec_command,
     announces_update_check: true,
+    owns_terminal: true,
 };
