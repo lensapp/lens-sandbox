@@ -78,6 +78,33 @@ pub fn run_tray(
     result.map_err(|e| anyhow::anyhow!("eframe run_native failed: {e}"))
 }
 
+/// Whether a desktop session the tray can attach to is present: macOS always has a window server, while Linux needs Wayland or X11 — whose absence (headless servers, CI, plain SSH) means winit cannot create an event loop.
+pub fn display_present() -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    has_linux_display(|key| std::env::var_os(key).is_some())
+}
+
+fn has_linux_display(present: impl Fn(&str) -> bool) -> bool {
+    present("WAYLAND_DISPLAY") || present("WAYLAND_SOCKET") || present("DISPLAY")
+}
+
+/// Run the service without the tray UI — wait for shutdown, then join the IPC thread and surface its result — so a headless host keeps the sandbox running instead of aborting at startup.
+pub fn run_headless(
+    shutdown: Arc<Shutdown>,
+    ipc_handle: JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    crate::log::warn!(
+        "no display detected — running headless without the tray; interactive approval prompts can't be shown, so pre-authorize access in lns-policy.yaml"
+    );
+    shutdown.wait_sync();
+    match ipc_handle.join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("the ipc thread panicked"),
+    }
+}
+
 struct TrayApp {
     shutdown: Arc<Shutdown>,
     window_state: Arc<WindowState>,
@@ -1029,6 +1056,35 @@ mod tests {
     fn embedded_icon_decodes_successfully() {
         let icon = load_icon().expect("embedded template PNG should decode");
         drop(icon);
+    }
+
+    #[test]
+    fn has_linux_display_true_when_any_display_var_is_present() {
+        assert!(has_linux_display(|k| k == "DISPLAY"));
+        assert!(has_linux_display(|k| k == "WAYLAND_DISPLAY"));
+        assert!(has_linux_display(|k| k == "WAYLAND_SOCKET"));
+    }
+
+    #[test]
+    fn has_linux_display_false_when_no_display_var_is_present() {
+        assert!(!has_linux_display(|_| false));
+    }
+
+    #[test]
+    fn run_headless_joins_the_ipc_thread_and_surfaces_success() {
+        let shutdown = Arc::new(Shutdown::new());
+        shutdown.signal();
+        let ipc = std::thread::spawn(|| Ok(()));
+        assert!(run_headless(shutdown, ipc).is_ok());
+    }
+
+    #[test]
+    fn run_headless_surfaces_an_ipc_thread_error() {
+        let shutdown = Arc::new(Shutdown::new());
+        shutdown.signal();
+        let ipc = std::thread::spawn(|| anyhow::bail!("ipc boom"));
+        let err = run_headless(shutdown, ipc).expect_err("ipc error must surface");
+        assert!(err.to_string().contains("ipc boom"), "got: {err}");
     }
 
     #[test]
