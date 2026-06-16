@@ -20,10 +20,22 @@ pub(crate) fn start_service(world: &mut E2eWorld) {
     let result = run_cli_with_env(["service", "start"], envs);
     assert!(
         result.exit_code == 0,
-        "lns service start failed: stdout={:?} stderr={:?}",
+        "lns service start failed: stdout={:?} stderr={:?}\n--- service.log ---\n{}",
         result.stdout,
-        result.stderr
+        result.stderr,
+        read_service_log(world),
     );
+}
+
+fn read_service_log(world: &E2eWorld) -> String {
+    let Some(socket) = &world.service_socket else {
+        return "(no socket path on the world)".to_string();
+    };
+    let Some(log_path) = socket.parent().map(|dir| dir.join("service.log")) else {
+        return "(socket path has no parent directory)".to_string();
+    };
+    std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| format!("(could not read {}: {e})", log_path.display()))
 }
 
 fn parse_pid(output: &str) -> Option<u64> {
