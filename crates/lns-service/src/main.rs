@@ -29,7 +29,11 @@ fn main() -> anyhow::Result<()> {
     let ipc_socket = socket.clone();
     let ipc_handle = thread::spawn(move || run_ipc_runtime(ipc_socket, ipc_shutdown, started_at));
 
-    tray::run_tray(shutdown, ipc_handle, window_state)
+    if tray::display_present() {
+        tray::run_tray(shutdown, ipc_handle, window_state)
+    } else {
+        tray::run_headless(shutdown, ipc_handle)
+    }
 }
 
 fn run_ipc_runtime(
