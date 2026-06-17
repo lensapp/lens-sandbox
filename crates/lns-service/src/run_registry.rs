@@ -625,14 +625,24 @@ mod tests {
         assert_eq!(next, 1, "expected id 1 (no prior runs), got {next}");
     }
 
-    #[cfg(target_os = "macos")]
+    struct StubTransport;
+    impl crate::vm::GuestTransport for StubTransport {
+        fn connect(
+            &self,
+            _port: u32,
+            _timeout: std::time::Duration,
+        ) -> futures_util::future::BoxFuture<'_, anyhow::Result<std::os::fd::RawFd>> {
+            Box::pin(async { Ok(0) })
+        }
+        fn request_stop(&self) {}
+    }
+
     #[tokio::test]
     async fn input_sender_returns_none_for_unknown_id() {
         let id = allocate_run_id() + 2_000_000;
         assert!(input_sender(id).is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn input_sender_returns_clone_when_handle_has_one() {
         let id = allocate_run_id();
@@ -647,14 +657,12 @@ mod tests {
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn connector_returns_none_for_unknown_id() {
         let id = allocate_run_id() + 2_000_001;
         assert!(connector(id).is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn connector_returns_none_when_handle_has_no_connector() {
         let id = allocate_run_id();
@@ -666,27 +674,31 @@ mod tests {
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_connector_populates_handle_field() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
         register(id, handle);
 
-        let conn = std::sync::Arc::new(crate::vm::VsockConnector::new_for_testing());
-        set_connector(id, conn);
+        set_connector(id, std::sync::Arc::new(StubTransport));
 
-        assert!(connector(id).is_some());
+        let stored = connector(id).expect("connector should be stored");
+        stored.request_stop();
+        assert_eq!(
+            stored
+                .connect(1, std::time::Duration::ZERO)
+                .await
+                .expect("stub connect"),
+            0
+        );
 
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_connector_is_noop_when_run_not_registered() {
         let id = allocate_run_id() + 2_000_002;
-        let conn = std::sync::Arc::new(crate::vm::VsockConnector::new_for_testing());
-        set_connector(id, conn);
+        set_connector(id, std::sync::Arc::new(StubTransport));
 
         assert!(connector(id).is_none());
     }

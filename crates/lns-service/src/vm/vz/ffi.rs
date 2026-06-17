@@ -60,17 +60,6 @@ pub struct VsockConnector {
 }
 
 impl VsockConnector {
-    #[cfg(test)]
-    pub(crate) fn new_for_testing() -> Self {
-        let (done_tx, _done_rx) = mpsc::channel();
-        Self {
-            queue: DispatchQueue::new("lns.vz.test", DispatchQueueAttr::SERIAL),
-            virtio_dev: VsockDevicePtr(std::ptr::null()),
-            vm: VmPtr(std::ptr::null()),
-            done_tx,
-        }
-    }
-
     pub fn request_stop(&self) {
         if self.vm.0.is_null() {
             return;

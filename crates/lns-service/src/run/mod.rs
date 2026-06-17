@@ -169,14 +169,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_supervised_returns_supervisor_wrapper() {
         let argv = build_workload_argv(None, &["echo".into(), "hi".into()], true);
         assert_eq!(argv, vec!["/.lens/bin/lns-supervisor".to_string()]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_unsupervised_imageless_wraps_in_sh_dash_c() {
         let argv = build_workload_argv(None, &["echo".into(), "hello world".into()], false);
@@ -186,7 +184,6 @@ mod tests {
         assert_eq!(argv[2], "echo 'hello world'");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_derives_agent_command_from_the_override_cmd() {
         let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[], None);
@@ -196,7 +193,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_preserves_whitespace_and_quotes() {
         let env = exec_env_strings(
@@ -222,7 +218,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_unsupervised_carries_user_env_without_supervisor_vars() {
         let env = exec_env_strings(
@@ -240,7 +235,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_unsupervised_with_image_uses_entrypoint_plus_override() {
         let cfg = oci_client::config::ConfigFile {
@@ -259,7 +253,6 @@ mod tests {
         assert_eq!(argv[2], "override");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_with_image_uses_image_entrypoint_and_cmd() {
         let cfg = oci_client::config::ConfigFile {
@@ -276,7 +269,6 @@ mod tests {
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_honors_image_env_and_lets_user_override_it() {
         let cfg = oci_client::config::ConfigFile {
@@ -303,7 +295,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn vm_ended_before_connector_reports_a_clean_vm_exit() {
         let err = vm_ended_before_connector(Ok(Ok(())));
@@ -313,7 +304,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn vm_ended_before_connector_wraps_a_boot_failure_with_context() {
         let err = vm_ended_before_connector(Ok(Err(anyhow::anyhow!("kernel ENOENT"))));
@@ -328,7 +318,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn vm_ended_before_connector_reports_a_panicked_boot_task() {
         let join_err = tokio::spawn(async { panic!("boom in boot") })
@@ -341,7 +330,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn connector_never_arrived_names_the_dropped_connector() {
         let err = connector_never_arrived();

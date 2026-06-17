@@ -1,18 +1,16 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::future::Future;
-use std::os::fd::{IntoRawFd, RawFd};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
-
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::log;
+use super::real::into_blocking_fd;
 use crate::vm::GuestTransport;
 use crate::vm::connect::{ConnectOnce, connect_with};
 
@@ -104,37 +102,9 @@ pub(crate) fn bind_guest_listener(vsock_socket: &Path, port: u32) -> Result<Unix
         .with_context(|| format!("binding guest-vsock listener {}", path.display()))
 }
 
-pub(crate) fn spawn_accept_loop(listener: UnixListener, fd_tx: UnboundedSender<RawFd>) {
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => match into_blocking_fd(stream) {
-                    Ok(fd) => {
-                        if fd_tx.send(fd).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => log::warn!("dropping guest vsock connection: {e:#}"),
-                },
-                Err(e) => {
-                    log::warn!("guest vsock listener accept failed: {e:#}");
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn into_blocking_fd(stream: UnixStream) -> Result<RawFd> {
-    let std_stream = stream.into_std().context("UnixStream into_std")?;
-    std_stream
-        .set_nonblocking(false)
-        .context("clearing O_NONBLOCK on vsock fd")?;
-    Ok(std_stream.into_raw_fd())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::real::spawn_accept_loop;
     use super::*;
     use std::io::Read;
     use std::os::fd::FromRawFd;
@@ -211,6 +181,25 @@ mod tests {
             format!("{err:#}").contains("refused CONNECT 1029"),
             "got {err:#}"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_once_errors_on_an_overlong_reply_line() {
+        let (_dir, socket) = temp_socket("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_reply_line(&mut stream).await;
+            // A reply with no newline, longer than MAX_REPLY_LINE, must be rejected.
+            stream.write_all(&[b'x'; 128]).await.unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let connector = HybridVsockConnector::new(&socket, &socket);
+        let err = connector.connect_once(1029).await.unwrap_err();
+        assert!(format!("{err:#}").contains("exceeded"), "got {err:#}");
         server.await.unwrap();
     }
 

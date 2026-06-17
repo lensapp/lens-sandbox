@@ -182,10 +182,10 @@ mod tests {
             "file=/cache/runs/7/console.log"
         );
         assert_eq!(arg_value(&args, "--serial"), "off");
+        let cmdline = arg_value(&args, "--cmdline");
         assert!(
-            arg_value(&args, "--cmdline").contains("console=hvc0"),
-            "cmdline must select the virtio console: {:?}",
-            arg_value(&args, "--cmdline")
+            cmdline.contains("console=hvc0"),
+            "cmdline must select the virtio console: {cmdline:?}"
         );
     }
 

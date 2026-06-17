@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{VmSpec, VmmBackend};
+use super::VmSpec;
 
 mod launch;
 mod orchestrate;
 mod process;
+mod real;
 mod vmm_bin;
 mod vsock;
 
@@ -17,26 +18,7 @@ use process::Child;
 
 pub struct CloudHypervisor;
 
-impl VmmBackend for CloudHypervisor {
-    fn name(&self) -> &'static str {
-        "cloud-hypervisor"
-    }
-
-    fn run(&self, spec: VmSpec) -> Result<()> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("building cloud-hypervisor runtime")?;
-        rt.block_on(run_async_with(
-            &process::RealSpawner,
-            spec,
-            |k| std::env::var_os(k),
-            &orchestrate::LaunchTimeouts::default(),
-        ))
-    }
-}
-
-async fn run_async_with<S: process::Spawner>(
+pub(super) async fn run_async_with<S: process::Spawner>(
     spawner: &S,
     spec: VmSpec,
     env_get: impl Fn(&str) -> Option<OsString>,
@@ -74,7 +56,7 @@ async fn run_async_with<S: process::Spawner>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::ExecSpec;
+    use crate::vm::{ExecSpec, VmmBackend};
     use orchestrate::LaunchTimeouts;
     use process::Spawner;
     use std::os::unix::process::ExitStatusExt;
@@ -134,29 +116,24 @@ mod tests {
         spawned: Arc<Mutex<usize>>,
     }
 
-    fn socket_from_args(args: &[String]) -> Option<PathBuf> {
-        for a in args {
-            if a.contains("cid=")
-                && let Some(idx) = a.find("socket=")
-            {
-                return Some(PathBuf::from(&a[idx + "socket=".len()..]));
-            }
-        }
-        for a in args {
-            if let Some(p) = a.strip_prefix("--socket-path=") {
-                return Some(PathBuf::from(p));
-            }
-        }
-        None
+    fn socket_from_args(args: &[String]) -> PathBuf {
+        args.iter()
+            .find_map(|a| {
+                if a.contains("cid=") {
+                    a.find("socket=")
+                        .map(|i| PathBuf::from(&a[i + "socket=".len()..]))
+                } else {
+                    a.strip_prefix("--socket-path=").map(PathBuf::from)
+                }
+            })
+            .expect("fake spawner: every spawned VMM arg set carries a socket path")
     }
 
     impl Spawner for FakeSpawner {
         type Child = FakeChild;
         fn spawn(&self, _program: &Path, args: &[String]) -> std::io::Result<FakeChild> {
             *self.spawned.lock().unwrap() += 1;
-            if let Some(path) = socket_from_args(args) {
-                std::fs::write(&path, b"").unwrap();
-            }
+            std::fs::write(socket_from_args(args), b"").unwrap();
             let is_virtiofsd = args.iter().any(|a| a.starts_with("--shared-dir="));
             if is_virtiofsd {
                 Ok(FakeChild {
@@ -172,11 +149,21 @@ mod tests {
         }
     }
 
-    struct PanicSpawner;
-    impl Spawner for PanicSpawner {
-        type Child = FakeChild;
-        fn spawn(&self, _p: &Path, _a: &[String]) -> std::io::Result<FakeChild> {
-            panic!("must not spawn before binaries are resolved");
+    fn override_env(ch: PathBuf, vfsd: PathBuf) -> impl Fn(&str) -> Option<OsString> {
+        let map: std::collections::HashMap<String, OsString> = [
+            ("LNS_CLOUD_HYPERVISOR_BIN".to_string(), ch.into_os_string()),
+            ("LNS_VIRTIOFSD_BIN".to_string(), vfsd.into_os_string()),
+        ]
+        .into_iter()
+        .collect();
+        move |k: &str| map.get(k).cloned()
+    }
+
+    fn idle_spawner() -> FakeSpawner {
+        FakeSpawner {
+            ch_exit_raw: 0,
+            virtiofsd_killed: Arc::new(AtomicBool::new(false)),
+            spawned: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -188,9 +175,15 @@ mod tests {
     #[tokio::test]
     async fn run_bails_with_actionable_help_when_binaries_are_not_resolved() {
         let d = tempfile::TempDir::new().unwrap();
-        let err = run_async_with(&PanicSpawner, spec(d.path()), |_| None, &fast())
+        let spawner = idle_spawner();
+        let err = run_async_with(&spawner, spec(d.path()), |_| None, &fast())
             .await
             .expect_err("no LNS_*_BIN override and no published pin → error");
+        assert_eq!(
+            *spawner.spawned.lock().unwrap(),
+            0,
+            "resolution must fail before any process is spawned"
+        );
         let msg = format!("{err:#}");
         assert!(
             msg.contains("cloud-hypervisor was not found on PATH"),
@@ -208,18 +201,9 @@ mod tests {
         std::fs::create_dir_all(d.path().join("disk")).unwrap();
         let ch = tempfile::NamedTempFile::new().unwrap();
         let vfsd = tempfile::NamedTempFile::new().unwrap();
-        let (ch_path, vfsd_path) = (ch.path().to_path_buf(), vfsd.path().to_path_buf());
-        let env = move |k: &str| match k {
-            "LNS_CLOUD_HYPERVISOR_BIN" => Some(ch_path.clone().into_os_string()),
-            "LNS_VIRTIOFSD_BIN" => Some(vfsd_path.clone().into_os_string()),
-            _ => None,
-        };
-        let virtiofsd_killed = Arc::new(AtomicBool::new(false));
-        let spawner = FakeSpawner {
-            ch_exit_raw: 0,
-            virtiofsd_killed: virtiofsd_killed.clone(),
-            spawned: Arc::new(Mutex::new(0)),
-        };
+        let env = override_env(ch.path().to_path_buf(), vfsd.path().to_path_buf());
+        let spawner = idle_spawner();
+        let virtiofsd_killed = spawner.virtiofsd_killed.clone();
         run_async_with(&spawner, spec(d.path()), env, &fast())
             .await
             .expect("clean boot+exit");
@@ -235,12 +219,7 @@ mod tests {
         std::fs::create_dir_all(d.path().join("disk")).unwrap();
         let ch = tempfile::NamedTempFile::new().unwrap();
         let vfsd = tempfile::NamedTempFile::new().unwrap();
-        let (ch_path, vfsd_path) = (ch.path().to_path_buf(), vfsd.path().to_path_buf());
-        let env = move |k: &str| match k {
-            "LNS_CLOUD_HYPERVISOR_BIN" => Some(ch_path.clone().into_os_string()),
-            "LNS_VIRTIOFSD_BIN" => Some(vfsd_path.clone().into_os_string()),
-            _ => None,
-        };
+        let env = override_env(ch.path().to_path_buf(), vfsd.path().to_path_buf());
         let spawner = FakeSpawner {
             ch_exit_raw: 256, // WEXITSTATUS == 1
             virtiofsd_killed: Arc::new(AtomicBool::new(false)),
@@ -252,6 +231,31 @@ mod tests {
         assert!(
             format!("{err:#}").contains("cloud-hypervisor exited unsuccessfully"),
             "got {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_the_connector_through_the_spec_channel() {
+        let d = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(d.path().join("disk")).unwrap();
+        let ch = tempfile::NamedTempFile::new().unwrap();
+        let vfsd = tempfile::NamedTempFile::new().unwrap();
+        let env = override_env(ch.path().to_path_buf(), vfsd.path().to_path_buf());
+        let (connector_tx, connector_rx) =
+            tokio::sync::oneshot::channel::<Arc<dyn crate::vm::GuestTransport>>();
+        let mut s = spec(d.path());
+        s.connector_tx = Some(connector_tx);
+        let spawner = FakeSpawner {
+            ch_exit_raw: 0,
+            virtiofsd_killed: Arc::new(AtomicBool::new(false)),
+            spawned: Arc::new(Mutex::new(0)),
+        };
+        run_async_with(&spawner, s, env, &fast())
+            .await
+            .expect("clean boot+exit");
+        assert!(
+            connector_rx.await.is_ok(),
+            "the orchestrator must receive the guest connector"
         );
     }
 }
