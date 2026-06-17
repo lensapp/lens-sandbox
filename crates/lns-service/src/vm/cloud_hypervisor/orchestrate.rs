@@ -169,6 +169,7 @@ mod tests {
             descriptor_sha256: None,
             upper_disk: run_dir.join("disk/upper"),
             volumes: vec![],
+            binds: vec![],
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,

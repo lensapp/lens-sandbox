@@ -33,6 +33,7 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
         spec.descriptor_sha256.as_deref(),
         spec.debug,
         &spec.volumes,
+        &spec.binds,
     )
 }
 
@@ -108,6 +109,7 @@ mod tests {
             descriptor_sha256: Some("sha256:deadbeef".into()),
             upper_disk: PathBuf::from("/cache/runs/7/disk/upper"),
             volumes: vec![],
+            binds: vec![],
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,
