@@ -5,15 +5,24 @@ sandbox.
 
 ## Prerequisites
 
-Lens Sandbox runs on **macOS on Apple Silicon** (M-series). It boots a real
-microVM using Apple's Virtualization framework, which ships with macOS — there's
-nothing extra to install. Intel Macs cannot host the guest VM and are rejected by
-the installer.
+Lens Sandbox boots a real microVM under a hardware hypervisor:
+
+- **macOS on Apple Silicon** (M-series) — uses Apple's Virtualization framework,
+  which ships with macOS, so there's nothing extra to install. Intel Macs cannot
+  host the guest VM and are rejected by the installer.
+- **Linux on x86_64 or aarch64** — uses KVM via Cloud Hypervisor. You need
+  `/dev/kvm` accessible to your user (typically `sudo usermod -aG kvm $USER`) and
+  the `cloud-hypervisor` and `virtiofsd` binaries available on `PATH` (or pointed
+  to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN`). The installer checks
+  for both and tells you what's missing.
+
+The security model is identical on both: the same per-directory policy, the same
+credential-shaped placeholders, the same "policy you run into, not write."
 
 ## Platform support
 
-macOS on Apple Silicon is the supported platform today. Linux and Windows support
-are on the roadmap and not yet available.
+macOS on Apple Silicon and Linux (x86_64 / aarch64) are supported. Windows support
+is on the roadmap and not yet available.
 
 ## Install
 
