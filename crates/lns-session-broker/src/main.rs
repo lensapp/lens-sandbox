@@ -62,13 +62,13 @@ fn run() -> Result<i32, String> {
     let forker = forker::LibcForker;
     let primary_outcome = session::handle_session(primary_conn, None, &forker);
 
-    // close(2) alone doesn't wake the accept thread; shutdown(SHUT_RDWR) is required first.
     // SAFETY: listen_fd is owned and unused after this block.
     unsafe {
         libc::shutdown(listen_fd, libc::SHUT_RDWR);
         libc::close(listen_fd);
     }
-    let _ = accept_thread.join();
+    // Abandon rather than join the exec-accept thread: a blocking AF_VSOCK accept() is not woken by shutdown()/close(), so joining would hang run() short of main()'s sync()+poweroff and the guest would never flush its disks; the imminent poweroff reaps it.
+    drop(accept_thread);
 
     reap_exec_sessions(&exec_sessions);
 
