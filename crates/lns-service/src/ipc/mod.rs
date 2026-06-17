@@ -722,7 +722,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_awaits_back_pressure_instead_of_dropping() {
         use crate::vm::session_client::SessionInput;
@@ -778,7 +777,6 @@ mod tests {
         crate::run_registry::deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_errors_when_run_not_registered() {
         let id = crate::run_registry::allocate_run_id() + 3_000_000;
@@ -1065,7 +1063,6 @@ mod tests {
         let _ = handle_request(&req, Instant::now()).await;
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn map_signal_covers_every_variant() {
         for (input, expected) in [
@@ -1080,7 +1077,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_returns_error_when_input_is_none() {
         let response = forward_session_input(1, None, "Synthetic").await;
@@ -1119,7 +1115,6 @@ mod tests {
         let _ = crate::run_registry::cancel(run_id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_errors_when_input_channel_is_closed() {
         use std::sync::Mutex;
@@ -1502,7 +1497,6 @@ mod tests {
         crate::run_registry::cancel(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test(start_paused = true)]
     async fn handle_request_stop_run_sends_term_through_the_session_channel() {
         use crate::vm::session_client::SessionInput;
@@ -1552,7 +1546,6 @@ mod tests {
         crate::run_registry::cancel(id);
     }
 
-    #[cfg(target_os = "macos")]
     fn exec_args(argv: Vec<String>, tty: bool, stdin: bool) -> lns_ipc::ExecImageArgs {
         lns_ipc::ExecImageArgs {
             run: "42".into(),
@@ -1564,14 +1557,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_rejects_empty_argv() {
         let result = validate_exec(&exec_args(Vec::new(), false, false));
         assert_eq!(result, Err("ExecImage.argv is empty".to_string()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_rejects_interactive_exec_and_names_the_run() {
         for (tty, stdin) in [(true, false), (false, true)] {
@@ -1582,14 +1573,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_accepts_a_non_interactive_command() {
         let result = validate_exec(&exec_args(vec!["echo".into(), "hi".into()], false, false));
         assert_eq!(result, Ok(()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_session_params_maps_fields_and_winsize() {
         let args = lns_ipc::ExecImageArgs {
@@ -1611,7 +1600,6 @@ mod tests {
         assert_eq!((ws.rows, ws.cols), (24, 80));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_session_params_leaves_winsize_unset_when_absent() {
         let params = build_session_params(exec_args(vec!["echo".into()], false, false));

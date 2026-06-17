@@ -75,16 +75,12 @@ mod tests {
     }
 
     #[test]
-    fn override_wins_over_path() {
+    fn override_is_used_without_consulting_path() {
         let dir = tempfile::TempDir::new().unwrap();
         let pinned = executable(dir.path(), "pinned-ch");
-        let path_dir = tempfile::TempDir::new().unwrap();
-        executable(path_dir.path(), "thing");
-        let env = |k: &str| match k {
-            "LNS_X" => Some(pinned.clone().into_os_string()),
-            "PATH" => Some(path_dir.path().as_os_str().to_os_string()),
-            _ => None,
-        };
+        let pinned_for_env = pinned.clone();
+        // No PATH entry: resolve_one must return the override without falling back.
+        let env = move |k: &str| (k == "LNS_X").then(|| pinned_for_env.clone().into_os_string());
         assert_eq!(resolve_one(&env, "LNS_X", "thing").unwrap(), pinned);
     }
 

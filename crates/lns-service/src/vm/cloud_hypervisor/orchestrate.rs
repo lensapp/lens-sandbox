@@ -55,7 +55,7 @@ pub(crate) async fn launch<S: Spawner>(
 
     if let Some(tx) = relay_fd_tx {
         let listener = vsock::bind_guest_listener(&layout.vsock, VSOCK_PORT)?;
-        vsock::spawn_accept_loop(listener, tx);
+        super::real::spawn_accept_loop(listener, tx);
     }
 
     let ch_args = cloud_hypervisor_args(spec, layout);
@@ -197,7 +197,7 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let spawner = FakeSpawner::new(Some(layout.virtiofsd.clone()), Some(layout.vsock.clone()));
-        let running = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
+        let mut running = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
             .await
             .expect("launch should succeed once both sockets appear");
 
@@ -206,7 +206,15 @@ mod tests {
             vec!["virtiofsd".to_string(), "cloud-hypervisor".to_string()],
             "virtiofsd must come up before cloud-hypervisor connects to its socket"
         );
-        let _ = running;
+        assert!(running.cloud_hypervisor.wait().await.unwrap().success());
+        let _ = running.connector;
+    }
+
+    #[test]
+    fn default_timeouts_leave_headroom_for_virtiofsd_and_cloud_hypervisor() {
+        let t = LaunchTimeouts::default();
+        assert!(t.virtiofsd >= Duration::from_secs(5));
+        assert!(t.cloud_hypervisor >= t.virtiofsd);
     }
 
     #[tokio::test]
