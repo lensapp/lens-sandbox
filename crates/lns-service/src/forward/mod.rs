@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use lns_ipc::PortPublish;
 
-#[cfg(target_os = "macos")]
 pub mod real;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
