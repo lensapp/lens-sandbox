@@ -52,12 +52,21 @@ impl Drop for E2eWorld {
 #[tokio::main]
 async fn main() {
     let features_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("features");
+    let microvm_only = std::env::var_os("LNS_E2E_MICROVM").is_some();
 
     E2eWorld::cucumber()
         .fail_on_skipped()
-        .filter_run_and_exit(features_dir, |feat, _, sc| {
-            let headless_excluded = |t: &String| t == "gui" || t == "microvm";
-            !feat.tags.iter().any(headless_excluded) && !sc.tags.iter().any(headless_excluded)
+        .filter_run_and_exit(features_dir, move |feat, _, sc| {
+            let tagged =
+                |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
+            if tagged("gui") {
+                return false;
+            }
+            if microvm_only {
+                tagged("microvm")
+            } else {
+                !tagged("microvm")
+            }
         })
         .await;
 }
