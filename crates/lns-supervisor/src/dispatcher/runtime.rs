@@ -25,7 +25,12 @@ fn hold_pty_slave(master_fd: RawFd) -> Option<OwnedFd> {
         return None;
     }
     // SAFETY: `path` holds the NUL-terminated slave path ptsname_r just wrote.
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return None;
     }
@@ -208,7 +213,6 @@ async fn run_agent_pty(
             Ok(status) => status.code().unwrap_or(1),
             Err(_) => 1,
         };
-        // Let the reader consume the agent's final buffered output — the held slave keeps it from being discarded — before closing our slave makes the master EOF.
         tokio::time::sleep(PTY_TAIL_SETTLE).await;
         drop(held_slave);
         let _ = output_task.await;
@@ -237,7 +241,6 @@ async fn run_agent_pty(
 
         match wait_with_signal_forwarding(&mut child, DEFAULT_GRACE).await {
             Ok(status) => {
-                // Let the reader consume the agent's final buffered output — the held slave keeps it from being discarded — before closing our slave makes the master EOF.
                 tokio::time::sleep(PTY_TAIL_SETTLE).await;
                 drop(held_slave);
                 let _ = drain_task.await;
