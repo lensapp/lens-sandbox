@@ -221,18 +221,20 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
   it on stderr, rather than exposing it unasked.
 - Decisions to **keep** a real secret are per-machine and never written to a shared
   file. To share a "never expose these" rule with your team, commit a `.lensignore`
-  in the bind directory — one path per line — and those files are dropped with no
-  prompt.
+  in the bind root — one path per line — and those paths are dropped with no prompt.
+  An entry may be a top-level name or a nested path relative to the bind root
+  (`packages/api/.env`); it must stay inside the bind (no leading `/`, no `..`), and a
+  rule for a file that isn't present is simply a no-op.
 
 The run summary lists each bind, its mode, and the disposition of every detected
 secret (`kept (exposed)` / `dropped`).
 
-> **The scan is top-level only.** Only the immediate contents of the bind root are
-> checked, so secrets nested in subdirectories (`packages/api/.env`, a key under
-> `server/certs/`, credentials embedded in `.git/config`) are exposed to the
-> workload **without a prompt**. Until the scan descends, treat a bind of a deep
-> tree as exposing everything under it, and use `:ro` or bind a narrower path when a
-> subtree holds secrets you don't want the workload to read.
+> **The automatic scan is top-level only.** Only the immediate contents of the bind
+> root are scanned for secret shapes, so a secret nested in a subdirectory
+> (`packages/api/.env`, a key under `server/certs/`, credentials embedded in
+> `.git/config`) is exposed to the workload **without a prompt**. To hide a nested
+> secret you know about, name it in `.lensignore` (a nested path is honored); for an
+> untrusted subtree, bind a narrower path or use `:ro`.
 
 ### Publishing ports
 
