@@ -223,10 +223,13 @@ async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
         Ok(id) => id,
         Err(message) => return Response::Error { message },
     };
-    if crate::run_registry::status(id).is_none() {
+    let Some(status) = crate::run_registry::status(id) else {
         return Response::Error {
             message: format!("no active run with id {id}"),
         };
+    };
+    if matches!(status, lns_ipc::RunStatus::Exited { .. }) {
+        return Response::Acknowledged;
     }
     forward_session_input(id, session_input_from_signal(signal), "Kill").await
 }
@@ -1027,6 +1030,28 @@ mod tests {
                 "expected a forwarding outcome for a sessionless registered run, got {other:?}"
             ),
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn handle_request_kill_of_an_already_exited_run_succeeds_without_forwarding() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        crate::run_registry::set_exit_code(id, 0);
+        let response = handle_request(
+            &Request::Kill {
+                run: id.to_string(),
+                signal: lns_ipc::SignalKind::Kill,
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::run_registry::deregister(id);
+        assert_eq!(
+            response,
+            Response::Acknowledged,
+            "killing an exited run is already satisfied and must not forward to a dead session"
+        );
     }
 
     #[tokio::test]
