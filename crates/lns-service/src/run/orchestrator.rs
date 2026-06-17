@@ -50,18 +50,10 @@ async fn orchestrate(
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
-    #[cfg(target_os = "macos")]
-    let forwards = Some(crate::forward::establish(
+    let forwards = crate::forward::establish(
         std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id)),
         &crate::forward::plan(&args.published_ports),
-    )?);
-    #[cfg(not(target_os = "macos"))]
-    let forwards: Option<crate::forward::ForwardGuard> = {
-        if !args.published_ports.is_empty() {
-            anyhow::bail!("port publishing (-p) is not yet supported on Linux hosts");
-        }
-        None
-    };
+    )?;
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
