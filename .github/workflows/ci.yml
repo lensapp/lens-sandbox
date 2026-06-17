@@ -301,6 +301,14 @@ jobs:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
       CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
       AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
+      # The x86_64 Linux runner cross-builds the guest payloads for
+      # x86_64-unknown-linux-musl (build.rs derives the guest triple from the
+      # host arch). The runner's native gcc/ar emit relocatable x86_64 objects
+      # for the C deps (aws-lc-sys / ring); rust-lld does the final static link
+      # against the Rust musl sysroot — same arrangement as the aarch64 path.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CC_x86_64_unknown_linux_musl: gcc
+      AR_x86_64_unknown_linux_musl: ar
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
