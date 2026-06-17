@@ -177,6 +177,7 @@ mod tests {
             .unwrap();
 
         let payload = tokio::task::spawn_blocking(move || {
+            // SAFETY: the connector/listener transferred ownership of this fd, so reconstructing the stream here is the sole owner.
             let mut s = unsafe { StdUnixStream::from_raw_fd(fd) };
             s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut buf = [0u8; 12];
@@ -248,6 +249,7 @@ mod tests {
             .expect("channel open");
 
         let got = tokio::task::spawn_blocking(move || {
+            // SAFETY: the connector/listener transferred ownership of this fd, so reconstructing the stream here is the sole owner.
             let mut s = unsafe { StdUnixStream::from_raw_fd(fd) };
             s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut buf = [0u8; 13];
