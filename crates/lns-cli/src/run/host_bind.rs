@@ -53,11 +53,12 @@ pub fn looks_like_secret(name: &str) -> bool {
         || EXACT_SECRET_NAMES.contains(&name)
 }
 
-pub fn scan_secrets(scan: &dyn DirScan, root: &Path) -> Vec<String> {
+/// Top-level names that need a KEEP/DROP decision: secret-shaped files, plus anything the bind's `.lensignore` names so an explicit "never expose this" works for any file, not only secret-shaped ones.
+fn names_needing_a_decision(scan: &dyn DirScan, root: &Path, ignore: &[String]) -> Vec<String> {
     let mut found: Vec<String> = scan
         .entries(root)
         .into_iter()
-        .filter(|name| looks_like_secret(name))
+        .filter(|name| looks_like_secret(name) || is_ignored(name, ignore))
         .collect();
     found.sort();
     found
@@ -100,7 +101,7 @@ impl ResolvedBind {
     }
 }
 
-/// Scans each bind for secret-shaped files and resolves a KEEP/DROP for every one — honoring `.lensignore`, reusing recorded decisions, prompting for the rest (or defaulting to DROP when there is no terminal).
+/// Resolves a KEEP/DROP for every secret-shaped file in each bind (and every `.lensignore`-listed path, whatever its shape) — `.lensignore` and recorded decisions drop silently, the rest prompt or default to DROP when there is no terminal.
 pub fn resolve_binds(
     specs: &[lns_ipc::BindSpec],
     scan: &dyn DirScan,
@@ -120,7 +121,7 @@ pub fn resolve_binds(
         let ignore = lensignore_patterns(scan, root);
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
-        for name in scan_secrets(scan, root) {
+        for name in names_needing_a_decision(scan, root, &ignore) {
             if is_ignored(&name, &ignore) {
                 push_drop(&mut dropped, name)?;
                 continue;
@@ -163,11 +164,11 @@ pub fn resolve_binds(
     Ok(resolved)
 }
 
-/// A dropped path travels to the guest on the kernel cmdline, which is whitespace-tokenized; a name with whitespace would be silently split and mis-masked, so we refuse it loudly rather than risk exposing the very secret the operator chose to drop.
+/// A dropped path travels to the guest on the kernel cmdline, which is whitespace-tokenized; a name with whitespace would be silently split and mis-masked, so we refuse it loudly rather than risk exposing the very file the operator chose to drop.
 fn push_drop(dropped: &mut Vec<String>, name: String) -> Result<()> {
     if name.contains(char::is_whitespace) {
         bail!(
-            "cannot drop secret-shaped file {name:?}: its name contains whitespace, which can't be carried to the guest safely — rename it or move it out of the bind"
+            "cannot drop {name:?}: its name contains whitespace, which can't be carried to the guest safely — rename it or move it out of the bind"
         );
     }
     dropped.push(name);
@@ -284,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_secrets_returns_sorted_matching_top_level_entries() {
+    fn names_needing_a_decision_returns_sorted_secret_shaped_entries() {
         let dir = FakeDir {
             entries: vec![
                 "src".into(),
@@ -294,17 +295,27 @@ mod tests {
             ],
             ..Default::default()
         };
-        let found = scan_secrets(&dir, Path::new("/proj"));
+        let found = names_needing_a_decision(&dir, Path::new("/proj"), &[]);
         assert_eq!(found, vec![".env".to_string(), ".npmrc".to_string()]);
     }
 
     #[test]
-    fn scan_secrets_is_empty_for_a_clean_directory() {
+    fn names_needing_a_decision_also_includes_lensignore_listed_non_secrets() {
+        let dir = FakeDir {
+            entries: vec!["src".into(), "notes.txt".into(), ".env".into()],
+            ..Default::default()
+        };
+        let found = names_needing_a_decision(&dir, Path::new("/proj"), &["notes.txt".to_string()]);
+        assert_eq!(found, vec![".env".to_string(), "notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn names_needing_a_decision_is_empty_for_a_clean_directory() {
         let dir = FakeDir {
             entries: vec!["src".into(), "Cargo.toml".into()],
             ..Default::default()
         };
-        assert!(scan_secrets(&dir, Path::new("/proj")).is_empty());
+        assert!(names_needing_a_decision(&dir, Path::new("/proj"), &[]).is_empty());
     }
 
     #[test]
@@ -473,6 +484,25 @@ mod tests {
             0,
             ".lensignore is not a decision"
         );
+    }
+
+    #[test]
+    fn resolve_binds_lensignore_drops_a_non_secret_shaped_file_too() {
+        let mut files = HashMap::new();
+        files.insert("/proj/.lensignore".to_string(), "notes.txt\n".to_string());
+        let dir = FakeDir {
+            entries: vec!["notes.txt".into(), "src".into()],
+            files,
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        assert_eq!(
+            out.unwrap()[0].dropped,
+            vec!["notes.txt".to_string()],
+            ".lensignore must drop any listed file, not only secret-shaped ones"
+        );
+        assert!(prompt.is_empty(), "a .lensignore drop never prompts");
     }
 
     #[test]
