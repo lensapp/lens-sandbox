@@ -1,3 +1,8 @@
+# Parked under specs/microvm/ (not the globbed features/ dir): these
+# scenarios have no step definitions yet, so they are inert documentation of
+# the intended volume behaviour until their guest-observable step glue is
+# written. Move back under features/ when implemented — make e2e-microvm runs
+# every @microvm feature there. See CLAUDE.md "Out of scope".
 @microvm
 Feature: named volumes persist workload state across runs
   `lns run` starts from a blank, discarded writable layer every time.
