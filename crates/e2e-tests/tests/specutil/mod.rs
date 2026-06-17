@@ -1,10 +1,14 @@
 #![allow(dead_code)]
 
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub mod arg_parser;
+
+pub const TIMEOUT_EXIT_CODE: i32 = 124;
 
 pub fn lns_binary() -> PathBuf {
     if let Ok(p) = std::env::var("LNS_BIN") {
@@ -111,6 +115,72 @@ where
         stdout: String::new(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
+pub fn run_cli_with_timeout<I, S, E, K, V>(args: I, envs: E, timeout: Duration) -> CliResult
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut cmd = Command::new(lns_binary());
+    cmd.args(&args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    capture_with_timeout(cmd, timeout)
+}
+
+pub fn capture_with_timeout(mut cmd: Command, timeout: Duration) -> CliResult {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn child");
+    let mut out_pipe = child.stdout.take().expect("child stdout was piped");
+    let mut err_pipe = child.stderr.take().expect("child stderr was piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait on child") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let stdout =
+        String::from_utf8_lossy(&out_reader.join().expect("join stdout reader")).into_owned();
+    let mut stderr =
+        String::from_utf8_lossy(&err_reader.join().expect("join stderr reader")).into_owned();
+    let exit_code = match status {
+        Some(status) => status.code().unwrap_or(-1),
+        None => {
+            stderr.push_str(&format!("\n[harness] killed: run exceeded {timeout:?}\n"));
+            TIMEOUT_EXIT_CODE
+        }
+    };
+    CliResult {
+        stdout,
+        stderr,
+        exit_code,
     }
 }
 
