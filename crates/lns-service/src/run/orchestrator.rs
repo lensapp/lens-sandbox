@@ -157,7 +157,13 @@ async fn orchestrate(
         })
         .collect();
     for bind in &args.binds {
-        crate::audit::record_bind_attached(run_id, &bind.host_source, &bind.target)?;
+        crate::audit::record_bind_attached(
+            run_id,
+            &bind.host_source,
+            &bind.target,
+            &bind.kept_paths,
+            &bind.dropped_paths,
+        )?;
     }
 
     let imageless = args.image.is_none();

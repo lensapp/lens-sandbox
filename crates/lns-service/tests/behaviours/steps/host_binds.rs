@@ -40,7 +40,21 @@ async fn request_dropping(w: &mut BehaviourWorld, source: String, target: String
 
 #[when(expr = "a host bind {string} at {string} is recorded in the audit chain")]
 async fn record_bind_audit(w: &mut BehaviourWorld, source: String, target: String) {
-    w.bind().record_audit(&source, &target);
+    w.bind().record_audit(&source, &target, &[], &[]);
+}
+
+#[when(
+    expr = "a host bind {string} at {string} exposing {string} and dropping {string} is recorded in the audit chain"
+)]
+async fn record_bind_audit_with_secrets(
+    w: &mut BehaviourWorld,
+    source: String,
+    target: String,
+    exposed: String,
+    dropped: String,
+) {
+    w.bind()
+        .record_audit(&source, &target, &[&exposed], &[&dropped]);
 }
 
 #[then(expr = "the spec carries a virtio-fs share for {string} at {string}")]
@@ -97,5 +111,21 @@ async fn audit_records(
         Ok(())
     } else {
         Err(format!("audit chain missing source/target: {content}"))
+    }
+}
+
+#[then(expr = "the audit chain records {string} as exposed and {string} as dropped")]
+async fn audit_records_disposition(
+    w: &mut BehaviourWorld,
+    exposed: String,
+    dropped: String,
+) -> Result<(), String> {
+    let content = w.bind().audit_contents();
+    if content.contains(&format!("\"exposed_secrets\":[\"{exposed}\"]"))
+        && content.contains(&format!("\"dropped_secrets\":[\"{dropped}\"]"))
+    {
+        Ok(())
+    } else {
+        Err(format!("audit chain missing secret disposition: {content}"))
     }
 }
