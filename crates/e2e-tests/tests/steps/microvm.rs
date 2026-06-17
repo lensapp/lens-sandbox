@@ -166,7 +166,7 @@ fn fetch_published(port: u16) -> Result<String, String> {
     use std::io::{Read, Write};
     let addr = format!("127.0.0.1:{port}");
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut last = "no connection attempt succeeded".to_string();
+    let mut last;
     loop {
         match std::net::TcpStream::connect(&addr) {
             Ok(mut stream) => {
