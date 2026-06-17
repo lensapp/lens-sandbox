@@ -49,13 +49,22 @@ async fn run_async_with<S: process::Spawner>(
         .unwrap_or_else(|| PathBuf::from("."));
     let layout = launch::SocketLayout::for_run_dir(&run_dir);
     let bins = vmm_bin::resolve(env_get)?;
-    let mut running = orchestrate::launch(spawner, &spec, &bins, &layout, None, timeouts).await?;
-    let status = running
-        .cloud_hypervisor
+    let relay_fd_tx = spec.vsock.as_ref().map(|c| c.fd_tx.clone());
+    let running =
+        orchestrate::launch(spawner, &spec, &bins, &layout, relay_fd_tx, timeouts).await?;
+    let orchestrate::RunningVm {
+        mut virtiofsd,
+        mut cloud_hypervisor,
+        connector,
+    } = running;
+    if let Some(tx) = spec.connector_tx {
+        let _ = tx.send(std::sync::Arc::new(connector));
+    }
+    let status = cloud_hypervisor
         .wait()
         .await
         .context("waiting for cloud-hypervisor to exit")?;
-    let _ = running.virtiofsd.start_kill();
+    let _ = virtiofsd.start_kill();
     if !status.success() {
         bail!("cloud-hypervisor exited unsuccessfully: {status}");
     }
@@ -90,9 +99,7 @@ mod tests {
             binds: vec![],
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
-            #[cfg(target_os = "macos")]
             vsock: None,
-            #[cfg(target_os = "macos")]
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

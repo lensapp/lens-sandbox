@@ -38,7 +38,6 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
     code
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn build_workload_argv(
     image_config: Option<&oci_client::config::ConfigFile>,
     override_cmd: &[String],
@@ -54,7 +53,6 @@ pub(super) fn build_workload_argv(
     vec!["/bin/sh".to_string(), "-c".to_string(), joined]
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn exec_env_strings(
     image_config: Option<&oci_client::config::ConfigFile>,
     override_cmd: &[String],
@@ -79,7 +77,6 @@ pub(super) fn exec_env_strings(
     )
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn vm_ended_before_connector(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> anyhow::Error {
@@ -90,7 +87,6 @@ pub(super) fn vm_ended_before_connector(
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn connector_never_arrived() -> anyhow::Error {
     anyhow::anyhow!("VM backend never produced a VsockConnector")
 }

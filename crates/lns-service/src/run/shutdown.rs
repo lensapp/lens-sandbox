@@ -1,5 +1,3 @@
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
-
 use std::time::Duration;
 
 use anyhow::Result;
@@ -9,7 +7,7 @@ use crate::forward::ForwardGuard;
 use crate::log;
 
 pub(crate) async fn shutdown_after_session(
-    forwards: ForwardGuard,
+    forwards: Option<ForwardGuard>,
     grace: Duration,
     mut vm_task: JoinHandle<Result<()>>,
 ) -> Result<()> {
@@ -81,7 +79,7 @@ mod tests {
         // exercises the "vm did not stop within grace period" branch.
         let vm_task = tokio::spawn(std::future::pending::<Result<()>>());
 
-        shutdown_after_session(guard, Duration::from_secs(2), vm_task)
+        shutdown_after_session(Some(guard), Duration::from_secs(2), vm_task)
             .await
             .unwrap();
 
@@ -105,7 +103,7 @@ mod tests {
             Ok(())
         });
 
-        shutdown_after_session(guard, Duration::from_secs(2), vm_task)
+        shutdown_after_session(Some(guard), Duration::from_secs(2), vm_task)
             .await
             .unwrap();
 
@@ -128,7 +126,7 @@ mod tests {
         let vm_task = tokio::spawn(async { panic!("vm exploded") });
         tokio::task::yield_now().await;
 
-        let result = shutdown_after_session(guard, Duration::from_secs(2), vm_task).await;
+        let result = shutdown_after_session(Some(guard), Duration::from_secs(2), vm_task).await;
 
         assert!(result.is_err());
         assert_eq!(

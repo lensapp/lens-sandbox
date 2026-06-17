@@ -79,7 +79,6 @@ async fn run_session(
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
-#[cfg(target_os = "macos")]
 pub async fn capture_session_output(
     connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
