@@ -365,7 +365,7 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
             "invalid volume target {target:?}: must be an absolute path"
         ));
     }
-    if target.chars().any(target_char_forbidden) {
+    if target.chars().any(cmdline_unsafe_char) {
         return Err(format!(
             "invalid volume target {target:?}: must not contain whitespace, quotes, or control characters"
         ));
@@ -378,7 +378,8 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn target_char_forbidden(c: char) -> bool {
+/// A char that can't safely ride the kernel cmdline value position the guest tokenizes (whitespace splits, `"` toggles quoting); rejected in volume targets, bind sources, and dropped-path names alike.
+pub fn cmdline_unsafe_char(c: char) -> bool {
     c.is_whitespace() || c.is_control() || c == '"'
 }
 
@@ -492,7 +493,7 @@ pub fn validate_bind_source(source: &str) -> Result<(), String> {
             "invalid host bind source {source:?}: must be an absolute path"
         ));
     }
-    if source.chars().any(target_char_forbidden) {
+    if source.chars().any(cmdline_unsafe_char) {
         return Err(format!(
             "invalid host bind source {source:?}: must not contain whitespace, quotes, or control characters"
         ));

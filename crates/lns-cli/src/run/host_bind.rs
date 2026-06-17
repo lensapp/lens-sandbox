@@ -164,11 +164,11 @@ pub fn resolve_binds(
     Ok(resolved)
 }
 
-/// A dropped path travels to the guest on the kernel cmdline, which is whitespace-tokenized; a name with whitespace would be silently split and mis-masked, so we refuse it loudly rather than risk exposing the very file the operator chose to drop.
+/// A dropped path travels to the guest on the kernel cmdline the guest tokenizes; a name with whitespace or a quote would be mis-split or mis-masked, so we refuse it loudly rather than risk exposing the very file the operator chose to drop.
 fn push_drop(dropped: &mut Vec<String>, name: String) -> Result<()> {
-    if name.contains(char::is_whitespace) {
+    if name.contains(lns_ipc::cmdline_unsafe_char) {
         bail!(
-            "cannot drop {name:?}: its name contains whitespace, which can't be carried to the guest safely — rename it or move it out of the bind"
+            "cannot drop {name:?}: its name contains whitespace, quotes, or control characters, which can't be carried to the guest safely — rename it or move it out of the bind"
         );
     }
     dropped.push(name);
@@ -535,6 +535,18 @@ mod tests {
         let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "drop\n");
         let err = out.unwrap_err().to_string();
         assert!(err.contains("whitespace"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_binds_refuses_to_drop_a_secret_whose_name_has_a_quote() {
+        let dir = FakeDir {
+            entries: vec![".env\"x".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "drop\n");
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("quote"), "got: {err}");
     }
 
     #[test]
