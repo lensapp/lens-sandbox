@@ -16,9 +16,7 @@ pub fn fresh_handle(
     lns_service::run_registry::RunHandle {
         cancel_tx,
         task,
-        #[cfg(target_os = "macos")]
         input_tx: None,
-        #[cfg(target_os = "macos")]
         connector: None,
         name: String::new(),
         image: image.into(),
