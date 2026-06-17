@@ -164,6 +164,14 @@ jobs:
       # intent and survives an org-level env override that picks a
       # nonexistent toolchain like `aarch64-linux-musl-gcc`.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      # On the x86_64 Linux runner the guests cross-build for
+      # x86_64-unknown-linux-musl (build.rs picks the triple from the host
+      # arch). cc-rs's default x86_64-linux-musl-gcc isn't installed, so point
+      # it at the runner's native gcc/ar; rust-lld links against the musl
+      # sysroot. The aarch64 runner ignores these and uses its own toolchain.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CC_x86_64_unknown_linux_musl: gcc
+      AR_x86_64_unknown_linux_musl: ar
       AWS_DEFAULT_REGION: us-east-1
       S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
