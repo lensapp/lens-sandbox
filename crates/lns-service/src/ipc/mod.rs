@@ -353,7 +353,6 @@ async fn wait_for_exit(run_id: u32, timeout: std::time::Duration) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn forward_session_input(
     run_id: u32,
     input: Option<crate::vm::session_client::SessionInput>,
@@ -377,25 +376,15 @@ async fn forward_session_input(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-async fn forward_session_input(_run_id: u32, _input: Option<()>, kind: &'static str) -> Response {
-    Response::Error {
-        message: format!("{kind} only supported on macOS hosts"),
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn session_input_from_stdin(bytes: Vec<u8>) -> Option<crate::vm::session_client::SessionInput> {
     Some(crate::vm::session_client::SessionInput::StdinBytes(bytes))
 }
-#[cfg(target_os = "macos")]
 fn session_input_from_resize(
     rows: u16,
     cols: u16,
 ) -> Option<crate::vm::session_client::SessionInput> {
     Some(crate::vm::session_client::SessionInput::Resize { rows, cols })
 }
-#[cfg(target_os = "macos")]
 fn session_input_from_signal(
     signal: lns_ipc::SignalKind,
 ) -> Option<crate::vm::session_client::SessionInput> {
@@ -404,7 +393,6 @@ fn session_input_from_signal(
     )))
 }
 
-#[cfg(target_os = "macos")]
 fn map_signal(s: lns_ipc::SignalKind) -> lns_session::SignalKind {
     match s {
         lns_ipc::SignalKind::Int => lns_session::SignalKind::Int,
@@ -416,7 +404,6 @@ fn map_signal(s: lns_ipc::SignalKind) -> lns_session::SignalKind {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String> {
     if args.argv.is_empty() {
         return Err("ExecImage.argv is empty".to_string());
@@ -432,7 +419,6 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
 ) -> crate::vm::session_client::SessionParams {
@@ -446,19 +432,6 @@ pub(super) fn build_session_params(
             .initial_winsize
             .map(|(rows, cols)| lns_session::Winsize { rows, cols }),
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_stdin(_bytes: Vec<u8>) -> Option<()> {
-    None
-}
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_resize(_rows: u16, _cols: u16) -> Option<()> {
-    None
-}
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_signal(_signal: lns_ipc::SignalKind) -> Option<()> {
-    None
 }
 
 #[cfg(test)]
@@ -1130,9 +1103,7 @@ mod tests {
         let handle = crate::run_registry::RunHandle {
             cancel_tx,
             task,
-            #[cfg(target_os = "macos")]
             input_tx: None,
-            #[cfg(target_os = "macos")]
             connector: None,
             name: String::new(),
             image: "test-image".into(),
@@ -1239,35 +1210,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn forward_session_input_on_linux_returns_not_supported_error() {
-        let response = forward_session_input(1, None, "Synthetic").await;
-        assert!(matches!(response, Response::Error { .. }));
-        if let Response::Error { message } = &response {
-            assert!(message.contains("Synthetic"), "got: {message}");
-            assert!(message.to_lowercase().contains("macos"), "got: {message}");
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_stdin_returns_none_on_linux() {
-        assert!(session_input_from_stdin(b"x".to_vec()).is_none());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_resize_returns_none_on_linux() {
-        assert!(session_input_from_resize(24, 80).is_none());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_signal_returns_none_on_linux() {
-        assert!(session_input_from_signal(lns_ipc::SignalKind::Term).is_none());
-    }
-
     fn register_running(run_id: u32) {
         let (cancel_tx, _cancel_rx) = oneshot::channel();
         let task = tokio::spawn(async {});
@@ -1276,9 +1218,7 @@ mod tests {
             crate::run_registry::RunHandle {
                 cancel_tx,
                 task,
-                #[cfg(target_os = "macos")]
                 input_tx: None,
-                #[cfg(target_os = "macos")]
                 connector: None,
                 name: "reviewer".into(),
                 image: "stop-test".into(),
@@ -1609,30 +1549,6 @@ mod tests {
 
         assert_eq!(resp, Response::RunStopped { forced: false });
         consumer.await.expect("consumer ran");
-        crate::run_registry::cancel(id);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn handle_request_stop_run_on_linux_reports_macos_only() {
-        let id = crate::run_registry::allocate_run_id();
-        register_running(id);
-
-        let resp = handle_request(
-            &Request::StopRun {
-                run: id.to_string(),
-                timeout_secs: 1,
-            },
-            Instant::now(),
-        )
-        .await;
-
-        match resp {
-            Response::Error { message } => {
-                assert!(message.to_lowercase().contains("macos"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
-        }
         crate::run_registry::cancel(id);
     }
 

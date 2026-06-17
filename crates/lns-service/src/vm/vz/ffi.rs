@@ -288,7 +288,9 @@ fn build_and_start(
     queue: &DispatchQueue,
     done_tx: mpsc::Sender<Result<()>>,
     start_tx: mpsc::SyncSender<Result<()>>,
-    connector_tx: Option<tokio::sync::oneshot::Sender<VsockConnector>>,
+    connector_tx: Option<
+        tokio::sync::oneshot::Sender<std::sync::Arc<dyn crate::vm::GuestTransport>>,
+    >,
     queue_for_connector: DispatchRetained<DispatchQueue>,
 ) -> Result<()> {
     // SAFETY: all Vz/Obj-C objects retained by `mem::forget` or kept alive via Retained<_>.
@@ -364,7 +366,7 @@ fn build_and_start(
                 vm: VmPtr(vm_ptr),
                 done_tx: connector_done_tx,
             };
-            let _ = tx.send(connector);
+            let _ = tx.send(std::sync::Arc::new(connector));
         }
 
         Ok(())

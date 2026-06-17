@@ -6,14 +6,11 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use lns_ipc::{RunStatus, validate_run_name};
 
 use crate::run_name;
-#[cfg(target_os = "macos")]
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-#[cfg(target_os = "macos")]
 use crate::vm::GuestTransport;
-#[cfg(target_os = "macos")]
 use crate::vm::session_client::SessionInput;
 
 static NEXT_RUN_ID: AtomicU32 = AtomicU32::new(1);
@@ -25,9 +22,7 @@ static ACTIVE: Mutex<Option<HashMap<u32, RunHandle>>> = Mutex::new(None);
 pub struct RunHandle {
     pub cancel_tx: oneshot::Sender<i32>,
     pub task: JoinHandle<()>,
-    #[cfg(target_os = "macos")]
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
-    #[cfg(target_os = "macos")]
     pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
     pub name: String,
     pub image: String,
@@ -174,7 +169,6 @@ pub fn deregister(run_id: u32) {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn input_sender(run_id: u32) -> Option<mpsc::Sender<SessionInput>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
@@ -189,7 +183,6 @@ pub fn log_buffer(run_id: u32) -> Option<std::sync::Arc<crate::run_log::RunLogBu
         .map(|h| h.logs.clone())
 }
 
-#[cfg(target_os = "macos")]
 pub fn connector(run_id: u32) -> Option<std::sync::Arc<dyn GuestTransport>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
@@ -197,7 +190,6 @@ pub fn connector(run_id: u32) -> Option<std::sync::Arc<dyn GuestTransport>> {
         .and_then(|h| h.connector.clone())
 }
 
-#[cfg(target_os = "macos")]
 pub fn set_connector(run_id: u32, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(&run_id)) {
@@ -339,9 +331,7 @@ mod tests {
             RunHandle {
                 cancel_tx,
                 task,
-                #[cfg(target_os = "macos")]
                 input_tx: None,
-                #[cfg(target_os = "macos")]
                 connector: None,
                 name: String::new(),
                 image: String::new(),

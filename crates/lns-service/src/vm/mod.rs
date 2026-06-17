@@ -6,7 +6,6 @@ mod cloud_hypervisor;
 mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
-#[cfg(target_os = "macos")]
 pub mod session_client;
 mod transport;
 #[cfg(target_os = "macos")]
@@ -30,10 +29,8 @@ pub struct VmSpec {
     pub upper_disk: PathBuf,
     pub volumes: Vec<VolumeAttachment>,
     pub binds: Vec<BindAttachment>,
-    #[cfg(target_os = "macos")]
     pub vsock: Option<VsockChannel>,
-    #[cfg(target_os = "macos")]
-    pub connector_tx: Option<tokio::sync::oneshot::Sender<VsockConnector>>,
+    pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
     pub debug: bool,
@@ -99,7 +96,6 @@ fn volume_disk_index(disks: &[VolumeDisk], host_image: &std::path::Path) -> usiz
         .expect("every attachment's image is present in volume_disks")
 }
 
-#[cfg(target_os = "macos")]
 pub struct VsockChannel {
     pub port: u32,
     pub fd_tx: tokio::sync::mpsc::UnboundedSender<std::os::fd::RawFd>,
@@ -905,9 +901,7 @@ mod tests {
             upper_disk: PathBuf::from("/dev/null"),
             volumes: vec![],
             binds: vec![],
-            #[cfg(target_os = "macos")]
             vsock: None,
-            #[cfg(target_os = "macos")]
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

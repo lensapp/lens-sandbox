@@ -110,9 +110,7 @@ mod tests {
             volumes: vec![],
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
-            #[cfg(target_os = "macos")]
             vsock: None,
-            #[cfg(target_os = "macos")]
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

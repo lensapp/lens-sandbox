@@ -13,7 +13,6 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 mod real;
-#[cfg(target_os = "macos")]
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 

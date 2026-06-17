@@ -18,7 +18,6 @@ use super::{
     PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
     pump_responses,
 };
-#[cfg(target_os = "macos")]
 use super::{build_session_params, validate_exec};
 
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -158,7 +157,6 @@ async fn handle_connection(
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
     let run_id = match crate::run_registry::resolve(&run) {
         Ok(id) => id,
@@ -181,16 +179,6 @@ async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()>
     };
     let frame = encode_frame(&response)?;
     stream.write_all(&frame).await?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
-    let _ = write_error(
-        &mut stream,
-        format!("sampling stats for run {run} is macOS-only in this build"),
-    )
-    .await;
     Ok(())
 }
 
@@ -440,7 +428,6 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     let run_id = crate::run_registry::allocate_run_id();
     let detached = args.detached;
 
-    #[cfg(target_os = "macos")]
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
 
     let image_label = args
@@ -461,14 +448,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     ));
     let run_args = args;
     let run_task = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
-        {
-            crate::run::handle(run_id, run_args, task_frame_tx, input_rx).await;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            crate::run::handle(run_id, run_args, task_frame_tx).await;
-        }
+        crate::run::handle(run_id, run_args, task_frame_tx, input_rx).await;
     });
 
     let abort = run_task.abort_handle();
@@ -478,9 +458,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         crate::run_registry::RunHandle {
             cancel_tx,
             task: run_task,
-            #[cfg(target_os = "macos")]
             input_tx: Some(input_tx),
-            #[cfg(target_os = "macos")]
             connector: None,
             name: String::new(),
             image: image_label,
@@ -540,7 +518,6 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
     let target_run_id = match crate::run_registry::resolve(&args.run) {
         Ok(id) => id,
@@ -630,16 +607,6 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     drop(input_keepalive);
     session_task.abort();
     let _ = session_task.await;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-async fn handle_exec(mut stream: UnixStream, _args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
-    let _ = write_error(
-        &mut stream,
-        "lns exec is macOS-only in this build".to_string(),
-    )
-    .await;
     Ok(())
 }
 
