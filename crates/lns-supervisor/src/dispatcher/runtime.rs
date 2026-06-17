@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+use std::os::fd::{OwnedFd, RawFd};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,6 +15,32 @@ use lens_sandbox_core::privilege::SandboxCredentials;
 use super::agent::{AgentRunner, agent_child_spec, build_agent_command, stream_output};
 use super::{CYAN, DIM, GREEN, RED, RESET};
 use crate::config::AgentConfig;
+
+/// Hold an extra slave fd open for the agent's PTY: while any slave is open the master never returns EIO, so the agent's final output stays buffered through its exit instead of being lost to the slave-close race; we drop this fd after the agent exits for a clean drain-then-EOF.
+#[cfg(target_os = "linux")]
+fn hold_pty_slave(master_fd: RawFd) -> Option<OwnedFd> {
+    let mut path = [0 as libc::c_char; 256];
+    // SAFETY: ptsname_r writes a NUL-terminated slave path into `path` (capacity 256); master_fd is the caller-owned PTY master.
+    if unsafe { libc::ptsname_r(master_fd, path.as_mut_ptr(), path.len()) } != 0 {
+        return None;
+    }
+    // SAFETY: `path` holds the NUL-terminated slave path ptsname_r just wrote.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd is a freshly-opened descriptor owned by no one else.
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+// The supervisor only runs inside the Linux guest; the host build (lint/tests) just needs this to compile, and ptsname_r is Linux-only.
+#[cfg(not(target_os = "linux"))]
+fn hold_pty_slave(_master_fd: RawFd) -> Option<OwnedFd> {
+    None
+}
+
+/// How long to let the async reader consume the agent's final buffered PTY output before we close our held slave and let the master EOF.
+const PTY_TAIL_SETTLE: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Flush stdout and let the activity forwarder drain before `process::exit` tears down pid 1.
 async fn drain_console() {
@@ -123,6 +152,7 @@ async fn run_agent_pty(
     let mut writer = proc.writer;
     let mut child = proc.child;
     let master_fd = proc.master_fd;
+    let held_slave = hold_pty_slave(master_fd.raw());
 
     // Register the PID before any await so a SIGCHLD can't make the reaper reap the agent before it's in the protected set.
     if let Some(pid) = child.id() {
@@ -178,6 +208,9 @@ async fn run_agent_pty(
             Ok(status) => status.code().unwrap_or(1),
             Err(_) => 1,
         };
+        // Let the reader consume the agent's final buffered output — the held slave keeps it from being discarded — before closing our slave makes the master EOF.
+        tokio::time::sleep(PTY_TAIL_SETTLE).await;
+        drop(held_slave);
         let _ = output_task.await;
         input_task.abort();
 
@@ -204,6 +237,9 @@ async fn run_agent_pty(
 
         match wait_with_signal_forwarding(&mut child, DEFAULT_GRACE).await {
             Ok(status) => {
+                // Let the reader consume the agent's final buffered output — the held slave keeps it from being discarded — before closing our slave makes the master EOF.
+                tokio::time::sleep(PTY_TAIL_SETTLE).await;
+                drop(held_slave);
                 let _ = drain_task.await;
                 let code = status.code().unwrap_or(1);
                 let color = if code == 0 { GREEN } else { RED };
