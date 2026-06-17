@@ -1,4 +1,4 @@
 {
-  "crates/lns-cli": "0.11.0",
+  "crates/lns-cli": "0.12.0",
   "scripts/lns-install": "0.5.0"
 }

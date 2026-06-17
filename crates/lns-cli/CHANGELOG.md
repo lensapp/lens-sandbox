@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.12.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.11.0...lns-v0.12.0) (2026-06-17)
+
+
+### Features
+
+* **lns-cli:** disambiguate -v host binds from named volumes ([2f742e6](https://github.com/lensapp/lens-sandbox/commit/2f742e67a576b0434cba0e5285b6f26cfb9336fb))
+* **lns-cli:** scan host binds for secrets and resolve KEEP/DROP before run ([f49b77b](https://github.com/lensapp/lens-sandbox/commit/f49b77b4ac8c45460b1ceaf08723fb4d31933328))
+* **lns-cli:** show host-bind secret disposition in the run summary ([8057b2b](https://github.com/lensapp/lens-sandbox/commit/8057b2b5a5d353ee3f3dc8b2b98f4ad0ee87cc16))
+* **lns-cli:** widen the host-bind secret heuristic to more credential shapes ([78750c4](https://github.com/lensapp/lens-sandbox/commit/78750c48704807f3dd4ed199296b1ff26853dc89))
+* **lns-policy,lns-cli:** secret detection, .lensignore, KEEP/DROP decision store ([5408928](https://github.com/lensapp/lens-sandbox/commit/5408928467b14f82c661dda0efb8a8d6634a0eff))
+
+
+### Bug Fixes
+
+* **lns-cli:** drop any .lensignore-listed file from a host bind, not only secret-shaped ones ([49c843e](https://github.com/lensapp/lens-sandbox/commit/49c843e475819657751d6fe23bb4577778df5203))
+* **lns-cli:** honor nested .lensignore entries and refuse bind-escaping ones ([5fb96e0](https://github.com/lensapp/lens-sandbox/commit/5fb96e078e03215173ebbe889ba10724180c5446))
+* **lns-cli:** refuse to drop a secret whose filename contains whitespace ([a958a07](https://github.com/lensapp/lens-sandbox/commit/a958a07b024829bc3adfbfab28113f053fc416c6))
+* **lns-cli:** reject quotes and control chars in dropped host-bind paths, not only whitespace ([3199a8f](https://github.com/lensapp/lens-sandbox/commit/3199a8fbd1a002ad76da50aad2956b6cebaa4f77))
+
 ## [0.11.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.10.0...lns-v0.11.0) (2026-06-16)
 
 
