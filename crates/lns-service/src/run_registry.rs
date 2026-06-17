@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 #[cfg(target_os = "macos")]
-use crate::vm::VsockConnector;
+use crate::vm::GuestTransport;
 #[cfg(target_os = "macos")]
 use crate::vm::session_client::SessionInput;
 
@@ -28,7 +28,7 @@ pub struct RunHandle {
     #[cfg(target_os = "macos")]
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
     #[cfg(target_os = "macos")]
-    pub connector: Option<std::sync::Arc<VsockConnector>>,
+    pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
     pub name: String,
     pub image: String,
     pub command: String,
@@ -190,7 +190,7 @@ pub fn log_buffer(run_id: u32) -> Option<std::sync::Arc<crate::run_log::RunLogBu
 }
 
 #[cfg(target_os = "macos")]
-pub fn connector(run_id: u32) -> Option<std::sync::Arc<VsockConnector>> {
+pub fn connector(run_id: u32) -> Option<std::sync::Arc<dyn GuestTransport>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(&run_id))
@@ -198,7 +198,7 @@ pub fn connector(run_id: u32) -> Option<std::sync::Arc<VsockConnector>> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_connector(run_id: u32, connector: std::sync::Arc<VsockConnector>) {
+pub fn set_connector(run_id: u32, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(&run_id)) {
         h.connector = Some(connector);

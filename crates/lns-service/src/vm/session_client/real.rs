@@ -81,7 +81,7 @@ const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
 #[cfg(target_os = "macos")]
 pub async fn capture_session_output(
-    connector: &crate::vm::VsockConnector,
+    connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
 ) -> Result<String> {
     let fd = connector

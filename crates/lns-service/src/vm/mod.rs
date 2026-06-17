@@ -3,15 +3,18 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 mod cloud_hypervisor;
+mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
 #[cfg(target_os = "macos")]
 pub mod session_client;
+mod transport;
 #[cfg(target_os = "macos")]
 mod vz;
 
+pub use transport::{GuestTransport, VmStopGuard};
 #[cfg(target_os = "macos")]
-pub use vz::{VmStopGuard, VsockConnector};
+pub use vz::VsockConnector;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct VmSpec {
