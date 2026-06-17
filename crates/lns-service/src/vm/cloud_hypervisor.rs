@@ -193,7 +193,7 @@ mod tests {
             .expect_err("no LNS_*_BIN override and no published pin → error");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("cloud-hypervisor binary not found"),
+            msg.contains("cloud-hypervisor was not found on PATH"),
             "got {msg}"
         );
         assert!(
