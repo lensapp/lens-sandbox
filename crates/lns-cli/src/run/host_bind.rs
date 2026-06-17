@@ -53,15 +53,42 @@ pub fn looks_like_secret(name: &str) -> bool {
         || EXACT_SECRET_NAMES.contains(&name)
 }
 
-/// Top-level names that need a KEEP/DROP decision: secret-shaped files, plus anything the bind's `.lensignore` names so an explicit "never expose this" works for any file, not only secret-shaped ones.
-fn names_needing_a_decision(scan: &dyn DirScan, root: &Path, ignore: &[String]) -> Vec<String> {
+fn secret_shaped_top_level(scan: &dyn DirScan, root: &Path) -> Vec<String> {
     let mut found: Vec<String> = scan
         .entries(root)
         .into_iter()
-        .filter(|name| looks_like_secret(name) || is_ignored(name, ignore))
+        .filter(|name| looks_like_secret(name))
         .collect();
     found.sort();
     found
+}
+
+/// `.lensignore`-listed paths that exist in the bind, dropped with no prompt; a nested entry is honored so an explicit "never expose this" reaches a secret the top-level scan can't see.
+fn ignored_paths_present(
+    scan: &dyn DirScan,
+    root: &Path,
+    ignore: &[String],
+) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in ignore {
+        validate_lensignore_entry(entry)?;
+        if scan.exists(&root.join(entry)) {
+            found.push(entry.clone());
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// A `.lensignore` entry is masked at `target/<entry>` in the guest, so an absolute or `..`-bearing entry would escape the bind — refuse it loudly rather than silently expose the file the operator listed.
+fn validate_lensignore_entry(entry: &str) -> Result<()> {
+    if entry.starts_with('/') {
+        bail!(".lensignore entry {entry:?} must be relative to the bind, not an absolute path");
+    }
+    if entry.split('/').any(|seg| seg == "." || seg == "..") {
+        bail!(".lensignore entry {entry:?} must not contain `.` or `..` path segments");
+    }
+    Ok(())
 }
 
 pub fn lensignore_patterns(scan: &dyn DirScan, root: &Path) -> Vec<String> {
@@ -97,6 +124,7 @@ impl ResolvedBind {
             target: self.target.clone(),
             read_only: self.read_only,
             dropped_paths: self.dropped.clone(),
+            kept_paths: self.kept.clone(),
         }
     }
 }
@@ -121,9 +149,11 @@ pub fn resolve_binds(
         let ignore = lensignore_patterns(scan, root);
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
-        for name in names_needing_a_decision(scan, root, &ignore) {
+        for path in ignored_paths_present(scan, root, &ignore)? {
+            push_drop(&mut dropped, path)?;
+        }
+        for name in secret_shaped_top_level(scan, root) {
             if is_ignored(&name, &ignore) {
-                push_drop(&mut dropped, name)?;
                 continue;
             }
             let key = root.join(&name).to_string_lossy().into_owned();
@@ -285,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn names_needing_a_decision_returns_sorted_secret_shaped_entries() {
+    fn secret_shaped_top_level_returns_sorted_secret_shaped_entries() {
         let dir = FakeDir {
             entries: vec![
                 "src".into(),
@@ -295,27 +325,61 @@ mod tests {
             ],
             ..Default::default()
         };
-        let found = names_needing_a_decision(&dir, Path::new("/proj"), &[]);
+        let found = secret_shaped_top_level(&dir, Path::new("/proj"));
         assert_eq!(found, vec![".env".to_string(), ".npmrc".to_string()]);
     }
 
     #[test]
-    fn names_needing_a_decision_also_includes_lensignore_listed_non_secrets() {
-        let dir = FakeDir {
-            entries: vec!["src".into(), "notes.txt".into(), ".env".into()],
-            ..Default::default()
-        };
-        let found = names_needing_a_decision(&dir, Path::new("/proj"), &["notes.txt".to_string()]);
-        assert_eq!(found, vec![".env".to_string(), "notes.txt".to_string()]);
-    }
-
-    #[test]
-    fn names_needing_a_decision_is_empty_for_a_clean_directory() {
+    fn secret_shaped_top_level_is_empty_for_a_clean_directory() {
         let dir = FakeDir {
             entries: vec!["src".into(), "Cargo.toml".into()],
             ..Default::default()
         };
-        assert!(names_needing_a_decision(&dir, Path::new("/proj"), &[]).is_empty());
+        assert!(secret_shaped_top_level(&dir, Path::new("/proj")).is_empty());
+    }
+
+    #[test]
+    fn ignored_paths_present_honors_top_level_and_nested_entries_that_exist() {
+        let dir = FakeDir::default();
+        let found = ignored_paths_present(
+            &dir,
+            Path::new("/proj"),
+            &["notes.txt".to_string(), "packages/api/.env".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            vec!["notes.txt".to_string(), "packages/api/.env".to_string()],
+            "a nested .lensignore path is honored, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn ignored_paths_present_skips_a_listed_path_that_is_absent() {
+        let dir = FakeDir {
+            missing: vec!["/proj/ghost.env".into()],
+            ..Default::default()
+        };
+        let found =
+            ignored_paths_present(&dir, Path::new("/proj"), &["ghost.env".to_string()]).unwrap();
+        assert!(
+            found.is_empty(),
+            "a .lensignore rule for an absent file is a no-op, not a phantom drop"
+        );
+    }
+
+    #[test]
+    fn ignored_paths_present_refuses_an_entry_that_would_escape_the_bind() {
+        let dir = FakeDir::default();
+        for bad in ["../secrets", "/etc/shadow", "a/../../etc"] {
+            let err = ignored_paths_present(&dir, Path::new("/proj"), &[bad.to_string()])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(".lensignore entry"),
+                "{bad} must be refused loudly: {err}"
+            );
+        }
     }
 
     #[test]
@@ -506,6 +570,46 @@ mod tests {
     }
 
     #[test]
+    fn resolve_binds_lensignore_drops_a_nested_path_without_prompting() {
+        let mut files = HashMap::new();
+        files.insert(
+            "/proj/.lensignore".to_string(),
+            "packages/api/.env\n".to_string(),
+        );
+        let dir = FakeDir {
+            entries: vec!["packages".into(), "src".into()],
+            files,
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        assert_eq!(
+            out.unwrap()[0].dropped,
+            vec!["packages/api/.env".to_string()],
+            "a nested .lensignore entry must drop the file, not silently expose it"
+        );
+        assert!(prompt.is_empty(), "a .lensignore drop never prompts");
+    }
+
+    #[test]
+    fn resolve_binds_refuses_a_lensignore_entry_that_escapes_the_bind() {
+        let mut files = HashMap::new();
+        files.insert(
+            "/proj/.lensignore".to_string(),
+            "../../etc/shadow\n".to_string(),
+        );
+        let dir = FakeDir {
+            entries: vec!["src".into()],
+            files,
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains(".lensignore entry"), "got: {err}");
+    }
+
+    #[test]
     fn resolve_binds_non_interactive_defaults_to_drop_and_reports() {
         let dir = FakeDir {
             entries: vec![".env".into()],
@@ -562,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn to_wire_carries_source_target_mode_and_only_the_dropped_paths() {
+    fn to_wire_carries_source_target_mode_and_both_kept_and_dropped_paths() {
         let resolved = ResolvedBind {
             host_source: "/proj".into(),
             target: "/work".into(),
@@ -578,6 +682,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: true,
                 dropped_paths: vec![".npmrc".into()],
+                kept_paths: vec![".env".into()],
             }
         );
     }
