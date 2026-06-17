@@ -168,19 +168,17 @@ impl super::ConnectOnce for VsockConnector {
     }
 }
 
-pub struct VmStopGuard {
-    connector: std::sync::Arc<VsockConnector>,
-}
-
-impl VmStopGuard {
-    pub fn new(connector: std::sync::Arc<VsockConnector>) -> Self {
-        Self { connector }
+impl crate::vm::GuestTransport for VsockConnector {
+    fn connect(
+        &self,
+        port: u32,
+        timeout: Duration,
+    ) -> futures_util::future::BoxFuture<'_, Result<std::os::fd::RawFd>> {
+        Box::pin(self.connect(port, timeout))
     }
-}
 
-impl Drop for VmStopGuard {
-    fn drop(&mut self) {
-        self.connector.request_stop();
+    fn request_stop(&self) {
+        self.request_stop();
     }
 }
 

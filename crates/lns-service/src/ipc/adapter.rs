@@ -173,7 +173,7 @@ async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()>
         },
         Some(connector) => crate::guest_stats::response_from(
             crate::vm::session_client::capture_session_output(
-                &connector,
+                connector.as_ref(),
                 crate::guest_stats::sample_argv(),
             )
             .await,
