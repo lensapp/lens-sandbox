@@ -4,7 +4,6 @@ use cucumber::{then, when};
 use std::time::{Duration, Instant};
 
 const MICROVM_RUN_TIMEOUT: Duration = Duration::from_secs(120);
-const HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
     world
@@ -82,22 +81,6 @@ fn start_detached_with_volume(world: &mut E2eWorld, cmd_line: String, name: Stri
     }
 }
 
-#[when(regex = r#"^the user starts a detached microVM server "([^"]*)" publishing "([^"]+)"$"#)]
-fn start_detached_publishing(world: &mut E2eWorld, cmd_line: String, mapping: String) {
-    run_microvm(world, vec!["-d".into(), "-p".into(), mapping], &cmd_line);
-    if let Some(id) = world.last_run_id {
-        world.detached_runs.push(id);
-    }
-}
-
-#[when(regex = r#"^the user starts a detached microVM server "([^"]*)"$"#)]
-fn start_detached_server(world: &mut E2eWorld, cmd_line: String) {
-    run_microvm(world, vec!["-d".into()], &cmd_line);
-    if let Some(id) = world.last_run_id {
-        world.detached_runs.push(id);
-    }
-}
-
 #[then(regex = r#"^the audit chain for that run records volume "([^"]+)" at "([^"]+)"$"#)]
 fn audit_records_volume(world: &mut E2eWorld, name: String, path: String) -> Result<(), String> {
     let run_id = world
@@ -120,18 +103,6 @@ fn audit_records_volume(world: &mut E2eWorld, name: String, path: String) -> Res
     }
 }
 
-#[then(regex = r#"^`curl http://127\.0\.0\.1:(\d+)(/[^`]*)` from the host returns 200$"#)]
-fn curl_returns_200(world: &mut E2eWorld, port: u16, path: String) -> Result<(), String> {
-    probe_http_200(port, &path).map_err(|e| {
-        let run = world.result.as_ref();
-        format!(
-            "{e}\n--- detached run output ---\nstdout={:?}\nstderr={:?}",
-            run.map(|r| &r.stdout),
-            run.map(|r| &r.stderr),
-        )
-    })
-}
-
 #[then(regex = r#"^volume "([^"]+)" is released$"#)]
 fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -151,55 +122,5 @@ fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
             ));
         }
         std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-#[then(regex = r#"^a host connection to 127\.0\.0\.1:(\d+) is refused$"#)]
-fn host_connection_refused(_world: &mut E2eWorld, port: u16) -> Result<(), String> {
-    use std::net::TcpStream;
-    for _ in 0..6 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Err(format!(
-                "expected a host connection to 127.0.0.1:{port} to be refused, but it connected"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    Ok(())
-}
-
-fn probe_http_200(port: u16, path: &str) -> Result<(), String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let deadline = Instant::now() + HTTP_PROBE_TIMEOUT;
-    loop {
-        let attempt = match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-                let mut buf = String::new();
-                if stream.write_all(req.as_bytes()).is_ok()
-                    && stream.read_to_string(&mut buf).is_ok()
-                {
-                    if buf
-                        .lines()
-                        .next()
-                        .is_some_and(|status| status.contains("200"))
-                    {
-                        return Ok(());
-                    }
-                    format!("status line was not 200: {:?}", buf.lines().next())
-                } else {
-                    "connected but the HTTP exchange failed".to_string()
-                }
-            }
-            Err(e) => format!("connect refused: {e}"),
-        };
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "127.0.0.1:{port}{path} never returned 200 within {HTTP_PROBE_TIMEOUT:?} (last: {attempt})"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(500));
     }
 }
