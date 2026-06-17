@@ -36,6 +36,9 @@ const EXACT_SECRET_NAMES: &[&str] = &[
     ".netrc",
     ".git-credentials",
     ".pgpass",
+    ".pypirc",
+    ".yarnrc.yml",
+    "auth.json",
     "id_rsa",
     "id_dsa",
     "id_ecdsa",
@@ -44,12 +47,19 @@ const EXACT_SECRET_NAMES: &[&str] = &[
     ".ssh",
     ".aws",
     ".gnupg",
+    ".kube",
+    ".azure",
+    ".oci",
+    ".docker",
 ];
 
 pub fn looks_like_secret(name: &str) -> bool {
     name.starts_with(".env")
+        || name.starts_with("credentials.")
         || name.ends_with(".pem")
         || name.ends_with(".key")
+        || name.ends_with(".ppk")
+        || name.ends_with(".keystore")
         || EXACT_SECRET_NAMES.contains(&name)
 }
 
@@ -296,12 +306,22 @@ mod tests {
             ".env.local",
             "server.pem",
             "tls.key",
+            "server.ppk",
+            "release.keystore",
+            "credentials.json",
             ".npmrc",
             ".netrc",
+            ".pypirc",
+            ".yarnrc.yml",
+            "auth.json",
             "id_rsa",
             "id_ed25519",
             ".ssh",
             ".aws",
+            ".kube",
+            ".azure",
+            ".oci",
+            ".docker",
         ] {
             assert!(looks_like_secret(s), "{s} should look like a secret");
         }
