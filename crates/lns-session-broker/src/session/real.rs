@@ -215,7 +215,6 @@ fn drive_session_tty(
 
     send_exit(&conn, exit_code);
 
-    // Wait (bounded) for the host to read the exit frame and close the connection before returning lets PID 1 power off, so the final frames aren't cut off mid-flight.
     let _ = host_closed_rx.recv_timeout(HOST_DRAIN_GRACE);
 
     shutdown_read(conn.raw());
@@ -256,7 +255,6 @@ fn drive_session_pipes(
 
     send_exit(&conn, exit_code);
 
-    // Wait (bounded) for the host to read the exit frame and close the connection before returning lets PID 1 power off, so the final frames aren't cut off mid-flight.
     let _ = host_closed_rx.recv_timeout(HOST_DRAIN_GRACE);
 
     shutdown_read(conn.raw());
