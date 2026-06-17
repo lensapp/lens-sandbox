@@ -29,3 +29,7 @@ Feature: host bind mounts — virtio-fs shares, read-only mode, dropped secrets,
   Scenario: Attaching a host bind emits an audit record
     When a host bind "/Users/me/proj" at "/work" is recorded in the audit chain
     Then the audit chain records the host source "/Users/me/proj" and target "/work"
+
+  Scenario: The audit record distinguishes exposed secrets from masked ones
+    When a host bind "/Users/me/proj" at "/work" exposing ".env" and dropping ".npmrc" is recorded in the audit chain
+    Then the audit chain records ".env" as exposed and ".npmrc" as dropped

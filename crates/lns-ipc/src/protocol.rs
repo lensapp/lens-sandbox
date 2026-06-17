@@ -426,6 +426,9 @@ pub struct BindMount {
     pub read_only: bool,
     #[serde(default)]
     pub dropped_paths: Vec<String>,
+    /// Secret-shaped files the operator chose to expose; carried for the audit record, not consumed by the guest.
+    #[serde(default)]
+    pub kept_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +660,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![".env".into()],
+                kept_paths: vec![".npmrc".into()],
             }],
         };
         let frame = crate::encode_frame(&args).unwrap();
@@ -781,6 +785,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![],
+                kept_paths: vec![],
             }],
         }
     }

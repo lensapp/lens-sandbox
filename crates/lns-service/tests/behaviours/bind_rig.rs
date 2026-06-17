@@ -47,9 +47,17 @@ impl BindRig {
         )
     }
 
-    pub fn record_audit(&self, source: &str, target: &str) {
-        lns_service::audit::record_bind_attached_at(&self.audit_file, source, target)
-            .expect("record bind audit event");
+    pub fn record_audit(&self, source: &str, target: &str, exposed: &[&str], dropped: &[&str]) {
+        let exposed: Vec<String> = exposed.iter().map(|s| s.to_string()).collect();
+        let dropped: Vec<String> = dropped.iter().map(|s| s.to_string()).collect();
+        lns_service::audit::record_bind_attached_at(
+            &self.audit_file,
+            source,
+            target,
+            &exposed,
+            &dropped,
+        )
+        .expect("record bind audit event");
     }
 
     pub fn audit_contents(&self) -> String {

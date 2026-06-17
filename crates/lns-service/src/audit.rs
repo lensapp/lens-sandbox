@@ -210,7 +210,16 @@ pub fn record_volume_attached(run_id: u32, name: &str, target: &str) -> Result<(
     record_volume_attached_at(&audit_path(run_id)?, name, target)
 }
 
-fn bind_attached_obj(source: &str, target: &str) -> Map<String, Value> {
+fn string_array(items: &[String]) -> Value {
+    Value::Array(items.iter().map(|s| Value::String(s.clone())).collect())
+}
+
+fn bind_attached_obj(
+    source: &str,
+    target: &str,
+    exposed_secrets: &[String],
+    dropped_secrets: &[String],
+) -> Map<String, Value> {
     let mut obj = Map::new();
     obj.insert(
         "type".to_string(),
@@ -219,15 +228,38 @@ fn bind_attached_obj(source: &str, target: &str) -> Map<String, Value> {
     obj.insert("origin".to_string(), Value::String("host".to_string()));
     obj.insert("source".to_string(), Value::String(source.to_string()));
     obj.insert("target".to_string(), Value::String(target.to_string()));
+    obj.insert("exposed_secrets".to_string(), string_array(exposed_secrets));
+    obj.insert("dropped_secrets".to_string(), string_array(dropped_secrets));
     obj
 }
 
-pub fn record_bind_attached_at(path: &Path, source: &str, target: &str) -> Result<()> {
-    append_event_at(path, bind_attached_obj(source, target))
+pub fn record_bind_attached_at(
+    path: &Path,
+    source: &str,
+    target: &str,
+    exposed_secrets: &[String],
+    dropped_secrets: &[String],
+) -> Result<()> {
+    append_event_at(
+        path,
+        bind_attached_obj(source, target, exposed_secrets, dropped_secrets),
+    )
 }
 
-pub fn record_bind_attached(run_id: u32, source: &str, target: &str) -> Result<()> {
-    record_bind_attached_at(&audit_path(run_id)?, source, target)
+pub fn record_bind_attached(
+    run_id: u32,
+    source: &str,
+    target: &str,
+    exposed_secrets: &[String],
+    dropped_secrets: &[String],
+) -> Result<()> {
+    record_bind_attached_at(
+        &audit_path(run_id)?,
+        source,
+        target,
+        exposed_secrets,
+        dropped_secrets,
+    )
 }
 
 #[cfg(test)]
@@ -267,7 +299,7 @@ mod tests {
     fn record_bind_attached_writes_host_source_and_target() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_bind_attached_at(&path, "/Users/me/proj", "/work").unwrap();
+        record_bind_attached_at(&path, "/Users/me/proj", "/work", &[], &[]).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"type\":\"bind_attached\""), "{content}");
@@ -280,12 +312,39 @@ mod tests {
     }
 
     #[test]
+    fn record_bind_attached_records_which_secrets_were_exposed_versus_masked() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_bind_attached_at(
+            &path,
+            "/Users/me/proj",
+            "/work",
+            &[".env".to_string()],
+            &[".npmrc".to_string(), ".ssh".to_string()],
+        )
+        .unwrap();
+
+        let line: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(
+            line["exposed_secrets"],
+            serde_json::json!([".env"]),
+            "the tamper-evident log must name the real secret the run exposed"
+        );
+        assert_eq!(
+            line["dropped_secrets"],
+            serde_json::json!([".npmrc", ".ssh"]),
+            "and the secrets it masked"
+        );
+    }
+
+    #[test]
     #[serial_test::serial(env)]
     fn record_bind_attached_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_bind_attached(123, "/Users/me/proj", "/work").unwrap();
+        record_bind_attached(123, "/Users/me/proj", "/work", &[], &[]).unwrap();
         let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
         assert!(
             content.contains("\"source\":\"/Users/me/proj\""),
