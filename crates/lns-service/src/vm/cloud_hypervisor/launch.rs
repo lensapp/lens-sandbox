@@ -67,15 +67,15 @@ pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec
     ];
 
     args.push("--disk".to_string());
-    args.push(format!("path={}", spec.upper_disk.display()));
+    args.push(format!("path={},image_type=raw", spec.upper_disk.display()));
     args.push("--disk".to_string());
     args.push(format!(
-        "path={},readonly=on",
+        "path={},readonly=on,image_type=raw",
         spec.composefs_descriptor.display()
     ));
     for disk in volume_disks(&spec.volumes) {
         args.push("--disk".to_string());
-        args.push(format!("path={}", disk.host_image.display()));
+        args.push(format!("path={},image_type=raw", disk.host_image.display()));
     }
 
     args.push("--fs".to_string());
@@ -210,10 +210,32 @@ mod tests {
             .map(|(i, _)| &args[i + 1])
             .collect();
         assert_eq!(disks.len(), 2, "no volumes → upper + descriptor only");
-        assert_eq!(disks[0], "path=/cache/runs/7/disk/upper");
+        assert_eq!(disks[0], "path=/cache/runs/7/disk/upper,image_type=raw");
         assert_eq!(
-            disks[1], "path=/cache/runs/7/descriptor.cfs,readonly=on",
+            disks[1], "path=/cache/runs/7/descriptor.cfs,readonly=on,image_type=raw",
             "the composefs descriptor (vdb) must be read-only"
+        );
+    }
+
+    #[test]
+    fn every_disk_declares_image_type_raw_so_sector_zero_writes_are_allowed() {
+        let mut s = spec();
+        s.volumes = vec![VolumeAttachment {
+            host_image: "/store/a.img".into(),
+            target: "/data".into(),
+            read_only: false,
+        }];
+        let args = cloud_hypervisor_args(&s, &layout());
+        let disks: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--disk" && i + 1 < args.len())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert!(
+            disks.iter().all(|d| d.contains("image_type=raw")),
+            "cloud-hypervisor >=51 disables sector-0 writes on auto-detected raw images, \
+             which breaks the guest writing the upper/volume filesystems; declare the type: {disks:?}"
         );
     }
 
@@ -247,10 +269,10 @@ mod tests {
         assert_eq!(
             disks,
             vec![
-                "path=/cache/runs/7/disk/upper",
-                "path=/cache/runs/7/descriptor.cfs,readonly=on",
-                "path=/store/a.img",
-                "path=/store/b.img",
+                "path=/cache/runs/7/disk/upper,image_type=raw",
+                "path=/cache/runs/7/descriptor.cfs,readonly=on,image_type=raw",
+                "path=/store/a.img,image_type=raw",
+                "path=/store/b.img,image_type=raw",
             ],
             "one writable block device per distinct image, /dev/vdc onward"
         );
