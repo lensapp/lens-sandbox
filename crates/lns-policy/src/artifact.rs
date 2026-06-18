@@ -119,12 +119,44 @@ pub struct ArtifactMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentResources {
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PortMapping {
+    pub host: u16,
+    pub container: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeMapping {
+    pub name: String,
+    pub target: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSpec {
     pub image: String,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
     pub isolation: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub resources: Option<AgentResources>,
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    #[serde(default)]
+    pub volumes: Vec<VolumeMapping>,
     #[serde(default)]
     pub credentials: Vec<CredentialRef>,
 }
@@ -334,6 +366,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_artifact_parses_resources_user_ports_and_volumes() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+             metadata:\n  name: some-agent\n\
+             spec:\n  image: some-image:1\n  user: runner\n  \
+             resources:\n    cpus: 2\n    memoryMib: 3072\n  \
+             ports:\n    - { host: 9119, container: 9119 }\n  \
+             volumes:\n    - { name: somedata, target: /opt/data }\n",
+        );
+        let agent = AgentArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(agent.spec.user.as_deref(), Some("runner"));
+        let resources = agent.spec.resources.unwrap();
+        assert_eq!(resources.cpus, Some(2));
+        assert_eq!(resources.memory_mib, Some(3072));
+        assert_eq!(
+            agent.spec.ports,
+            vec![PortMapping {
+                host: 9119,
+                container: 9119
+            }]
+        );
+        assert_eq!(
+            agent.spec.volumes,
+            vec![VolumeMapping {
+                name: "somedata".into(),
+                target: "/opt/data".into(),
+                read_only: false
+            }]
+        );
+    }
+
+    #[test]
     fn agent_artifact_tolerates_missing_command_and_credentials() {
         let blob = agent_blob(
             "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
@@ -342,6 +406,10 @@ mod tests {
         let agent = AgentArtifact::from_config_blob(&blob).unwrap();
         assert!(agent.spec.command.is_none());
         assert!(agent.spec.credentials.is_empty());
+        assert!(agent.spec.user.is_none());
+        assert!(agent.spec.resources.is_none());
+        assert!(agent.spec.ports.is_empty());
+        assert!(agent.spec.volumes.is_empty());
     }
 
     #[test]

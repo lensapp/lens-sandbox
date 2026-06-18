@@ -13,6 +13,11 @@ use crate::registry::{Pulled, RegistryClient};
 pub struct ResolvedRun {
     pub image: String,
     pub cmd: Vec<String>,
+    pub cpus: Option<u8>,
+    pub mem: Option<usize>,
+    pub sandbox_user: Option<String>,
+    pub ports: Vec<lns_ipc::PortPublish>,
+    pub volumes: Vec<lns_ipc::VolumeMount>,
     pub policy_path: Option<PathBuf>,
     pub credentials: Vec<CredentialRef>,
     pub _policy_tempfile: Option<tempfile::NamedTempFile>,
@@ -40,6 +45,21 @@ pub async fn resolve_into_run_args(
     args.image = Some(resolved.image);
     if args.cmd.is_empty() {
         args.cmd = resolved.cmd;
+    }
+    if args.cpus.is_none() {
+        args.cpus = resolved.cpus;
+    }
+    if args.mem.is_none() {
+        args.mem = resolved.mem;
+    }
+    if args.sandbox_user.is_none() {
+        args.sandbox_user = resolved.sandbox_user;
+    }
+    if args.publish.is_empty() {
+        args.publish = resolved.ports;
+    }
+    if args.volumes.is_empty() {
+        args.volumes = resolved.volumes;
     }
     if args.policy.is_none()
         && let Some(p) = &resolved.policy_path
@@ -73,13 +93,42 @@ pub async fn resolve_agent_ref(
         "✓ resolved agent {} → {}",
         agent.metadata.name, agent.spec.image
     )?;
+    let (cpus, mem) = match &agent.spec.resources {
+        Some(r) => (
+            r.cpus.and_then(|c| u8::try_from(c).ok()),
+            r.memory_mib.map(|m| m as usize),
+        ),
+        None => (None, None),
+    };
     Ok(ResolvedRun {
         cmd: command_argv(agent.spec.command.as_deref()),
         image: agent.spec.image,
+        cpus,
+        mem,
+        sandbox_user: agent.spec.user,
+        ports: agent.spec.ports.iter().map(port_publish).collect(),
+        volumes: agent.spec.volumes.iter().map(volume_mount).collect(),
         policy_path: None,
         credentials: agent.spec.credentials,
         _policy_tempfile: None,
     })
+}
+
+fn port_publish(p: &lns_policy::artifact::PortMapping) -> lns_ipc::PortPublish {
+    lns_ipc::PortPublish {
+        host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        host_port: p.host,
+        container_port: p.container,
+        protocol: lns_ipc::Protocol::Tcp,
+    }
+}
+
+fn volume_mount(v: &lns_policy::artifact::VolumeMapping) -> lns_ipc::VolumeMount {
+    lns_ipc::VolumeMount {
+        name: v.name.clone(),
+        target: v.target.clone(),
+        read_only: v.read_only,
+    }
 }
 
 async fn pull_agent(reference: &str, client: &dyn RegistryClient) -> Result<AgentArtifact> {
@@ -257,10 +306,13 @@ mod tests {
     const BUNDLE_REF: &str = "localhost:5000/org/acme/bundles/some-system:v1";
     const AGENT_IMAGE: &str = "localhost:5000/org/acme/images/some-agent:v1";
 
+    type ArtifactMap = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
+    type ImageMap = Arc<Mutex<HashMap<String, String>>>;
+
     #[derive(Default, Clone)]
     struct RefKeyedClient {
-        artifacts: Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>,
-        images: Arc<Mutex<HashMap<String, String>>>,
+        artifacts: ArtifactMap,
+        images: ImageMap,
         fail: Option<String>,
     }
 
@@ -382,6 +434,27 @@ mod tests {
             &agent_blob(command, with_cred),
         )
         .await;
+        client
+    }
+
+    fn full_agent_blob() -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+                 metadata:\n  name: some-agent\n\
+                 spec:\n  image: {AGENT_IMAGE}\n  user: runner\n  \
+                 resources:\n    cpus: 2\n    memoryMib: 3072\n  \
+                 ports:\n    - {{ host: 9119, container: 9119 }}\n  \
+                 volumes:\n    - {{ name: somedata, target: /opt/data }}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    async fn full_agent_client() -> RefKeyedClient {
+        let client = RefKeyedClient::default();
+        put_artifact(&client, AGENT_REF, Family::Agent, &full_agent_blob()).await;
         client
     }
 
@@ -525,6 +598,68 @@ mod tests {
             msg.contains("some-provider"),
             "expected a credential warning: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_ref_maps_resources_user_ports_and_volumes() {
+        let client = full_agent_client().await;
+        let resolved = resolve_agent_ref(AGENT_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(resolved.cpus, Some(2));
+        assert_eq!(resolved.mem, Some(3072));
+        assert_eq!(resolved.sandbox_user.as_deref(), Some("runner"));
+        assert_eq!(resolved.ports.len(), 1);
+        assert_eq!(resolved.ports[0].host_port, 9119);
+        assert_eq!(resolved.ports[0].container_port, 9119);
+        assert!(resolved.ports[0].host_ip.is_loopback());
+        assert_eq!(resolved.volumes.len(), 1);
+        assert_eq!(resolved.volumes[0].name, "somedata");
+        assert_eq!(resolved.volumes[0].target, "/opt/data");
+    }
+
+    #[tokio::test]
+    async fn resolve_into_run_args_overlays_resources_user_ports_and_volumes() {
+        let client = full_agent_client().await;
+        let (args, _) =
+            resolve_into_run_args(run_args(Some(AGENT_REF)), &client, &[], &mut Vec::new())
+                .await
+                .unwrap();
+        assert_eq!(args.cpus, Some(2));
+        assert_eq!(args.mem, Some(3072));
+        assert_eq!(args.sandbox_user.as_deref(), Some("runner"));
+        assert_eq!(args.publish.len(), 1);
+        assert_eq!(args.publish[0].host_port, 9119);
+        assert_eq!(args.volumes.len(), 1);
+        assert_eq!(args.volumes[0].name, "somedata");
+    }
+
+    #[tokio::test]
+    async fn resolve_into_run_args_keeps_explicit_resources_ports_and_volumes_over_the_agents() {
+        let client = full_agent_client().await;
+        let mut args = run_args(Some(AGENT_REF));
+        args.cpus = Some(8);
+        args.mem = Some(1024);
+        args.sandbox_user = Some("override".into());
+        args.publish = vec![lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port: 1,
+            container_port: 1,
+            protocol: lns_ipc::Protocol::Tcp,
+        }];
+        args.volumes = vec![lns_ipc::VolumeMount {
+            name: "mine".into(),
+            target: "/mnt".into(),
+            read_only: false,
+        }];
+        let (args, _) = resolve_into_run_args(args, &client, &[], &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(args.cpus, Some(8), "explicit --cpus must win");
+        assert_eq!(args.mem, Some(1024), "explicit --mem must win");
+        assert_eq!(args.sandbox_user.as_deref(), Some("override"));
+        assert_eq!(args.publish[0].host_port, 1, "explicit -p must win");
+        assert_eq!(args.volumes[0].name, "mine", "explicit -v must win");
     }
 
     #[tokio::test]
