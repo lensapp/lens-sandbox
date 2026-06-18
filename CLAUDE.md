@@ -86,7 +86,7 @@ Extract a library entry point (a port / trait) when **either** of the following 
 
 ### Out of scope (any layer)
 
-Scenarios that require booting a real microVM (`lns run <image>`). They need Vz/KVM and (for OCI-image variants) network, which neither local `cargo test` nor regular CI has. When a dedicated runner with virt is provisioned, add them under `crates/e2e-tests/specs/microvm/` with a `@microvm` cucumber tag and filter in/out via `--tags`. Until then, microVM behavior is covered by Layer 3 unit tests in `src/vm/`.
+Scenarios that require booting a real microVM (`lns run <image>`) need Vz/KVM and (for OCI-image variants) network, so the **PR gate** doesn't run them — `cargo test` and the required CI jobs stay virt-free. They are not unrun, though: the `@microvm`-tagged scenarios in `crates/e2e-tests/features/` boot a real guest via `make e2e-microvm` (macOS Vz, or Linux Cloud Hypervisor when `/dev/kvm` + cloud-hypervisor + virtiofsd are present — the target preflights both). CI exercises them on the **non-required** nightly `e2e-microvm` workflow (x86_64 KVM runner); run `make e2e-microvm` locally on a virt-capable host otherwise. Scenarios that still can't run imageless (volume seeding, server images) stay parked under `crates/e2e-tests/specs/microvm/` with no step glue until `lns image import` lands. Corner cases not expressible against a real guest remain covered by Layer 3 unit tests in `src/vm/`.
 
 ### Feature file conventions
 
