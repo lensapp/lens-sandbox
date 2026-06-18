@@ -51,13 +51,14 @@ fn build_tray_icon(
     let quit_id = quit_item.id().clone();
 
     let icon = load_icon().context("load embedded tray icon")?;
-    let tray = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Lens Sandbox")
-        .with_icon(icon)
-        .with_icon_as_template(true)
-        .build()
-        .context("build tray icon")?;
+        .with_icon(icon);
+    // Template rendering (monochrome mask adapting to the menu bar) is a macOS concept; on Linux the recolored icon is shown as-is.
+    #[cfg(target_os = "macos")]
+    let builder = builder.with_icon_as_template(true);
+    let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == quit_id {
@@ -1095,7 +1096,20 @@ fn load_icon() -> anyhow::Result<Icon> {
             .collect(),
         other => anyhow::bail!("unsupported PNG color type for tray icon: {other:?}"),
     };
+    // The shipped icon is a macOS black template (shape carried by alpha); recolor it white on Linux so it shows on the dark panel — appindicator has no template concept.
+    #[cfg(target_os = "linux")]
+    let rgba = whiten_template(rgba);
     Icon::from_rgba(rgba, info.width, info.height).context("build Icon from RGBA")
+}
+
+#[cfg(target_os = "linux")]
+fn whiten_template(mut rgba: Vec<u8>) -> Vec<u8> {
+    for px in rgba.chunks_exact_mut(4) {
+        px[0] = 0xFF;
+        px[1] = 0xFF;
+        px[2] = 0xFF;
+    }
+    rgba
 }
 
 #[cfg(test)]
