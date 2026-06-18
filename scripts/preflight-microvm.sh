@@ -26,9 +26,22 @@ if [ -z "${LNS_CLOUD_HYPERVISOR_BIN:-}" ] && ! command -v cloud-hypervisor >/dev
 	fail=1
 fi
 
-if [ -z "${LNS_VIRTIOFSD_BIN:-}" ] && ! command -v virtiofsd >/dev/null 2>&1; then
-	echo "preflight: virtiofsd is not on PATH and LNS_VIRTIOFSD_BIN is unset." >&2
-	echo "          install it or point LNS_VIRTIOFSD_BIN at the binary." >&2
+# Mirrors the service's resolution: override, then PATH, then the distro dirs (apt ships virtiofsd off PATH under /usr/libexec).
+virtiofsd_found() {
+	if [ -n "${LNS_VIRTIOFSD_BIN:-}" ] && [ -x "${LNS_VIRTIOFSD_BIN}" ]; then
+		return 0
+	fi
+	if command -v virtiofsd >/dev/null 2>&1; then
+		return 0
+	fi
+	for dir in /usr/libexec /usr/lib/virtiofsd /usr/lib/qemu; do
+		[ -x "$dir/virtiofsd" ] && return 0
+	done
+	return 1
+}
+if ! virtiofsd_found; then
+	echo "preflight: virtiofsd not found on PATH, in /usr/libexec, /usr/lib/virtiofsd, /usr/lib/qemu, or via LNS_VIRTIOFSD_BIN." >&2
+	echo "          install it: sudo apt-get install -y virtiofsd" >&2
 	fail=1
 fi
 
