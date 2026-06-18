@@ -1,4 +1,4 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm audit install-hooks
+.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks
 
 CARGO ?= cargo
 
@@ -205,23 +205,28 @@ e2e:
 		$(CARGO) test -p e2e-tests --test e2e
 
 # Boots a REAL microVM and runs the @microvm scenarios. Unlike `e2e`,
-# this needs the signed release binaries: Vz requires the
-# com.apple.security.virtualization entitlement and the embedded guest
-# binaries (lns-init / broker / nft / supervisor), both of which only
-# `make build` produces — hence the dependency and no LNS_*_BIN := skip.
-# macOS-only today (the Linux Cloud Hypervisor backend is not yet wired).
-# NOT part of CI or the push gate — run it deliberately on a virt-capable
-# host once in a while. See CLAUDE.md "Out of scope".
-e2e-microvm: build
-	@if [ "$$(uname -s)" != "Darwin" ]; then \
-		echo "e2e-microvm needs the Vz backend (macOS); the Linux backend is not yet wired."; \
-		exit 1; \
-	fi
+# this needs the embedded guest binaries (lns-init / broker / nft /
+# supervisor) that only `make build` produces — hence the dependency and
+# no LNS_*_BIN := skip. On macOS Vz also requires the codesigned
+# com.apple.security.virtualization entitlement (handled by build-lns).
+# On Linux the Cloud Hypervisor backend needs no entitlement but does
+# need /dev/kvm plus cloud-hypervisor + virtiofsd reachable; the
+# preflight-microvm prerequisite checks that before the slow build.
+# Not part of the push gate; CI runs it nightly on a KVM x86_64 runner
+# (.github/workflows/e2e-microvm.yml).
+e2e-microvm: preflight-microvm build
 	$(CARGO) test -p e2e-tests --test specutil_timeout
 	@LNS_E2E_MICROVM=1 \
 		LNS_BIN=$(CARGO_TARGET_DIR)/release/lns \
 		LNS_SERVICE_BIN=$(CARGO_TARGET_DIR)/release/lns-service \
 		$(CARGO) test -p e2e-tests --test e2e
+
+preflight-microvm:
+	@case "$$(uname -s)" in \
+		Linux) ./scripts/preflight-microvm.sh ;; \
+		Darwin) : ;; \
+		*) echo "e2e-microvm: unsupported host $$(uname -s) (need macOS Vz or Linux KVM)" >&2; exit 1 ;; \
+	esac
 
 # ── Security advisories ───────────────────────────────────────────────
 
