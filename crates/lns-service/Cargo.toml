@@ -121,6 +121,12 @@ objc2-virtualization  = { version = "0.3", features = [
 block2                = "0.6"
 dispatch2             = "0.3"
 
+# The tray icon uses GTK on Linux (via tray-icon → libappindicator → glib 0.18),
+# so the tray must be created on a thread running a GTK main loop; this gives us
+# gtk::init / gtk::main and re-exports the matching glib as gtk::glib.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [dev-dependencies]
 tempfile = "3"
 # Behaviours rig fakes implement the oauth DeviceFlow port (BoxFuture, anyhow::Result).

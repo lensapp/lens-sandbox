@@ -35,11 +35,78 @@ const FRAME_OUTER_MARGIN: i8 = 8;
 /// The vertical space the frame's margins add around the scroll content; the window sizes to measured content + this chrome.
 const STACK_CHROME: f32 = 2.0 * (FRAME_INNER_MARGIN as f32 + FRAME_OUTER_MARGIN as f32);
 
+/// Builds the tray icon + Quit menu and installs the global menu-event handler (Quit signals shutdown); `on_event` lets the caller repaint after any menu event.
+fn build_tray_icon(
+    shutdown: Arc<Shutdown>,
+    on_event: impl Fn() + Send + Sync + 'static,
+) -> anyhow::Result<tray_icon::TrayIcon> {
+    let menu = Menu::new();
+    let quit_item = MenuItem::new(
+        "Quit Lens Sandbox",
+        true,
+        Some(Accelerator::new(Some(Modifiers::META), Code::KeyQ)),
+    );
+    menu.append(&quit_item)
+        .context("failed to append quit menu item")?;
+    let quit_id = quit_item.id().clone();
+
+    let icon = load_icon().context("load embedded tray icon")?;
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("Lens Sandbox")
+        .with_icon(icon)
+        .with_icon_as_template(true)
+        .build()
+        .context("build tray icon")?;
+
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == quit_id {
+            shutdown.signal();
+        }
+        on_event();
+    }));
+
+    Ok(tray)
+}
+
+/// Runs the tray on its own GTK main loop (tray-icon needs gtk on Linux), the only place gtk lives; the winit/eframe window owns the main thread. Degrades to no-tray if gtk can't init.
+#[cfg(target_os = "linux")]
+fn spawn_gtk_tray(shutdown: Arc<Shutdown>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        if let Err(e) = gtk::init() {
+            crate::log::warn!(
+                "tray unavailable: gtk init failed ({e}); running without a tray icon"
+            );
+            return;
+        }
+        let _tray = match build_tray_icon(shutdown.clone(), || {}) {
+            Ok(tray) => tray,
+            Err(e) => {
+                crate::log::warn!("tray unavailable: {e:#}; running without a tray icon");
+                return;
+            }
+        };
+        let quit_shutdown = shutdown.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            if quit_shutdown.is_set() {
+                gtk::main_quit();
+                gtk::glib::ControlFlow::Break
+            } else {
+                gtk::glib::ControlFlow::Continue
+            }
+        });
+        gtk::main();
+    })
+}
+
 pub fn run_tray(
     shutdown: Arc<Shutdown>,
     ipc_handle: JoinHandle<anyhow::Result<()>>,
     window_state: Arc<WindowState>,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let gtk_tray = spawn_gtk_tray(shutdown.clone());
+
     let viewport = egui::ViewportBuilder::default()
         .with_title("Lens Sandbox")
         .with_position([0.0, 0.0])
@@ -74,6 +141,8 @@ pub fn run_tray(
 
     shutdown.signal();
     let _ = ipc_handle.join();
+    #[cfg(target_os = "linux")]
+    let _ = gtk_tray.join();
 
     result.map_err(|e| anyhow::anyhow!("eframe run_native failed: {e}"))
 }
@@ -108,6 +177,7 @@ pub fn run_headless(
 struct TrayApp {
     shutdown: Arc<Shutdown>,
     window_state: Arc<WindowState>,
+    #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     last_visible: bool,
     /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
@@ -131,33 +201,12 @@ impl TrayApp {
         shutdown: Arc<Shutdown>,
         window_state: Arc<WindowState>,
     ) -> anyhow::Result<Self> {
-        let menu = Menu::new();
-        let quit_item = MenuItem::new(
-            "Quit Lens Sandbox",
-            true,
-            Some(Accelerator::new(Some(Modifiers::META), Code::KeyQ)),
-        );
-        menu.append(&quit_item)
-            .context("failed to append quit menu item")?;
-        let quit_id = quit_item.id().clone();
-
-        let icon = load_icon().context("load embedded tray icon")?;
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("Lens Sandbox")
-            .with_icon(icon)
-            .with_icon_as_template(true)
-            .build()
-            .context("build tray icon")?;
-
-        let menu_ctx = ctx.clone();
-        let menu_shutdown = shutdown.clone();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if event.id == quit_id {
-                menu_shutdown.signal();
-            }
-            menu_ctx.request_repaint();
-        }));
+        // Linux owns the tray on a dedicated gtk-main thread (spawn_gtk_tray); only macOS builds it in-app.
+        #[cfg(target_os = "macos")]
+        let _tray = {
+            let menu_ctx = ctx.clone();
+            build_tray_icon(shutdown.clone(), move || menu_ctx.request_repaint())?
+        };
 
         let watch_shutdown = shutdown.clone();
         let watch_ctx = ctx;
@@ -169,7 +218,8 @@ impl TrayApp {
         Ok(Self {
             shutdown,
             window_state,
-            _tray: tray,
+            #[cfg(target_os = "macos")]
+            _tray,
             last_visible: false,
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
