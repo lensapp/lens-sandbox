@@ -35,6 +35,20 @@ pub async fn run(cli: Cli) -> Result<i32> {
             let defaults = config::load_run_defaults(&config_path)?;
             let args = config::apply_run_defaults(args, defaults);
             service::require_running().await;
+            let client = registry::RealRegistryClient::new(service::socket_path()?);
+            let store = lns_policy::credentials::JsonFileCredentialStore::new(
+                lns_policy::credentials::default_credentials_path(),
+            );
+            let available = run::resolve::available_credentials(
+                &lns_policy::credentials::CredentialStore::load(&store)?,
+            );
+            let (args, _policy_guard) = run::resolve::resolve_into_run_args(
+                args,
+                &client,
+                &available,
+                &mut std::io::stderr(),
+            )
+            .await?;
             service::run_image(args, debug).await?
         }
         Command::Exec(args) => {

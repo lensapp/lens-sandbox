@@ -30,6 +30,13 @@ pub struct BehaviourWorld {
     pub registry: FakeRegistryClient,
     pub push_digest: Option<String>,
     pub pull_digest: Option<String>,
+    pub available_creds: Vec<String>,
+    pub resolved_image: Option<String>,
+    pub resolved_cmd: Vec<String>,
+    pub resolved_policy: Option<std::path::PathBuf>,
+    pub resolve_guard: Option<tempfile::NamedTempFile>,
+    pub resolve_writer: String,
+    pub resolve_error: Option<String>,
 }
 
 /// An in-memory stand-in for the service-backed OCI registry: push stores the

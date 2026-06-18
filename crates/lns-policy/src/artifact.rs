@@ -2,6 +2,8 @@
 
 use std::io;
 
+use serde::Deserialize;
+
 /// One of the registry's typed-artifact families (`GET /ext/v1/types`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
@@ -103,6 +105,106 @@ pub fn to_config_blob(file_bytes: &[u8]) -> io::Result<Vec<u8>> {
     serde_json::to_vec(&value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// A named credential the agent needs, mapped to the env var it is injected as.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CredentialRef {
+    pub name: String,
+    pub env: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ArtifactMetadata {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpec {
+    pub image: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub isolation: Option<String>,
+    #[serde(default)]
+    pub credentials: Vec<CredentialRef>,
+}
+
+/// The parsed `agent` artifact (`kind: Agent`) — the runtime-bearing artifact `lns run` resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifact {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ArtifactMetadata,
+    pub spec: AgentSpec,
+}
+
+impl AgentArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<AgentArtifact> {
+        let artifact: AgentArtifact = serde_json::from_slice(blob)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if artifact.kind != "Agent" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected an Agent artifact, got kind {:?}", artifact.kind),
+            ));
+        }
+        if artifact.spec.image.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "agent spec.image must not be empty",
+            ));
+        }
+        Ok(artifact)
+    }
+}
+
+/// A reference to another artifact inside a bundle's component list.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ComponentRef {
+    #[serde(rename = "ref")]
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Components {
+    #[serde(default)]
+    pub agents: Vec<ComponentRef>,
+    #[serde(default)]
+    pub policies: Vec<ComponentRef>,
+    #[serde(default)]
+    pub tools: Vec<ComponentRef>,
+    #[serde(default)]
+    pub sandbox: Option<ComponentRef>,
+    #[serde(default)]
+    pub knowledge: Vec<ComponentRef>,
+}
+
+/// The parsed `bundle` artifact (`kind: AgentSystem`) — a manifest of component references.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleArtifact {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ArtifactMetadata,
+    #[serde(default)]
+    pub components: Components,
+}
+
+impl BundleArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<BundleArtifact> {
+        let bundle: BundleArtifact = serde_json::from_slice(blob)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if bundle.kind != "AgentSystem" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected an AgentSystem bundle, got kind {:?}", bundle.kind),
+            ));
+        }
+        Ok(bundle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +300,116 @@ mod tests {
     fn to_config_blob_rejects_a_malformed_file() {
         let err = to_config_blob(b": : not yaml or json : :").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn agent_blob(yaml: &str) -> Vec<u8> {
+        to_config_blob(yaml.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn agent_artifact_parses_image_command_and_credentials() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\n\
+             kind: Agent\n\
+             metadata:\n  name: some-agent\n  labels:\n    team: demo\n\
+             spec:\n  image: localhost:5000/org/acme/images/some-agent:v1\n  \
+             command: 'run it'\n  isolation: microvm\n  \
+             credentials:\n    - { name: some-provider, env: SOME_TOKEN }\n",
+        );
+        let agent = AgentArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(agent.metadata.name, "some-agent");
+        assert_eq!(
+            agent.spec.image,
+            "localhost:5000/org/acme/images/some-agent:v1"
+        );
+        assert_eq!(agent.spec.command.as_deref(), Some("run it"));
+        assert_eq!(agent.spec.isolation.as_deref(), Some("microvm"));
+        assert_eq!(
+            agent.spec.credentials,
+            vec![CredentialRef {
+                name: "some-provider".into(),
+                env: "SOME_TOKEN".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn agent_artifact_tolerates_missing_command_and_credentials() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+             metadata:\n  name: bare\nspec:\n  image: some-image:1\n",
+        );
+        let agent = AgentArtifact::from_config_blob(&blob).unwrap();
+        assert!(agent.spec.command.is_none());
+        assert!(agent.spec.credentials.is_empty());
+    }
+
+    #[test]
+    fn agent_artifact_rejects_a_non_agent_kind() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Policy\n\
+             metadata:\n  name: x\nspec:\n  image: some-image:1\n",
+        );
+        let err = AgentArtifact::from_config_blob(&blob).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("kind"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_artifact_rejects_an_empty_image() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+             metadata:\n  name: x\nspec:\n  image: '   '\n",
+        );
+        let err = AgentArtifact::from_config_blob(&blob).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("image"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_artifact_rejects_malformed_json() {
+        let err = AgentArtifact::from_config_blob(b"not json").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn bundle_artifact_parses_component_references() {
+        let blob = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
+             metadata:\n  name: some-system\n\
+             components:\n  \
+             agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             policies:\n    - { ref: org/acme/policies/some-egress:v1 }\n  \
+             sandbox:\n    ref: org/acme/sandboxes/some-runtime:v1\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let bundle = BundleArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(bundle.metadata.name, "some-system");
+        assert_eq!(bundle.components.agents.len(), 1);
+        assert_eq!(
+            bundle.components.agents[0].reference,
+            "org/acme/agents/some-agent:v1"
+        );
+        assert_eq!(
+            bundle.components.policies[0].reference,
+            "org/acme/policies/some-egress:v1"
+        );
+        assert_eq!(
+            bundle.components.sandbox.as_ref().unwrap().reference,
+            "org/acme/sandboxes/some-runtime:v1"
+        );
+        assert!(bundle.components.tools.is_empty());
+    }
+
+    #[test]
+    fn bundle_artifact_rejects_a_non_agentsystem_kind() {
+        let blob = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: x\n".as_bytes(),
+        )
+        .unwrap();
+        let err = BundleArtifact::from_config_blob(&blob).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("AgentSystem"), "got: {err}");
     }
 }

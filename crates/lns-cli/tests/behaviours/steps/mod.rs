@@ -8,6 +8,8 @@ pub mod policy_cli;
 pub mod publish;
 pub mod registry;
 pub mod run;
+pub mod run_agent_ref;
+pub mod run_bundle_ref;
 pub mod run_config_defaults;
 pub mod sandbox_cli;
 pub mod update_check;
