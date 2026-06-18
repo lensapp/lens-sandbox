@@ -64,14 +64,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y virtiofsd
-          # Ubuntu ships the Rust virtiofsd off PATH (e.g. /usr/libexec); the
-          # service reads LNS_VIRTIOFSD_BIN, so resolve the packaged binary —
-          # the first dpkg-listed path named virtiofsd that is an executable
-          # file (skips the /usr/share/doc/virtiofsd directory).
-          bin="$(dpkg -L virtiofsd | grep -E '/virtiofsd$' | while read -r p; do [ -f "$p" ] && [ -x "$p" ] && { echo "$p"; break; }; done)"
-          test -n "$bin"
-          "$bin" --version
-          echo "LNS_VIRTIOFSD_BIN=$bin" >> "$GITHUB_ENV"
+          # apt ships virtiofsd off PATH under /usr/libexec; the service and the
+          # preflight both resolve that location, so no LNS_VIRTIOFSD_BIN needed.
 
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
