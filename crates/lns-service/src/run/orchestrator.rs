@@ -299,8 +299,16 @@ async fn orchestrate(
             match c {
                 Ok(c) => c,
                 Err(_) => {
-                    vm_task.abort();
-                    return Err(connector_never_arrived());
+                    // The boot task only drops the connector while returning an error; await it (bounded) to surface that cause, not a generic message.
+                    return Err(
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut vm_task).await {
+                            Ok(r) => vm_ended_before_connector(r),
+                            Err(_) => {
+                                vm_task.abort();
+                                connector_never_arrived()
+                            }
+                        },
+                    );
                 }
             }
         }
