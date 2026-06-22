@@ -52,10 +52,14 @@ pub(crate) fn virtiofsd_args(
         format!("--socket-path={}", socket.display()),
         format!("--shared-dir={}", shared_dir.display()),
         "--cache=never".to_string(),
-        "--sandbox=none".to_string(),
     ];
-    if let Some((guest_uid, host_uid)) = uid_map {
-        args.push(format!("--uid-map=:{guest_uid}:{host_uid}:1:"));
+    match uid_map {
+        // virtiofsd only honours --uid-map under the namespace sandbox; --sandbox=none would make it exit before serving.
+        Some((guest_uid, host_uid)) => {
+            args.push("--sandbox=namespace".to_string());
+            args.push(format!("--uid-map=:{guest_uid}:{host_uid}:1:"));
+        }
+        None => args.push("--sandbox=none".to_string()),
     }
     args
 }
@@ -193,6 +197,11 @@ mod tests {
         assert!(
             args.contains(&"--uid-map=:65534:1001:1:".to_string()),
             "the workload's guest uid must act as the host user so it can reach a host-owned bind, like Vz: {args:?}"
+        );
+        assert!(
+            args.contains(&"--sandbox=namespace".to_string())
+                && !args.contains(&"--sandbox=none".to_string()),
+            "uid-map only takes effect under the namespace sandbox: {args:?}"
         );
     }
 
