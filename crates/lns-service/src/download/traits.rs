@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::io;
 use std::path::Path;
 
-pub(super) trait Fetcher: Send + Sync {
+pub(crate) trait Fetcher: Send + Sync {
     fn fetch(&self, url: &str) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
 }
 
-pub(super) trait Fs: Send + Sync {
+pub(crate) trait Fs: Send + Sync {
     type WritableFile: WritableFile + Send;
 
     fn create_dir_all(&self, p: &Path) -> impl std::future::Future<Output = io::Result<()>> + Send;
@@ -17,6 +17,11 @@ pub(super) trait Fs: Send + Sync {
         &self,
         p: &Path,
     ) -> impl std::future::Future<Output = io::Result<Self::WritableFile>> + Send;
+    fn set_mode(
+        &self,
+        p: &Path,
+        mode: u32,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
     fn rename(
         &self,
         from: &Path,
@@ -24,7 +29,7 @@ pub(super) trait Fs: Send + Sync {
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
-pub(super) trait WritableFile: Send {
+pub(crate) trait WritableFile: Send {
     fn write_all<'a>(
         &'a mut self,
         bytes: &'a [u8],

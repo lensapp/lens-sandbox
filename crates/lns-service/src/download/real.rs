@@ -4,10 +4,12 @@ use std::path::Path;
 
 use futures_util::StreamExt;
 
-use super::{Fetcher, Fs, MAX_KERNEL_BYTES, WritableFile};
+use super::{Fetcher, Fs, WritableFile};
 use crate::http_cap::CappedBuffer;
 
-pub(super) struct RealFetcher;
+pub(crate) struct RealFetcher {
+    pub max_bytes: u64,
+}
 
 impl Fetcher for RealFetcher {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
@@ -16,7 +18,7 @@ impl Fetcher for RealFetcher {
             .with_context(|| format!("downloading {url}"))?
             .error_for_status()
             .with_context(|| format!("HTTP error from {url}"))?;
-        let mut buf = CappedBuffer::new(resp.content_length(), MAX_KERNEL_BYTES, url)?;
+        let mut buf = CappedBuffer::new(resp.content_length(), self.max_bytes, url)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             buf.push(chunk.map(|b| b.to_vec()), url)?;
@@ -25,7 +27,7 @@ impl Fetcher for RealFetcher {
     }
 }
 
-pub(super) struct RealFs;
+pub(crate) struct RealFs;
 
 impl Fs for RealFs {
     type WritableFile = tokio::fs::File;
@@ -55,6 +57,19 @@ impl Fs for RealFs {
             .write(true)
             .open(p)
             .await
+    }
+
+    async fn set_mode(&self, p: &Path, mode: u32) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).await
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (p, mode);
+            Ok(())
+        }
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {

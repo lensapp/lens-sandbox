@@ -51,8 +51,8 @@ crates/lns-policy/build.rs                               OAuth env-substitution 
 
 # Production-wiring adapters — thin pass-throughs; if logic is added, write a unit test and drop the entry.
 crates/lns-service/src/browser.rs                        process-spawn leaf (`open`/`xdg-open`); only caller is the tray's sign-in card (itself IGNORES'd GUI). Pinned by manual `lns integration connect github_oauth` smoke.
-crates/lns-service/src/kernel/real.rs                    production wiring over reqwest + tokio::fs; pinned by wiremock tests in kernel.rs
-crates/lns-service/src/kernel/traits.rs                  trait/type-level declarations; LLVM phantom DA on trait headers
+crates/lns-service/src/download/real.rs                  production wiring over reqwest + tokio::fs (RealFetcher/RealFs/set_mode); pinned by wiremock tests in kernel.rs and the FakeFs ensure_pinned tests in download/mod.rs
+crates/lns-service/src/download/traits.rs                trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/image/real.rs                     production wiring over oci_client::Client + linux/host-arch resolver; pinned by fake-Registry tests in image/mod.rs
 crates/lns-service/src/guest_tools/real.rs               production wiring over reqwest::get for dl-cdn.alpinelinux.org + cache::root() + current_exe() self-hash build id; pinned by fake-Fetcher tests in guest_tools/mod.rs
 crates/lns-service/src/supervisor/traits.rs              trait/type-level declarations; LLVM phantom DA on trait headers
