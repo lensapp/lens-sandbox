@@ -9,6 +9,7 @@ pub(crate) struct SocketLayout {
     pub api: PathBuf,
     pub virtiofsd: PathBuf,
     pub console_log: PathBuf,
+    run_dir: PathBuf,
 }
 
 impl SocketLayout {
@@ -18,7 +19,12 @@ impl SocketLayout {
             api: run_dir.join("cloud-hypervisor.sock"),
             virtiofsd: run_dir.join("virtiofsd.sock"),
             console_log: run_dir.join("console.log"),
+            run_dir: run_dir.to_path_buf(),
         }
+    }
+
+    pub(crate) fn bind_virtiofsd(&self, index: usize) -> PathBuf {
+        self.run_dir.join(format!("virtiofsd-bind-{index}.sock"))
     }
 }
 
@@ -84,6 +90,14 @@ pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec
         spec.content_tag,
         layout.virtiofsd.display()
     ));
+    for i in 0..spec.binds.len() {
+        args.push("--fs".to_string());
+        args.push(format!(
+            "tag={},socket={}",
+            crate::vm::bind_share_tag(i),
+            layout.bind_virtiofsd(i).display()
+        ));
+    }
 
     args.push("--vsock".to_string());
     args.push(format!("cid={GUEST_CID},socket={}", layout.vsock.display()));
@@ -94,7 +108,7 @@ pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{ExecSpec, VolumeAttachment};
+    use crate::vm::{BindAttachment, ExecSpec, VolumeAttachment};
 
     fn spec() -> VmSpec {
         VmSpec {
@@ -284,6 +298,55 @@ mod tests {
         assert_eq!(
             arg_value(&args, "--fs"),
             "tag=lns-content,socket=/cache/runs/7/virtiofsd.sock"
+        );
+    }
+
+    #[test]
+    fn bind_virtiofsd_socket_is_distinct_per_index_under_the_run_dir() {
+        let l = SocketLayout::for_run_dir(Path::new("/runs/9"));
+        assert_eq!(
+            l.bind_virtiofsd(0),
+            PathBuf::from("/runs/9/virtiofsd-bind-0.sock")
+        );
+        assert_eq!(
+            l.bind_virtiofsd(1),
+            PathBuf::from("/runs/9/virtiofsd-bind-1.sock")
+        );
+        assert_ne!(l.bind_virtiofsd(0), l.bind_virtiofsd(1));
+    }
+
+    #[test]
+    fn each_host_bind_is_served_as_its_own_fs_share_after_the_content_share() {
+        let mut s = spec();
+        s.binds = vec![
+            BindAttachment {
+                host_source: "/host/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![],
+            },
+            BindAttachment {
+                host_source: "/host/data".into(),
+                target: "/data".into(),
+                read_only: true,
+                dropped_paths: vec![],
+            },
+        ];
+        let args = cloud_hypervisor_args(&s, &layout());
+        let shares: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--fs" && i + 1 < args.len())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(
+            shares,
+            vec![
+                "tag=lns-content,socket=/cache/runs/7/virtiofsd.sock",
+                "tag=lns-bind-0,socket=/cache/runs/7/virtiofsd-bind-0.sock",
+                "tag=lns-bind-1,socket=/cache/runs/7/virtiofsd-bind-1.sock",
+            ],
+            "the content share comes first, then one tagged share per bind in attachment order"
         );
     }
 
