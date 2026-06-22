@@ -234,6 +234,7 @@ async fn orchestrate(
         upper_disk: upper_disk_path,
         volumes: volume_attachments,
         binds: bind_attachments,
+        workload_uid: run_as.uid,
         vsock: session.as_ref().map(|s| vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,
             fd_tx: s.relay.fd_tx.clone(),

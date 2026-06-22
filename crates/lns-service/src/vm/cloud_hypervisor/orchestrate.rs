@@ -49,15 +49,25 @@ pub(crate) async fn launch<S: Spawner>(
         &bins.virtiofsd,
         &layout.virtiofsd,
         &spec.content_share,
-        false,
         None,
         timeouts.virtiofsd,
     )
     .await?;
     let mut virtiofsd = vec![content];
 
+    let bind_uid_map = spec.workload_uid.map(|guest_uid| (guest_uid, host_euid()));
     for (i, bind) in spec.binds.iter().enumerate() {
-        match prepare_bind(spawner, bins, layout, bind, i, timeouts.virtiofsd).await {
+        match prepare_bind(
+            spawner,
+            bins,
+            layout,
+            bind,
+            i,
+            bind_uid_map,
+            timeouts.virtiofsd,
+        )
+        .await
+        {
             Ok(child) => virtiofsd.push(child),
             Err(e) => {
                 kill_all(&mut virtiofsd);
@@ -95,6 +105,7 @@ async fn prepare_bind<S: Spawner>(
     layout: &SocketLayout,
     bind: &BindAttachment,
     index: usize,
+    uid_map: Option<(u32, u32)>,
     timeout: Duration,
 ) -> Result<S::Child> {
     tokio::fs::metadata(&bind.host_source)
@@ -110,16 +121,15 @@ async fn prepare_bind<S: Spawner>(
         &bins.virtiofsd,
         &layout.bind_virtiofsd(index),
         &bind.host_source,
-        bind.read_only,
-        Some(host_squash_ids()),
+        uid_map,
         timeout,
     )
     .await
 }
 
-fn host_squash_ids() -> (u32, u32) {
-    // SAFETY: geteuid/getegid are reentrant and always succeed per POSIX.
-    unsafe { (libc::geteuid(), libc::getegid()) }
+fn host_euid() -> u32 {
+    // SAFETY: geteuid is reentrant and always succeeds per POSIX.
+    unsafe { libc::geteuid() }
 }
 
 async fn spawn_virtiofsd<S: Spawner>(
@@ -127,11 +137,10 @@ async fn spawn_virtiofsd<S: Spawner>(
     bin: &Path,
     socket: &Path,
     shared_dir: &Path,
-    read_only: bool,
-    squash_to: Option<(u32, u32)>,
+    uid_map: Option<(u32, u32)>,
     timeout: Duration,
 ) -> Result<S::Child> {
-    let args = virtiofsd_args(socket, shared_dir, read_only, squash_to);
+    let args = virtiofsd_args(socket, shared_dir, uid_map);
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
@@ -279,6 +288,7 @@ mod tests {
             upper_disk: run_dir.join("disk/upper"),
             volumes: vec![],
             binds: vec![],
+            workload_uid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,
@@ -459,29 +469,15 @@ mod tests {
             "bind 1 is exposed on the bind-1 socket"
         );
 
-        let is_readonly = |r: &Spawned| r.args.iter().any(|a| a == "--readonly");
+        let maps_workload_uid =
+            |r: &Spawned| r.args.iter().any(|a| a.starts_with("--uid-map=:65534:"));
         assert!(
-            !is_readonly(&recs[0]),
-            "the content share is never read-only"
-        );
-        assert!(!is_readonly(&recs[1]), "the writable bind is not read-only");
-        assert!(
-            is_readonly(&recs[2]),
-            "the read-only bind is served --readonly so the host rejects guest writes"
-        );
-
-        let squashes = |r: &Spawned| {
-            r.args
-                .iter()
-                .any(|a| a.starts_with("--translate-uid=squash-guest:0:"))
-        };
-        assert!(
-            !squashes(&recs[0]),
+            !maps_workload_uid(&recs[0]),
             "the world-readable content share keeps 1:1 uids"
         );
         assert!(
-            squashes(&recs[1]) && squashes(&recs[2]),
-            "every bind squashes guest uids to the host user so an unprivileged workload can reach it"
+            maps_workload_uid(&recs[1]) && maps_workload_uid(&recs[2]),
+            "every bind maps the workload uid to the host user so an unprivileged workload can reach it"
         );
     }
 

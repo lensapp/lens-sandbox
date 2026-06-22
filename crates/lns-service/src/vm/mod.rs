@@ -29,6 +29,7 @@ pub struct VmSpec {
     pub upper_disk: PathBuf,
     pub volumes: Vec<VolumeAttachment>,
     pub binds: Vec<BindAttachment>,
+    pub workload_uid: Option<u32>,
     pub vsock: Option<VsockChannel>,
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
@@ -901,6 +902,7 @@ mod tests {
             upper_disk: PathBuf::from("/dev/null"),
             volumes: vec![],
             binds: vec![],
+            workload_uid: None,
             vsock: None,
             connector_tx: None,
             #[cfg(target_os = "macos")]

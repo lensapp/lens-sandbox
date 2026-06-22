@@ -81,6 +81,7 @@ mod tests {
             upper_disk: run_dir.join("disk/upper"),
             volumes: vec![],
             binds: vec![],
+            workload_uid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,

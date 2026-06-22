@@ -46,8 +46,7 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
 pub(crate) fn virtiofsd_args(
     socket: &Path,
     shared_dir: &Path,
-    read_only: bool,
-    squash_to: Option<(u32, u32)>,
+    uid_map: Option<(u32, u32)>,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--socket-path={}", socket.display()),
@@ -55,12 +54,8 @@ pub(crate) fn virtiofsd_args(
         "--cache=never".to_string(),
         "--sandbox=none".to_string(),
     ];
-    if read_only {
-        args.push("--readonly".to_string());
-    }
-    if let Some((uid, gid)) = squash_to {
-        args.push(format!("--translate-uid=squash-guest:0:{uid}:{}", u32::MAX));
-        args.push(format!("--translate-gid=squash-guest:0:{gid}:{}", u32::MAX));
+    if let Some((guest_uid, host_uid)) = uid_map {
+        args.push(format!("--uid-map=:{guest_uid}:{host_uid}:1:"));
     }
     args
 }
@@ -137,6 +132,7 @@ mod tests {
             upper_disk: PathBuf::from("/cache/runs/7/disk/upper"),
             volumes: vec![],
             binds: vec![],
+            workload_uid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,
@@ -173,7 +169,6 @@ mod tests {
         let args = virtiofsd_args(
             Path::new("/runs/7/virtiofsd.sock"),
             Path::new("/cache/content"),
-            false,
             None,
         );
         assert_eq!(
@@ -184,39 +179,20 @@ mod tests {
                 "--cache=never".to_string(),
                 "--sandbox=none".to_string(),
             ],
-            "the content share is world-readable and keeps 1:1 uids — no squash"
+            "the content share is world-readable and keeps 1:1 uids — no map"
         );
     }
 
     #[test]
-    fn virtiofsd_args_marks_a_read_only_share_readonly() {
+    fn virtiofsd_args_map_the_workload_uid_to_the_host_user_for_a_bind() {
         let args = virtiofsd_args(
             Path::new("/runs/7/virtiofsd-bind-0.sock"),
             Path::new("/host/proj"),
-            true,
-            None,
+            Some((65534, 1001)),
         );
         assert!(
-            args.contains(&"--readonly".to_string()),
-            "a read-only bind share must reject guest writes at the host: {args:?}"
-        );
-    }
-
-    #[test]
-    fn virtiofsd_args_squashes_every_guest_uid_to_the_host_user_for_a_bind() {
-        let args = virtiofsd_args(
-            Path::new("/runs/7/virtiofsd-bind-0.sock"),
-            Path::new("/host/proj"),
-            false,
-            Some((1001, 100)),
-        );
-        assert!(
-            args.contains(&"--translate-uid=squash-guest:0:1001:4294967295".to_string()),
-            "every guest uid must act as the host user so an unprivileged workload reaches the bind, like Vz: {args:?}"
-        );
-        assert!(
-            args.contains(&"--translate-gid=squash-guest:0:100:4294967295".to_string()),
-            "gids squash to the host group too: {args:?}"
+            args.contains(&"--uid-map=:65534:1001:1:".to_string()),
+            "the workload's guest uid must act as the host user so it can reach a host-owned bind, like Vz: {args:?}"
         );
     }
 
