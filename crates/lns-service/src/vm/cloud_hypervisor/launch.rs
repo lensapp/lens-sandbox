@@ -46,17 +46,18 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
 pub(crate) fn virtiofsd_args(
     socket: &Path,
     shared_dir: &Path,
-    uid_map: Option<(u32, u32)>,
+    id_map: Option<(u32, u32, u32)>,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--socket-path={}", socket.display()),
         format!("--shared-dir={}", shared_dir.display()),
         "--cache=never".to_string(),
     ];
-    match uid_map {
-        Some((guest_uid, host_uid)) => {
+    match id_map {
+        Some((guest_id, host_uid, host_gid)) => {
             args.push("--sandbox=namespace".to_string());
-            args.push(format!("--uid-map=:{guest_uid}:{host_uid}:1:"));
+            args.push(format!("--uid-map=:{guest_id}:{host_uid}:1:"));
+            args.push(format!("--gid-map=:{guest_id}:{host_gid}:1:"));
         }
         None => args.push("--sandbox=none".to_string()),
     }
@@ -187,20 +188,21 @@ mod tests {
     }
 
     #[test]
-    fn virtiofsd_args_map_the_workload_uid_to_the_host_user_for_a_bind() {
+    fn virtiofsd_args_map_the_workload_ids_to_the_host_user_for_a_bind() {
         let args = virtiofsd_args(
             Path::new("/runs/7/virtiofsd-bind-0.sock"),
             Path::new("/host/proj"),
-            Some((65534, 1001)),
+            Some((65534, 1001, 100)),
         );
         assert!(
-            args.contains(&"--uid-map=:65534:1001:1:".to_string()),
-            "the workload's guest uid must act as the host user so it can reach a host-owned bind, like Vz: {args:?}"
+            args.contains(&"--uid-map=:65534:1001:1:".to_string())
+                && args.contains(&"--gid-map=:65534:100:1:".to_string()),
+            "the workload's guest uid/gid must act as the host user so it reads and writes a host-owned bind, like Vz: {args:?}"
         );
         assert!(
             args.contains(&"--sandbox=namespace".to_string())
                 && !args.contains(&"--sandbox=none".to_string()),
-            "uid-map only takes effect under the namespace sandbox: {args:?}"
+            "id maps only take effect under the namespace sandbox: {args:?}"
         );
     }
 
