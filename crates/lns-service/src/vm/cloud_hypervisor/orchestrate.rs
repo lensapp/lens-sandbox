@@ -50,6 +50,7 @@ pub(crate) async fn launch<S: Spawner>(
         &layout.virtiofsd,
         &spec.content_share,
         false,
+        None,
         timeouts.virtiofsd,
     )
     .await?;
@@ -110,9 +111,15 @@ async fn prepare_bind<S: Spawner>(
         &layout.bind_virtiofsd(index),
         &bind.host_source,
         bind.read_only,
+        Some(host_squash_ids()),
         timeout,
     )
     .await
+}
+
+fn host_squash_ids() -> (u32, u32) {
+    // SAFETY: geteuid/getegid are reentrant and always succeed per POSIX.
+    unsafe { (libc::geteuid(), libc::getegid()) }
 }
 
 async fn spawn_virtiofsd<S: Spawner>(
@@ -121,9 +128,10 @@ async fn spawn_virtiofsd<S: Spawner>(
     socket: &Path,
     shared_dir: &Path,
     read_only: bool,
+    squash_to: Option<(u32, u32)>,
     timeout: Duration,
 ) -> Result<S::Child> {
-    let args = virtiofsd_args(socket, shared_dir, read_only);
+    let args = virtiofsd_args(socket, shared_dir, read_only, squash_to);
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
@@ -460,6 +468,20 @@ mod tests {
         assert!(
             is_readonly(&recs[2]),
             "the read-only bind is served --readonly so the host rejects guest writes"
+        );
+
+        let squashes = |r: &Spawned| {
+            r.args
+                .iter()
+                .any(|a| a.starts_with("--translate-uid=squash-guest:0:"))
+        };
+        assert!(
+            !squashes(&recs[0]),
+            "the world-readable content share keeps 1:1 uids"
+        );
+        assert!(
+            squashes(&recs[1]) && squashes(&recs[2]),
+            "every bind squashes guest uids to the host user so an unprivileged workload can reach it"
         );
     }
 

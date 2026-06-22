@@ -43,7 +43,12 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
     )
 }
 
-pub(crate) fn virtiofsd_args(socket: &Path, shared_dir: &Path, read_only: bool) -> Vec<String> {
+pub(crate) fn virtiofsd_args(
+    socket: &Path,
+    shared_dir: &Path,
+    read_only: bool,
+    squash_to: Option<(u32, u32)>,
+) -> Vec<String> {
     let mut args = vec![
         format!("--socket-path={}", socket.display()),
         format!("--shared-dir={}", shared_dir.display()),
@@ -52,6 +57,10 @@ pub(crate) fn virtiofsd_args(socket: &Path, shared_dir: &Path, read_only: bool) 
     ];
     if read_only {
         args.push("--readonly".to_string());
+    }
+    if let Some((uid, gid)) = squash_to {
+        args.push(format!("--translate-uid=squash-guest:0:{uid}:{}", u32::MAX));
+        args.push(format!("--translate-gid=squash-guest:0:{gid}:{}", u32::MAX));
     }
     args
 }
@@ -165,6 +174,7 @@ mod tests {
             Path::new("/runs/7/virtiofsd.sock"),
             Path::new("/cache/content"),
             false,
+            None,
         );
         assert_eq!(
             args,
@@ -173,7 +183,8 @@ mod tests {
                 "--shared-dir=/cache/content".to_string(),
                 "--cache=never".to_string(),
                 "--sandbox=none".to_string(),
-            ]
+            ],
+            "the content share is world-readable and keeps 1:1 uids — no squash"
         );
     }
 
@@ -183,10 +194,29 @@ mod tests {
             Path::new("/runs/7/virtiofsd-bind-0.sock"),
             Path::new("/host/proj"),
             true,
+            None,
         );
         assert!(
             args.contains(&"--readonly".to_string()),
             "a read-only bind share must reject guest writes at the host: {args:?}"
+        );
+    }
+
+    #[test]
+    fn virtiofsd_args_squashes_every_guest_uid_to_the_host_user_for_a_bind() {
+        let args = virtiofsd_args(
+            Path::new("/runs/7/virtiofsd-bind-0.sock"),
+            Path::new("/host/proj"),
+            false,
+            Some((1001, 100)),
+        );
+        assert!(
+            args.contains(&"--translate-uid=squash-guest:0:1001:4294967295".to_string()),
+            "every guest uid must act as the host user so an unprivileged workload reaches the bind, like Vz: {args:?}"
+        );
+        assert!(
+            args.contains(&"--translate-gid=squash-guest:0:100:4294967295".to_string()),
+            "gids squash to the host group too: {args:?}"
         );
     }
 
