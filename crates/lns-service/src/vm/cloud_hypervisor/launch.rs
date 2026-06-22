@@ -43,10 +43,18 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
     )
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct BindIdMap {
+    pub guest_uid: u32,
+    pub guest_gid: u32,
+    pub host_uid: u32,
+    pub host_gid: u32,
+}
+
 pub(crate) fn virtiofsd_args(
     socket: &Path,
     shared_dir: &Path,
-    id_map: Option<(u32, u32, u32)>,
+    id_map: Option<BindIdMap>,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--socket-path={}", socket.display()),
@@ -54,10 +62,10 @@ pub(crate) fn virtiofsd_args(
         "--cache=never".to_string(),
     ];
     match id_map {
-        Some((guest_id, host_uid, host_gid)) => {
+        Some(m) => {
             args.push("--sandbox=namespace".to_string());
-            args.push(format!("--uid-map=:{guest_id}:{host_uid}:1:"));
-            args.push(format!("--gid-map=:{guest_id}:{host_gid}:1:"));
+            args.push(format!("--uid-map=:{}:{}:1:", m.guest_uid, m.host_uid));
+            args.push(format!("--gid-map=:{}:{}:1:", m.guest_gid, m.host_gid));
         }
         None => args.push("--sandbox=none".to_string()),
     }
@@ -137,6 +145,7 @@ mod tests {
             volumes: vec![],
             binds: vec![],
             workload_uid: Some(65534),
+            workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,
@@ -192,7 +201,12 @@ mod tests {
         let args = virtiofsd_args(
             Path::new("/runs/7/virtiofsd-bind-0.sock"),
             Path::new("/host/proj"),
-            Some((65534, 1001, 100)),
+            Some(BindIdMap {
+                guest_uid: 65534,
+                guest_gid: 65534,
+                host_uid: 1001,
+                host_gid: 100,
+            }),
         );
         assert!(
             args.contains(&"--uid-map=:65534:1001:1:".to_string())

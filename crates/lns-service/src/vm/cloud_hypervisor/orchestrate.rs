@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::launch::{SocketLayout, cloud_hypervisor_args, virtiofsd_args};
+use super::launch::{BindIdMap, SocketLayout, cloud_hypervisor_args, virtiofsd_args};
 use super::process::{Child, Spawner};
 use super::vmm_bin::VmmBinaries;
 use super::vsock;
@@ -55,10 +55,18 @@ pub(crate) async fn launch<S: Spawner>(
     .await?;
     let mut virtiofsd = vec![content];
 
-    let bind_id_map = spec.workload_uid.map(|guest_id| {
-        let (host_uid, host_gid) = host_ids();
-        (guest_id, host_uid, host_gid)
-    });
+    let bind_id_map = match (spec.workload_uid, spec.workload_gid) {
+        (Some(guest_uid), Some(guest_gid)) => {
+            let (host_uid, host_gid) = host_ids();
+            Some(BindIdMap {
+                guest_uid,
+                guest_gid,
+                host_uid,
+                host_gid,
+            })
+        }
+        _ => None,
+    };
     for (i, bind) in spec.binds.iter().enumerate() {
         match prepare_bind(
             spawner,
@@ -108,7 +116,7 @@ async fn prepare_bind<S: Spawner>(
     layout: &SocketLayout,
     bind: &BindAttachment,
     index: usize,
-    id_map: Option<(u32, u32, u32)>,
+    id_map: Option<BindIdMap>,
     timeout: Duration,
 ) -> Result<S::Child> {
     tokio::fs::metadata(&bind.host_source)
@@ -140,7 +148,7 @@ async fn spawn_virtiofsd<S: Spawner>(
     bin: &Path,
     socket: &Path,
     shared_dir: &Path,
-    id_map: Option<(u32, u32, u32)>,
+    id_map: Option<BindIdMap>,
     timeout: Duration,
 ) -> Result<S::Child> {
     let args = virtiofsd_args(socket, shared_dir, id_map);
@@ -292,6 +300,7 @@ mod tests {
             volumes: vec![],
             binds: vec![],
             workload_uid: Some(65534),
+            workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, &["true".into()]),
             vsock: None,
@@ -481,6 +490,28 @@ mod tests {
         assert!(
             maps_workload_uid(&recs[1]) && maps_workload_uid(&recs[2]),
             "every bind maps the workload uid to the host user so an unprivileged workload can reach it"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_serves_a_bind_1to1_when_the_host_cannot_map_the_workload_gid() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = SocketLayout::for_run_dir(d.path());
+        let proj = tempfile::TempDir::new().unwrap();
+        let mut s = spec(d.path());
+        s.workload_gid = None;
+        s.binds = vec![bind(proj.path(), "/work", false)];
+        let spawner = FakeSpawner::ready();
+        let running = launch(&spawner, &s, &bins(), &layout, None, &fast())
+            .await
+            .expect("a bind still boots without a known gid");
+
+        assert_eq!(running.virtiofsd.len(), 2);
+        let bind_args = &spawner.records()[1].args;
+        assert!(
+            bind_args.iter().any(|a| a == "--sandbox=none")
+                && !bind_args.iter().any(|a| a.starts_with("--uid-map=")),
+            "an unknown gid can't be namespace-mapped, so the bind falls back to 1:1 passthrough: {bind_args:?}"
         );
     }
 
