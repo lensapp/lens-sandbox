@@ -54,7 +54,6 @@ pub(crate) fn virtiofsd_args(
         "--cache=never".to_string(),
     ];
     match uid_map {
-        // virtiofsd only honours --uid-map under the namespace sandbox; --sandbox=none would make it exit before serving.
         Some((guest_uid, host_uid)) => {
             args.push("--sandbox=namespace".to_string());
             args.push(format!("--uid-map=:{guest_uid}:{host_uid}:1:"));
