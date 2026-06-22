@@ -1,0 +1,132 @@
+name: Publish lns virtiofsd
+
+# Builds a static-musl virtiofsd for both guest arches and publishes it to the
+# CDN origin, so `lns run` on Linux resolves a sha-pinned binary instead of
+# requiring the host to `apt install virtiofsd`. Same role as publish-kernel.yml.
+#
+# Why build instead of re-host upstream: upstream virtiofsd publishes an x86_64
+# static binary only (its CI has no aarch64 job), and we want both arches from
+# one provenance-controlled pipeline. The recipe mirrors upstream's .gitlab-ci:
+# rust:alpine + libseccomp-static/libcap-ng-static + `-C target-feature=+crt-static`,
+# with an explicit `--target` (without it, crt-static leaks into the host
+# proc-macro build and the compile fails). Each arch builds NATIVELY on its own
+# runner — no cross-sysroot, no emulation.
+#
+# Unlike the kernel (extracted from Kata → deterministic sha, so that workflow
+# computes-then-verifies), a Rust build is not bit-reproducible: we sha the exact
+# bytes we built and upload those bytes alongside their .sha256. The pin in the
+# (forthcoming) vmm.toml is set from the published sha; there is no rebuild-compare.
+#
+# Repo secrets required (shared with publish-kernel): S3_ENDPOINT_URL, S3_BUCKET,
+# S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY.
+#
+# Required GitHub environment `vmm-publish`: configure it (Settings → Environments)
+# with required reviewers so a human approves before the CDN-write secrets reach a
+# run. WARNING: if the environment does not exist, GitHub auto-creates it
+# UNPROTECTED and the gate is a no-op — configure it; it is not optional.
+#
+# aarch64 uses the `ubuntu-24.04-arm` hosted runner (free on public repos). If this
+# repo is private and ARM runners aren't on the plan, swap that leg to an emulated
+# build on ubuntu-latest (uses: docker/setup-qemu-action + `docker run --platform
+# linux/arm64`); slower, but the artifact is identical.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: virtiofsd git tag to build (e.g. v1.13.3)
+        required: true
+        default: v1.13.3
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-virtiofsd-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    environment: vmm-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Build static virtiofsd ${{ inputs.ref }} (${{ matrix.arch }})
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # The runner's native arch selects the rust:alpine variant, so the
+          # host triple inside the container is the musl target we want.
+          docker run --rm -e REF -v "$PWD:/out" rust:alpine sh -euc '
+            apk add --no-cache git musl-dev libcap-ng-static libseccomp-static
+            git clone --depth 1 --branch "$REF" https://gitlab.com/virtio-fs/virtiofsd /tmp/v
+            cd /tmp/v
+            export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
+            export LIBSECCOMP_LINK_TYPE=static LIBSECCOMP_LIB_PATH=/usr/lib
+            export LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH=/usr/lib
+            triple=$(rustc -vV | sed -n "s/^host: //p")
+            cargo build --release --target "$triple"
+            install -m0755 "target/$triple/release/virtiofsd" /out/virtiofsd
+            strip /out/virtiofsd
+          '
+          file virtiofsd
+          if ! file virtiofsd | grep -q "statically linked\|static-pie"; then
+            echo "::error::built virtiofsd is not statically linked — refusing to publish a host-dep binary"
+            exit 1
+          fi
+
+      - name: Compute artifact name + sha
+        id: artifact
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          version="${REF#v}"
+          name="lns-virtiofsd-${version}-${{ matrix.arch }}"
+          mv virtiofsd "$name"
+          sha256sum "$name" | awk '{print $1}' > "$name.sha256.value"
+          sha256sum "$name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cat "$name.sha256.value")" >> "$GITHUB_OUTPUT"
+          echo "::notice::$name sha256=$(cat "$name.sha256.value")"
+
+      - name: Refuse to overwrite an existing CDN artifact
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          NAME: ${{ steps.artifact.outputs.name }}
+        run: |
+          set -euo pipefail
+          if aws s3 ls "s3://${S3_BUCKET}/${NAME}" --endpoint-url "$S3_ENDPOINT_URL" >/dev/null 2>&1; then
+            echo "::error::s3://${S3_BUCKET}/${NAME} already exists — bump the virtiofsd ref or follow the overwrite procedure."
+            exit 1
+          fi
+
+      - name: Upload to CDN origin
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          NAME: ${{ steps.artifact.outputs.name }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "$NAME" "s3://${S3_BUCKET}/${NAME}" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "application/octet-stream"
+          aws s3 cp "$NAME.sha256" "s3://${S3_BUCKET}/${NAME}.sha256" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/plain"
+          echo "::notice::Published https://get.lns.run/${NAME} (pin this sha in vmm.toml: ${{ steps.artifact.outputs.sha256 }})"
