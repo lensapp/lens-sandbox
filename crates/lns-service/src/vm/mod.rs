@@ -30,6 +30,7 @@ pub struct VmSpec {
     pub volumes: Vec<VolumeAttachment>,
     pub binds: Vec<BindAttachment>,
     pub workload_uid: Option<u32>,
+    pub workload_gid: Option<u32>,
     pub vsock: Option<VsockChannel>,
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
@@ -182,6 +183,7 @@ impl ExecSpec {
 
 const DEFAULT_SANDBOX_USER: &str = "sandbox";
 const DEFAULT_SANDBOX_UID: u32 = 65534;
+const DEFAULT_SANDBOX_GID: u32 = 65534;
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
@@ -230,6 +232,14 @@ pub fn resolve_run_as(
             }
         }
     }
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub fn host_known_workload_gid(run_as: &RunAs) -> Option<u32> {
+    (run_as.user == DEFAULT_SANDBOX_USER
+        && run_as.uid == Some(DEFAULT_SANDBOX_UID)
+        && run_as.group.is_none())
+    .then_some(DEFAULT_SANDBOX_GID)
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -692,6 +702,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_knows_the_workload_gid_only_for_the_default_sandbox() {
+        assert_eq!(
+            host_known_workload_gid(&run_as("sandbox", Some(65534))),
+            Some(65534),
+            "the default sandbox is nobody:nogroup, which the host pins"
+        );
+        assert_eq!(
+            host_known_workload_gid(&run_as("sandbox", Some(1000))),
+            None,
+            "a non-default uid's gid is resolved in-guest"
+        );
+        assert_eq!(
+            host_known_workload_gid(&RunAs {
+                user: "app".into(),
+                uid: Some(65534),
+                group: Some("staff".into()),
+            }),
+            None,
+            "an explicit group is resolved in-guest"
+        );
+    }
+
     fn fake_session(url: &str, token: &str) -> crate::supervisor::SupervisorSession {
         let (fd_tx, _fd_rx) = tokio::sync::mpsc::unbounded_channel();
         crate::supervisor::SupervisorSession {
@@ -903,6 +936,7 @@ mod tests {
             volumes: vec![],
             binds: vec![],
             workload_uid: None,
+            workload_gid: None,
             vsock: None,
             connector_tx: None,
             #[cfg(target_os = "macos")]
