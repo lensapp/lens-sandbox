@@ -18,6 +18,7 @@ pub struct E2eWorld {
     pub created_volumes: Vec<String>,
     pub policy_dir: Option<TempDir>,
     pub policy_path: Option<PathBuf>,
+    pub host_bind_dir: Option<TempDir>,
 }
 
 impl E2eWorld {

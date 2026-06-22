@@ -58,6 +58,16 @@ fn track_volume(world: &mut E2eWorld, name: &str) {
     }
 }
 
+fn host_bind_source(world: &E2eWorld) -> String {
+    world
+        .host_bind_dir
+        .as_ref()
+        .expect("a host directory must be created before binding it")
+        .path()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)"$"#)]
 fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
@@ -119,6 +129,59 @@ fn audit_records_volume(world: &mut E2eWorld, name: String, path: String) -> Res
             "no volume_attached event for {name:?} at {path:?} in {}:\n{contents}",
             log_path.display()
         ))
+    }
+}
+
+#[given(regex = r#"^a host directory with a file "([^"]+)" containing "([^"]*)"$"#)]
+fn host_dir_with_file(world: &mut E2eWorld, name: String, content: String) {
+    let dir = tempfile::TempDir::new().expect("tempdir for host bind");
+    std::fs::write(dir.path().join(&name), content).expect("seed host bind file");
+    world.host_bind_dir = Some(dir);
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" with a host bind at "([^"]+)"$"#)]
+fn run_command_with_host_bind(world: &mut E2eWorld, cmd_line: String, target: String) {
+    let src = host_bind_source(world);
+    run_microvm(
+        world,
+        vec!["-v".into(), format!("{src}:{target}")],
+        &cmd_line,
+    );
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" with a read-only host bind at "([^"]+)"$"#
+)]
+fn run_command_with_ro_host_bind(world: &mut E2eWorld, cmd_line: String, target: String) {
+    let src = host_bind_source(world);
+    run_microvm(
+        world,
+        vec!["-v".into(), format!("{src}:{target}:ro")],
+        &cmd_line,
+    );
+}
+
+#[then(regex = r#"^the host bind directory has a file "([^"]+)" containing "([^"]*)"$"#)]
+fn host_bind_has_file(world: &mut E2eWorld, name: String, expected: String) -> Result<(), String> {
+    let dir = world
+        .host_bind_dir
+        .as_ref()
+        .ok_or("no host bind directory was created")?;
+    let path = dir.path().join(&name);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(got) = std::fs::read_to_string(&path)
+            && got.trim() == expected
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let got = std::fs::read_to_string(&path).unwrap_or_default();
+            return Err(format!(
+                "host bind file {name:?} expected {expected:?}, got {got:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
