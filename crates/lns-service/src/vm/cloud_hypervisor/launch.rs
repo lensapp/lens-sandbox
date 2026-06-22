@@ -43,13 +43,17 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
     )
 }
 
-pub(crate) fn virtiofsd_args(virtiofsd_socket: &Path, content_share: &Path) -> Vec<String> {
-    vec![
-        format!("--socket-path={}", virtiofsd_socket.display()),
-        format!("--shared-dir={}", content_share.display()),
+pub(crate) fn virtiofsd_args(socket: &Path, shared_dir: &Path, read_only: bool) -> Vec<String> {
+    let mut args = vec![
+        format!("--socket-path={}", socket.display()),
+        format!("--shared-dir={}", shared_dir.display()),
         "--cache=never".to_string(),
         "--sandbox=none".to_string(),
-    ]
+    ];
+    if read_only {
+        args.push("--readonly".to_string());
+    }
+    args
 }
 
 pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec<String> {
@@ -160,6 +164,7 @@ mod tests {
         let args = virtiofsd_args(
             Path::new("/runs/7/virtiofsd.sock"),
             Path::new("/cache/content"),
+            false,
         );
         assert_eq!(
             args,
@@ -169,6 +174,19 @@ mod tests {
                 "--cache=never".to_string(),
                 "--sandbox=none".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn virtiofsd_args_marks_a_read_only_share_readonly() {
+        let args = virtiofsd_args(
+            Path::new("/runs/7/virtiofsd-bind-0.sock"),
+            Path::new("/host/proj"),
+            true,
+        );
+        assert!(
+            args.contains(&"--readonly".to_string()),
+            "a read-only bind share must reject guest writes at the host: {args:?}"
         );
     }
 

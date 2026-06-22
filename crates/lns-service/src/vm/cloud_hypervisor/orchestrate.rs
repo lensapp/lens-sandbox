@@ -49,6 +49,7 @@ pub(crate) async fn launch<S: Spawner>(
         &bins.virtiofsd,
         &layout.virtiofsd,
         &spec.content_share,
+        false,
         timeouts.virtiofsd,
     )
     .await?;
@@ -108,6 +109,7 @@ async fn prepare_bind<S: Spawner>(
         &bins.virtiofsd,
         &layout.bind_virtiofsd(index),
         &bind.host_source,
+        bind.read_only,
         timeout,
     )
     .await
@@ -118,9 +120,10 @@ async fn spawn_virtiofsd<S: Spawner>(
     bin: &Path,
     socket: &Path,
     shared_dir: &Path,
+    read_only: bool,
     timeout: Duration,
 ) -> Result<S::Child> {
-    let args = virtiofsd_args(socket, shared_dir);
+    let args = virtiofsd_args(socket, shared_dir, read_only);
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
@@ -446,6 +449,17 @@ mod tests {
             arg_with_prefix(&recs[2].args, "--socket-path="),
             layout.bind_virtiofsd(1).display().to_string(),
             "bind 1 is exposed on the bind-1 socket"
+        );
+
+        let is_readonly = |r: &Spawned| r.args.iter().any(|a| a == "--readonly");
+        assert!(
+            !is_readonly(&recs[0]),
+            "the content share is never read-only"
+        );
+        assert!(!is_readonly(&recs[1]), "the writable bind is not read-only");
+        assert!(
+            is_readonly(&recs[2]),
+            "the read-only bind is served --readonly so the host rejects guest writes"
         );
     }
 
