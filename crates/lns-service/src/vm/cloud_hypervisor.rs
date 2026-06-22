@@ -46,7 +46,9 @@ pub(super) async fn run_async_with<S: process::Spawner>(
         .wait()
         .await
         .context("waiting for cloud-hypervisor to exit")?;
-    let _ = virtiofsd.start_kill();
+    for child in &mut virtiofsd {
+        let _ = child.start_kill();
+    }
     if !status.success() {
         bail!("cloud-hypervisor exited unsuccessfully: {status}");
     }
