@@ -55,7 +55,10 @@ pub(crate) async fn launch<S: Spawner>(
     .await?;
     let mut virtiofsd = vec![content];
 
-    let bind_uid_map = spec.workload_uid.map(|guest_uid| (guest_uid, host_euid()));
+    let bind_id_map = spec.workload_uid.map(|guest_id| {
+        let (host_uid, host_gid) = host_ids();
+        (guest_id, host_uid, host_gid)
+    });
     for (i, bind) in spec.binds.iter().enumerate() {
         match prepare_bind(
             spawner,
@@ -63,7 +66,7 @@ pub(crate) async fn launch<S: Spawner>(
             layout,
             bind,
             i,
-            bind_uid_map,
+            bind_id_map,
             timeouts.virtiofsd,
         )
         .await
@@ -105,7 +108,7 @@ async fn prepare_bind<S: Spawner>(
     layout: &SocketLayout,
     bind: &BindAttachment,
     index: usize,
-    uid_map: Option<(u32, u32)>,
+    id_map: Option<(u32, u32, u32)>,
     timeout: Duration,
 ) -> Result<S::Child> {
     tokio::fs::metadata(&bind.host_source)
@@ -121,15 +124,15 @@ async fn prepare_bind<S: Spawner>(
         &bins.virtiofsd,
         &layout.bind_virtiofsd(index),
         &bind.host_source,
-        uid_map,
+        id_map,
         timeout,
     )
     .await
 }
 
-fn host_euid() -> u32 {
-    // SAFETY: geteuid is reentrant and always succeeds per POSIX.
-    unsafe { libc::geteuid() }
+fn host_ids() -> (u32, u32) {
+    // SAFETY: geteuid/getegid are reentrant and always succeed per POSIX.
+    unsafe { (libc::geteuid(), libc::getegid()) }
 }
 
 async fn spawn_virtiofsd<S: Spawner>(
@@ -137,10 +140,10 @@ async fn spawn_virtiofsd<S: Spawner>(
     bin: &Path,
     socket: &Path,
     shared_dir: &Path,
-    uid_map: Option<(u32, u32)>,
+    id_map: Option<(u32, u32, u32)>,
     timeout: Duration,
 ) -> Result<S::Child> {
-    let args = virtiofsd_args(socket, shared_dir, uid_map);
+    let args = virtiofsd_args(socket, shared_dir, id_map);
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
