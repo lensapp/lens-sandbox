@@ -18,7 +18,7 @@ use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
 use lns_policy::integrations::TokenFallback;
 
-const WINDOW_WIDTH: f32 = 460.0;
+pub const WINDOW_WIDTH: f32 = 460.0;
 const WINDOW_HEIGHT: f32 = 300.0;
 const SCREEN_EDGE_MARGIN: f32 = 20.0;
 
@@ -191,7 +191,7 @@ struct TrayApp {
 
 /// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
 #[derive(Default)]
-struct TokenDraft {
+pub struct TokenDraft {
     revealed: bool,
     value: String,
 }
@@ -360,7 +360,7 @@ const BTN_HEIGHT: f32 = 38.0;
 const BTN_GAP: f32 = 12.0;
 
 #[derive(Debug, PartialEq, Eq)]
-enum CardAction {
+pub enum CardAction {
     Decide {
         id: String,
         decision: Decision,
@@ -428,7 +428,7 @@ fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f3
 }
 
 /// Renders the stack and returns the fired action plus the content's natural height (the scroll area's `content_size`, not the window-bounded laid-out size), which the caller sizes the window from so a card taller than the window grows it instead of being clipped.
-fn render_stack(
+pub fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
