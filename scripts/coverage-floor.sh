@@ -85,6 +85,7 @@ crates/lns-cli/src/service/orchestrator.rs               UnixStream-coupled CLI 
 
 # Top-level GUI main-loop adapter — exercised live, not unit-tested.
 crates/lns-service/src/tray.rs                           eframe main-loop adapter — `eframe::run_native` takes over the main thread (and on macOS needs a live NSApp), and the egui card renderers' click/interaction state needs a live frame + pointer input (no headless egui_kittest harness in-crate). The pure residue (position_top_right arithmetic, prune_credential_inputs, visibility_transition) is host-tested; load_icon decode is too.
+crates/lns-service/examples/approval_preview.rs          dev-only egui preview harness — seeds fixtures and calls the production render_stack so style edits preview live; run manually via `cargo run -p lns-service --example approval_preview`, never run by `cargo test --all-targets`.
 
 # LLVM opener-line phantom DAs — LLVM maps the execution counter for a multi-line construct to
 # the first instruction of the body, leaving the opener line with 0 count even when the body runs.
