@@ -514,6 +514,64 @@ pub fn lds_visuals() -> egui::Visuals {
     v
 }
 
+#[derive(Default)]
+struct HostFonts {
+    ui: Option<Vec<u8>>,
+    mono: Option<Vec<u8>>,
+}
+
+/// Registers the host's system UI and monospace fonts ahead of egui's bundled set, so the approval window renders in the platform's native typeface (San Francisco on macOS) with the bundled font kept as the glyph fallback.
+pub fn install_system_fonts(ctx: &egui::Context) {
+    apply_host_fonts(ctx, read_host_fonts());
+}
+
+fn apply_host_fonts(ctx: &egui::Context, host: HostFonts) {
+    if let Some(defs) = build_font_defs(host) {
+        ctx.set_fonts(defs);
+    }
+}
+
+fn build_font_defs(host: HostFonts) -> Option<egui::FontDefinitions> {
+    if host.ui.is_none() && host.mono.is_none() {
+        return None;
+    }
+    let mut defs = egui::FontDefinitions::default();
+    if let Some(bytes) = host.ui {
+        prepend_font(
+            &mut defs,
+            "system-ui",
+            bytes,
+            egui::FontFamily::Proportional,
+        );
+    }
+    if let Some(bytes) = host.mono {
+        prepend_font(&mut defs, "system-mono", bytes, egui::FontFamily::Monospace);
+    }
+    Some(defs)
+}
+
+fn prepend_font(
+    defs: &mut egui::FontDefinitions,
+    name: &str,
+    bytes: Vec<u8>,
+    family: egui::FontFamily,
+) {
+    defs.font_data
+        .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+    defs.families
+        .entry(family)
+        .or_default()
+        .insert(0, name.to_owned());
+}
+
+fn read_host_fonts() -> HostFonts {
+    use crate::approval_flow::system_font;
+    HostFonts {
+        ui: system_font::ui_font_bytes(),
+        mono: system_font::mono_font_bytes(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,5 +1326,76 @@ mod tests {
         assert_eq!(v.selection.bg_fill, ACCENT_GREEN);
         assert_eq!(v.hyperlink_color, ACCENT_GREEN);
         assert!(v.dark_mode);
+    }
+
+    #[test]
+    fn build_font_defs_is_none_when_no_host_font_is_available() {
+        assert!(build_font_defs(HostFonts::default()).is_none());
+    }
+
+    #[test]
+    fn build_font_defs_puts_the_system_ui_font_ahead_of_the_bundled_fallback() {
+        let defs = build_font_defs(HostFonts {
+            ui: Some(b"ui-bytes".to_vec()),
+            mono: None,
+        })
+        .expect("a ui font yields definitions");
+        let proportional = &defs.families[&egui::FontFamily::Proportional];
+        assert_eq!(
+            proportional.first().map(String::as_str),
+            Some("system-ui"),
+            "the system font is tried first so text renders in the native typeface"
+        );
+        assert!(
+            proportional.len() > 1,
+            "egui's bundled font stays as the glyph fallback"
+        );
+        assert!(
+            !defs.families[&egui::FontFamily::Monospace].contains(&"system-mono".to_string()),
+            "no monospace font was supplied, so the bundled mono is left untouched"
+        );
+    }
+
+    #[test]
+    fn build_font_defs_registers_the_monospace_font_ahead_of_the_fallback() {
+        let defs = build_font_defs(HostFonts {
+            ui: None,
+            mono: Some(b"mono-bytes".to_vec()),
+        })
+        .expect("a mono font yields definitions");
+        assert_eq!(
+            defs.families[&egui::FontFamily::Monospace]
+                .first()
+                .map(String::as_str),
+            Some("system-mono")
+        );
+    }
+
+    #[test]
+    fn apply_host_fonts_installs_a_supplied_font_without_panicking() {
+        let ctx = egui::Context::default();
+        apply_host_fonts(
+            &ctx,
+            HostFonts {
+                ui: Some(b"ui-bytes".to_vec()),
+                mono: None,
+            },
+        );
+    }
+
+    #[test]
+    fn apply_host_fonts_leaves_the_defaults_when_no_host_font_is_available() {
+        let ctx = egui::Context::default();
+        apply_host_fonts(&ctx, HostFonts::default());
+    }
+
+    #[test]
+    fn read_host_fonts_returns_without_panicking_on_this_host() {
+        let _ = read_host_fonts();
+    }
+
+    #[test]
+    fn install_system_fonts_applies_host_fonts_without_panicking() {
+        install_system_fonts(&egui::Context::default());
     }
 }
