@@ -75,6 +75,7 @@ anstyle = "1"
 # no HTTP stack is involved.
 serde_yaml      = "0.9"
 notify          = "6"
+egui_material_icons = { version = "0.6", default-features = false, features = ["filled"] }
 
 # Apple Virtualization.framework bindings — macOS only. These pull in just
 # the Vz/Foundation symbols we use; the linkage to the underlying frameworks

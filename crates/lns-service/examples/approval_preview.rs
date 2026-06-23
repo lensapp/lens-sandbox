@@ -4,7 +4,8 @@ use eframe::egui;
 use lns_policy::integrations::TokenFallback;
 use lns_service::approval_flow::session::PendingPrompt;
 use lns_service::approval_flow::window::{
-    CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_system_fonts, lds_visuals,
+    CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,
+    lds_visuals,
 };
 use lns_service::tray::{
     CardAction, MIN_WINDOW_HEIGHT, TokenDraft, WINDOW_WIDTH, content_cap, position_top_right,
@@ -106,55 +107,74 @@ fn seed() -> Snapshot {
         pending: vec![
             PendingPrompt {
                 id: "net-allow".into(),
-                host: "api.example.test".into(),
-                action: "connect".into(),
+                host: "pypi.org".into(),
+                action: "CONNECT pypi.org:443".into(),
                 offer: None,
                 token_fallback: None,
             },
             PendingPrompt {
                 id: "net-offer".into(),
-                host: "api.some-provider.example".into(),
-                action: "connect".into(),
-                offer: Some("Some Provider".into()),
+                host: "openrouter.ai".into(),
+                action: "CONNECT openrouter.ai:443".into(),
+                offer: Some("OpenRouter".into()),
+                token_fallback: None,
+            },
+            PendingPrompt {
+                id: "net-offer-token".into(),
+                host: "www.googleapis.com".into(),
+                action: "CONNECT www.googleapis.com:443".into(),
+                offer: Some("Google".into()),
                 token_fallback: Some(TokenFallback {
-                    help: Some("https://help.example/token".into()),
+                    help: Some("https://developers.google.com/oauthplayground".into()),
                 }),
             },
         ],
         pending_credentials: vec![
             CredentialCardPrompt {
                 id: "cred-value".into(),
-                credential_id: "some-provider".into(),
-                action: "read".into(),
+                credential_id: "openai".into(),
+                action: "use of openai placeholder".into(),
                 host_value_available: true,
                 oauth_display_name: None,
                 token_fallback: None,
             },
             CredentialCardPrompt {
-                id: "cred-oauth".into(),
-                credential_id: "some-oauth".into(),
-                action: "connect".into(),
+                id: "cred-novalue".into(),
+                credential_id: "anthropic".into(),
+                action: "use of anthropic placeholder".into(),
                 host_value_available: false,
-                oauth_display_name: Some("Some OAuth".into()),
+                oauth_display_name: None,
+                token_fallback: None,
+            },
+            CredentialCardPrompt {
+                id: "cred-oauth".into(),
+                credential_id: "github".into(),
+                action: "use of github placeholder".into(),
+                host_value_available: false,
+                oauth_display_name: Some("GitHub".into()),
                 token_fallback: Some(TokenFallback {
-                    help: Some("https://help.example/oauth".into()),
+                    help: Some("https://github.com/settings/personal-access-tokens/new".into()),
                 }),
             },
         ],
         sign_ins: vec![SignInCard {
-            credential_id: "some-oauth".into(),
-            display_name: "Some OAuth".into(),
+            credential_id: "github".into(),
+            display_name: "GitHub".into(),
             user_code: Some("ABCD-1234".into()),
-            verification_uri: "https://example.test/device".into(),
-            token_fallback: None,
+            verification_uri: "https://github.com/login/device".into(),
+            token_fallback: Some(TokenFallback {
+                help: Some("https://github.com/settings/personal-access-tokens/new".into()),
+            }),
         }],
-        informs: vec!["Workload finished — the sandbox is idle.".into()],
-        connecting: vec!["Some Provider".into()],
+        informs: vec!["sign-in to GitHub failed: device code expired".into()],
+        connecting: vec!["OpenRouter".into()],
         order: vec![
             StackItem::Network(0),
             StackItem::Network(1),
+            StackItem::Network(2),
             StackItem::Credential(0),
             StackItem::Credential(1),
+            StackItem::Credential(2),
             StackItem::SignIn(0),
             StackItem::Connecting(0),
             StackItem::Inform(0),
@@ -180,6 +200,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(lds_visuals());
             install_system_fonts(&cc.egui_ctx);
+            install_icon_font(&cc.egui_ctx);
             Ok(Box::new(Preview {
                 snapshot: seed(),
                 credential_inputs: HashMap::new(),

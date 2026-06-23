@@ -1522,6 +1522,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_material_icons"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1179e4fcbb018c90a6af6fce53db025536f9a2961f1bbb13b442580dd8382ebc"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3265,6 +3274,7 @@ dependencies = [
  "dispatch2",
  "eframe",
  "egui",
+ "egui_material_icons",
  "flate2",
  "form_urlencoded",
  "futures-util",

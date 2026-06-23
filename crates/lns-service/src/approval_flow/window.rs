@@ -474,6 +474,7 @@ pub const ACCENT_GREEN_HOVER: Color32 = Color32::from_rgb(0x6e, 0xe7, 0x9a);
 pub const ACCENT_GREEN_PRESSED: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 pub const STATUS_CRITICAL: Color32 = Color32::from_rgb(0xf4, 0x71, 0x74);
 pub const STATUS_WARNING: Color32 = Color32::from_rgb(0xff, 0xb1, 0x4a);
+pub const CATEGORY: Color32 = Color32::from_rgb(0x3d, 0x90, 0xce);
 
 pub fn lds_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
@@ -483,7 +484,7 @@ pub fn lds_visuals() -> egui::Visuals {
     v.faint_bg_color = BORDER;
     v.override_text_color = Some(TEXT_PRIMARY);
     v.hyperlink_color = ACCENT_GREEN;
-    v.selection.bg_fill = ACCENT_GREEN;
+    v.selection.bg_fill = Color32::from_gray(64);
     v.selection.stroke = Stroke::new(1.0, TEXT_ACCENT);
 
     let radius = egui::CornerRadius::same(8);
@@ -523,6 +524,14 @@ struct HostFonts {
 /// Registers the host's system UI and monospace fonts ahead of egui's bundled set, so the approval window renders in the platform's native typeface (San Francisco on macOS) with the bundled font kept as the glyph fallback.
 pub fn install_system_fonts(ctx: &egui::Context) {
     apply_host_fonts(ctx, read_host_fonts());
+}
+
+const ICON_Y_OFFSET: f32 = -2.0;
+
+pub fn install_icon_font(ctx: &egui::Context) {
+    let mut insert = egui_material_icons::font_insert();
+    insert.data.tweak.y_offset = ICON_Y_OFFSET;
+    ctx.add_font(insert);
 }
 
 fn apply_host_fonts(ctx: &egui::Context, host: HostFonts) {
@@ -1323,7 +1332,7 @@ mod tests {
         assert_eq!(v.panel_fill, Color32::TRANSPARENT);
         assert_eq!(v.window_fill, BG_SECONDARY);
         assert_eq!(v.override_text_color, Some(TEXT_PRIMARY));
-        assert_eq!(v.selection.bg_fill, ACCENT_GREEN);
+        assert_eq!(v.selection.bg_fill, Color32::from_gray(64));
         assert_eq!(v.hyperlink_color, ACCENT_GREEN);
         assert!(v.dark_mode);
     }
@@ -1397,5 +1406,11 @@ mod tests {
     #[test]
     fn install_system_fonts_applies_host_fonts_without_panicking() {
         install_system_fonts(&egui::Context::default());
+    }
+
+    #[test]
+    fn install_icon_font_lifts_the_glyph_baseline() {
+        install_icon_font(&egui::Context::default());
+        assert_eq!(ICON_Y_OFFSET, -2.0);
     }
 }
