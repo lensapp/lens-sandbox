@@ -16,24 +16,19 @@ use crate::approval_flow::window::{
 use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
+use crate::ui::{Button, ButtonKind, theme};
 use lns_policy::integrations::TokenFallback;
 
 pub const WINDOW_WIDTH: f32 = 460.0;
 const WINDOW_HEIGHT: f32 = 300.0;
 const SCREEN_EDGE_MARGIN: f32 = 20.0;
 
-const MIN_WINDOW_HEIGHT: f32 = 140.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 140.0;
 const FALLBACK_MAX_HEIGHT: f32 = 720.0;
-const INFORM_ITEM_HEIGHT: f32 = 56.0;
-const CONNECTING_ITEM_HEIGHT: f32 = 80.0;
-const CARD_ITEM_HEIGHT: f32 = 250.0;
-/// Added per card whose token-fallback field is revealed: an input, a help link, and a Save button below the primary action.
+const INFORM_ITEM_HEIGHT: f32 = 88.0;
+const CONNECTING_ITEM_HEIGHT: f32 = 112.0;
+const CARD_ITEM_HEIGHT: f32 = 282.0;
 const TOKEN_REVEAL_EXTRA: f32 = 150.0;
-const STACK_ITEM_GAP: f32 = 14.0;
-const FRAME_INNER_MARGIN: i8 = 22;
-const FRAME_OUTER_MARGIN: i8 = 8;
-/// The vertical space the frame's margins add around the scroll content; the window sizes to measured content + this chrome.
-const STACK_CHROME: f32 = 2.0 * (FRAME_INNER_MARGIN as f32 + FRAME_OUTER_MARGIN as f32);
 
 /// Builds the tray icon + Quit menu and installs the global menu-event handler (Quit signals shutdown); `on_event` lets the caller repaint after any menu event.
 fn build_tray_icon(
@@ -133,6 +128,7 @@ pub fn run_tray(
         native_options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(window::lds_visuals());
+            window::install_system_fonts(&cc.egui_ctx);
             window::install_ctx(cc.egui_ctx.clone());
             let app = TrayApp::new(cc.egui_ctx.clone(), app_shutdown, window_state)
                 .map_err(|e| format!("{e:#}"))?;
@@ -185,6 +181,8 @@ struct TrayApp {
     credential_inputs: HashMap<String, String>,
     /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
+    /// Per-network-card "remember this decision" toggle, keyed by request id; true persists the choice as an always-rule.
+    remember: HashMap<String, bool>,
     /// The viewport inner height last applied; grows to fit a revealed token field and shrinks back when none is open.
     current_height: f32,
 }
@@ -224,6 +222,7 @@ impl TrayApp {
             last_visible: false,
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
+            remember: HashMap::new(),
             current_height: WINDOW_HEIGHT,
         })
     }
@@ -296,6 +295,7 @@ impl eframe::App for TrayApp {
         let snapshot = self.window_state.snapshot();
         prune_credential_inputs(&mut self.credential_inputs, &snapshot);
         prune_token_drafts(&mut self.token_drafts, &snapshot);
+        prune_remember(&mut self.remember, &snapshot);
 
         let monitor_height = ui.ctx().input(|i| i.viewport().monitor_size).map(|m| m.y);
         let cap = content_cap(monitor_height);
@@ -304,9 +304,10 @@ impl eframe::App for TrayApp {
             &snapshot,
             &mut self.credential_inputs,
             &mut self.token_drafts,
-            cap - STACK_CHROME,
+            &mut self.remember,
+            cap,
         );
-        let target = (content_height + STACK_CHROME).clamp(MIN_WINDOW_HEIGHT, cap);
+        let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
         self.fit_height_to_content(ui.ctx(), target);
 
         match action {
@@ -352,11 +353,12 @@ impl eframe::App for TrayApp {
             }
             None => {}
         }
+
+        refresh_window_shadows();
     }
 }
 
 const BTN_WIDTH: f32 = 188.0;
-const BTN_HEIGHT: f32 = 38.0;
 const BTN_GAP: f32 = 12.0;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -409,7 +411,7 @@ fn item_height(item: &StackItem) -> f32 {
 }
 
 /// The tallest the window may grow before the stack scrolls rather than running off-screen — the usable monitor height, or a fixed fallback when the monitor size isn't known yet.
-fn content_cap(monitor_height: Option<f32>) -> f32 {
+pub fn content_cap(monitor_height: Option<f32>) -> f32 {
     monitor_height
         .map(|h| (h - 2.0 * SCREEN_EDGE_MARGIN).max(MIN_WINDOW_HEIGHT))
         .unwrap_or(FALLBACK_MAX_HEIGHT)
@@ -421,9 +423,9 @@ fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f3
         return MIN_WINDOW_HEIGHT;
     }
     let content = items.iter().map(item_height).sum::<f32>()
-        + STACK_ITEM_GAP * (items.len() - 1) as f32
+        + theme::CARD_GAP * (items.len() - 1) as f32
         + revealed as f32 * TOKEN_REVEAL_EXTRA
-        + STACK_CHROME;
+        + 2.0 * theme::STACK_MARGIN as f32;
     content.clamp(MIN_WINDOW_HEIGHT, content_cap(monitor_height))
 }
 
@@ -433,41 +435,67 @@ pub fn render_stack(
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
     token_drafts: &mut HashMap<String, TokenDraft>,
+    remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
-    use egui::{CornerRadius, Frame, Margin, Stroke};
+    use egui::{Frame, Margin, Sense};
 
     if snapshot.order.is_empty() {
         return (None, 0.0);
     }
 
-    Frame::new()
-        .fill(window::BG_SECONDARY)
-        .stroke(Stroke::new(1.0, window::BORDER))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(FRAME_INNER_MARGIN))
-        .outer_margin(Margin::same(FRAME_OUTER_MARGIN))
+    ui.style_mut().spacing.scroll.floating = true;
+    ui.style_mut().spacing.scroll.fade.strength = 0.0;
+    let out = egui::ScrollArea::vertical()
+        .max_height(scroll_max)
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
-            let out = egui::ScrollArea::vertical()
-                .max_height(scroll_max)
-                .auto_shrink([false, true])
+            Frame::new()
+                .inner_margin(Margin::same(theme::STACK_MARGIN))
                 .show(ui, |ui| {
                     let mut action = None;
                     for (idx, item) in snapshot.order.iter().enumerate() {
                         if idx > 0 {
-                            ui.add_space(STACK_ITEM_GAP);
-                            ui.add(egui::Separator::default().spacing(0.0));
-                            ui.add_space(STACK_ITEM_GAP);
+                            ui.add_space(theme::CARD_GAP);
                         }
-                        let fired =
-                            render_item(ui, item, snapshot, credential_inputs, token_drafts);
+                        let wrapped = crate::ui::card(ui, |ui| {
+                            render_item(
+                                ui,
+                                item,
+                                snapshot,
+                                credential_inputs,
+                                token_drafts,
+                                remember,
+                            )
+                        });
+                        let mut fired = match *item {
+                            StackItem::Inform(i)
+                                if wrapped.response.interact(Sense::click()).clicked() =>
+                            {
+                                Some(CardAction::DismissInform { index: i })
+                            }
+                            _ => wrapped.inner,
+                        };
+                        let close_rect = egui::Rect::from_center_size(
+                            wrapped.response.rect.left_top() + egui::vec2(3.0, 3.0),
+                            egui::Vec2::splat(22.0),
+                        );
+                        if fired.is_none()
+                            && ui.rect_contains_pointer(wrapped.response.rect.union(close_rect))
+                            && let Some(close) = close_action(item, snapshot)
+                            && close_button(ui, egui::Id::new(("card-close", idx)), close_rect)
+                                .clicked()
+                        {
+                            fired = Some(close);
+                        }
                         action = action.or(fired);
                     }
                     action
-                });
-            (out.inner, out.content_size.y)
-        })
-        .inner
+                })
+                .inner
+        });
+    (out.inner, out.content_size.y)
 }
 
 fn render_item(
@@ -476,16 +504,21 @@ fn render_item(
     snapshot: &Snapshot,
     credential_inputs: &mut HashMap<String, String>,
     token_drafts: &mut HashMap<String, TokenDraft>,
+    remember: &mut HashMap<String, bool>,
 ) -> Option<CardAction> {
     match *item {
-        StackItem::Inform(i) => render_inform_banner(ui, &snapshot.informs[i], i),
+        StackItem::Inform(i) => {
+            render_inform_content(ui, &snapshot.informs[i]);
+            None
+        }
         StackItem::Network(i) => {
             let prompt = &snapshot.pending[i];
             if let Some(display_name) = &prompt.offer {
                 let draft = token_drafts.entry(prompt.id.clone()).or_default();
                 render_offer_card(ui, prompt, display_name, draft)
             } else {
-                render_network_card(ui, prompt)
+                let flag = remember.entry(prompt.id.clone()).or_default();
+                render_network_card(ui, prompt, flag)
             }
         }
         StackItem::SignIn(i) => {
@@ -523,31 +556,74 @@ fn render_connecting_card(ui: &mut egui::Ui, display_name: &str) {
     });
 }
 
-fn render_inform_banner(ui: &mut egui::Ui, msg: &str, index: usize) -> Option<CardAction> {
-    use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke};
+fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
+    use egui::{Align, Layout, RichText};
 
-    let banner = Frame::new()
-        .fill(window::BG_TERTIARY)
-        .stroke(Stroke::new(1.0, window::STATUS_WARNING))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 8))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(window::STATUS_WARNING, "⚠");
-                ui.colored_label(window::TEXT_PRIMARY, RichText::new(msg).size(12.0));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.colored_label(window::TEXT_MUTED, RichText::new("✕  dismiss").size(10.5));
-                });
-            });
+    ui.horizontal(|ui| {
+        ui.colored_label(window::STATUS_WARNING, "⚠");
+        ui.colored_label(window::TEXT_PRIMARY, RichText::new(msg).size(12.0));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.colored_label(window::TEXT_MUTED, RichText::new("✕  dismiss").size(10.5));
         });
-    if banner.response.interact(Sense::click()).clicked() {
-        Some(CardAction::DismissInform { index })
-    } else {
-        None
+    });
+}
+
+/// Closing must resolve a pending request rather than just hide it, or the workload stays blocked — so the corner ✕ maps to each card's safe negative.
+fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<CardAction> {
+    match *item {
+        StackItem::Inform(i) => Some(CardAction::DismissInform { index: i }),
+        StackItem::Network(i) => Some(CardAction::Decide {
+            id: snapshot.pending[i].id.clone(),
+            decision: Decision::DenyOnce,
+        }),
+        StackItem::SignIn(i) => Some(CardAction::CancelSignIn {
+            credential_id: snapshot.sign_ins[i].credential_id.clone(),
+        }),
+        StackItem::Credential(i) => Some(CardAction::DecideCredential {
+            id: snapshot.pending_credentials[i].id.clone(),
+            request: CredentialDecisionRequest::Deny,
+        }),
+        StackItem::Connecting(_) => None,
     }
 }
 
-fn render_network_card(ui: &mut egui::Ui, prompt: &PendingPrompt) -> Option<CardAction> {
+fn close_button(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect) -> egui::Response {
+    use egui::{Color32, Sense, Stroke, vec2};
+
+    let resp = ui.interact(rect, id, Sense::click());
+    let center = rect.center();
+    let radius = rect.width() * 0.5;
+    let painter = ui.painter();
+
+    painter.circle_filled(
+        center + vec2(0.0, 1.5),
+        radius + 1.5,
+        Color32::from_black_alpha(45),
+    );
+    painter.circle_filled(
+        center + vec2(0.0, 0.8),
+        radius + 0.5,
+        Color32::from_black_alpha(75),
+    );
+    let fill = if resp.hovered() {
+        Color32::from_gray(96)
+    } else {
+        Color32::from_gray(72)
+    };
+    painter.circle_filled(center, radius, fill);
+
+    let arm = radius * 0.34;
+    let x = Stroke::new(1.6, Color32::from_gray(235));
+    painter.line_segment([center - vec2(arm, arm), center + vec2(arm, arm)], x);
+    painter.line_segment([center + vec2(arm, -arm), center - vec2(arm, -arm)], x);
+    resp
+}
+
+fn render_network_card(
+    ui: &mut egui::Ui,
+    prompt: &PendingPrompt,
+    remember: &mut bool,
+) -> Option<CardAction> {
     use egui::RichText;
 
     let id = prompt.id.clone();
@@ -569,32 +645,59 @@ fn render_network_card(ui: &mut egui::Ui, prompt: &PendingPrompt) -> Option<Card
             .color(window::TEXT_MUTED),
     );
 
-    ui.add_space(18.0);
-    ui.add(egui::Separator::default().spacing(0.0));
     ui.add_space(16.0);
+    remember_toggle(ui, remember);
+    ui.add_space(BTN_GAP);
 
     let mut chosen: Option<Decision> = None;
     ui.horizontal(|ui| {
-        if primary_button(ui, "Allow once").clicked() {
-            chosen = Some(Decision::AllowOnce);
+        if primary_button(ui, "Allow").clicked() {
+            chosen = Some(allow_decision(*remember));
         }
         ui.add_space(BTN_GAP);
-        if primary_button(ui, "Allow always").clicked() {
-            chosen = Some(Decision::AllowAlways);
-        }
-    });
-    ui.add_space(BTN_GAP);
-    ui.horizontal(|ui| {
-        if deny_button(ui, "Deny once").clicked() {
-            chosen = Some(Decision::DenyOnce);
-        }
-        ui.add_space(BTN_GAP);
-        if deny_button(ui, "Deny always").clicked() {
-            chosen = Some(Decision::DenyAlways);
+        if deny_button(ui, "Deny").clicked() {
+            chosen = Some(deny_decision(*remember));
         }
     });
 
     chosen.map(|decision| CardAction::Decide { id, decision })
+}
+
+fn allow_decision(remember: bool) -> Decision {
+    if remember {
+        Decision::AllowAlways
+    } else {
+        Decision::AllowOnce
+    }
+}
+
+fn deny_decision(remember: bool) -> Decision {
+    if remember {
+        Decision::DenyAlways
+    } else {
+        Decision::DenyOnce
+    }
+}
+
+fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
+    use egui::{RichText, Sense};
+
+    let (glyph, color) = if *remember {
+        ("◉", window::ACCENT_GREEN)
+    } else {
+        ("○", window::TEXT_MUTED)
+    };
+    let resp = ui.add(
+        egui::Label::new(
+            RichText::new(format!("{glyph}  Remember this decision"))
+                .size(12.0)
+                .color(color),
+        )
+        .sense(Sense::click()),
+    );
+    if resp.clicked() {
+        *remember = !*remember;
+    }
 }
 
 fn render_offer_card(
@@ -633,7 +736,7 @@ fn render_offer_card(
             action = Some(CardAction::ConnectOffer { id: id.clone() });
         }
         ui.add_space(BTN_GAP);
-        if deny_button(ui, "Not now").clicked() {
+        if secondary_button(ui, "Not now").clicked() {
             action = Some(CardAction::DeclineOffer { id });
         }
     });
@@ -716,16 +819,10 @@ fn render_credential_card(
     ui.add_space(BTN_GAP);
     ui.horizontal(|ui| {
         let submit_enabled = !input.trim().is_empty();
-        let submit_resp = ui.add_enabled(
-            submit_enabled,
-            egui::Button::new(
-                RichText::new("Submit value")
-                    .color(window::BG_PRIMARY)
-                    .strong()
-                    .size(13.0),
-            )
-            .min_size(egui::vec2(BTN_WIDTH, BTN_HEIGHT)),
-        );
+        let submit_resp = Button::new("Submit value", ButtonKind::Primary)
+            .enabled(submit_enabled)
+            .min_size(egui::vec2(BTN_WIDTH, 0.0))
+            .show(ui);
         if submit_resp.clicked() && submit_enabled {
             chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
                 value: input.trim().to_string(),
@@ -859,7 +956,7 @@ fn render_sign_in_card(
             });
         }
         ui.add_space(BTN_GAP);
-        if deny_button(ui, "Cancel").clicked() {
+        if secondary_button(ui, "Cancel").clicked() {
             action = Some(CardAction::CancelSignIn {
                 credential_id: card.credential_id.clone(),
             });
@@ -957,51 +1054,28 @@ fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Resp
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let text = egui::RichText::new(label)
-        .color(window::BG_PRIMARY)
-        .strong()
-        .size(13.0);
-    ui.add_sized([BTN_WIDTH, BTN_HEIGHT], egui::Button::new(text))
+    Button::new(label, ButtonKind::Primary)
+        .min_size(egui::vec2(BTN_WIDTH, 0.0))
+        .show(ui)
 }
 
-/// A primary button that spans the card and can be disabled — for a lone action (no paired Deny) like "Save token". Same centered fill/typography as [`primary_button`], full width.
 fn wide_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    let text = egui::RichText::new(label)
-        .color(window::BG_PRIMARY)
-        .strong()
-        .size(13.0);
-    let width = ui.available_width();
-    ui.add_enabled_ui(enabled, |ui| {
-        ui.add_sized([width, BTN_HEIGHT], egui::Button::new(text))
-    })
-    .inner
+    Button::new(label, ButtonKind::Primary)
+        .enabled(enabled)
+        .min_size(egui::vec2(ui.available_width(), 0.0))
+        .show(ui)
+}
+
+fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    Button::new(label, ButtonKind::Secondary)
+        .min_size(egui::vec2(BTN_WIDTH, 0.0))
+        .show(ui)
 }
 
 fn deny_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let text = egui::RichText::new(label).size(13.0);
-    ui.scope(|ui| {
-        let style = ui.style_mut();
-        let critical = egui::Stroke::new(1.0, window::STATUS_CRITICAL);
-        let on_critical = egui::Stroke::new(1.0, window::TEXT_ACCENT);
-
-        style.visuals.widgets.inactive.bg_fill = window::BG_TERTIARY;
-        style.visuals.widgets.inactive.weak_bg_fill = window::BG_TERTIARY;
-        style.visuals.widgets.inactive.bg_stroke = critical;
-        style.visuals.widgets.inactive.fg_stroke = critical;
-
-        style.visuals.widgets.hovered.bg_fill = window::STATUS_CRITICAL;
-        style.visuals.widgets.hovered.weak_bg_fill = window::STATUS_CRITICAL;
-        style.visuals.widgets.hovered.bg_stroke = critical;
-        style.visuals.widgets.hovered.fg_stroke = on_critical;
-
-        style.visuals.widgets.active.bg_fill = window::STATUS_CRITICAL;
-        style.visuals.widgets.active.weak_bg_fill = window::STATUS_CRITICAL;
-        style.visuals.widgets.active.bg_stroke = critical;
-        style.visuals.widgets.active.fg_stroke = on_critical;
-
-        ui.add_sized([BTN_WIDTH, BTN_HEIGHT], egui::Button::new(text))
-    })
-    .inner
+    Button::new(label, ButtonKind::Danger)
+        .min_size(egui::vec2(BTN_WIDTH, 0.0))
+        .show(ui)
 }
 
 fn prune_credential_inputs(inputs: &mut HashMap<String, String>, snapshot: &Snapshot) {
@@ -1013,6 +1087,12 @@ fn prune_credential_inputs(inputs: &mut HashMap<String, String>, snapshot: &Snap
     inputs.retain(|id, _| still_pending.contains(id.as_str()));
 }
 
+fn prune_remember(remember: &mut HashMap<String, bool>, snapshot: &Snapshot) {
+    let still_pending: std::collections::HashSet<&str> =
+        snapshot.pending.iter().map(|p| p.id.as_str()).collect();
+    remember.retain(|id, _| still_pending.contains(id.as_str()));
+}
+
 /// Token drafts are keyed by the shown card's id — a network request id, a credential prompt id, or a sign-in credential id — so a draft survives only while its card is still on screen.
 fn prune_token_drafts(drafts: &mut HashMap<String, TokenDraft>, snapshot: &Snapshot) {
     let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1022,7 +1102,7 @@ fn prune_token_drafts(drafts: &mut HashMap<String, TokenDraft>, snapshot: &Snaps
     drafts.retain(|key, _| live.contains(key.as_str()));
 }
 
-fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
+pub fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
     egui::Pos2::new(
         monitor.x - WINDOW_WIDTH - SCREEN_EDGE_MARGIN,
         SCREEN_EDGE_MARGIN,
@@ -1079,6 +1159,23 @@ fn join_all_spaces() {
 
 #[cfg(not(target_os = "macos"))]
 fn join_all_spaces() {}
+
+/// macOS recomputes a transparent window's shadow only on resize, so without per-frame invalidation a scrolled card's shadow freezes at its old position.
+#[cfg(target_os = "macos")]
+pub fn refresh_window_shadows() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        window.invalidateShadow();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_window_shadows() {}
 
 fn load_icon() -> anyhow::Result<Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../assets/lensTemplate@2x.png");
@@ -1156,6 +1253,14 @@ mod tests {
         let accel = Accelerator::new(Some(Modifiers::META), Code::KeyQ);
         let repr = format!("{accel:?}");
         assert!(repr.contains("KeyQ"), "expected KeyQ in {repr}");
+    }
+
+    #[test]
+    fn remember_toggle_maps_the_allow_and_deny_decisions() {
+        assert_eq!(allow_decision(false), Decision::AllowOnce);
+        assert_eq!(allow_decision(true), Decision::AllowAlways);
+        assert_eq!(deny_decision(false), Decision::DenyOnce);
+        assert_eq!(deny_decision(true), Decision::DenyAlways);
     }
 
     fn credential_prompt(id: &str) -> CredentialCardPrompt {
