@@ -120,6 +120,9 @@ objc2-virtualization  = { version = "0.3", features = [
 ] }
 block2                = "0.6"
 dispatch2             = "0.3"
+# Core Text resolves the host's system UI / monospace font file at runtime, so the approval window renders in San Francisco without hardcoding private font paths.
+objc2-core-text       = "0.3"
+objc2-core-foundation = "0.3"
 
 # The tray icon uses GTK on Linux (via tray-icon → libappindicator → glib 0.18),
 # so the tray must be created on a thread running a GTK main loop; this gives us
