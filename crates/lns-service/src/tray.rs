@@ -568,7 +568,6 @@ fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
     });
 }
 
-/// Closing must resolve a pending request rather than just hide it, or the workload stays blocked — so the corner ✕ maps to each card's safe negative.
 fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<CardAction> {
     match *item {
         StackItem::Inform(i) => Some(CardAction::DismissInform { index: i }),
