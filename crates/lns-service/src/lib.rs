@@ -32,6 +32,7 @@ pub mod shutdown;
 pub mod supervisor;
 mod time_fmt;
 pub mod tray;
+pub mod ui;
 pub mod update_check;
 pub mod upperfs;
 pub mod vm;
