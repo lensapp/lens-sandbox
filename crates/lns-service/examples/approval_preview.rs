@@ -16,7 +16,7 @@ struct Preview {
 
 impl eframe::App for Preview {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.04, 0.04, 0.05, 1.0]
+        [0.0, 0.0, 0.0, 0.0]
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {}
@@ -100,6 +100,8 @@ fn seed() -> Snapshot {
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_title("approval preview")
+        .with_decorations(false)
+        .with_transparent(true)
         .with_inner_size([WINDOW_WIDTH, 820.0]);
     let options = eframe::NativeOptions {
         viewport,
