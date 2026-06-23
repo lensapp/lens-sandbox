@@ -118,15 +118,6 @@ pub struct ArtifactMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentResources {
-    #[serde(default)]
-    pub cpus: Option<u32>,
-    #[serde(default)]
-    pub memory_mib: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PortMapping {
     pub host: u16,
     pub container: u16,
@@ -151,8 +142,6 @@ pub struct AgentSpec {
     pub isolation: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
-    #[serde(default)]
-    pub resources: Option<AgentResources>,
     #[serde(default)]
     pub ports: Vec<PortMapping>,
     #[serde(default)]
@@ -234,6 +223,40 @@ impl BundleArtifact {
             ));
         }
         Ok(bundle)
+    }
+}
+
+/// A resource quantity as the registry schema allows it: a number or a string (e.g. `3072` or `"3g"`); the consumer interprets it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Quantity {
+    Unsigned(u64),
+    Float(f64),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SandboxResources {
+    #[serde(default)]
+    pub cpu: Option<Quantity>,
+    #[serde(default)]
+    pub memory: Option<Quantity>,
+}
+
+/// The parsed `sandbox` artifact — the runtime envelope; `lns run` reads its `resources` for sizing.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxArtifact {
+    pub name: String,
+    #[serde(default)]
+    pub isolation: Option<String>,
+    #[serde(default)]
+    pub resources: Option<SandboxResources>,
+}
+
+impl SandboxArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<SandboxArtifact> {
+        serde_json::from_slice(blob).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -366,20 +389,16 @@ mod tests {
     }
 
     #[test]
-    fn agent_artifact_parses_resources_user_ports_and_volumes() {
+    fn agent_artifact_parses_user_ports_and_volumes() {
         let blob = agent_blob(
             "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
              metadata:\n  name: some-agent\n\
              spec:\n  image: some-image:1\n  user: runner\n  \
-             resources:\n    cpus: 2\n    memoryMib: 3072\n  \
              ports:\n    - { host: 9119, container: 9119 }\n  \
              volumes:\n    - { name: somedata, target: /opt/data }\n",
         );
         let agent = AgentArtifact::from_config_blob(&blob).unwrap();
         assert_eq!(agent.spec.user.as_deref(), Some("runner"));
-        let resources = agent.spec.resources.unwrap();
-        assert_eq!(resources.cpus, Some(2));
-        assert_eq!(resources.memory_mib, Some(3072));
         assert_eq!(
             agent.spec.ports,
             vec![PortMapping {
@@ -407,7 +426,6 @@ mod tests {
         assert!(agent.spec.command.is_none());
         assert!(agent.spec.credentials.is_empty());
         assert!(agent.spec.user.is_none());
-        assert!(agent.spec.resources.is_none());
         assert!(agent.spec.ports.is_empty());
         assert!(agent.spec.volumes.is_empty());
     }
@@ -479,5 +497,46 @@ mod tests {
         let err = BundleArtifact::from_config_blob(&blob).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(format!("{err}").contains("AgentSystem"), "got: {err}");
+    }
+
+    #[test]
+    fn sandbox_artifact_parses_numeric_resources() {
+        let blob = to_config_blob(
+            "name: some-runtime\nversion: \"1.0\"\n\
+             baseImage: localhost:5000/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\n\
+             isolation: microvm\nresources:\n  cpu: 2\n  memory: 3072\ncapabilities: []\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(sandbox.name, "some-runtime");
+        assert_eq!(sandbox.isolation.as_deref(), Some("microvm"));
+        let resources = sandbox.resources.unwrap();
+        assert_eq!(resources.cpu, Some(Quantity::Unsigned(2)));
+        assert_eq!(resources.memory, Some(Quantity::Unsigned(3072)));
+    }
+
+    #[test]
+    fn sandbox_artifact_tolerates_string_resources() {
+        let blob =
+            to_config_blob("name: r\nresources:\n  cpu: \"2\"\n  memory: \"3g\"\n".as_bytes())
+                .unwrap();
+        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
+        let resources = sandbox.resources.unwrap();
+        assert_eq!(resources.cpu, Some(Quantity::Text("2".into())));
+        assert_eq!(resources.memory, Some(Quantity::Text("3g".into())));
+    }
+
+    #[test]
+    fn sandbox_artifact_tolerates_a_missing_resources_block() {
+        let blob = to_config_blob("name: r\nisolation: microvm\n".as_bytes()).unwrap();
+        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
+        assert!(sandbox.resources.is_none());
+    }
+
+    #[test]
+    fn sandbox_artifact_rejects_malformed_json() {
+        let err = SandboxArtifact::from_config_blob(b"not json").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

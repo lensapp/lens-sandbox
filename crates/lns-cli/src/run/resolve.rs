@@ -2,7 +2,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use lns_policy::artifact::{AgentArtifact, BundleArtifact, CredentialRef, Family};
+use lns_policy::artifact::{
+    AgentArtifact, BundleArtifact, CredentialRef, Family, Quantity, SandboxArtifact,
+};
 use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
 
 use crate::cli::RunArgs;
@@ -93,18 +95,11 @@ pub async fn resolve_agent_ref(
         "✓ resolved agent {} → {}",
         agent.metadata.name, agent.spec.image
     )?;
-    let (cpus, mem) = match &agent.spec.resources {
-        Some(r) => (
-            r.cpus.and_then(|c| u8::try_from(c).ok()),
-            r.memory_mib.map(|m| m as usize),
-        ),
-        None => (None, None),
-    };
     Ok(ResolvedRun {
         cmd: command_argv(agent.spec.command.as_deref()),
         image: agent.spec.image,
-        cpus,
-        mem,
+        cpus: None,
+        mem: None,
         sandbox_user: agent.spec.user,
         ports: agent.spec.ports.iter().map(port_publish).collect(),
         volumes: agent.spec.volumes.iter().map(volume_mount).collect(),
@@ -172,8 +167,52 @@ pub async fn resolve_bundle_ref(
         resolved.policy_path = Some(path);
         resolved._policy_tempfile = Some(file);
     }
+    if let Some(component) = &bundle.components.sandbox {
+        let sandbox_ref = qualify_component_ref(reference, &component.reference);
+        let sandbox = pull_sandbox(&sandbox_ref, client).await?;
+        if let Some(resources) = &sandbox.resources {
+            resolved.cpus = resources.cpu.as_ref().and_then(quantity_to_cpus);
+            resolved.mem = resources.memory.as_ref().and_then(quantity_to_mib);
+        }
+        writeln!(writer, "✓ applied sandbox {sandbox_ref}")?;
+    }
     note_skipped_components(&bundle, writer)?;
     Ok(resolved)
+}
+
+async fn pull_sandbox(reference: &str, client: &dyn RegistryClient) -> Result<SandboxArtifact> {
+    match client.pull(reference).await? {
+        Pulled::Artifact {
+            artifact_type,
+            config_blob,
+            ..
+        } => {
+            if Family::from_artifact_type(&artifact_type) != Some(Family::Sandbox) {
+                bail!("{reference} is not a sandbox artifact (media type {artifact_type})");
+            }
+            SandboxArtifact::from_config_blob(&config_blob)
+                .with_context(|| format!("parsing sandbox artifact {reference}"))
+        }
+        Pulled::Image { .. } => {
+            bail!("{reference} resolved to an image, not a sandbox artifact")
+        }
+    }
+}
+
+fn quantity_to_cpus(q: &Quantity) -> Option<u8> {
+    match q {
+        Quantity::Unsigned(n) => u8::try_from(*n).ok(),
+        Quantity::Float(f) => u8::try_from(*f as u64).ok(),
+        Quantity::Text(s) => s.trim().parse().ok(),
+    }
+}
+
+fn quantity_to_mib(q: &Quantity) -> Option<usize> {
+    match q {
+        Quantity::Unsigned(n) => usize::try_from(*n).ok(),
+        Quantity::Float(f) => Some(*f as usize),
+        Quantity::Text(s) => crate::cli::parse_mem_arg(s).ok(),
+    }
 }
 
 async fn pull_bundle(reference: &str, client: &dyn RegistryClient) -> Result<BundleArtifact> {
@@ -240,9 +279,6 @@ fn note_skipped_components(bundle: &BundleArtifact, writer: &mut impl Write) -> 
     if !bundle.components.tools.is_empty() {
         skipped.push("tools");
     }
-    if bundle.components.sandbox.is_some() {
-        skipped.push("sandbox");
-    }
     if !bundle.components.knowledge.is_empty() {
         skipped.push("knowledge");
     }
@@ -303,6 +339,7 @@ mod tests {
 
     const AGENT_REF: &str = "localhost:5000/org/acme/agents/some-agent:v1";
     const POLICY_REF: &str = "localhost:5000/org/acme/policies/some-egress:v1";
+    const SANDBOX_REF: &str = "localhost:5000/org/acme/sandboxes/some-runtime:v1";
     const BUNDLE_REF: &str = "localhost:5000/org/acme/bundles/some-system:v1";
     const AGENT_IMAGE: &str = "localhost:5000/org/acme/images/some-agent:v1";
 
@@ -443,11 +480,17 @@ mod tests {
                 "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
                  metadata:\n  name: some-agent\n\
                  spec:\n  image: {AGENT_IMAGE}\n  user: runner\n  \
-                 resources:\n    cpus: 2\n    memoryMib: 3072\n  \
                  ports:\n    - {{ host: 9119, container: 9119 }}\n  \
                  volumes:\n    - {{ name: somedata, target: /opt/data }}\n"
             )
             .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn sandbox_blob(resources: &str) -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            format!("name: some-runtime\nisolation: microvm\n{resources}").as_bytes(),
         )
         .unwrap()
     }
@@ -469,6 +512,13 @@ mod tests {
         .await;
         put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
         put_artifact(&client, POLICY_REF, Family::Policy, &policy_blob()).await;
+        put_artifact(
+            &client,
+            SANDBOX_REF,
+            Family::Sandbox,
+            &sandbox_blob("resources:\n  cpu: 2\n  memory: 3072\n"),
+        )
+        .await;
         client
     }
 
@@ -601,13 +651,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_agent_ref_maps_resources_user_ports_and_volumes() {
+    async fn resolve_agent_ref_maps_user_ports_and_volumes_but_not_resources() {
         let client = full_agent_client().await;
         let resolved = resolve_agent_ref(AGENT_REF, &client, &mut Vec::new())
             .await
             .unwrap();
-        assert_eq!(resolved.cpus, Some(2));
-        assert_eq!(resolved.mem, Some(3072));
+        assert_eq!(resolved.cpus, None, "the agent no longer carries sizing");
+        assert_eq!(resolved.mem, None);
         assert_eq!(resolved.sandbox_user.as_deref(), Some("runner"));
         assert_eq!(resolved.ports.len(), 1);
         assert_eq!(resolved.ports[0].host_port, 9119);
@@ -619,27 +669,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_into_run_args_overlays_resources_user_ports_and_volumes() {
+    async fn resolve_into_run_args_overlays_user_ports_and_volumes() {
         let client = full_agent_client().await;
         let (args, _) =
             resolve_into_run_args(run_args(Some(AGENT_REF)), &client, &[], &mut Vec::new())
                 .await
                 .unwrap();
-        assert_eq!(args.cpus, Some(2));
-        assert_eq!(args.mem, Some(3072));
         assert_eq!(args.sandbox_user.as_deref(), Some("runner"));
         assert_eq!(args.publish.len(), 1);
         assert_eq!(args.publish[0].host_port, 9119);
         assert_eq!(args.volumes.len(), 1);
         assert_eq!(args.volumes[0].name, "somedata");
+        assert_eq!(args.cpus, None, "a bare agent has no sizing");
     }
 
     #[tokio::test]
-    async fn resolve_into_run_args_keeps_explicit_resources_ports_and_volumes_over_the_agents() {
+    async fn resolve_into_run_args_keeps_explicit_ports_and_volumes_over_the_agents() {
         let client = full_agent_client().await;
         let mut args = run_args(Some(AGENT_REF));
-        args.cpus = Some(8);
-        args.mem = Some(1024);
         args.sandbox_user = Some("override".into());
         args.publish = vec![lns_ipc::PortPublish {
             host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -655,8 +702,6 @@ mod tests {
         let (args, _) = resolve_into_run_args(args, &client, &[], &mut Vec::new())
             .await
             .unwrap();
-        assert_eq!(args.cpus, Some(8), "explicit --cpus must win");
-        assert_eq!(args.mem, Some(1024), "explicit --mem must win");
         assert_eq!(args.sandbox_user.as_deref(), Some("override"));
         assert_eq!(args.publish[0].host_port, 1, "explicit -p must win");
         assert_eq!(args.volumes[0].name, "mine", "explicit -v must win");
@@ -905,6 +950,137 @@ mod tests {
                 .unwrap();
         let guard = guard.expect("bundle policy guard kept alive");
         assert_eq!(args.policy.as_deref(), Some(guard.path()));
+    }
+
+    const AGENTS_AND_SANDBOX: &str = "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+         sandbox:\n    ref: org/acme/sandboxes/some-runtime:v1\n";
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_applies_sandbox_resources() {
+        let client = bundle_client(AGENTS_AND_SANDBOX).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(resolved.cpus, Some(2));
+        assert_eq!(resolved.mem, Some(3072));
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_without_a_sandbox_leaves_resources_unset() {
+        let client =
+            bundle_client("  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n").await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(resolved.cpus, None);
+        assert_eq!(resolved.mem, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_parses_string_sandbox_resources() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(AGENTS_AND_SANDBOX),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(
+            &client,
+            SANDBOX_REF,
+            Family::Sandbox,
+            &sandbox_blob("resources:\n  cpu: \"4\"\n  memory: \"3g\"\n"),
+        )
+        .await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(resolved.cpus, Some(4));
+        assert_eq!(resolved.mem, Some(3072));
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_rejects_a_sandbox_component_that_is_an_image() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(AGENTS_AND_SANDBOX),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_image(&client, SANDBOX_REF).await;
+        let err = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a sandbox artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_rejects_a_sandbox_component_of_a_foreign_family() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(AGENTS_AND_SANDBOX),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(&client, SANDBOX_REF, Family::Tool, &sandbox_blob("")).await;
+        let err = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a sandbox artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_into_run_args_sizes_a_bundle_from_its_sandbox_but_explicit_cpus_wins() {
+        let client = bundle_client(AGENTS_AND_SANDBOX).await;
+        let (sized, _) =
+            resolve_into_run_args(run_args(Some(BUNDLE_REF)), &client, &[], &mut Vec::new())
+                .await
+                .unwrap();
+        assert_eq!(sized.cpus, Some(2), "sized from the sandbox");
+        assert_eq!(sized.mem, Some(3072));
+
+        let mut args = run_args(Some(BUNDLE_REF));
+        args.cpus = Some(8);
+        let (overridden, _) = resolve_into_run_args(args, &client, &[], &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            overridden.cpus,
+            Some(8),
+            "explicit --cpus must win over the sandbox"
+        );
+        assert_eq!(overridden.mem, Some(3072), "mem still from the sandbox");
+    }
+
+    #[test]
+    fn quantity_to_cpus_coerces_every_form() {
+        assert_eq!(quantity_to_cpus(&Quantity::Unsigned(2)), Some(2));
+        assert_eq!(quantity_to_cpus(&Quantity::Unsigned(9999)), None);
+        assert_eq!(quantity_to_cpus(&Quantity::Float(2.9)), Some(2));
+        assert_eq!(quantity_to_cpus(&Quantity::Text("4".into())), Some(4));
+        assert_eq!(quantity_to_cpus(&Quantity::Text("nope".into())), None);
+    }
+
+    #[test]
+    fn quantity_to_mib_coerces_every_form() {
+        assert_eq!(quantity_to_mib(&Quantity::Unsigned(3072)), Some(3072));
+        assert_eq!(quantity_to_mib(&Quantity::Float(2048.0)), Some(2048));
+        assert_eq!(quantity_to_mib(&Quantity::Text("3g".into())), Some(3072));
+        assert_eq!(quantity_to_mib(&Quantity::Text("bad".into())), None);
     }
 
     #[test]
