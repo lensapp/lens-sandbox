@@ -19,9 +19,10 @@ use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
 use lns_policy::integrations::TokenFallback;
 
-pub const WINDOW_WIDTH: f32 = 460.0;
+pub const WINDOW_WIDTH: f32 = 380.0;
 const WINDOW_HEIGHT: f32 = 300.0;
 const SCREEN_EDGE_MARGIN: f32 = 20.0;
+const SCREEN_RIGHT_MARGIN: f32 = 0.0;
 
 pub const MIN_WINDOW_HEIGHT: f32 = 140.0;
 const FALLBACK_MAX_HEIGHT: f32 = 720.0;
@@ -129,6 +130,7 @@ pub fn run_tray(
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(window::lds_visuals());
             window::install_system_fonts(&cc.egui_ctx);
+            window::install_icon_font(&cc.egui_ctx);
             window::install_ctx(cc.egui_ctx.clone());
             let app = TrayApp::new(cc.egui_ctx.clone(), app_shutdown, window_state)
                 .map_err(|e| format!("{e:#}"))?;
@@ -358,7 +360,6 @@ impl eframe::App for TrayApp {
     }
 }
 
-const BTN_WIDTH: f32 = 188.0;
 const BTN_GAP: f32 = 12.0;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -438,7 +439,7 @@ pub fn render_stack(
     remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
-    use egui::{Frame, Margin, Sense};
+    use egui::{Frame, Margin};
 
     if snapshot.order.is_empty() {
         return (None, 0.0);
@@ -451,6 +452,7 @@ pub fn render_stack(
         .auto_shrink([false, true])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
+            let card_width = WINDOW_WIDTH - 2.0 * theme::STACK_MARGIN as f32;
             Frame::new()
                 .inner_margin(Margin::same(theme::STACK_MARGIN))
                 .show(ui, |ui| {
@@ -459,30 +461,22 @@ pub fn render_stack(
                         if idx > 0 {
                             ui.add_space(theme::CARD_GAP);
                         }
-                        let wrapped = crate::ui::card(ui, |ui| {
-                            render_item(
-                                ui,
-                                item,
-                                snapshot,
-                                credential_inputs,
-                                token_drafts,
-                                remember,
-                            )
-                        });
-                        let mut fired = match *item {
-                            StackItem::Inform(i)
-                                if wrapped.response.interact(Sense::click()).clicked() =>
-                            {
-                                Some(CardAction::DismissInform { index: i })
-                            }
-                            _ => wrapped.inner,
-                        };
+                        let (item_action, response) = render_item(
+                            ui,
+                            item,
+                            snapshot,
+                            credential_inputs,
+                            token_drafts,
+                            remember,
+                            card_width,
+                        );
+                        let mut fired = item_action;
                         let close_rect = egui::Rect::from_center_size(
-                            wrapped.response.rect.left_top() + egui::vec2(3.0, 3.0),
+                            response.rect.left_top() + egui::vec2(3.0, 3.0),
                             egui::Vec2::splat(22.0),
                         );
                         if fired.is_none()
-                            && ui.rect_contains_pointer(wrapped.response.rect.union(close_rect))
+                            && ui.rect_contains_pointer(response.rect.union(close_rect))
                             && let Some(close) = close_action(item, snapshot)
                             && close_button(ui, egui::Id::new(("card-close", idx)), close_rect)
                                 .clicked()
@@ -505,36 +499,41 @@ fn render_item(
     credential_inputs: &mut HashMap<String, String>,
     token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     match *item {
         StackItem::Inform(i) => {
-            render_inform_content(ui, &snapshot.informs[i]);
-            None
+            let r = crate::ui::card(ui, width, |ui| {
+                render_inform_content(ui, &snapshot.informs[i])
+            });
+            (None, r.response)
         }
         StackItem::Network(i) => {
             let prompt = &snapshot.pending[i];
             if let Some(display_name) = &prompt.offer {
                 let draft = token_drafts.entry(prompt.id.clone()).or_default();
-                render_offer_card(ui, prompt, display_name, draft)
+                render_offer_card(ui, prompt, display_name, draft, width)
             } else {
                 let flag = remember.entry(prompt.id.clone()).or_default();
-                render_network_card(ui, prompt, flag)
+                render_network_card(ui, prompt, flag, width)
             }
         }
         StackItem::SignIn(i) => {
             let card = &snapshot.sign_ins[i];
             let draft = token_drafts.entry(card.credential_id.clone()).or_default();
-            render_sign_in_card(ui, card, draft)
+            render_sign_in_card(ui, card, draft, width)
         }
         StackItem::Credential(i) => {
             let prompt = &snapshot.pending_credentials[i];
             let input = credential_inputs.entry(prompt.id.clone()).or_default();
             let draft = token_drafts.entry(prompt.id.clone()).or_default();
-            render_credential_card(ui, prompt, input, draft)
+            render_credential_card(ui, prompt, input, draft, width)
         }
         StackItem::Connecting(i) => {
-            render_connecting_card(ui, &snapshot.connecting[i]);
-            None
+            let r = crate::ui::card(ui, width, |ui| {
+                render_connecting_card(ui, &snapshot.connecting[i])
+            });
+            (None, r.response)
         }
     }
 }
@@ -542,7 +541,7 @@ fn render_item(
 fn render_connecting_card(ui: &mut egui::Ui, display_name: &str) {
     use egui::RichText;
 
-    render_card_header(ui, "CONNECT");
+    crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -557,14 +556,11 @@ fn render_connecting_card(ui: &mut egui::Ui, display_name: &str) {
 }
 
 fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
-    use egui::{Align, Layout, RichText};
+    use egui::RichText;
 
     ui.horizontal(|ui| {
         ui.colored_label(window::STATUS_WARNING, "⚠");
         ui.colored_label(window::TEXT_PRIMARY, RichText::new(msg).size(12.0));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.colored_label(window::TEXT_MUTED, RichText::new("✕  dismiss").size(10.5));
-        });
     });
 }
 
@@ -622,44 +618,55 @@ fn render_network_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
     remember: &mut bool,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     use egui::RichText;
 
     let id = prompt.id.clone();
-
-    render_card_header(ui, "APPROVAL NEEDED");
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(&prompt.host)
-            .size(22.0)
-            .strong()
-            .color(window::TEXT_ACCENT),
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_PUBLIC, "NETWORK");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("Connect to {}?", prompt.host))
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(window::TEXT_ACCENT),
+            );
+            ui.add_space(8.0);
+            crate::ui::badges(ui, connection_badges(&prompt.action));
+        },
+        |ui| {
+            remember_toggle(ui, remember);
+            ui.add_space(BTN_GAP);
+            let mut chosen: Option<Decision> = None;
+            ui.columns(2, |cols| {
+                if primary_button(&mut cols[0], "Allow").clicked() {
+                    chosen = Some(allow_decision(*remember));
+                }
+                if deny_button(&mut cols[1], "Deny").clicked() {
+                    chosen = Some(deny_decision(*remember));
+                }
+            });
+            chosen
+        },
     );
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(&prompt.action)
-            .size(12.0)
-            .monospace()
-            .color(window::TEXT_MUTED),
-    );
+    (
+        out.inner
+            .map(|decision| CardAction::Decide { id, decision }),
+        out.response,
+    )
+}
 
-    ui.add_space(16.0);
-    remember_toggle(ui, remember);
-    ui.add_space(BTN_GAP);
-
-    let mut chosen: Option<Decision> = None;
-    ui.horizontal(|ui| {
-        if primary_button(ui, "Allow").clicked() {
-            chosen = Some(allow_decision(*remember));
+fn connection_badges(action: &str) -> Vec<String> {
+    match action.rsplit_once(':') {
+        Some((_, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            vec!["TCP".to_string(), port.to_string()]
         }
-        ui.add_space(BTN_GAP);
-        if deny_button(ui, "Deny").clicked() {
-            chosen = Some(deny_decision(*remember));
-        }
-    });
-
-    chosen.map(|decision| CardAction::Decide { id, decision })
+        _ => vec![action.to_string()],
+    }
 }
 
 fn allow_decision(remember: bool) -> Decision {
@@ -679,22 +686,45 @@ fn deny_decision(remember: bool) -> Decision {
 }
 
 fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
-    use egui::{RichText, Sense};
+    use egui::{Color32, CornerRadius, RichText, Sense, Shape, Stroke, StrokeKind, vec2};
 
-    let (glyph, color) = if *remember {
-        ("◉", window::ACCENT_GREEN)
-    } else {
-        ("○", window::TEXT_MUTED)
-    };
-    let resp = ui.add(
-        egui::Label::new(
-            RichText::new(format!("{glyph}  Remember this decision"))
-                .size(12.0)
-                .color(color),
-        )
-        .sense(Sense::click()),
-    );
-    if resp.clicked() {
+    let resp = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (rect, _) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::hover());
+            let painter = ui.painter().clone();
+            let (fill, border) = if *remember {
+                (Color32::WHITE, Color32::WHITE)
+            } else {
+                (Color32::TRANSPARENT, window::TEXT_MUTED)
+            };
+            painter.rect(
+                rect,
+                CornerRadius::same(4),
+                fill,
+                Stroke::new(1.5, border),
+                StrokeKind::Inside,
+            );
+            if *remember {
+                let c = rect.center();
+                let r = rect.width() * 0.5;
+                painter.add(Shape::line(
+                    vec![
+                        c + vec2(-0.4 * r, 0.0),
+                        c + vec2(-0.1 * r, 0.34 * r),
+                        c + vec2(0.42 * r, -0.34 * r),
+                    ],
+                    Stroke::new(1.7, window::BG_PRIMARY),
+                ));
+            }
+            ui.label(
+                RichText::new("Don't ask again for this host")
+                    .size(theme::FONT_CAPTION)
+                    .color(window::TEXT_MUTED),
+            );
+        })
+        .response;
+    if resp.interact(Sense::click()).clicked() {
         *remember = !*remember;
     }
 }
@@ -704,56 +734,58 @@ fn render_offer_card(
     prompt: &PendingPrompt,
     display_name: &str,
     draft: &mut TokenDraft,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     use egui::RichText;
 
     let id = prompt.id.clone();
-
-    render_card_header(ui, "CONNECT");
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(format!("Connect to {display_name}?"))
-            .size(22.0)
-            .strong()
-            .color(window::TEXT_ACCENT),
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("Connect to {display_name}?"))
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(window::TEXT_ACCENT),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!("A workload wants to reach {}.", prompt.host))
+                    .size(theme::FONT_BODY)
+                    .color(window::TEXT_MUTED),
+            );
+        },
+        |ui| {
+            let mut action: Option<CardAction> = None;
+            ui.columns(2, |cols| {
+                if primary_button(&mut cols[0], "Connect").clicked() {
+                    action = Some(CardAction::ConnectOffer { id: id.clone() });
+                }
+                if secondary_button(&mut cols[1], "Not now").clicked() {
+                    action = Some(CardAction::DeclineOffer { id: id.clone() });
+                }
+            });
+            if action.is_none()
+                && let Some(fallback) = &prompt.token_fallback
+            {
+                action = match render_token_fallback(ui, fallback, draft) {
+                    Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseOfferToken {
+                        id: id.clone(),
+                        value,
+                    }),
+                    Some(TokenFallbackEvent::OpenHelp(url)) => {
+                        Some(CardAction::OpenBrowser { url })
+                    }
+                    None => None,
+                };
+            }
+            action
+        },
     );
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(format!("A workload wants to reach {}.", prompt.host))
-            .size(12.0)
-            .color(window::TEXT_MUTED),
-    );
-
-    ui.add_space(18.0);
-    ui.add(egui::Separator::default().spacing(0.0));
-    ui.add_space(16.0);
-
-    let mut action: Option<CardAction> = None;
-    ui.horizontal(|ui| {
-        if primary_button(ui, &format!("Connect {display_name}")).clicked() {
-            action = Some(CardAction::ConnectOffer { id: id.clone() });
-        }
-        ui.add_space(BTN_GAP);
-        if secondary_button(ui, "Not now").clicked() {
-            action = Some(CardAction::DeclineOffer { id });
-        }
-    });
-
-    if action.is_none()
-        && let Some(fallback) = &prompt.token_fallback
-    {
-        action = match render_token_fallback(ui, fallback, draft) {
-            Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseOfferToken {
-                id: prompt.id.clone(),
-                value,
-            }),
-            Some(TokenFallbackEvent::OpenHelp(url)) => Some(CardAction::OpenBrowser { url }),
-            None => None,
-        };
-    }
-
-    action
+    (out.inner, out.response)
 }
 
 fn render_credential_card(
@@ -761,79 +793,76 @@ fn render_credential_card(
     prompt: &CredentialCardPrompt,
     input: &mut String,
     draft: &mut TokenDraft,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     use egui::RichText;
 
-    let id = prompt.id.clone();
-
     if let Some(display_name) = &prompt.oauth_display_name {
-        return render_oauth_consent_card(ui, prompt, display_name, draft);
+        return render_oauth_consent_card(ui, prompt, display_name, draft, width);
     }
 
-    render_card_header(ui, "CREDENTIAL NEEDED");
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(&prompt.credential_id)
-            .size(22.0)
-            .strong()
-            .color(window::TEXT_ACCENT),
-    );
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(&prompt.action)
-            .size(12.0)
-            .monospace()
-            .color(window::TEXT_MUTED),
-    );
-
-    if !prompt.host_value_available {
-        ui.add_space(8.0);
-        ui.colored_label(
-            window::TEXT_MUTED,
-            RichText::new("No credential detected on host.")
-                .size(11.5)
-                .italics(),
-        );
-    }
-
-    ui.add_space(18.0);
-    ui.add(egui::Separator::default().spacing(0.0));
-    ui.add_space(16.0);
-
-    let mut chosen: Option<CredentialDecisionRequest> = None;
-
-    if prompt.host_value_available {
-        ui.horizontal(|ui| {
-            if primary_button(ui, "Use from host").clicked() {
-                chosen = Some(CredentialDecisionRequest::Allow(
-                    CredentialEntry::HostDetect,
-                ));
+    let id = prompt.id.clone();
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_KEY, "CREDENTIAL");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(&prompt.credential_id)
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(window::TEXT_ACCENT),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(&prompt.action)
+                    .size(theme::FONT_CAPTION)
+                    .monospace()
+                    .color(window::TEXT_MUTED),
+            );
+            if !prompt.host_value_available {
+                ui.add_space(8.0);
+                ui.colored_label(
+                    window::TEXT_MUTED,
+                    RichText::new("No credential detected on host.")
+                        .size(theme::FONT_CAPTION)
+                        .italics(),
+                );
             }
-        });
-        ui.add_space(BTN_GAP);
-    }
-
-    secret_input(ui, input, "Enter a value");
-    ui.add_space(BTN_GAP);
-    ui.horizontal(|ui| {
-        let submit_enabled = !input.trim().is_empty();
-        let submit_resp = Button::new("Submit value", ButtonKind::Primary)
-            .enabled(submit_enabled)
-            .min_size(egui::vec2(BTN_WIDTH, 0.0))
-            .show(ui);
-        if submit_resp.clicked() && submit_enabled {
-            chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                value: input.trim().to_string(),
-            }));
-        }
-        ui.add_space(BTN_GAP);
-        if deny_button(ui, "Deny").clicked() {
-            chosen = Some(CredentialDecisionRequest::Deny);
-        }
-    });
-
-    chosen.map(|request| CardAction::DecideCredential { id, request })
+        },
+        |ui| {
+            let mut chosen: Option<CredentialDecisionRequest> = None;
+            if prompt.host_value_available {
+                if primary_button(ui, "Use detected value").clicked() {
+                    chosen = Some(CredentialDecisionRequest::Allow(
+                        CredentialEntry::HostDetect,
+                    ));
+                }
+                ui.add_space(BTN_GAP);
+            }
+            secret_input(ui, input, "Enter a value");
+            ui.add_space(BTN_GAP);
+            let submit_enabled = !input.trim().is_empty();
+            ui.columns(2, |cols| {
+                if enabled_primary_button(&mut cols[0], "Submit", submit_enabled).clicked()
+                    && submit_enabled
+                {
+                    chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                        value: input.trim().to_string(),
+                    }));
+                }
+                if deny_button(&mut cols[1], "Deny").clicked() {
+                    chosen = Some(CredentialDecisionRequest::Deny);
+                }
+            });
+            chosen.map(|request| CardAction::DecideCredential {
+                id: id.clone(),
+                request,
+            })
+        },
+    );
+    (out.inner, out.response)
 }
 
 fn render_oauth_consent_card(
@@ -841,144 +870,149 @@ fn render_oauth_consent_card(
     prompt: &CredentialCardPrompt,
     display_name: &str,
     draft: &mut TokenDraft,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     use egui::RichText;
 
-    render_card_header(ui, "CONNECT");
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(format!("Connect to {display_name}?"))
-            .size(22.0)
-            .strong()
-            .color(window::TEXT_ACCENT),
-    );
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(format!(
-            "A workload wants to use your {display_name} access."
-        ))
-        .size(12.0)
-        .color(window::TEXT_MUTED),
-    );
-
-    ui.add_space(18.0);
-    ui.add(egui::Separator::default().spacing(0.0));
-    ui.add_space(16.0);
-
-    let mut chosen: Option<CredentialDecisionRequest> = None;
-    ui.horizontal(|ui| {
-        if primary_button(ui, "Connect").clicked() {
-            chosen = Some(CredentialDecisionRequest::Allow(
-                CredentialEntry::HostDetect,
-            ));
-        }
-        ui.add_space(BTN_GAP);
-        if deny_button(ui, "Deny").clicked() {
-            chosen = Some(CredentialDecisionRequest::Deny);
-        }
-    });
-
-    if chosen.is_none()
-        && let Some(fallback) = &prompt.token_fallback
-    {
-        match render_token_fallback(ui, fallback, draft) {
-            Some(TokenFallbackEvent::Save(value)) => {
-                chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                    value,
-                }));
+    let id = prompt.id.clone();
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("Connect to {display_name}?"))
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(window::TEXT_ACCENT),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!(
+                    "A workload wants to use your {display_name} access."
+                ))
+                .size(theme::FONT_BODY)
+                .color(window::TEXT_MUTED),
+            );
+        },
+        |ui| {
+            let mut chosen: Option<CredentialDecisionRequest> = None;
+            ui.columns(2, |cols| {
+                if primary_button(&mut cols[0], "Connect").clicked() {
+                    chosen = Some(CredentialDecisionRequest::Allow(
+                        CredentialEntry::HostDetect,
+                    ));
+                }
+                if deny_button(&mut cols[1], "Deny").clicked() {
+                    chosen = Some(CredentialDecisionRequest::Deny);
+                }
+            });
+            if chosen.is_none()
+                && let Some(fallback) = &prompt.token_fallback
+            {
+                match render_token_fallback(ui, fallback, draft) {
+                    Some(TokenFallbackEvent::Save(value)) => {
+                        chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                            value,
+                        }));
+                    }
+                    Some(TokenFallbackEvent::OpenHelp(url)) => {
+                        return Some(CardAction::OpenBrowser { url });
+                    }
+                    None => {}
+                }
             }
-            Some(TokenFallbackEvent::OpenHelp(url)) => {
-                return Some(CardAction::OpenBrowser { url });
-            }
-            None => {}
-        }
-    }
-
-    chosen.map(|request| CardAction::DecideCredential {
-        id: prompt.id.clone(),
-        request,
-    })
+            chosen.map(|request| CardAction::DecideCredential {
+                id: id.clone(),
+                request,
+            })
+        },
+    );
+    (out.inner, out.response)
 }
 
 fn render_sign_in_card(
     ui: &mut egui::Ui,
     card: &SignInCard,
     draft: &mut TokenDraft,
-) -> Option<CardAction> {
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
     use egui::RichText;
 
-    render_card_header(ui, "CONNECT");
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(format!("Connect to {}", card.display_name))
-            .size(22.0)
-            .strong()
-            .color(window::TEXT_ACCENT),
-    );
-    ui.add_space(8.0);
-    match &card.user_code {
-        Some(user_code) => {
-            ui.label(
-                RichText::new("Enter this code on the page that opens:")
-                    .size(12.0)
-                    .color(window::TEXT_MUTED),
-            );
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
             ui.add_space(6.0);
             ui.label(
-                RichText::new(user_code)
-                    .size(28.0)
+                RichText::new(format!("Connect to {}", card.display_name))
+                    .size(theme::FONT_TITLE)
                     .strong()
-                    .monospace()
                     .color(window::TEXT_ACCENT),
             );
-        }
-        None => {
-            ui.label(
-                RichText::new("Your browser is opening to finish signing in…")
-                    .size(12.0)
-                    .color(window::TEXT_MUTED),
-            );
-        }
-    }
-
-    ui.add_space(18.0);
-    ui.add(egui::Separator::default().spacing(0.0));
-    ui.add_space(16.0);
-
-    let mut action: Option<CardAction> = None;
-    ui.horizontal(|ui| {
-        if primary_button(ui, &format!("Open {}", card.display_name)).clicked() {
-            action = Some(CardAction::OpenBrowser {
-                url: card.verification_uri.clone(),
+            ui.add_space(8.0);
+            match &card.user_code {
+                Some(user_code) => {
+                    ui.label(
+                        RichText::new("Enter this code on the page that opens:")
+                            .size(theme::FONT_BODY)
+                            .color(window::TEXT_MUTED),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(user_code)
+                            .size(28.0)
+                            .strong()
+                            .monospace()
+                            .color(window::TEXT_ACCENT),
+                    );
+                }
+                None => {
+                    ui.label(
+                        RichText::new("Your browser is opening to finish signing in…")
+                            .size(theme::FONT_BODY)
+                            .color(window::TEXT_MUTED),
+                    );
+                }
+            }
+        },
+        |ui| {
+            let mut action: Option<CardAction> = None;
+            ui.columns(2, |cols| {
+                if primary_button(&mut cols[0], "Open").clicked() {
+                    action = Some(CardAction::OpenBrowser {
+                        url: card.verification_uri.clone(),
+                    });
+                }
+                if secondary_button(&mut cols[1], "Cancel").clicked() {
+                    action = Some(CardAction::CancelSignIn {
+                        credential_id: card.credential_id.clone(),
+                    });
+                }
             });
-        }
-        ui.add_space(BTN_GAP);
-        if secondary_button(ui, "Cancel").clicked() {
-            action = Some(CardAction::CancelSignIn {
-                credential_id: card.credential_id.clone(),
-            });
-        }
-    });
-
-    if action.is_none()
-        && let Some(fallback) = &card.token_fallback
-    {
-        action = match render_token_fallback(ui, fallback, draft) {
-            Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseTokenSignIn {
-                credential_id: card.credential_id.clone(),
-                value,
-            }),
-            Some(TokenFallbackEvent::OpenHelp(url)) => Some(CardAction::OpenBrowser { url }),
-            None => None,
-        };
-    }
-
-    action
+            if action.is_none()
+                && let Some(fallback) = &card.token_fallback
+            {
+                action = match render_token_fallback(ui, fallback, draft) {
+                    Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseTokenSignIn {
+                        credential_id: card.credential_id.clone(),
+                        value,
+                    }),
+                    Some(TokenFallbackEvent::OpenHelp(url)) => {
+                        Some(CardAction::OpenBrowser { url })
+                    }
+                    None => None,
+                };
+            }
+            action
+        },
+    );
+    (out.inner, out.response)
 }
 
-/// Progressive disclosure shared by every connect card: a muted "Use a token instead" that, once clicked, reveals a password field + "Save token" and (when declared) a help link. Returns the user's action without performing it.
+/// Progressive disclosure shared by every connect card: a muted "Use a token instead" that, once clicked, reveals a password field + "Save" and (when declared) a help link. Returns the user's action without performing it.
 fn render_token_fallback(
     ui: &mut egui::Ui,
     fallback: &TokenFallback,
@@ -1025,40 +1059,33 @@ fn render_token_fallback(
 
     ui.add_space(BTN_GAP);
     let enabled = !draft.value.trim().is_empty();
-    if wide_primary_button(ui, "Save token", enabled).clicked() && enabled {
+    if enabled_primary_button(ui, "Save", enabled).clicked() && enabled {
         event = Some(TokenFallbackEvent::Save(draft.value.trim().to_string()));
     }
     event
 }
 
-fn render_card_header(ui: &mut egui::Ui, label: &str) {
-    use egui::RichText;
-
-    ui.label(
-        RichText::new(label)
-            .size(10.5)
-            .strong()
-            .color(window::ACCENT_GREEN),
-    );
-}
-
 fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
-    ui.add(
-        egui::TextEdit::singleline(value)
-            .password(true)
-            .hint_text(hint)
-            .margin(egui::Margin::symmetric(10, 9))
-            .desired_width(f32::INFINITY),
-    )
+    ui.scope(|ui| {
+        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, window::BORDER);
+        ui.style_mut().visuals.widgets.hovered.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_gray(96));
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .password(true)
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(10, 9))
+                .desired_width(f32::INFINITY),
+        )
+    })
+    .inner
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    Button::new(label, ButtonKind::Primary)
-        .min_size(egui::vec2(BTN_WIDTH, 0.0))
-        .show(ui)
+    enabled_primary_button(ui, label, true)
 }
 
-fn wide_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+fn enabled_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
     Button::new(label, ButtonKind::Primary)
         .enabled(enabled)
         .min_size(egui::vec2(ui.available_width(), 0.0))
@@ -1067,13 +1094,13 @@ fn wide_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::R
 
 fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     Button::new(label, ButtonKind::Secondary)
-        .min_size(egui::vec2(BTN_WIDTH, 0.0))
+        .min_size(egui::vec2(ui.available_width(), 0.0))
         .show(ui)
 }
 
 fn deny_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     Button::new(label, ButtonKind::Danger)
-        .min_size(egui::vec2(BTN_WIDTH, 0.0))
+        .min_size(egui::vec2(ui.available_width(), 0.0))
         .show(ui)
 }
 
@@ -1103,7 +1130,7 @@ fn prune_token_drafts(drafts: &mut HashMap<String, TokenDraft>, snapshot: &Snaps
 
 pub fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
     egui::Pos2::new(
-        monitor.x - WINDOW_WIDTH - SCREEN_EDGE_MARGIN,
+        monitor.x - WINDOW_WIDTH - SCREEN_RIGHT_MARGIN,
         SCREEN_EDGE_MARGIN,
     )
 }
@@ -1361,7 +1388,7 @@ mod tests {
     #[test]
     fn position_top_right_insets_the_window_from_the_monitor_corner() {
         let pos = position_top_right(egui::Vec2::new(1920.0, 1080.0));
-        assert_eq!(pos.x, 1920.0 - WINDOW_WIDTH - SCREEN_EDGE_MARGIN);
+        assert_eq!(pos.x, 1920.0 - WINDOW_WIDTH - SCREEN_RIGHT_MARGIN);
         assert_eq!(pos.y, SCREEN_EDGE_MARGIN);
     }
 

@@ -44,7 +44,7 @@ impl<'a> Button<'a> {
                 theme::BUTTON_FONT_SIZE,
                 egui::FontFamily::Proportional,
             ));
-            ui.add(egui::Button::new(text).min_size(self.min_size))
+            ui.add(egui::Button::new(text).truncate().min_size(self.min_size))
         })
         .inner
     }
@@ -56,24 +56,27 @@ struct StateColors {
     fg: Color32,
 }
 
-/// Per-state fill/stroke/text colors for each kind, ordered `[inactive, hovered, active]`.
+fn tint(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
 fn palette(kind: ButtonKind) -> [StateColors; 3] {
     match kind {
         ButtonKind::Primary => [
             StateColors {
-                fill: window::ACCENT_GREEN,
-                stroke: window::ACCENT_GREEN,
-                fg: window::BG_PRIMARY,
+                fill: tint(window::CATEGORY, 40),
+                stroke: tint(window::CATEGORY, 140),
+                fg: window::CATEGORY,
             },
             StateColors {
-                fill: window::ACCENT_GREEN_HOVER,
-                stroke: window::ACCENT_GREEN_HOVER,
-                fg: window::BG_PRIMARY,
+                fill: tint(window::CATEGORY, 74),
+                stroke: window::CATEGORY,
+                fg: window::CATEGORY,
             },
             StateColors {
-                fill: window::ACCENT_GREEN_PRESSED,
-                stroke: window::ACCENT_GREEN_PRESSED,
-                fg: window::BG_PRIMARY,
+                fill: tint(window::CATEGORY, 110),
+                stroke: window::CATEGORY,
+                fg: window::CATEGORY,
             },
         ],
         ButtonKind::Secondary => [
@@ -95,19 +98,19 @@ fn palette(kind: ButtonKind) -> [StateColors; 3] {
         ],
         ButtonKind::Danger => [
             StateColors {
-                fill: window::BG_TERTIARY,
+                fill: tint(window::STATUS_CRITICAL, 40),
+                stroke: tint(window::STATUS_CRITICAL, 90),
+                fg: window::STATUS_CRITICAL,
+            },
+            StateColors {
+                fill: tint(window::STATUS_CRITICAL, 74),
                 stroke: window::STATUS_CRITICAL,
                 fg: window::STATUS_CRITICAL,
             },
             StateColors {
-                fill: window::STATUS_CRITICAL,
+                fill: tint(window::STATUS_CRITICAL, 110),
                 stroke: window::STATUS_CRITICAL,
-                fg: window::TEXT_ACCENT,
-            },
-            StateColors {
-                fill: window::STATUS_CRITICAL,
-                stroke: window::STATUS_CRITICAL,
-                fg: window::TEXT_ACCENT,
+                fg: window::STATUS_CRITICAL,
             },
         ],
     }
@@ -135,10 +138,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn primary_uses_the_green_accent_fill_with_dark_text() {
+    fn primary_is_a_tonal_blue_not_a_solid_fill() {
         let [inactive, _, _] = palette(ButtonKind::Primary);
-        assert_eq!(inactive.fill, window::ACCENT_GREEN);
-        assert_eq!(inactive.fg, window::BG_PRIMARY);
+        assert!(
+            inactive.fill.a() < 255,
+            "primary fill is a translucent tint, not a solid block"
+        );
+        assert_eq!(inactive.fg, window::CATEGORY, "blue label on the tint");
     }
 
     #[test]
@@ -154,11 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn danger_fills_red_on_hover_to_confirm_the_destructive_action() {
+    fn danger_is_a_tonal_red_matching_the_primary_treatment() {
         let [inactive, hovered, _] = palette(ButtonKind::Danger);
-        assert_eq!(inactive.fg, window::STATUS_CRITICAL);
-        assert_eq!(hovered.fill, window::STATUS_CRITICAL);
-        assert_eq!(hovered.fg, window::TEXT_ACCENT);
+        assert!(
+            inactive.fill.a() < 255 && hovered.fill.a() < 255,
+            "danger uses a translucent tint that intensifies on hover, not a solid fill"
+        );
+        assert_eq!(inactive.fg, window::STATUS_CRITICAL, "red label throughout");
     }
 
     #[test]
