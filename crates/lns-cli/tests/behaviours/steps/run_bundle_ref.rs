@@ -42,9 +42,9 @@ async fn given_bundle_with_policy(world: &mut BehaviourWorld, bundle_ref: String
         Family::Bundle,
         "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
          metadata:\n  name: some-system\n\
-         components:\n  \
-         agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
-         policies:\n    - { ref: org/acme/policies/some-egress:v1 }\n",
+         spec:\n  components:\n    \
+         agents:\n      - { ref: org/acme/agents/some-agent:v1 }\n    \
+         policies:\n      - { ref: org/acme/policies/some-egress:v1 }\n",
     )
     .await;
 }

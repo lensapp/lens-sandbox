@@ -166,28 +166,28 @@ pub async fn resolve_bundle_ref(
     let bundle = pull_bundle(reference, client).await?;
     let agent_ref = single_agent_ref(reference, &bundle)?;
     let mut resolved = resolve_agent_ref(&agent_ref, client, writer).await?;
-    if let Some(component) = bundle.components.policies.first() {
+    let components = &bundle.spec.components;
+    if let Some(component) = components.policies.first() {
         let policy_ref = qualify_component_ref(reference, &component.reference);
         let (path, file) = materialize_policy(&policy_ref, client).await?;
         writeln!(writer, "✓ applied bundle policy {policy_ref}")?;
         resolved.policy_path = Some(path);
         resolved._policy_tempfile = Some(file);
     }
-    if let Some(component) = &bundle.components.sandbox {
+    if let Some(component) = &components.sandbox {
         let sandbox_ref = qualify_component_ref(reference, &component.reference);
         let sandbox = pull_sandbox(&sandbox_ref, client).await?;
-        if let Some(resources) = &sandbox.resources {
+        if let Some(resources) = &sandbox.spec.resources {
             resolved.cpus = resources.cpu.as_ref().and_then(quantity_to_cpus);
             resolved.mem = resources.memory.as_ref().and_then(quantity_to_mib);
         }
         writeln!(writer, "✓ applied sandbox {sandbox_ref}")?;
     }
-    let mount_components = bundle
-        .components
+    let mount_components = components
         .model
         .iter()
-        .chain(bundle.components.tools.iter())
-        .chain(bundle.components.knowledge.iter());
+        .chain(components.tools.iter())
+        .chain(components.knowledge.iter());
     for component in mount_components {
         let mount = resolve_mount(reference, component, client).await?;
         writeln!(writer, "✓ mounting {} → {}", mount.reference, mount.path)?;
@@ -300,7 +300,7 @@ async fn pull_bundle(reference: &str, client: &dyn RegistryClient) -> Result<Bun
 }
 
 fn single_agent_ref(bundle_ref: &str, bundle: &BundleArtifact) -> Result<String> {
-    match bundle.components.agents.as_slice() {
+    match bundle.spec.components.agents.as_slice() {
         [] => bail!("bundle {bundle_ref} has no agent component to run"),
         [one] => Ok(qualify_component_ref(bundle_ref, &one.reference)),
         many => bail!(
@@ -332,11 +332,21 @@ async fn materialize_policy(
         .suffix(".yaml")
         .tempfile()
         .context("creating a temp file for the bundle policy")?;
-    file.write_all(&blob)
+    file.write_all(&policy_spec_bytes(&blob)?)
         .context("writing the materialized bundle policy")?;
     file.flush().ok();
     let path = file.path().to_path_buf();
     Ok((path, file))
+}
+
+/// The supervisor reads a flat `{network, integrations}` policy; extract the artifact envelope's `spec` (the new schema nests it there), falling back to the blob as-is for an already-flat policy.
+fn policy_spec_bytes(config_blob: &[u8]) -> Result<Vec<u8>> {
+    let value: serde_json::Value =
+        serde_json::from_slice(config_blob).context("parsing policy artifact config")?;
+    match value.get("spec") {
+        Some(spec) => Ok(serde_json::to_vec(spec).context("serializing policy spec")?),
+        None => Ok(config_blob.to_vec()),
+    }
 }
 
 fn registry_host(reference: &str) -> Option<&str> {
@@ -508,14 +518,14 @@ mod tests {
     }
 
     fn bundle_blob(components: &str) -> Vec<u8> {
-        lns_policy::artifact::to_config_blob(
-            format!(
-                "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
-                 metadata:\n  name: some-system\ncomponents:\n{components}"
-            )
-            .as_bytes(),
-        )
-        .unwrap()
+        let parsed: serde_json::Value = serde_yaml::from_str(components).unwrap();
+        let doc = serde_json::json!({
+            "apiVersion": "lens.dev/v1alpha1",
+            "kind": "AgentSystem",
+            "metadata": { "name": "some-system" },
+            "spec": { "components": parsed },
+        });
+        serde_json::to_vec(&doc).unwrap()
     }
 
     fn policy_blob() -> Vec<u8> {
@@ -549,10 +559,22 @@ mod tests {
     }
 
     fn sandbox_blob(resources: &str) -> Vec<u8> {
-        lns_policy::artifact::to_config_blob(
-            format!("name: some-runtime\nisolation: microvm\n{resources}").as_bytes(),
-        )
-        .unwrap()
+        let mut spec = serde_json::json!({ "isolation": "microvm" });
+        if !resources.trim().is_empty() {
+            let parsed: serde_json::Value = serde_yaml::from_str(resources).unwrap();
+            if let (Some(obj), Some(extra)) = (spec.as_object_mut(), parsed.as_object()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        let doc = serde_json::json!({
+            "apiVersion": "lens.dev/v1alpha1",
+            "kind": "Sandbox",
+            "metadata": { "name": "some-runtime" },
+            "spec": spec,
+        });
+        serde_json::to_vec(&doc).unwrap()
     }
 
     async fn full_agent_client() -> RefKeyedClient {
@@ -1209,6 +1231,17 @@ mod tests {
         let msg = missing_credentials_warning(&["some-oauth".to_string()]);
         assert!(msg.contains("some-oauth"), "got: {msg}");
         assert!(msg.contains("`lns connect some-oauth`"), "got: {msg}");
+    }
+
+    #[test]
+    fn policy_spec_bytes_unwraps_the_envelope_or_passes_a_flat_policy_through() {
+        let enveloped = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"p"},"spec":{"network":{"defaultVerdict":"ask"}}}"#;
+        let out = policy_spec_bytes(enveloped).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("network").is_some(), "spec unwrapped to top level");
+        assert!(v.get("spec").is_none());
+        let flat = br#"{"network":{}}"#;
+        assert_eq!(policy_spec_bytes(flat).unwrap(), flat.to_vec());
     }
 
     fn cref(reference: &str) -> ComponentRef {

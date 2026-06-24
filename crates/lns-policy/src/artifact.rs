@@ -238,7 +238,13 @@ pub struct Components {
     pub knowledge: Vec<ComponentRef>,
 }
 
-/// The parsed `bundle` artifact (`kind: AgentSystem`) — a manifest of component references.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct BundleSpec {
+    #[serde(default)]
+    pub components: Components,
+}
+
+/// The parsed `bundle` artifact (`kind: AgentSystem`) — its `spec.components` is a manifest of component references.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleArtifact {
@@ -246,7 +252,7 @@ pub struct BundleArtifact {
     pub kind: String,
     pub metadata: ArtifactMetadata,
     #[serde(default)]
-    pub components: Components,
+    pub spec: BundleSpec,
 }
 
 impl BundleArtifact {
@@ -280,11 +286,9 @@ pub struct SandboxResources {
     pub memory: Option<Quantity>,
 }
 
-/// The parsed `sandbox` artifact — the runtime envelope; `lns run` reads its `resources` for sizing.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SandboxArtifact {
-    pub name: String,
+pub struct SandboxSpec {
     #[serde(default)]
     pub isolation: Option<String>,
     #[serde(default)]
@@ -295,6 +299,15 @@ pub struct SandboxArtifact {
     pub capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub base_image: Option<String>,
+}
+
+/// The parsed `sandbox` artifact — the runtime envelope; `lns run` reads `spec.resources` for sizing.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxArtifact {
+    pub metadata: ArtifactMetadata,
+    #[serde(default)]
+    pub spec: SandboxSpec,
 }
 
 impl SandboxArtifact {
@@ -592,29 +605,24 @@ mod tests {
         let blob = to_config_blob(
             "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
              metadata:\n  name: some-system\n\
-             components:\n  \
-             agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
-             policies:\n    - { ref: org/acme/policies/some-egress:v1 }\n  \
-             sandbox:\n    ref: org/acme/sandboxes/some-runtime:v1\n"
+             spec:\n  components:\n    \
+             agents:\n      - { ref: org/acme/agents/some-agent:v1 }\n    \
+             policies:\n      - { ref: org/acme/policies/some-egress:v1 }\n    \
+             sandbox:\n      ref: org/acme/sandboxes/some-runtime:v1\n"
                 .as_bytes(),
         )
         .unwrap();
         let bundle = BundleArtifact::from_config_blob(&blob).unwrap();
+        let c = &bundle.spec.components;
         assert_eq!(bundle.metadata.name, "some-system");
-        assert_eq!(bundle.components.agents.len(), 1);
+        assert_eq!(c.agents.len(), 1);
+        assert_eq!(c.agents[0].reference, "org/acme/agents/some-agent:v1");
+        assert_eq!(c.policies[0].reference, "org/acme/policies/some-egress:v1");
         assert_eq!(
-            bundle.components.agents[0].reference,
-            "org/acme/agents/some-agent:v1"
-        );
-        assert_eq!(
-            bundle.components.policies[0].reference,
-            "org/acme/policies/some-egress:v1"
-        );
-        assert_eq!(
-            bundle.components.sandbox.as_ref().unwrap().reference,
+            c.sandbox.as_ref().unwrap().reference,
             "org/acme/sandboxes/some-runtime:v1"
         );
-        assert!(bundle.components.tools.is_empty());
+        assert!(c.tools.is_empty());
     }
 
     #[test]
@@ -628,39 +636,46 @@ mod tests {
         assert!(format!("{err}").contains("AgentSystem"), "got: {err}");
     }
 
+    fn sandbox_blob(spec: &str) -> Vec<u8> {
+        to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: Sandbox\n\
+                 metadata:\n  name: some-runtime\nspec:\n{spec}"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn sandbox_artifact_parses_numeric_resources() {
-        let blob = to_config_blob(
-            "name: some-runtime\nversion: \"1.0\"\n\
-             baseImage: localhost:5000/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\n\
-             isolation: microvm\nresources:\n  cpu: 2\n  memory: 3072\ncapabilities: []\n"
-                .as_bytes(),
-        )
+        let sandbox = SandboxArtifact::from_config_blob(&sandbox_blob(
+            "  isolation: microvm\n  resources:\n    cpu: 2\n    memory: 3072\n",
+        ))
         .unwrap();
-        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
-        assert_eq!(sandbox.name, "some-runtime");
-        assert_eq!(sandbox.isolation.as_deref(), Some("microvm"));
-        let resources = sandbox.resources.unwrap();
+        assert_eq!(sandbox.metadata.name, "some-runtime");
+        assert_eq!(sandbox.spec.isolation.as_deref(), Some("microvm"));
+        let resources = sandbox.spec.resources.unwrap();
         assert_eq!(resources.cpu, Some(Quantity::Unsigned(2)));
         assert_eq!(resources.memory, Some(Quantity::Unsigned(3072)));
     }
 
     #[test]
     fn sandbox_artifact_tolerates_string_resources() {
-        let blob =
-            to_config_blob("name: r\nresources:\n  cpu: \"2\"\n  memory: \"3g\"\n".as_bytes())
-                .unwrap();
-        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
-        let resources = sandbox.resources.unwrap();
+        let sandbox = SandboxArtifact::from_config_blob(&sandbox_blob(
+            "  resources:\n    cpu: \"2\"\n    memory: \"3g\"\n",
+        ))
+        .unwrap();
+        let resources = sandbox.spec.resources.unwrap();
         assert_eq!(resources.cpu, Some(Quantity::Text("2".into())));
         assert_eq!(resources.memory, Some(Quantity::Text("3g".into())));
     }
 
     #[test]
     fn sandbox_artifact_tolerates_a_missing_resources_block() {
-        let blob = to_config_blob("name: r\nisolation: microvm\n".as_bytes()).unwrap();
-        let sandbox = SandboxArtifact::from_config_blob(&blob).unwrap();
-        assert!(sandbox.resources.is_none());
+        let sandbox =
+            SandboxArtifact::from_config_blob(&sandbox_blob("  isolation: microvm\n")).unwrap();
+        assert!(sandbox.spec.resources.is_none());
     }
 
     #[test]
@@ -671,16 +686,14 @@ mod tests {
 
     #[test]
     fn sandbox_artifact_parses_supervisor_capabilities_and_base_image() {
-        let blob = to_config_blob(
-            "name: r\nisolation: microvm\nsupervisorVersion: 1.2.3\n\
-             capabilities: [net]\nbaseImage: img@sha256:abc\n"
-                .as_bytes(),
-        )
+        let s = SandboxArtifact::from_config_blob(&sandbox_blob(
+            "  isolation: microvm\n  supervisorVersion: 1.2.3\n  \
+             capabilities: [net]\n  baseImage: img@sha256:abc\n",
+        ))
         .unwrap();
-        let s = SandboxArtifact::from_config_blob(&blob).unwrap();
-        assert_eq!(s.supervisor_version.as_deref(), Some("1.2.3"));
-        assert_eq!(s.capabilities, Some(vec!["net".to_string()]));
-        assert_eq!(s.base_image.as_deref(), Some("img@sha256:abc"));
+        assert_eq!(s.spec.supervisor_version.as_deref(), Some("1.2.3"));
+        assert_eq!(s.spec.capabilities, Some(vec!["net".to_string()]));
+        assert_eq!(s.spec.base_image.as_deref(), Some("img@sha256:abc"));
     }
 
     #[test]
@@ -730,15 +743,15 @@ mod tests {
     fn components_parses_a_single_model_ref() {
         let blob = to_config_blob(
             "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
-             metadata:\n  name: sys\ncomponents:\n  \
-             agents:\n    - { ref: org/acme/agents/a:v1 }\n  \
-             model:\n    ref: org/acme/models/m:v1\n"
+             metadata:\n  name: sys\nspec:\n  components:\n    \
+             agents:\n      - { ref: org/acme/agents/a:v1 }\n    \
+             model:\n      ref: org/acme/models/m:v1\n"
                 .as_bytes(),
         )
         .unwrap();
         let bundle = BundleArtifact::from_config_blob(&blob).unwrap();
         assert_eq!(
-            bundle.components.model.unwrap().reference,
+            bundle.spec.components.model.unwrap().reference,
             "org/acme/models/m:v1"
         );
     }
