@@ -712,6 +712,10 @@ pub struct RunArgs {
         help = "Override entrypoint+cmd. Everything after `--` is the command."
     )]
     pub cmd: Vec<String>,
+
+    /// Application-layer artifact mounts resolved from a bundle/agent ref or `--mount`; not a direct CLI arg.
+    #[arg(skip)]
+    pub artifact_mounts: Vec<lns_ipc::ArtifactMount>,
 }
 
 pub const DEFAULT_CPUS: u8 = 1;

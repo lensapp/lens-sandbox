@@ -510,6 +510,7 @@ mod tests {
                 detached: false,
                 published_ports: vec![],
                 volumes: vec![],
+                artifact_mounts: vec![],
             }),
             Instant::now(),
         )

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use lns_policy::artifact::{
-    AgentArtifact, BundleArtifact, CredentialRef, Family, Quantity, SandboxArtifact,
+    AgentArtifact, BundleArtifact, ComponentRef, CredentialRef, Family, MountedArtifact, Quantity,
+    SandboxArtifact,
 };
 use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
 
@@ -20,6 +21,7 @@ pub struct ResolvedRun {
     pub sandbox_user: Option<String>,
     pub ports: Vec<lns_ipc::PortPublish>,
     pub volumes: Vec<lns_ipc::VolumeMount>,
+    pub artifact_mounts: Vec<lns_ipc::ArtifactMount>,
     pub policy_path: Option<PathBuf>,
     pub credentials: Vec<CredentialRef>,
     pub _policy_tempfile: Option<tempfile::NamedTempFile>,
@@ -63,6 +65,9 @@ pub async fn resolve_into_run_args(
     if args.volumes.is_empty() {
         args.volumes = resolved.volumes;
     }
+    if args.artifact_mounts.is_empty() {
+        args.artifact_mounts = resolved.artifact_mounts;
+    }
     if args.policy.is_none()
         && let Some(p) = &resolved.policy_path
     {
@@ -103,6 +108,7 @@ pub async fn resolve_agent_ref(
         sandbox_user: agent.spec.user,
         ports: agent.spec.ports.iter().map(port_publish).collect(),
         volumes: agent.spec.volumes.iter().map(volume_mount).collect(),
+        artifact_mounts: Vec::new(),
         policy_path: None,
         credentials: agent.spec.credentials,
         _policy_tempfile: None,
@@ -176,8 +182,66 @@ pub async fn resolve_bundle_ref(
         }
         writeln!(writer, "✓ applied sandbox {sandbox_ref}")?;
     }
+    if let Some(component) = &bundle.components.model {
+        let mount = resolve_mount(reference, component, client).await?;
+        writeln!(
+            writer,
+            "✓ mounting model {} → {}",
+            mount.reference, mount.path
+        )?;
+        resolved.artifact_mounts.push(mount);
+    }
     note_skipped_components(&bundle, writer)?;
     Ok(resolved)
+}
+
+/// Resolves an application-layer component into an `ArtifactMount` (host-qualified ref + guest path); the service materializes the content at boot.
+async fn resolve_mount(
+    bundle_ref: &str,
+    component: &ComponentRef,
+    client: &dyn RegistryClient,
+) -> Result<lns_ipc::ArtifactMount> {
+    let reference = qualify_component_ref(bundle_ref, &component.reference);
+    let (artifact_type, config_blob) = match client.pull(&reference).await? {
+        Pulled::Artifact {
+            artifact_type,
+            config_blob,
+            ..
+        } => (artifact_type, config_blob),
+        Pulled::Image { .. } => {
+            bail!("{reference} resolved to an image, not a mountable artifact")
+        }
+    };
+    let family = Family::from_artifact_type(&artifact_type).ok_or_else(|| {
+        anyhow::anyhow!("{reference} has an unrecognized artifact type {artifact_type}")
+    })?;
+    if !family.is_application_layer() {
+        bail!(
+            "{reference} is a {} artifact and cannot be mounted",
+            family.slug()
+        );
+    }
+    let parsed = MountedArtifact::from_config_blob(&config_blob)
+        .with_context(|| format!("parsing artifact {reference}"))?;
+    let (path, read_only) = match &parsed.mount {
+        Some(m) => (m.path.clone(), m.read_only.unwrap_or(true)),
+        None => (
+            family
+                .default_mount_path(&parsed.metadata.name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{reference} ({}) requires an explicit mount path",
+                        family.slug()
+                    )
+                })?,
+            true,
+        ),
+    };
+    Ok(lns_ipc::ArtifactMount {
+        reference,
+        path,
+        read_only,
+    })
 }
 
 async fn pull_sandbox(reference: &str, client: &dyn RegistryClient) -> Result<SandboxArtifact> {
@@ -341,7 +405,20 @@ mod tests {
     const POLICY_REF: &str = "localhost:5000/org/acme/policies/some-egress:v1";
     const SANDBOX_REF: &str = "localhost:5000/org/acme/sandboxes/some-runtime:v1";
     const BUNDLE_REF: &str = "localhost:5000/org/acme/bundles/some-system:v1";
+    const MODEL_REF: &str = "localhost:5000/org/acme/models/some-model:v1";
     const AGENT_IMAGE: &str = "localhost:5000/org/acme/images/some-agent:v1";
+
+    fn model_blob(mount: &str) -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: Model\n\
+                 metadata:\n  name: some-model\n{mount}\
+                 spec:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
 
     type ArtifactMap = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
     type ImageMap = Arc<Mutex<HashMap<String, String>>>;
@@ -547,6 +624,7 @@ mod tests {
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
+            artifact_mounts: Vec::new(),
         }
     }
 
@@ -1120,5 +1198,173 @@ mod tests {
         let msg = missing_credentials_warning(&["some-oauth".to_string()]);
         assert!(msg.contains("some-oauth"), "got: {msg}");
         assert!(msg.contains("`lns connect some-oauth`"), "got: {msg}");
+    }
+
+    fn cref(reference: &str) -> ComponentRef {
+        ComponentRef {
+            reference: reference.to_string(),
+            digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_maps_a_model_to_its_default_path() {
+        let client = RefKeyedClient::default();
+        put_artifact(&client, MODEL_REF, Family::Model, &model_blob("")).await;
+        let mount = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)
+            .await
+            .unwrap();
+        assert_eq!(mount.reference, MODEL_REF);
+        assert_eq!(mount.path, "/etc/agent/model");
+        assert!(mount.read_only);
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_honors_an_explicit_mount_override() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            MODEL_REF,
+            Family::Model,
+            &model_blob("mount:\n  path: /custom/model\n  readOnly: false\n"),
+        )
+        .await;
+        let mount = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)
+            .await
+            .unwrap();
+        assert_eq!(mount.path, "/custom/model");
+        assert!(!mount.read_only);
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_rejects_a_runtime_layer_artifact() {
+        let client = RefKeyedClient::default();
+        put_artifact(&client, POLICY_REF, Family::Policy, &policy_blob()).await;
+        let err = resolve_mount(
+            BUNDLE_REF,
+            &cref("org/acme/policies/some-egress:v1"),
+            &client,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot be mounted"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_rejects_an_image() {
+        let client = RefKeyedClient::default();
+        put_image(&client, MODEL_REF).await;
+        let err = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a mountable artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_requires_an_explicit_path_for_a_fileset() {
+        let client = RefKeyedClient::default();
+        let fileset_ref = "localhost:5000/org/acme/filesets/cfg:v1";
+        // a fileset config blob with no mount (MountedArtifact tolerates it; default_mount_path is None)
+        let blob = lns_policy::artifact::to_config_blob(
+            b"apiVersion: lens.dev/v1alpha1\nkind: FileSet\nmetadata:\n  name: cfg\n",
+        )
+        .unwrap();
+        put_artifact(&client, fileset_ref, Family::Fileset, &blob).await;
+        let err = resolve_mount(BUNDLE_REF, &cref("org/acme/filesets/cfg:v1"), &client)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("requires an explicit mount path"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_rejects_an_unrecognized_artifact_type() {
+        let client = RefKeyedClient::default();
+        client
+            .push_artifact(
+                MODEL_REF,
+                "application/vnd.oci.image.config.v1+json",
+                "x",
+                &model_blob(""),
+            )
+            .await
+            .unwrap();
+        let err = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unrecognized artifact type"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mount_surfaces_a_malformed_artifact_blob() {
+        let client = RefKeyedClient::default();
+        client
+            .push_artifact(MODEL_REF, &Family::Model.artifact_type(), "x", b"{}")
+            .await
+            .unwrap();
+        let err = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parsing artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_mounts_the_model_component() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(
+                "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+                 model:\n    ref: org/acme/models/some-model:v1\n",
+            ),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(&client, MODEL_REF, Family::Model, &model_blob("")).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(resolved.artifact_mounts.len(), 1);
+        assert_eq!(resolved.artifact_mounts[0].path, "/etc/agent/model");
+        assert_eq!(resolved.artifact_mounts[0].reference, MODEL_REF);
+    }
+
+    #[tokio::test]
+    async fn resolve_into_run_args_overlays_artifact_mounts() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(
+                "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+                 model:\n    ref: org/acme/models/some-model:v1\n",
+            ),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(&client, MODEL_REF, Family::Model, &model_blob("")).await;
+        let (args, _) =
+            resolve_into_run_args(run_args(Some(BUNDLE_REF)), &client, &[], &mut Vec::new())
+                .await
+                .unwrap();
+        assert_eq!(args.artifact_mounts.len(), 1);
+        assert_eq!(args.artifact_mounts[0].path, "/etc/agent/model");
     }
 }

@@ -264,6 +264,7 @@ pub struct RunConfig {
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
+    pub artifact_mounts: Vec<ArtifactMount>,
     pub detached: bool,
 }
 
@@ -278,6 +279,7 @@ impl RunConfig {
             env: args.env.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
+            artifact_mounts: args.artifact_mounts.clone(),
             detached: args.detached,
         }
     }
@@ -333,12 +335,22 @@ pub struct RunImageArgs {
     pub published_ports: Vec<PortPublish>,
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub artifact_mounts: Vec<ArtifactMount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeMount {
     pub name: String,
     pub target: String,
+    pub read_only: bool,
+}
+
+/// An application-layer registry artifact to mount into the guest at `path`; the service resolves the reference and materializes its content (config blob for model, OCI layers for tool/knowledge/fileset) at boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMount {
+    pub reference: String,
+    pub path: String,
     pub read_only: bool,
 }
 
@@ -523,6 +535,7 @@ mod tests {
             detached: false,
             published_ports: vec![mapping],
             volumes: Vec::new(),
+            artifact_mounts: Vec::new(),
         });
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -552,10 +565,42 @@ mod tests {
                 target: "/data".into(),
                 read_only: true,
             }],
+            artifact_mounts: Vec::new(),
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, args);
+    }
+
+    #[test]
+    fn run_image_args_artifact_mounts_survive_round_trip_and_default_empty() {
+        let args = RunImageArgs {
+            image: Some("ubuntu".into()),
+            cpus: 1,
+            mem: 512,
+            policy_path: None,
+            sandbox_user: None,
+            sandbox_uid: None,
+            cmd: vec![],
+            env: vec![],
+            workdir: None,
+            debug: false,
+            tty: true,
+            stdin: true,
+            initial_winsize: None,
+            detached: false,
+            published_ports: vec![],
+            volumes: vec![],
+            artifact_mounts: vec![ArtifactMount {
+                reference: "localhost:5000/org/acme/models/m:v1".into(),
+                path: "/etc/agent/model".into(),
+                read_only: true,
+            }],
+        };
+        let frame = crate::encode_frame(&args).unwrap();
+        let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, args);
+        assert_eq!(decoded.artifact_mounts[0].path, "/etc/agent/model");
     }
 
     #[test]
@@ -710,6 +755,11 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
+            }],
+            artifact_mounts: vec![ArtifactMount {
+                reference: "localhost:5000/org/acme/models/m:v1".into(),
+                path: "/etc/agent/model".into(),
+                read_only: true,
             }],
         }
     }
