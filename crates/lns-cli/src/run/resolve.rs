@@ -369,14 +369,34 @@ async fn materialize_policy(
     Ok((path, file))
 }
 
-/// The supervisor reads a flat `{network, integrations}` policy; extract the artifact envelope's `spec` (the new schema nests it there), falling back to the blob as-is for an already-flat policy.
+/// The supervisor reads a flat `{network, integrations}` policy with integrations as id strings; extract the artifact envelope's `spec` (the new schema nests it there) and normalize each integration `ArtifactRef` to its id, falling back to the blob as-is for an already-flat policy.
 fn policy_spec_bytes(config_blob: &[u8]) -> Result<Vec<u8>> {
     let value: serde_json::Value =
         serde_json::from_slice(config_blob).context("parsing policy artifact config")?;
-    match value.get("spec") {
-        Some(spec) => Ok(serde_json::to_vec(spec).context("serializing policy spec")?),
-        None => Ok(config_blob.to_vec()),
+    let mut spec = match value.get("spec") {
+        Some(spec) => spec.clone(),
+        None => return Ok(config_blob.to_vec()),
+    };
+    normalize_policy_integrations(&mut spec);
+    serde_json::to_vec(&spec).context("serializing policy spec")
+}
+
+/// Rewrites `spec.integrations` entries from registry `ArtifactRef` maps (`{ref}`) to the bare integration ids the supervisor reads; string entries pass through.
+fn normalize_policy_integrations(spec: &mut serde_json::Value) {
+    let Some(integrations) = spec.get_mut("integrations").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for entry in integrations.iter_mut() {
+        if let Some(reference) = entry.get("ref").and_then(|r| r.as_str()) {
+            *entry = serde_json::Value::String(integration_id_from_ref(reference));
+        }
     }
+}
+
+/// The integration id is the last path segment of its reference with any `:tag` stripped (`org/acme/integrations/anthropic:v1` → `anthropic`).
+fn integration_id_from_ref(reference: &str) -> String {
+    let last = reference.rsplit('/').next().unwrap_or(reference);
+    last.split(':').next().unwrap_or(last).to_string()
 }
 
 fn registry_host(reference: &str) -> Option<&str> {
@@ -1275,6 +1295,34 @@ mod tests {
         assert!(v.get("spec").is_none());
         let flat = br#"{"network":{}}"#;
         assert_eq!(policy_spec_bytes(flat).unwrap(), flat.to_vec());
+    }
+
+    #[test]
+    fn policy_spec_bytes_normalizes_integration_refs_to_ids() {
+        let enveloped = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"p"},"spec":{"integrations":[{"ref":"org/acme/integrations/anthropic:v1"},"already-an-id"]}}"#;
+        let out = policy_spec_bytes(enveloped).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["integrations"],
+            serde_json::json!(["anthropic", "already-an-id"])
+        );
+    }
+
+    #[test]
+    fn policy_spec_bytes_leaves_a_spec_without_integrations_untouched() {
+        let enveloped = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"p"},"spec":{"network":{"defaultVerdict":"ask"}}}"#;
+        let out = policy_spec_bytes(enveloped).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("integrations").is_none());
+    }
+
+    #[test]
+    fn integration_id_from_ref_strips_path_and_tag() {
+        assert_eq!(
+            integration_id_from_ref("localhost:5000/org/acme/integrations/anthropic:v1"),
+            "anthropic"
+        );
+        assert_eq!(integration_id_from_ref("bare"), "bare");
     }
 
     fn cref(reference: &str) -> ComponentRef {
