@@ -2,8 +2,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use lns_policy::artifact::{AgentArtifact, BundleArtifact, CredentialRef, Family};
+use lns_policy::artifact::{AgentArtifact, BundleArtifact, CredentialRef, Family, ToolArtifact};
 use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
+use serde_json::{Value, json};
 
 use crate::cli::RunArgs;
 use crate::registry::{Pulled, RegistryClient};
@@ -165,10 +166,18 @@ pub async fn resolve_bundle_ref(
     let bundle = pull_bundle(reference, client).await?;
     let agent_ref = single_agent_ref(reference, &bundle)?;
     let mut resolved = resolve_agent_ref(&agent_ref, client, writer).await?;
-    if let Some(component) = bundle.components.policies.first() {
-        let policy_ref = qualify_component_ref(reference, &component.reference);
-        let (path, file) = materialize_policy(&policy_ref, client).await?;
-        writeln!(writer, "✓ applied bundle policy {policy_ref}")?;
+    let tools = resolve_tools(reference, &bundle, client, writer).await?;
+    let base = match bundle.components.policies.first() {
+        Some(component) => {
+            let policy_ref = qualify_component_ref(reference, &component.reference);
+            let blob = pull_policy_blob(&policy_ref, client).await?;
+            writeln!(writer, "✓ applied bundle policy {policy_ref}")?;
+            Some(blob)
+        }
+        None => None,
+    };
+    if let Some(bytes) = fold_tools_into_policy(base, &tools)? {
+        let (path, file) = write_ephemeral_policy(&bytes)?;
         resolved.policy_path = Some(path);
         resolved._policy_tempfile = Some(file);
     }
@@ -206,11 +215,8 @@ fn single_agent_ref(bundle_ref: &str, bundle: &BundleArtifact) -> Result<String>
     }
 }
 
-async fn materialize_policy(
-    policy_ref: &str,
-    client: &dyn RegistryClient,
-) -> Result<(PathBuf, tempfile::NamedTempFile)> {
-    let blob = match client.pull(policy_ref).await? {
+async fn pull_policy_blob(policy_ref: &str, client: &dyn RegistryClient) -> Result<Vec<u8>> {
+    match client.pull(policy_ref).await? {
         Pulled::Artifact {
             artifact_type,
             config_blob,
@@ -219,27 +225,137 @@ async fn materialize_policy(
             if Family::from_artifact_type(&artifact_type) != Some(Family::Policy) {
                 bail!("{policy_ref} is not a policy artifact (media type {artifact_type})");
             }
-            config_blob
+            Ok(config_blob)
         }
         Pulled::Image { .. } => bail!("{policy_ref} resolved to an image, not a policy artifact"),
-    };
+    }
+}
+
+fn write_ephemeral_policy(bytes: &[u8]) -> Result<(PathBuf, tempfile::NamedTempFile)> {
     let mut file = tempfile::Builder::new()
         .prefix("lns-bundle-policy-")
         .suffix(".yaml")
         .tempfile()
         .context("creating a temp file for the bundle policy")?;
-    file.write_all(&blob)
+    file.write_all(bytes)
         .context("writing the materialized bundle policy")?;
     file.flush().ok();
     let path = file.path().to_path_buf();
     Ok((path, file))
 }
 
+async fn resolve_tools(
+    bundle_ref: &str,
+    bundle: &BundleArtifact,
+    client: &dyn RegistryClient,
+    writer: &mut impl Write,
+) -> Result<Vec<ToolArtifact>> {
+    let mut tools = Vec::new();
+    for component in &bundle.components.tools {
+        let tool_ref = qualify_component_ref(bundle_ref, &component.reference);
+        let tool = pull_tool(&tool_ref, client).await?;
+        writeln!(writer, "✓ resolved tool {} ({tool_ref})", tool.name)?;
+        tools.push(tool);
+    }
+    Ok(tools)
+}
+
+async fn pull_tool(tool_ref: &str, client: &dyn RegistryClient) -> Result<ToolArtifact> {
+    match client.pull(tool_ref).await? {
+        Pulled::Artifact {
+            artifact_type,
+            config_blob,
+            ..
+        } => {
+            if Family::from_artifact_type(&artifact_type) != Some(Family::Tool) {
+                bail!("{tool_ref} is not a tool artifact (media type {artifact_type})");
+            }
+            ToolArtifact::from_config_blob(&config_blob)
+                .with_context(|| format!("parsing tool artifact {tool_ref}"))
+        }
+        Pulled::Image { .. } => bail!("{tool_ref} resolved to an image, not a tool artifact"),
+    }
+}
+
+/// Folds the bundle's remote-tool egress routes and required integrations into the run policy as raw JSON bytes; `Ok(base)` unchanged when nothing needs adding, `Ok(None)` when there is no policy at all.
+fn fold_tools_into_policy(
+    base: Option<Vec<u8>>,
+    tools: &[ToolArtifact],
+) -> Result<Option<Vec<u8>>> {
+    let routes: Vec<Value> = tools
+        .iter()
+        .filter_map(|t| t.remote_url().and_then(url_authority))
+        .map(tool_route)
+        .collect();
+    let integrations: Vec<Value> = tools
+        .iter()
+        .flat_map(|t| t.required_integrations.iter())
+        .map(|id| Value::String(id.clone()))
+        .collect();
+    if routes.is_empty() && integrations.is_empty() {
+        return Ok(base);
+    }
+    let mut policy: Value = match base {
+        Some(blob) => serde_json::from_slice(&blob).context("parsing the bundle policy")?,
+        None => json!({ "network": { "defaultVerdict": "ask", "defaultTransport": "direct" } }),
+    };
+    append_unique(network_routes(&mut policy)?, routes);
+    append_unique(integrations_array(&mut policy)?, integrations);
+    Ok(Some(
+        serde_json::to_vec(&policy).context("serializing the run policy")?,
+    ))
+}
+
+fn network_routes(policy: &mut Value) -> Result<&mut Vec<Value>> {
+    let network = policy
+        .as_object_mut()
+        .context("a policy must be a JSON object")?
+        .entry("network")
+        .or_insert_with(|| json!({}));
+    network
+        .as_object_mut()
+        .context("policy.network must be an object")?
+        .entry("allowedRoutes")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("policy.network.allowedRoutes must be an array")
+}
+
+fn integrations_array(policy: &mut Value) -> Result<&mut Vec<Value>> {
+    policy
+        .as_object_mut()
+        .context("a policy must be a JSON object")?
+        .entry("integrations")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("policy.integrations must be an array")
+}
+
+fn append_unique(target: &mut Vec<Value>, items: Vec<Value>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+fn url_authority(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    (!authority.is_empty()).then(|| authority.to_string())
+}
+
+fn tool_route(authority: String) -> Value {
+    json!({
+        "match": authority,
+        "verdict": "allow",
+        "transport": "direct",
+        "description": "egress for a bundle tool",
+    })
+}
+
 fn note_skipped_components(bundle: &BundleArtifact, writer: &mut impl Write) -> Result<()> {
     let mut skipped = Vec::new();
-    if !bundle.components.tools.is_empty() {
-        skipped.push("tools");
-    }
     if bundle.components.sandbox.is_some() {
         skipped.push("sandbox");
     }
@@ -305,6 +421,7 @@ mod tests {
     const POLICY_REF: &str = "localhost:5000/org/acme/policies/some-egress:v1";
     const BUNDLE_REF: &str = "localhost:5000/org/acme/bundles/some-system:v1";
     const AGENT_IMAGE: &str = "localhost:5000/org/acme/images/some-agent:v1";
+    const TOOL_REF: &str = "localhost:5000/org/acme/tools/some-tool:v1";
 
     type ArtifactMap = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
     type ImageMap = Arc<Mutex<HashMap<String, String>>>;
@@ -423,6 +540,20 @@ mod tests {
 
     fn policy_blob() -> Vec<u8> {
         lns_policy::artifact::to_config_blob(b"network:\n  defaultVerdict: ask\n").unwrap()
+    }
+
+    fn stdio_tool_blob() -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            b"name: fmt\nkind: mcp\nmcp:\n  transport: stdio\n  command: some-mcp-server\n",
+        )
+        .unwrap()
+    }
+
+    fn remote_tool_blob() -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            b"name: search\nkind: mcp\nmcp:\n  transport: http\n  url: https://api.some-provider.example/mcp\nrequiredIntegrations: [some-oauth]\n",
+        )
+        .unwrap()
     }
 
     async fn agent_client(command: &str, with_cred: bool) -> RefKeyedClient {
@@ -774,7 +905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_bundle_ref_notes_unapplied_components() {
+    async fn resolve_bundle_ref_notes_only_the_still_unapplied_components() {
         let client = bundle_client(
             "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
              tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n  \
@@ -782,14 +913,123 @@ mod tests {
              knowledge:\n    - { ref: org/acme/knowledge/some-runbook:v1 }\n",
         )
         .await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &stdio_tool_blob()).await;
         let mut out = Vec::new();
         resolve_bundle_ref(BUNDLE_REF, &client, &mut out)
             .await
             .unwrap();
         let msg = String::from_utf8(out).unwrap();
-        assert!(msg.contains("tools"), "got: {msg}");
-        assert!(msg.contains("sandbox"), "got: {msg}");
-        assert!(msg.contains("knowledge"), "got: {msg}");
+        assert!(msg.contains("resolved tool"), "tool is resolved: {msg}");
+        let skipped = msg
+            .lines()
+            .find(|l| l.contains("not yet applied"))
+            .expect("a skipped-components line");
+        assert!(skipped.contains("sandbox"), "got: {skipped}");
+        assert!(skipped.contains("knowledge"), "got: {skipped}");
+        assert!(
+            !skipped.contains("tools"),
+            "tools are applied now: {skipped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_folds_a_remote_tool_into_a_synthesized_policy() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &remote_tool_blob()).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        let path = resolved
+            .policy_path
+            .expect("a remote tool synthesizes a run policy");
+        let policy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let routes = policy["network"]["allowedRoutes"].as_array().unwrap();
+        assert!(
+            routes
+                .iter()
+                .any(|r| r["match"] == "api.some-provider.example"),
+            "got: {policy}"
+        );
+        assert_eq!(policy["integrations"], json!(["some-oauth"]));
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_adds_remote_tool_routes_to_the_bundle_policy() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             policies:\n    - { ref: org/acme/policies/some-egress:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &remote_tool_blob()).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        let policy: Value =
+            serde_json::from_slice(&std::fs::read(resolved.policy_path.unwrap()).unwrap()).unwrap();
+        assert_eq!(policy["network"]["defaultVerdict"], "ask");
+        let routes = policy["network"]["allowedRoutes"].as_array().unwrap();
+        assert!(
+            routes
+                .iter()
+                .any(|r| r["match"] == "api.some-provider.example"),
+            "got: {policy}"
+        );
+        assert_eq!(policy["integrations"], json!(["some-oauth"]));
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_resolves_a_stdio_tool_without_opening_egress() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &stdio_tool_blob()).await;
+        let mut out = Vec::new();
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut out)
+            .await
+            .unwrap();
+        assert!(
+            resolved.policy_path.is_none(),
+            "a stdio tool adds no egress route"
+        );
+        assert!(String::from_utf8(out).unwrap().contains("resolved tool"));
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_rejects_a_tool_that_is_an_image() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_image(&client, TOOL_REF).await;
+        let err = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("image"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_rejects_a_tool_of_the_wrong_family() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, TOOL_REF, Family::Agent, &agent_blob("x", false)).await;
+        let err = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a tool artifact"),
+            "got: {err:#}"
+        );
     }
 
     #[tokio::test]
