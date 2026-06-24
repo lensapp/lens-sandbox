@@ -120,7 +120,9 @@ impl Policy {
     }
 
     pub fn add_rule(&mut self, rule: RouteRule) {
-        self.network.allowed_routes.push(rule);
+        if !self.network.allowed_routes.contains(&rule) {
+            self.network.allowed_routes.push(rule);
+        }
     }
 
     pub fn connect(&mut self, id: impl Into<String>) {
@@ -418,6 +420,23 @@ network:
         assert_eq!(p.network.allowed_routes[0].verdict, Verdict::Allow);
         assert_eq!(p.network.allowed_routes[1].match_pattern, "b");
         assert_eq!(p.network.allowed_routes[1].verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn add_rule_skips_an_exact_duplicate() {
+        // Concurrent re-approvals of one host must not stack identical rules.
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("huggingface.co"));
+        p.add_rule(RouteRule::allow_host("huggingface.co"));
+        assert_eq!(p.network.allowed_routes.len(), 1);
+    }
+
+    #[test]
+    fn add_rule_keeps_a_same_host_rule_that_differs() {
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("example.com"));
+        p.add_rule(RouteRule::deny_host("example.com"));
+        assert_eq!(p.network.allowed_routes.len(), 2);
     }
 
     #[test]
