@@ -159,6 +159,24 @@ pub struct AgentSpec {
     pub volumes: Vec<VolumeMapping>,
     #[serde(default)]
     pub credentials: Vec<CredentialRef>,
+    #[serde(default)]
+    pub mcp: Option<McpInjection>,
+}
+
+/// Where and how an agent ingests its MCP client config; the agent declares the injection point while the format stays the de-facto `mcpServers` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInjection {
+    pub config_path: String,
+    #[serde(default)]
+    pub format: McpConfigFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum McpConfigFormat {
+    #[default]
+    McpServers,
 }
 
 /// The parsed `agent` artifact (`kind: Agent`) — the runtime-bearing artifact `lns run` resolves.
@@ -234,6 +252,109 @@ impl BundleArtifact {
             ));
         }
         Ok(bundle)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolKind {
+    Mcp,
+    Api,
+}
+
+/// The transport an MCP tool server speaks; `stdio` is a launched child process, `sse`/`http` are remote endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio,
+    Sse,
+    Http,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSpec {
+    pub transport: McpTransport,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl McpSpec {
+    fn connection_error(&self) -> Option<&'static str> {
+        let blank = |s: &Option<String>| s.as_deref().unwrap_or_default().trim().is_empty();
+        match self.transport {
+            McpTransport::Stdio if blank(&self.command) => {
+                Some("a stdio mcp tool requires `mcp.command`")
+            }
+            McpTransport::Sse | McpTransport::Http if blank(&self.url) => {
+                Some("an http/sse mcp tool requires `mcp.url`")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The parsed `tool` artifact — an MCP server or an API the agent may use; mirrors the registry's tool schema.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolArtifact {
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub kind: ToolKind,
+    #[serde(default)]
+    pub mcp: Option<McpSpec>,
+    #[serde(default)]
+    pub required_integrations: Vec<String>,
+}
+
+impl ToolArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<ToolArtifact> {
+        let tool: ToolArtifact = serde_json::from_slice(blob)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if tool.name.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tool name must not be empty",
+            ));
+        }
+        match tool.kind {
+            ToolKind::Mcp => {
+                let mcp = tool.mcp.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "an mcp tool requires an `mcp` block",
+                    )
+                })?;
+                if let Some(msg) = mcp.connection_error() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
+                }
+            }
+            ToolKind::Api if tool.remote_url().unwrap_or_default().trim().is_empty() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "an api tool requires a url",
+                ));
+            }
+            ToolKind::Api => {}
+        }
+        Ok(tool)
+    }
+
+    /// The network endpoint a remote tool is reached at (folds into the run policy); `None` for a launched stdio server.
+    pub fn remote_url(&self) -> Option<&str> {
+        let url = self.mcp.as_ref().and_then(|m| m.url.as_deref());
+        match self.kind {
+            ToolKind::Api => url,
+            ToolKind::Mcp => match self.mcp.as_ref().map(|m| m.transport) {
+                Some(McpTransport::Sse | McpTransport::Http) => url,
+                _ => None,
+            },
+        }
     }
 }
 
@@ -410,6 +531,138 @@ mod tests {
         assert!(agent.spec.resources.is_none());
         assert!(agent.spec.ports.is_empty());
         assert!(agent.spec.volumes.is_empty());
+        assert!(agent.spec.mcp.is_none());
+    }
+
+    #[test]
+    fn agent_artifact_parses_the_mcp_injection_point_with_a_default_format() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+             metadata:\n  name: some-agent\n\
+             spec:\n  image: some-image:1\n  mcp:\n    configPath: /home/agent/.mcp.json\n",
+        );
+        let mcp = AgentArtifact::from_config_blob(&blob)
+            .unwrap()
+            .spec
+            .mcp
+            .unwrap();
+        assert_eq!(mcp.config_path, "/home/agent/.mcp.json");
+        assert_eq!(mcp.format, McpConfigFormat::McpServers);
+    }
+
+    #[test]
+    fn agent_artifact_parses_an_explicit_mcp_format() {
+        let blob = agent_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+             metadata:\n  name: some-agent\n\
+             spec:\n  image: some-image:1\n  mcp:\n    \
+             configPath: /etc/mcp.json\n    format: mcpServers\n",
+        );
+        let mcp = AgentArtifact::from_config_blob(&blob)
+            .unwrap()
+            .spec
+            .mcp
+            .unwrap();
+        assert_eq!(mcp.format, McpConfigFormat::McpServers);
+    }
+
+    fn tool_blob(yaml: &str) -> Vec<u8> {
+        to_config_blob(yaml.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn tool_artifact_parses_a_stdio_mcp_server() {
+        let blob = tool_blob(
+            "name: fmt\nversion: '1'\nkind: mcp\n\
+             mcp:\n  transport: stdio\n  command: some-mcp-server\n  args: ['--flag']\n\
+             requiredIntegrations: [some-oauth]\n",
+        );
+        let tool = ToolArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(tool.name, "fmt");
+        assert_eq!(tool.kind, ToolKind::Mcp);
+        let mcp = tool.mcp.as_ref().unwrap();
+        assert_eq!(mcp.transport, McpTransport::Stdio);
+        assert_eq!(mcp.command.as_deref(), Some("some-mcp-server"));
+        assert_eq!(mcp.args, vec!["--flag".to_string()]);
+        assert_eq!(tool.required_integrations, vec!["some-oauth".to_string()]);
+        assert_eq!(tool.remote_url(), None);
+    }
+
+    #[test]
+    fn tool_artifact_parses_an_http_mcp_server_as_remote() {
+        let blob = tool_blob(
+            "name: search\nkind: mcp\n\
+             mcp:\n  transport: http\n  url: https://api.some-provider.example/mcp\n",
+        );
+        let tool = ToolArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(
+            tool.remote_url(),
+            Some("https://api.some-provider.example/mcp")
+        );
+    }
+
+    #[test]
+    fn tool_artifact_parses_an_sse_mcp_server_as_remote() {
+        let blob = tool_blob(
+            "name: events\nkind: mcp\n\
+             mcp:\n  transport: sse\n  url: https://api.some-provider.example/sse\n",
+        );
+        let tool = ToolArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(
+            tool.remote_url(),
+            Some("https://api.some-provider.example/sse")
+        );
+    }
+
+    #[test]
+    fn tool_artifact_parses_an_api_tool_as_remote() {
+        let blob = tool_blob(
+            "name: weather\nkind: api\n\
+             mcp:\n  transport: http\n  url: https://api.example.test/v1\n",
+        );
+        let tool = ToolArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(tool.kind, ToolKind::Api);
+        assert_eq!(tool.remote_url(), Some("https://api.example.test/v1"));
+    }
+
+    #[test]
+    fn tool_artifact_rejects_an_empty_name() {
+        let err =
+            ToolArtifact::from_config_blob(&tool_blob("name: '  '\nkind: api\n")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("name"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_artifact_rejects_an_mcp_tool_without_an_mcp_block() {
+        let err = ToolArtifact::from_config_blob(&tool_blob("name: x\nkind: mcp\n")).unwrap_err();
+        assert!(format!("{err}").contains("mcp` block"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_artifact_rejects_a_stdio_tool_without_a_command() {
+        let blob = tool_blob("name: x\nkind: mcp\nmcp:\n  transport: stdio\n");
+        let err = ToolArtifact::from_config_blob(&blob).unwrap_err();
+        assert!(format!("{err}").contains("command"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_artifact_rejects_a_remote_mcp_tool_without_a_url() {
+        let blob = tool_blob("name: x\nkind: mcp\nmcp:\n  transport: http\n");
+        let err = ToolArtifact::from_config_blob(&blob).unwrap_err();
+        assert!(format!("{err}").contains("url"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_artifact_rejects_an_api_tool_without_a_url() {
+        let err = ToolArtifact::from_config_blob(&tool_blob("name: x\nkind: api\n")).unwrap_err();
+        assert!(format!("{err}").contains("url"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_artifact_rejects_malformed_json() {
+        let err = ToolArtifact::from_config_blob(b"not json").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
