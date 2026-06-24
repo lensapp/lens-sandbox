@@ -163,7 +163,6 @@ pub struct AgentSpec {
     pub mcp: Option<McpInjection>,
 }
 
-/// Where and how an agent ingests its MCP client config; the agent declares the injection point while the format stays the de-facto `mcpServers` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpInjection {
@@ -262,7 +261,6 @@ pub enum ToolKind {
     Api,
 }
 
-/// The transport an MCP tool server speaks; `stdio` is a launched child process, `sse`/`http` are remote endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransport {

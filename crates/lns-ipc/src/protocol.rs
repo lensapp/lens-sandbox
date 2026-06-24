@@ -269,7 +269,6 @@ pub struct RunConfig {
     pub detached: bool,
 }
 
-/// A rendered MCP client config (`mcpServers` shape) and the in-guest path it is written to, so the agent can reach a bundle's tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpConfig {
     pub target: String,

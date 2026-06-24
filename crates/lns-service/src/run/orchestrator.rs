@@ -82,11 +82,10 @@ async fn orchestrate(
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
     if let Some(mcp) = args.mcp_config.as_ref() {
-        // platform: the rendered mcpServers config is written into the guest rootfs at `mcp.target` during boot — the guest-write hop is tracked in the tool-injection design doc.
         log::debug!(
             path = %mcp.target,
             bytes = mcp.content.len(),
-            "mcp config staged for guest injection"
+            "mcp config resolved; guest rootfs write happens during boot"
         );
     }
 
