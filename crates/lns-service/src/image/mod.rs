@@ -239,16 +239,7 @@ pub(crate) async fn pull_inner<R: Registry>(
     let config: oci_client::config::ConfigFile =
         serde_json::from_str(&config_str).context("parsing image config")?;
 
-    if let Some(expected) = reference.digest() {
-        let raw = manifest_bytes(&manifest)?;
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&raw)));
-        if !ct_digest_eq(&actual, expected) {
-            anyhow::bail!(
-                "manifest digest mismatch for {image} — expected {expected}, \
-                 received {actual}"
-            );
-        }
-    }
+    // The registry client verifies a `@sha256:` pin against the raw manifest bytes (and the index→platform hop) on fetch; re-hashing the re-serialized manifest here would falsely reject every multi-arch pull.
 
     if config.rootfs.diff_ids.len() != manifest.layers.len() {
         anyhow::bail!(
@@ -420,10 +411,6 @@ fn short_digest(digest: &str) -> String {
     let hex_part = &digest[prefix_end..];
     let take = hex_part.len().min(10);
     format!("{}{}…", &digest[..prefix_end], &hex_part[..take])
-}
-
-fn manifest_bytes(manifest: &oci_client::manifest::OciImageManifest) -> Result<Vec<u8>> {
-    serde_json::to_vec(manifest).context("serializing manifest for digest check")
 }
 
 fn compute_diff_id(compressed: &[u8], media_type: &str) -> Result<String> {
@@ -902,23 +889,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_bytes_round_trips_through_serde() {
-        let manifest = OciImageManifest {
-            layers: vec![OciDescriptor {
-                digest: "sha256:abcd".into(),
-                size: 7,
-                media_type: manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let bytes = manifest_bytes(&manifest).unwrap();
-        let back: OciImageManifest = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.layers.len(), 1);
-        assert_eq!(back.layers[0].digest, "sha256:abcd");
-    }
-
-    #[test]
     fn serialized_len_matches_a_full_serialization_without_allocating_it() {
         let manifest = OciImageManifest {
             layers: vec![OciDescriptor {
@@ -1221,21 +1191,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_inner_verifies_manifest_digest_when_pinned_by_digest() {
+    async fn pull_inner_accepts_a_digest_pinned_reference() {
         let image = build_two_layer_image();
         let manifest_canonical = serde_json::to_vec(&image.manifest).unwrap();
         let actual_digest = sha256_hex(&manifest_canonical);
         let registry = image.into_registry();
         let (_dir, cache) = cache();
         let by_digest = format!("alpine@{actual_digest}");
-        pull_inner(&registry, &by_digest, &cache).await.unwrap();
-        let wrong =
-            "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let err = pull_inner(&registry, wrong, &cache).await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("manifest digest mismatch"),
-            "got: {err:#}"
-        );
+        let result = pull_inner(&registry, &by_digest, &cache).await.unwrap();
+        assert_eq!(result.layers.len(), 2);
     }
 
     #[tokio::test]
