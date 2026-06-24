@@ -190,6 +190,53 @@ pub async fn pull(reference: &str) -> Result<Pulled> {
     pull_with(&registry_for(reference), &store(), reference).await
 }
 
+async fn materialize_mounts_with<R: ArtifactRegistry>(
+    client: &R,
+    store: &dyn RegistryCredentialStore,
+    mounts: &[lns_ipc::ArtifactMount],
+) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
+    use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
+    let mut specs = Vec::with_capacity(mounts.len());
+    let mut seen = std::collections::HashSet::new();
+    for mount in mounts {
+        if !seen.insert(mount.path.as_str()) {
+            anyhow::bail!("duplicate mount path {}", mount.path);
+        }
+        let (reference, auth) = resolve(&mount.reference, store)?;
+        let head = client.pull_head(&reference, &auth).await?;
+        let family = Family::from_config_media_type(&head.config_media_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is not a typed artifact (media type {})",
+                mount.reference,
+                head.config_media_type
+            )
+        })?;
+        match family {
+            Family::Model => specs.push(RuntimeFileSpec {
+                guest_path: mount.path.clone(),
+                mode: 0o644,
+                source: RuntimeSource::Bytes(head.config_blob),
+            }),
+            other => anyhow::bail!(
+                "layer-content mounts are not yet supported ({} is a {})",
+                mount.reference,
+                other.slug()
+            ),
+        }
+    }
+    Ok(specs)
+}
+
+/// Materializes application-layer artifact mounts into runtime files injected at boot; model writes its config blob at the mount path (layer-content families land in a later stage).
+pub async fn materialize_mounts(
+    mounts: &[lns_ipc::ArtifactMount],
+) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
+    if mounts.is_empty() {
+        return Ok(Vec::new());
+    }
+    materialize_mounts_with(&registry_for(&mounts[0].reference), &store(), mounts).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +621,121 @@ mod tests {
         let err = pull_with(&client, &empty_store(), REF).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("image pull failed"),
+            "got: {err:#}"
+        );
+    }
+
+    const MODEL_CMT: &str = "application/vnd.lens.model.config.v1+json";
+    const TOOL_CMT: &str = "application/vnd.lens.tool.config.v1+json";
+    const MODEL_REF: &str = "registry.example.test/org/acme/models/m:v1";
+
+    fn model_mount() -> lns_ipc::ArtifactMount {
+        lns_ipc::ArtifactMount {
+            reference: MODEL_REF.into(),
+            path: "/etc/agent/model".into(),
+            read_only: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_writes_a_model_config_at_its_path() {
+        let fake = FakeRegistry {
+            head: Some(head(MODEL_CMT, Some("application/vnd.lens.model.v1+json"))),
+            ..Default::default()
+        };
+        let specs = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
+            .await
+            .unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].guest_path, "/etc/agent/model");
+        assert!(matches!(
+            &specs[0].source,
+            crate::runtime_layer::RuntimeSource::Bytes(b) if b == br#"{"network":{}}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_rejects_a_duplicate_mount_path() {
+        let fake = FakeRegistry {
+            head: Some(head(MODEL_CMT, None)),
+            ..Default::default()
+        };
+        let err = materialize_mounts_with(&fake, &empty_store(), &[model_mount(), model_mount()])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate mount path"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_defers_layer_content_families() {
+        let fake = FakeRegistry {
+            head: Some(head(TOOL_CMT, None)),
+            ..Default::default()
+        };
+        let err = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not yet supported"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_rejects_a_non_typed_artifact() {
+        let fake = FakeRegistry {
+            head: Some(head(OCI_CMT, None)),
+            ..Default::default()
+        };
+        let err = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a typed artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_surfaces_a_pull_error() {
+        let fake = FakeRegistry {
+            fail: true,
+            ..Default::default()
+        };
+        let err = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refused the pull"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_is_empty_for_no_mounts() {
+        assert!(materialize_mounts(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn public_materialize_mounts_wires_real_registry_and_fails_fast_on_a_bad_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_REGISTRY_AUTH_PATH",
+            dir.path().join("auth.json"),
+        );
+        let err = materialize_mounts(&[lns_ipc::ArtifactMount {
+            reference: "::bad::".into(),
+            path: "/etc/agent/model".into(),
+            read_only: true,
+        }])
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid registry reference"),
             "got: {err:#}"
         );
     }

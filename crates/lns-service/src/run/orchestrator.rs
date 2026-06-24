@@ -141,11 +141,13 @@ async fn orchestrate(
     }
 
     let imageless = args.image.is_none();
+    let mount_specs = crate::artifact::materialize_mounts(&args.artifact_mounts).await?;
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
+        mount_specs,
     )?;
 
     let layers = std::mem::take(&mut image.bytes);

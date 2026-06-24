@@ -301,9 +301,10 @@ pub fn for_run(
     content_store: &crate::content_store::ContentStore,
     guest_tools: &crate::guest_tools::GuestTools,
     assets: Option<&crate::supervisor::SupervisorAssets>,
+    extra_specs: Vec<RuntimeFileSpec>,
 ) -> Result<Option<RuntimeLayer>> {
     let runtime_label = format!("lns-runtime-v1+{}", env!("CARGO_PKG_VERSION"));
-    if let Some(a) = assets {
+    let (mut specs, label) = if let Some(a) = assets {
         let mut specs = crate::supervisor::runtime_specs(a)?;
         if imageless {
             specs.extend(crate::supervisor::imageless_runtime_extras());
@@ -313,21 +314,22 @@ pub fn for_run(
         } else {
             runtime_label.clone()
         };
-        Ok(Some(
-            RuntimeLayerBuilder::new(&label).build(content_store, &specs)?,
-        ))
+        (specs, label)
     } else if imageless {
-        let specs = crate::supervisor::guest_tools_only_specs(&guest_tools.root)?;
-        Ok(Some(
-            RuntimeLayerBuilder::new(format!("{runtime_label}+imageless"))
-                .build(content_store, &specs)?,
-        ))
+        (
+            crate::supervisor::guest_tools_only_specs(&guest_tools.root)?,
+            format!("{runtime_label}+imageless"),
+        )
     } else {
-        let specs = crate::supervisor::guest_tools_tree_specs(&guest_tools.root)?;
-        Ok(Some(
-            RuntimeLayerBuilder::new(&runtime_label).build(content_store, &specs)?,
-        ))
-    }
+        (
+            crate::supervisor::guest_tools_tree_specs(&guest_tools.root)?,
+            runtime_label.clone(),
+        )
+    };
+    specs.extend(extra_specs);
+    Ok(Some(
+        RuntimeLayerBuilder::new(&label).build(content_store, &specs)?,
+    ))
 }
 
 #[cfg(test)]
@@ -808,7 +810,9 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         let assets = fake_assets(&d);
-        let layer = for_run(false, &s, &gt, Some(&assets)).unwrap().unwrap();
+        let layer = for_run(false, &s, &gt, Some(&assets), Vec::new())
+            .unwrap()
+            .unwrap();
         let p = paths(&layer);
         assert!(p.contains(&".lens/bin/lns-supervisor"));
         assert!(!p.contains(&".lens/bin/supervisor.real"));
@@ -825,7 +829,9 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         let assets = fake_assets(&d);
-        let layer = for_run(true, &s, &gt, Some(&assets)).unwrap().unwrap();
+        let layer = for_run(true, &s, &gt, Some(&assets), Vec::new())
+            .unwrap()
+            .unwrap();
         let p = paths(&layer);
         assert!(p.contains(&".lens/bin/lns-supervisor"));
         assert!(
@@ -841,7 +847,7 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         std::fs::write(gt.root.join("marker"), b"x").unwrap();
-        let layer = for_run(false, &s, &gt, None).unwrap().unwrap();
+        let layer = for_run(false, &s, &gt, None, Vec::new()).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&"marker"));
         assert!(!p.contains(&"bin/sh"));
@@ -854,10 +860,24 @@ mod tests {
         let d = tempdir();
         let s = store(&d);
         let gt = fake_guest_tools(&d);
-        let layer = for_run(true, &s, &gt, None).unwrap().unwrap();
+        let layer = for_run(true, &s, &gt, None, Vec::new()).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&"bin/sh"));
         assert!(!p.contains(&".lens/bin/supervisor.real"));
         assert!(layer.manifest.label.ends_with("+imageless"));
+    }
+
+    #[test]
+    fn for_run_injects_extra_mount_specs_into_the_runtime_layer() {
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let extra = vec![RuntimeFileSpec {
+            guest_path: "/etc/agent/model".into(),
+            mode: 0o644,
+            source: RuntimeSource::Bytes(b"{\"provider\":\"anthropic\"}".to_vec()),
+        }];
+        let layer = for_run(false, &s, &gt, None, extra).unwrap().unwrap();
+        assert!(paths(&layer).contains(&"etc/agent/model"));
     }
 }
