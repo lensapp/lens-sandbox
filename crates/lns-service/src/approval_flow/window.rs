@@ -463,10 +463,13 @@ pub fn ctx() -> Option<egui::Context> {
 }
 
 pub fn quiet_debug_overlays(ctx: &egui::Context) {
+    #[cfg(debug_assertions)]
     ctx.all_styles_mut(|style| {
         style.debug.warn_if_rect_changes_id = false;
         style.debug.show_unaligned = false;
     });
+    #[cfg(not(debug_assertions))]
+    let _ = ctx;
 }
 
 pub const BG_PRIMARY: Color32 = Color32::from_rgb(0x0f, 0x10, 0x12);
