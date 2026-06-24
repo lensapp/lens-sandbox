@@ -206,6 +206,7 @@ mod tests {
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
+            mcp_config: None,
         }
     }
 

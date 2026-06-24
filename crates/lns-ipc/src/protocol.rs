@@ -264,7 +264,16 @@ pub struct RunConfig {
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub mcp_config: Option<McpConfig>,
     pub detached: bool,
+}
+
+/// A rendered MCP client config (`mcpServers` shape) and the in-guest path it is written to, so the agent can reach a bundle's tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpConfig {
+    pub target: String,
+    pub content: String,
 }
 
 impl RunConfig {
@@ -278,6 +287,7 @@ impl RunConfig {
             env: args.env.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
+            mcp_config: args.mcp_config.clone(),
             detached: args.detached,
         }
     }
@@ -333,6 +343,8 @@ pub struct RunImageArgs {
     pub published_ports: Vec<PortPublish>,
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub mcp_config: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +535,7 @@ mod tests {
             detached: false,
             published_ports: vec![mapping],
             volumes: Vec::new(),
+            mcp_config: None,
         });
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -552,6 +565,7 @@ mod tests {
                 target: "/data".into(),
                 read_only: true,
             }],
+            mcp_config: None,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -711,7 +725,19 @@ mod tests {
                 target: "/data".into(),
                 read_only: false,
             }],
+            mcp_config: Some(McpConfig {
+                target: "/home/agent/.mcp.json".into(),
+                content: "{\"mcpServers\":{}}".into(),
+            }),
         }
+    }
+
+    #[test]
+    fn run_image_args_mcp_config_survives_a_frame_round_trip() {
+        let req = Request::RunImage(sample_run_args());
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
     }
 
     #[test]
@@ -721,6 +747,7 @@ mod tests {
         assert_eq!(config.cpus, 2);
         assert_eq!(config.mem_mib, 1024);
         assert_eq!(config.policy_path.as_deref(), Some("/work/lns-policy.yaml"));
+        assert_eq!(config.mcp_config.unwrap().target, "/home/agent/.mcp.json");
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
         assert_eq!(config.sandbox_uid, Some(65534));
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);

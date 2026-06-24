@@ -21,6 +21,8 @@ pub struct ResolvedRun {
     pub volumes: Vec<lns_ipc::VolumeMount>,
     pub policy_path: Option<PathBuf>,
     pub credentials: Vec<CredentialRef>,
+    pub mcp_injection: Option<lns_policy::artifact::McpInjection>,
+    pub mcp_config: Option<lns_ipc::McpConfig>,
     pub _policy_tempfile: Option<tempfile::NamedTempFile>,
 }
 
@@ -67,6 +69,7 @@ pub async fn resolve_into_run_args(
     {
         args.policy = Some(p.clone());
     }
+    args.mcp_config = resolved.mcp_config;
     let missing = missing_credentials(&resolved.credentials, available_creds);
     if !missing.is_empty() {
         writeln!(writer, "⚠ {}", missing_credentials_warning(&missing))?;
@@ -111,6 +114,8 @@ pub async fn resolve_agent_ref(
         volumes: agent.spec.volumes.iter().map(volume_mount).collect(),
         policy_path: None,
         credentials: agent.spec.credentials,
+        mcp_injection: agent.spec.mcp,
+        mcp_config: None,
         _policy_tempfile: None,
     })
 }
@@ -181,8 +186,42 @@ pub async fn resolve_bundle_ref(
         resolved.policy_path = Some(path);
         resolved._policy_tempfile = Some(file);
     }
+    match resolved.mcp_injection.take() {
+        Some(injection) if !tools.is_empty() => {
+            resolved.mcp_config = Some(lns_ipc::McpConfig {
+                target: injection.config_path,
+                content: render_mcp_servers(&tools),
+            });
+        }
+        None if !tools.is_empty() => writeln!(
+            writer,
+            "⚠ resolved {} tool(s) but the agent declares no spec.mcp injection point; \
+             tools will not be registered with the agent",
+            tools.len()
+        )?,
+        _ => {}
+    }
     note_skipped_components(&bundle, writer)?;
     Ok(resolved)
+}
+
+fn render_mcp_servers(tools: &[ToolArtifact]) -> String {
+    let mut servers = serde_json::Map::new();
+    for tool in tools {
+        servers.insert(tool.name.clone(), mcp_server_entry(tool));
+    }
+    json!({ "mcpServers": Value::Object(servers) }).to_string()
+}
+
+fn mcp_server_entry(tool: &ToolArtifact) -> Value {
+    if let Some(url) = tool.remote_url() {
+        return json!({ "url": url });
+    }
+    let mcp = tool.mcp.as_ref();
+    json!({
+        "command": mcp.and_then(|m| m.command.as_deref()),
+        "args": mcp.map(|m| m.args.as_slice()).unwrap_or_default(),
+    })
 }
 
 async fn pull_bundle(reference: &str, client: &dyn RegistryClient) -> Result<BundleArtifact> {
@@ -556,6 +595,18 @@ mod tests {
         .unwrap()
     }
 
+    fn agent_with_mcp_blob() -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: Agent\n\
+                 metadata:\n  name: some-agent\n\
+                 spec:\n  image: {AGENT_IMAGE}\n  mcp:\n    configPath: /home/agent/.mcp.json\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
     async fn agent_client(command: &str, with_cred: bool) -> RefKeyedClient {
         let client = RefKeyedClient::default();
         put_artifact(
@@ -628,6 +679,7 @@ mod tests {
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
+            mcp_config: None,
         }
     }
 
@@ -1029,6 +1081,62 @@ mod tests {
         assert!(
             format!("{err:#}").contains("not a tool artifact"),
             "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_renders_a_stdio_tool_into_the_mcp_config() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_with_mcp_blob()).await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &stdio_tool_blob()).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        let mcp = resolved.mcp_config.expect("an mcp config is rendered");
+        assert_eq!(mcp.target, "/home/agent/.mcp.json");
+        let cfg: Value = serde_json::from_str(&mcp.content).unwrap();
+        assert_eq!(cfg["mcpServers"]["fmt"]["command"], "some-mcp-server");
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_renders_a_remote_tool_url_into_the_mcp_config() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_with_mcp_blob()).await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &remote_tool_blob()).await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        let cfg: Value = serde_json::from_str(&resolved.mcp_config.unwrap().content).unwrap();
+        assert_eq!(
+            cfg["mcpServers"]["search"]["url"],
+            "https://api.some-provider.example/mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_warns_when_tools_resolve_without_an_mcp_injection_point() {
+        let client = bundle_client(
+            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n",
+        )
+        .await;
+        put_artifact(&client, TOOL_REF, Family::Tool, &stdio_tool_blob()).await;
+        let mut out = Vec::new();
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut out)
+            .await
+            .unwrap();
+        assert!(resolved.mcp_config.is_none());
+        assert!(
+            String::from_utf8(out).unwrap().contains("no spec.mcp"),
+            "warns about the missing injection point"
         );
     }
 

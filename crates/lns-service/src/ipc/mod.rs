@@ -510,6 +510,7 @@ mod tests {
                 detached: false,
                 published_ports: vec![],
                 volumes: vec![],
+                mcp_config: None,
             }),
             Instant::now(),
         )

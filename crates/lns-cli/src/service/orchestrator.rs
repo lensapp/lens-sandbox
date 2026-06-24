@@ -88,6 +88,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         detached,
         published_ports: args.publish,
         volumes: args.volumes,
+        mcp_config: args.mcp_config,
     });
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

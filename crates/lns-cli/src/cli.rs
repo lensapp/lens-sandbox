@@ -712,6 +712,9 @@ pub struct RunArgs {
         help = "Override entrypoint+cmd. Everything after `--` is the command."
     )]
     pub cmd: Vec<String>,
+
+    #[arg(skip)]
+    pub mcp_config: Option<lns_ipc::McpConfig>,
 }
 
 pub const DEFAULT_CPUS: u8 = 1;
