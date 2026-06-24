@@ -4,7 +4,17 @@
   "release-label": "autorelease: tagged,release",
   "separate-pull-requests": true,
   "include-component-in-tag": true,
-  "plugins": ["cargo-workspace"],
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "lns-bundle",
+      "components": ["lns", "lns-service", "e2e-tests"]
+    }
+  ],
   "exclude-paths": [
     ".github",
     ".husky",
@@ -17,6 +27,19 @@
       "component": "lns",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true
+    },
+    "crates/lns-service": {
+      "release-type": "rust",
+      "component": "lns-service",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true
+    },
+    "crates/e2e-tests": {
+      "release-type": "rust",
+      "component": "e2e-tests",
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
     },
     "scripts/lns-install": {
       "release-type": "simple",
