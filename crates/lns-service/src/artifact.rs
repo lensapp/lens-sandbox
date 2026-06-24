@@ -213,6 +213,7 @@ async fn materialize_mounts_with<R: ArtifactRegistry>(
         if !seen.insert(mount.path.as_str()) {
             anyhow::bail!("duplicate mount path {}", mount.path);
         }
+        // mount.read_only is advisory today: the seed lands in the read-only composefs base, but per-file RO mode and overlay-CoW-shadow enforcement are future work.
         let (reference, auth) = resolve(&mount.reference, store)?;
         let head = client.pull_head(&reference, &auth).await?;
         let family = Family::from_config_media_type(&head.config_media_type).ok_or_else(|| {
@@ -226,7 +227,7 @@ async fn materialize_mounts_with<R: ArtifactRegistry>(
             Family::Model => specs.push(RuntimeFileSpec {
                 guest_path: mount.path.clone(),
                 mode: 0o644,
-                source: RuntimeSource::Bytes(head.config_blob),
+                source: RuntimeSource::Bytes(model_spec_bytes(&head.config_blob)),
             }),
             Family::Tool | Family::Knowledge | Family::Fileset => {
                 let layers = client.pull_artifact_layers(&reference, &auth).await?;
@@ -245,6 +246,14 @@ async fn materialize_mounts_with<R: ArtifactRegistry>(
         }
     }
     Ok(specs)
+}
+
+/// Unwraps the envelope `spec` so a model mount delivers `{provider, model, parameters?}` directly (mirrors the policy unwrap), falling back to the full blob when there is no `spec`.
+fn model_spec_bytes(config_blob: &[u8]) -> Vec<u8> {
+    serde_json::from_slice::<serde_json::Value>(config_blob)
+        .ok()
+        .and_then(|v| v.get("spec").map(serde_json::to_vec).and_then(Result::ok))
+        .unwrap_or_else(|| config_blob.to_vec())
 }
 
 /// Expands one OCI layer tarball (optionally gzip-compressed) into runtime file specs rooted at `mount_root`; rejects path traversal before the runtime layer's second gate.
@@ -275,6 +284,7 @@ fn expand_layer_to_specs(
         if etype.is_dir() {
             continue;
         } else if etype.is_symlink() {
+            // The target is left verbatim: it resolves only inside the guest FS at runtime (never on the host), and the entry path itself is already safe_rel_path-guarded.
             let target = entry
                 .link_name()
                 .context("layer symlink target")?
@@ -793,9 +803,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_mounts_writes_a_model_config_at_its_path() {
+    async fn materialize_mounts_writes_a_model_spec_at_its_path() {
+        let mut h = head(MODEL_CMT, Some("application/vnd.lens.model.v1+json"));
+        h.config_blob = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Model","metadata":{"name":"m"},"spec":{"provider":"some-provider","model":"some-model"}}"#.to_vec();
         let fake = FakeRegistry {
-            head: Some(head(MODEL_CMT, Some("application/vnd.lens.model.v1+json"))),
+            head: Some(h),
             ..Default::default()
         };
         let specs = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
@@ -803,10 +815,32 @@ mod tests {
             .unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].guest_path, "/etc/agent/model");
-        assert!(matches!(
-            &specs[0].source,
-            crate::runtime_layer::RuntimeSource::Bytes(b) if b == br#"{"network":{}}"#
-        ));
+        let crate::runtime_layer::RuntimeSource::Bytes(b) = &specs[0].source else {
+            panic!("expected model spec bytes");
+        };
+        let written: serde_json::Value = serde_json::from_slice(b).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"provider": "some-provider", "model": "some-model"})
+        );
+    }
+
+    #[test]
+    fn model_spec_bytes_unwraps_the_envelope_spec() {
+        let envelope = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Model","metadata":{"name":"m"},"spec":{"provider":"some-provider","model":"some-model"}}"#;
+        let out: serde_json::Value = serde_json::from_slice(&model_spec_bytes(envelope)).unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!({"provider": "some-provider", "model": "some-model"})
+        );
+    }
+
+    #[test]
+    fn model_spec_bytes_falls_back_when_there_is_no_spec() {
+        let flat = br#"{"provider":"some-provider"}"#;
+        assert_eq!(model_spec_bytes(flat), flat.to_vec());
+        let garbage = b"not json";
+        assert_eq!(model_spec_bytes(garbage), garbage.to_vec());
     }
 
     #[tokio::test]

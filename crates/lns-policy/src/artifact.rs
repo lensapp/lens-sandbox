@@ -236,6 +236,8 @@ pub struct Components {
     pub model: Option<ComponentRef>,
     #[serde(default)]
     pub knowledge: Vec<ComponentRef>,
+    #[serde(default)]
+    pub filesets: Vec<ComponentRef>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

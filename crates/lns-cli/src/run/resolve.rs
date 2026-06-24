@@ -185,7 +185,8 @@ pub async fn resolve_bundle_ref(
         .model
         .iter()
         .chain(components.tools.iter())
-        .chain(components.knowledge.iter());
+        .chain(components.knowledge.iter())
+        .chain(components.filesets.iter());
     for component in mount_components {
         let mount = resolve_mount(reference, component, client).await?;
         writeln!(writer, "✓ mounting {} → {}", mount.reference, mount.path)?;
@@ -999,6 +1000,39 @@ mod tests {
             paths.contains(&"/etc/agent/knowledge/runbook"),
             "got: {paths:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_bundle_ref_mounts_filesets_at_their_declared_paths() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(
+                "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+                 filesets:\n    - { ref: org/acme/filesets/cfg:v1 }\n",
+            ),
+        )
+        .await;
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(
+            &client,
+            FILESET_REF,
+            Family::Fileset,
+            &fileset_blob("mount:\n  path: /opt/data\n  readOnly: true\n"),
+        )
+        .await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        let mount = resolved
+            .artifact_mounts
+            .iter()
+            .find(|m| m.reference == FILESET_REF)
+            .expect("fileset mount resolved from the bundle");
+        assert_eq!(mount.path, "/opt/data");
+        assert!(mount.read_only);
     }
 
     #[tokio::test]
