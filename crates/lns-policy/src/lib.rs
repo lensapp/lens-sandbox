@@ -424,7 +424,6 @@ network:
 
     #[test]
     fn add_rule_skips_an_exact_duplicate() {
-        // Concurrent re-approvals of one host must not stack identical rules.
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("huggingface.co"));
         p.add_rule(RouteRule::allow_host("huggingface.co"));
