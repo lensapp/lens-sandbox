@@ -714,6 +714,12 @@ pub struct RunArgs {
     pub volumes: Vec<lns_ipc::VolumeMount>,
 
     #[arg(
+        long = "mount",
+        help = "Mount an application-layer artifact (fileset/model/tool/knowledge) by reference: `<ref>[:/guest-path]`. The path overrides the artifact's declared mount."
+    )]
+    pub mount: Vec<String>,
+
+    #[arg(
         last = true,
         help = "Override entrypoint+cmd. Everything after `--` is the command."
     )]

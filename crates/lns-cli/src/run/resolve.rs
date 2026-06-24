@@ -65,9 +65,7 @@ pub async fn resolve_into_run_args(
     if args.volumes.is_empty() {
         args.volumes = resolved.volumes;
     }
-    if args.artifact_mounts.is_empty() {
-        args.artifact_mounts = resolved.artifact_mounts;
-    }
+    args.artifact_mounts.extend(resolved.artifact_mounts);
     if args.policy.is_none()
         && let Some(p) = &resolved.policy_path
     {
@@ -203,7 +201,16 @@ async fn resolve_mount(
     client: &dyn RegistryClient,
 ) -> Result<lns_ipc::ArtifactMount> {
     let reference = qualify_component_ref(bundle_ref, &component.reference);
-    let (artifact_type, config_blob) = match client.pull(&reference).await? {
+    resolve_mount_ref(&reference, None, client).await
+}
+
+/// Resolves a fully-qualified application-layer reference into an `ArtifactMount`; an explicit `path_override` wins over the artifact's declared mount and its family default.
+async fn resolve_mount_ref(
+    reference: &str,
+    path_override: Option<&str>,
+    client: &dyn RegistryClient,
+) -> Result<lns_ipc::ArtifactMount> {
+    let (artifact_type, config_blob) = match client.pull(reference).await? {
         Pulled::Artifact {
             artifact_type,
             config_blob,
@@ -224,10 +231,16 @@ async fn resolve_mount(
     }
     let parsed = MountedArtifact::from_config_blob(&config_blob)
         .with_context(|| format!("parsing artifact {reference}"))?;
-    let (path, read_only) = match &parsed.mount {
-        Some(m) => (m.path.clone(), m.read_only.unwrap_or(true)),
-        None => (
-            family
+    let read_only = parsed
+        .mount
+        .as_ref()
+        .and_then(|m| m.read_only)
+        .unwrap_or(true);
+    let path = match path_override {
+        Some(p) => p.to_string(),
+        None => match &parsed.mount {
+            Some(m) => m.path.clone(),
+            None => family
                 .default_mount_path(&parsed.metadata.name)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -235,14 +248,31 @@ async fn resolve_mount(
                         family.slug()
                     )
                 })?,
-            true,
-        ),
+        },
     };
     Ok(lns_ipc::ArtifactMount {
-        reference,
+        reference: reference.to_string(),
         path,
         read_only,
     })
+}
+
+/// Parses each `--mount <ref>[:/abs-path]` spec and appends the resolved `ArtifactMount` to `args`.
+pub async fn resolve_explicit_mounts(
+    mut args: RunArgs,
+    client: &dyn RegistryClient,
+    writer: &mut impl Write,
+) -> Result<RunArgs> {
+    for spec in &args.mount {
+        let (reference, path_override) = match spec.split_once(":/") {
+            Some((reference, rest)) => (reference, Some(format!("/{rest}"))),
+            None => (spec.as_str(), None),
+        };
+        let mount = resolve_mount_ref(reference, path_override.as_deref(), client).await?;
+        writeln!(writer, "✓ mounting {} → {}", mount.reference, mount.path)?;
+        args.artifact_mounts.push(mount);
+    }
+    Ok(args)
 }
 
 async fn pull_sandbox(reference: &str, client: &dyn RegistryClient) -> Result<SandboxArtifact> {
@@ -631,6 +661,7 @@ mod tests {
             publish: Vec::new(),
             volumes: Vec::new(),
             cmd: Vec::new(),
+            mount: Vec::new(),
             artifact_mounts: Vec::new(),
         }
     }
@@ -1413,5 +1444,110 @@ mod tests {
                 .unwrap();
         assert_eq!(args.artifact_mounts.len(), 1);
         assert_eq!(args.artifact_mounts[0].path, "/etc/agent/model");
+    }
+
+    fn fileset_blob(mount: &str) -> Vec<u8> {
+        lns_policy::artifact::to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: FileSet\nmetadata:\n  name: cfg\n{mount}"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    const FILESET_REF: &str = "localhost:5000/org/acme/filesets/cfg:v1";
+
+    #[tokio::test]
+    async fn resolve_explicit_mounts_honors_a_filesets_declared_path() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            FILESET_REF,
+            Family::Fileset,
+            &fileset_blob("mount:\n  path: /opt/data\n  readOnly: true\n"),
+        )
+        .await;
+        let mut args = run_args(None);
+        args.mount = vec![FILESET_REF.to_string()];
+        let args = resolve_explicit_mounts(args, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(args.artifact_mounts.len(), 1);
+        assert_eq!(args.artifact_mounts[0].reference, FILESET_REF);
+        assert_eq!(args.artifact_mounts[0].path, "/opt/data");
+        assert!(args.artifact_mounts[0].read_only);
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_mounts_path_override_wins_over_the_declared_path() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            FILESET_REF,
+            Family::Fileset,
+            &fileset_blob("mount:\n  path: /opt/data\n"),
+        )
+        .await;
+        let mut args = run_args(None);
+        args.mount = vec![format!("{FILESET_REF}:/srv/cfg")];
+        let args = resolve_explicit_mounts(args, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(args.artifact_mounts[0].reference, FILESET_REF);
+        assert_eq!(args.artifact_mounts[0].path, "/srv/cfg");
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_mounts_appends_to_existing_mounts() {
+        let client = RefKeyedClient::default();
+        put_artifact(&client, MODEL_REF, Family::Model, &model_blob("")).await;
+        let mut args = run_args(None);
+        args.artifact_mounts.push(lns_ipc::ArtifactMount {
+            reference: "pre-existing".into(),
+            path: "/etc/agent/pre".into(),
+            read_only: true,
+        });
+        args.mount = vec![MODEL_REF.to_string()];
+        let args = resolve_explicit_mounts(args, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(args.artifact_mounts.len(), 2);
+        assert_eq!(args.artifact_mounts[1].path, "/etc/agent/model");
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_mounts_treats_a_port_colon_as_part_of_the_reference() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            FILESET_REF,
+            Family::Fileset,
+            &fileset_blob("mount:\n  path: /opt/data\n"),
+        )
+        .await;
+        let mut args = run_args(None);
+        args.mount = vec![FILESET_REF.to_string()];
+        let args = resolve_explicit_mounts(args, &client, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(args.artifact_mounts[0].reference, FILESET_REF);
+        assert_eq!(args.artifact_mounts[0].path, "/opt/data");
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_mounts_surfaces_a_resolution_error() {
+        let client = RefKeyedClient::default();
+        put_image(&client, FILESET_REF).await;
+        let mut args = run_args(None);
+        args.mount = vec![FILESET_REF.to_string()];
+        let err = resolve_explicit_mounts(args, &client, &mut Vec::new())
+            .await
+            .err()
+            .expect("expected a resolution error");
+        assert!(
+            format!("{err:#}").contains("not a mountable artifact"),
+            "got: {err:#}"
+        );
     }
 }

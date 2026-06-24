@@ -34,6 +34,7 @@ pub struct BehaviourWorld {
     pub resolved_image: Option<String>,
     pub resolved_cmd: Vec<String>,
     pub resolved_policy: Option<std::path::PathBuf>,
+    pub resolved_mounts: Vec<lns_ipc::ArtifactMount>,
     pub resolve_guard: Option<tempfile::NamedTempFile>,
     pub resolve_writer: String,
     pub resolve_error: Option<String>,

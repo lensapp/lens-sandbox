@@ -11,6 +11,7 @@ pub mod run;
 pub mod run_agent_ref;
 pub mod run_bundle_ref;
 pub mod run_config_defaults;
+pub mod run_mount_flag;
 pub mod sandbox_cli;
 pub mod update_check;
 pub mod volume_cli;

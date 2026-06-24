@@ -21,6 +21,26 @@ pub mod volume;
 use anyhow::Result;
 use cli::{Cli, Command, LogLevel};
 
+async fn dispatch_run(mut args: cli::RunArgs, debug: bool) -> Result<i32> {
+    args.env = run::env_file::merged_run_env(&args.env_file, &args.env)?;
+    let config_path = config::default_config_path()?;
+    let defaults = config::load_run_defaults(&config_path)?;
+    let args = config::apply_run_defaults(args, defaults);
+    service::require_running().await;
+    let client = registry::RealRegistryClient::new(service::socket_path()?);
+    let store = lns_policy::credentials::JsonFileCredentialStore::new(
+        lns_policy::credentials::default_credentials_path(),
+    );
+    let available = run::resolve::available_credentials(
+        &lns_policy::credentials::CredentialStore::load(&store)?,
+    );
+    let args = run::resolve::resolve_explicit_mounts(args, &client, &mut std::io::stderr()).await?;
+    let (args, _policy_guard) =
+        run::resolve::resolve_into_run_args(args, &client, &available, &mut std::io::stderr())
+            .await?;
+    service::run_image(args, debug).await
+}
+
 pub async fn run(cli: Cli) -> Result<i32> {
     let debug = cli.log_level == LogLevel::Debug;
     if update_check::should_announce(&cli.command)
@@ -29,28 +49,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
         let _ = update_check::real::run_announce();
     }
     let code = match cli.command {
-        Command::Run(mut args) => {
-            args.env = run::env_file::merged_run_env(&args.env_file, &args.env)?;
-            let config_path = config::default_config_path()?;
-            let defaults = config::load_run_defaults(&config_path)?;
-            let args = config::apply_run_defaults(args, defaults);
-            service::require_running().await;
-            let client = registry::RealRegistryClient::new(service::socket_path()?);
-            let store = lns_policy::credentials::JsonFileCredentialStore::new(
-                lns_policy::credentials::default_credentials_path(),
-            );
-            let available = run::resolve::available_credentials(
-                &lns_policy::credentials::CredentialStore::load(&store)?,
-            );
-            let (args, _policy_guard) = run::resolve::resolve_into_run_args(
-                args,
-                &client,
-                &available,
-                &mut std::io::stderr(),
-            )
-            .await?;
-            service::run_image(args, debug).await?
-        }
+        Command::Run(args) => dispatch_run(args, debug).await?,
         Command::Exec(args) => {
             service::require_running().await;
             service::exec_image(args).await?
