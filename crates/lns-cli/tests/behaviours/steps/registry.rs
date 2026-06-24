@@ -75,6 +75,7 @@ async fn push_inferred(world: &mut BehaviourWorld, source: String, reference: St
             source,
             reference,
             family: None,
+            content: None,
         },
     )
     .await;
@@ -93,6 +94,7 @@ async fn push_with_family(
             source,
             reference,
             family: Some(family),
+            content: None,
         },
     )
     .await;

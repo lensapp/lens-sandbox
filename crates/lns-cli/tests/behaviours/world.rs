@@ -73,6 +73,7 @@ impl lns_cli::registry::RegistryClient for FakeRegistryClient {
         artifact_type: &'a str,
         _config_media_type: &'a str,
         config_blob: &'a [u8],
+        _layers: &'a [Vec<u8>],
     ) -> lns_cli::integration::LocalBoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let digest = Self::digest(config_blob);

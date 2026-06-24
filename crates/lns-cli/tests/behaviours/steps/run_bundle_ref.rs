@@ -12,6 +12,7 @@ async fn store(world: &mut BehaviourWorld, reference: &str, family: Family, yaml
             &family.artifact_type(),
             &family.config_media_type(),
             &blob,
+            &[],
         )
         .await
         .expect("store artifact");

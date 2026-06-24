@@ -450,6 +450,12 @@ pub struct PushArgs {
         help = "Artifact family (agent, policy, tool, …); inferred from the reference path when omitted."
     )]
     pub family: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Pack a local file or directory into the artifact's OCI layer (for filesets and other content-bearing artifacts)."
+    )]
+    pub content: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]

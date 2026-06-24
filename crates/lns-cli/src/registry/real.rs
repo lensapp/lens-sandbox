@@ -40,6 +40,7 @@ impl RegistryClient for RealRegistryClient {
         artifact_type: &'a str,
         config_media_type: &'a str,
         config_blob: &'a [u8],
+        layers: &'a [Vec<u8>],
     ) -> LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
             let request = Request::PushArtifact {
@@ -47,6 +48,7 @@ impl RegistryClient for RealRegistryClient {
                 artifact_type: artifact_type.to_string(),
                 config_media_type: config_media_type.to_string(),
                 config_blob: config_blob.to_vec(),
+                layers: layers.to_vec(),
             };
             match self.round_trip(request).await? {
                 Response::Pushed { digest } => Ok(digest),

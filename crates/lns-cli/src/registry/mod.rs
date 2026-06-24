@@ -29,6 +29,7 @@ pub trait RegistryClient {
         artifact_type: &'a str,
         config_media_type: &'a str,
         config_blob: &'a [u8],
+        layers: &'a [Vec<u8>],
     ) -> LocalBoxFuture<'a, Result<String>>;
 
     fn push_image<'a>(
@@ -82,23 +83,65 @@ pub async fn push(
             family.slug()
         )
     })?;
+    let layers = match &args.content {
+        Some(content) => {
+            let content = if Path::new(content).is_absolute() {
+                content.clone()
+            } else {
+                cwd.join(content)
+            };
+            vec![pack_content_layer(&content)?]
+        }
+        None => Vec::new(),
+    };
     let digest = client
         .push_artifact(
             &args.reference,
             &family.artifact_type(),
             &family.config_media_type(),
             &config_blob,
+            &layers,
         )
         .await?;
     writeln!(
         writer,
-        "Pushed {} {} ({} bytes) to {}",
+        "Pushed {} {} ({} bytes{}) to {}",
         family.slug(),
         digest,
         config_blob.len(),
+        if layers.is_empty() {
+            String::new()
+        } else {
+            format!(" + {} layer", layers.len())
+        },
         args.reference
     )?;
     Ok(0)
+}
+
+/// Packs a file or directory tree into a single gzip-compressed tar layer (relative paths, rooted at the content dir).
+fn pack_content_layer(content: &Path) -> Result<Vec<u8>> {
+    use flate2::{Compression, write::GzEncoder};
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut builder = tar::Builder::new(&mut gz);
+        if content.is_dir() {
+            builder
+                .append_dir_all(".", content)
+                .with_context(|| format!("packing directory {}", content.display()))?;
+        } else {
+            let name = content.file_name().ok_or_else(|| {
+                anyhow::anyhow!("content path has no file name: {}", content.display())
+            })?;
+            let mut file = std::fs::File::open(content)
+                .with_context(|| format!("opening {}", content.display()))?;
+            builder
+                .append_file(name, &mut file)
+                .with_context(|| format!("packing file {}", content.display()))?;
+        }
+        builder.finish().context("finalizing content tar")?;
+    }
+    gz.finish().context("finalizing content gzip")
 }
 
 pub async fn pull(
@@ -140,6 +183,7 @@ mod tests {
     #[derive(Default)]
     struct FakeClient {
         pushed: Mutex<Option<(String, String, Vec<u8>)>>,
+        pushed_layers: Mutex<Vec<Vec<u8>>>,
         image_pushed: Mutex<Option<(String, String)>>,
         push_digest: String,
         pull: Option<Pulled>,
@@ -168,6 +212,7 @@ mod tests {
             artifact_type: &'a str,
             _config_media_type: &'a str,
             config_blob: &'a [u8],
+            layers: &'a [Vec<u8>],
         ) -> LocalBoxFuture<'a, Result<String>> {
             Box::pin(async move {
                 if let Some(msg) = &self.fail {
@@ -175,6 +220,7 @@ mod tests {
                 }
                 *self.pushed.lock().unwrap() =
                     Some((reference.into(), artifact_type.into(), config_blob.to_vec()));
+                *self.pushed_layers.lock().unwrap() = layers.to_vec();
                 Ok(self.push_digest.clone())
             })
         }
@@ -207,6 +253,7 @@ mod tests {
             source: source.into(),
             reference: reference.into(),
             family: family.map(str::to_string),
+            content: None,
         }
     }
 
@@ -483,5 +530,74 @@ mod tests {
         };
         let err = pull(&args, &client, &mut Vec::new()).await.unwrap_err();
         assert!(format!("{err:#}").contains("not found"), "got: {err:#}");
+    }
+
+    fn read_gz_tar_names(layer: &[u8]) -> Vec<String> {
+        let dec = flate2::read::GzDecoder::new(layer);
+        let mut archive = tar::Archive::new(dec);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pack_content_layer_packs_a_single_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.yaml"), b"model: {}\n").unwrap();
+        let layer = pack_content_layer(&dir.path().join("config.yaml")).unwrap();
+        assert!(
+            read_gz_tar_names(&layer)
+                .iter()
+                .any(|n| n.ends_with("config.yaml"))
+        );
+    }
+
+    #[test]
+    fn pack_content_layer_rejects_a_path_with_no_file_name() {
+        let err = pack_content_layer(Path::new("does-not-exist/..")).unwrap_err();
+        assert!(format!("{err:#}").contains("no file name"), "got: {err:#}");
+    }
+
+    #[test]
+    fn pack_content_layer_packs_a_directory_tree() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.yaml"), b"x: 1\n").unwrap();
+        let layer = pack_content_layer(dir.path()).unwrap();
+        assert!(
+            read_gz_tar_names(&layer)
+                .iter()
+                .any(|n| n.contains("config.yaml"))
+        );
+    }
+
+    #[tokio::test]
+    async fn push_packs_content_into_a_layer_and_forwards_it() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("fs.yaml"),
+            "apiVersion: lens.dev/v1alpha1\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("payload")).unwrap();
+        std::fs::write(dir.path().join("payload/config.yaml"), b"model: {}\n").unwrap();
+        let client = FakeClient {
+            push_digest: "sha256:abc".into(),
+            ..Default::default()
+        };
+        let mut args = push_args("fs.yaml", "localhost:5000/org/acme/filesets/cfg:v1", None);
+        args.content = Some("payload".into());
+        let mut out = Vec::new();
+        assert_eq!(push(&args, dir.path(), &client, &mut out).await.unwrap(), 0);
+        let layers = client.pushed_layers.lock().unwrap().clone();
+        assert_eq!(layers.len(), 1, "one content layer pushed");
+        assert!(
+            read_gz_tar_names(&layers[0])
+                .iter()
+                .any(|n| n.contains("config.yaml")),
+            "layer carries the packed content"
+        );
+        assert!(String::from_utf8(out).unwrap().contains("1 layer"));
     }
 }

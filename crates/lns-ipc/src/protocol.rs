@@ -82,6 +82,8 @@ pub enum Request {
         artifact_type: String,
         config_media_type: String,
         config_blob: Vec<u8>,
+        #[serde(default)]
+        layers: Vec<Vec<u8>>,
     },
     PushImage {
         source_reference: String,
@@ -695,6 +697,7 @@ mod tests {
                 artifact_type: "application/vnd.lens.policy.v1+json".into(),
                 config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                 config_blob: br#"{"network":{}}"#.to_vec(),
+                layers: vec![b"layer-bytes".to_vec()],
             },
             Request::PushImage {
                 source_reference: "docker.io/library/alpine:3.20".into(),

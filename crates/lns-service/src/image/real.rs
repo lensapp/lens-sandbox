@@ -91,14 +91,21 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
         artifact_type: &str,
         config_media_type: &str,
         config_blob: &[u8],
+        layers: &[Vec<u8>],
         auth: &RegistryAuth,
     ) -> Result<String> {
-        use oci_client::client::Config;
-        use oci_client::manifest::OCI_IMAGE_MEDIA_TYPE;
+        use oci_client::client::{Config, ImageLayer};
+        use oci_client::manifest::{IMAGE_LAYER_GZIP_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
         use sha2::{Digest, Sha256};
 
         let config = Config::new(config_blob.to_vec(), config_media_type.to_string(), None);
         let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(config_blob)));
+        let image_layers: Vec<ImageLayer> = layers
+            .iter()
+            .map(|bytes| {
+                ImageLayer::new(bytes.clone(), IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(), None)
+            })
+            .collect();
         let manifest = OciImageManifest {
             schema_version: 2,
             media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
@@ -108,12 +115,20 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
                 size: config_blob.len() as i64,
                 ..Default::default()
             },
-            layers: Vec::new(),
+            layers: image_layers
+                .iter()
+                .map(|l| OciDescriptor {
+                    media_type: l.media_type.clone(),
+                    digest: l.sha256_digest(),
+                    size: l.data.len() as i64,
+                    ..Default::default()
+                })
+                .collect(),
             artifact_type: Some(artifact_type.to_string()),
             ..Default::default()
         };
         self.client
-            .push(reference, &[], config, auth, Some(manifest))
+            .push(reference, &image_layers, config, auth, Some(manifest))
             .await
             .with_context(|| format!("pushing artifact to {reference}"))?;
         self.client

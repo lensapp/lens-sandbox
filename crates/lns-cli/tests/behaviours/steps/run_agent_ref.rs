@@ -15,6 +15,7 @@ async fn store_agent(world: &mut BehaviourWorld, reference: &str, yaml: &str) {
             &Family::Agent.artifact_type(),
             &Family::Agent.config_media_type(),
             &blob,
+            &[],
         )
         .await
         .expect("store agent artifact");

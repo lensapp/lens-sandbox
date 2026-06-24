@@ -430,6 +430,7 @@ mod tests {
             artifact_type: &'a str,
             _config_media_type: &'a str,
             config_blob: &'a [u8],
+            _layers: &'a [Vec<u8>],
         ) -> LocalBoxFuture<'a, Result<String>> {
             Box::pin(async move {
                 self.artifacts.lock().unwrap().insert(
@@ -483,6 +484,7 @@ mod tests {
                 &family.artifact_type(),
                 &family.config_media_type(),
                 blob,
+                &[],
             )
             .await
             .unwrap();
@@ -1338,6 +1340,7 @@ mod tests {
                 "application/vnd.oci.image.config.v1+json",
                 "x",
                 &model_blob(""),
+                &[],
             )
             .await
             .unwrap();
@@ -1354,7 +1357,7 @@ mod tests {
     async fn resolve_mount_surfaces_a_malformed_artifact_blob() {
         let client = RefKeyedClient::default();
         client
-            .push_artifact(MODEL_REF, &Family::Model.artifact_type(), "x", b"{}")
+            .push_artifact(MODEL_REF, &Family::Model.artifact_type(), "x", b"{}", &[])
             .await
             .unwrap();
         let err = resolve_mount(BUNDLE_REF, &cref("org/acme/models/some-model:v1"), &client)

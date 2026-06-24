@@ -35,6 +35,7 @@ pub(crate) trait ArtifactRegistry: Send + Sync {
         artifact_type: &str,
         config_media_type: &str,
         config_blob: &[u8],
+        layers: &[Vec<u8>],
         auth: &RegistryAuth,
     ) -> impl std::future::Future<Output = Result<String>> + Send;
 
@@ -103,6 +104,7 @@ async fn push_artifact_with<R: ArtifactRegistry>(
     artifact_type: &str,
     config_media_type: &str,
     config_blob: &[u8],
+    layers: &[Vec<u8>],
 ) -> Result<String> {
     let (reference, auth) = resolve(reference, store)?;
     client
@@ -111,6 +113,7 @@ async fn push_artifact_with<R: ArtifactRegistry>(
             artifact_type,
             config_media_type,
             config_blob,
+            layers,
             &auth,
         )
         .await
@@ -170,6 +173,7 @@ pub async fn push_artifact(
     artifact_type: &str,
     config_media_type: &str,
     config_blob: &[u8],
+    layers: &[Vec<u8>],
 ) -> Result<String> {
     push_artifact_with(
         &registry_for(reference),
@@ -178,6 +182,7 @@ pub async fn push_artifact(
         artifact_type,
         config_media_type,
         config_blob,
+        layers,
     )
     .await
 }
@@ -344,6 +349,7 @@ mod tests {
         layers: Vec<Vec<u8>>,
         layers_fail: bool,
         seen_auth: Mutex<Option<RegistryAuth>>,
+        pushed_layers: Mutex<Vec<Vec<u8>>>,
         image_pulled: Mutex<Option<String>>,
         image_pushed: Mutex<Option<(String, String)>>,
     }
@@ -355,9 +361,11 @@ mod tests {
             _artifact_type: &str,
             _config_media_type: &str,
             _config_blob: &[u8],
+            layers: &[Vec<u8>],
             auth: &RegistryAuth,
         ) -> Result<String> {
             *self.seen_auth.lock().unwrap() = Some(auth.clone());
+            *self.pushed_layers.lock().unwrap() = layers.to_vec();
             if self.fail {
                 anyhow::bail!("registry refused the push");
             }
@@ -530,7 +538,7 @@ mod tests {
         );
         store.save(&file).unwrap();
 
-        let digest = push_artifact_with(&client, &store, REF, POLICY_AT, POLICY_CMT, b"{}")
+        let digest = push_artifact_with(&client, &store, REF, POLICY_AT, POLICY_CMT, b"{}", &[])
             .await
             .unwrap();
         assert_eq!(digest, "sha256:abc");
@@ -543,13 +551,39 @@ mod tests {
     #[tokio::test]
     async fn push_falls_back_to_anonymous_without_a_stored_credential() {
         let client = FakeRegistry::default();
-        push_artifact_with(&client, &empty_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
-            .await
-            .unwrap();
+        push_artifact_with(
+            &client,
+            &empty_store(),
+            REF,
+            POLICY_AT,
+            POLICY_CMT,
+            b"{}",
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             *client.seen_auth.lock().unwrap(),
             Some(RegistryAuth::Anonymous)
         );
+    }
+
+    #[tokio::test]
+    async fn push_forwards_content_layers_to_the_registry() {
+        let client = FakeRegistry::default();
+        let layer = b"tar-gz-bytes".to_vec();
+        push_artifact_with(
+            &client,
+            &empty_store(),
+            REF,
+            POLICY_AT,
+            POLICY_CMT,
+            b"{}",
+            std::slice::from_ref(&layer),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*client.pushed_layers.lock().unwrap(), vec![layer]);
     }
 
     #[tokio::test]
@@ -562,6 +596,7 @@ mod tests {
             POLICY_AT,
             POLICY_CMT,
             b"{}",
+            &[],
         )
         .await
         .unwrap_err();
@@ -575,9 +610,17 @@ mod tests {
     #[tokio::test]
     async fn push_surfaces_a_credential_store_load_error() {
         let client = FakeRegistry::default();
-        let err = push_artifact_with(&client, &failing_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
-            .await
-            .unwrap_err();
+        let err = push_artifact_with(
+            &client,
+            &failing_store(),
+            REF,
+            POLICY_AT,
+            POLICY_CMT,
+            b"{}",
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("loading registry credentials"),
             "got: {err:#}"
@@ -590,9 +633,17 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        let err = push_artifact_with(&client, &empty_store(), REF, POLICY_AT, POLICY_CMT, b"{}")
-            .await
-            .unwrap_err();
+        let err = push_artifact_with(
+            &client,
+            &empty_store(),
+            REF,
+            POLICY_AT,
+            POLICY_CMT,
+            b"{}",
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("refused the push"),
             "got: {err:#}"
@@ -1009,7 +1060,7 @@ mod tests {
             "LNS_REGISTRY_AUTH_PATH",
             dir.path().join("auth.json"),
         );
-        let err = push_artifact("::bad::", POLICY_AT, POLICY_CMT, b"{}")
+        let err = push_artifact("::bad::", POLICY_AT, POLICY_CMT, b"{}", &[])
             .await
             .unwrap_err();
         assert!(

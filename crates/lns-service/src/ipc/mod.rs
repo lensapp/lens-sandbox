@@ -235,12 +235,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             artifact_type,
             config_media_type,
             config_blob,
+            layers,
         } => push_response(
             crate::artifact::push_artifact(
                 reference,
                 artifact_type,
                 config_media_type,
                 config_blob,
+                layers,
             )
             .await,
         ),
@@ -1670,6 +1672,7 @@ mod tests {
                     artifact_type: "application/vnd.lens.policy.v1+json".into(),
                     config_media_type: "application/vnd.lens.policy.config.v1+json".into(),
                     config_blob: b"{}".to_vec(),
+                    layers: Vec::new(),
                 },
                 Instant::now(),
             )
