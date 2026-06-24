@@ -182,16 +182,17 @@ pub async fn resolve_bundle_ref(
         }
         writeln!(writer, "✓ applied sandbox {sandbox_ref}")?;
     }
-    if let Some(component) = &bundle.components.model {
+    let mount_components = bundle
+        .components
+        .model
+        .iter()
+        .chain(bundle.components.tools.iter())
+        .chain(bundle.components.knowledge.iter());
+    for component in mount_components {
         let mount = resolve_mount(reference, component, client).await?;
-        writeln!(
-            writer,
-            "✓ mounting model {} → {}",
-            mount.reference, mount.path
-        )?;
+        writeln!(writer, "✓ mounting {} → {}", mount.reference, mount.path)?;
         resolved.artifact_mounts.push(mount);
     }
-    note_skipped_components(&bundle, writer)?;
     Ok(resolved)
 }
 
@@ -336,24 +337,6 @@ async fn materialize_policy(
     file.flush().ok();
     let path = file.path().to_path_buf();
     Ok((path, file))
-}
-
-fn note_skipped_components(bundle: &BundleArtifact, writer: &mut impl Write) -> Result<()> {
-    let mut skipped = Vec::new();
-    if !bundle.components.tools.is_empty() {
-        skipped.push("tools");
-    }
-    if !bundle.components.knowledge.is_empty() {
-        skipped.push("knowledge");
-    }
-    if !skipped.is_empty() {
-        writeln!(
-            writer,
-            "• bundle components not yet applied: {}",
-            skipped.join(", ")
-        )?;
-    }
-    Ok(())
 }
 
 fn registry_host(reference: &str) -> Option<&str> {
@@ -897,22 +880,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_bundle_ref_notes_unapplied_components() {
-        let client = bundle_client(
-            "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
-             tools:\n    - { ref: org/acme/tools/some-tool:v1 }\n  \
-             sandbox:\n    ref: org/acme/sandboxes/some-runtime:v1\n  \
-             knowledge:\n    - { ref: org/acme/knowledge/some-runbook:v1 }\n",
+    async fn resolve_bundle_ref_mounts_tools_and_knowledge_at_canonical_paths() {
+        let client = RefKeyedClient::default();
+        put_artifact(
+            &client,
+            BUNDLE_REF,
+            Family::Bundle,
+            &bundle_blob(
+                "  agents:\n    - { ref: org/acme/agents/some-agent:v1 }\n  \
+                 tools:\n    - { ref: org/acme/tools/filesystem:v1 }\n  \
+                 knowledge:\n    - { ref: org/acme/knowledge/runbook:v1 }\n",
+            ),
         )
         .await;
-        let mut out = Vec::new();
-        resolve_bundle_ref(BUNDLE_REF, &client, &mut out)
+        put_artifact(&client, AGENT_REF, Family::Agent, &agent_blob("go", false)).await;
+        put_artifact(
+            &client,
+            "localhost:5000/org/acme/tools/filesystem:v1",
+            Family::Tool,
+            b"{\"apiVersion\":\"lens.dev/v1alpha1\",\"kind\":\"Tool\",\"metadata\":{\"name\":\"filesystem\"},\"spec\":{\"kind\":\"mcp\"}}",
+        )
+        .await;
+        put_artifact(
+            &client,
+            "localhost:5000/org/acme/knowledge/runbook:v1",
+            Family::Knowledge,
+            b"{\"apiVersion\":\"lens.dev/v1alpha1\",\"kind\":\"Knowledge\",\"metadata\":{\"name\":\"runbook\"},\"spec\":{\"format\":\"runbook\"}}",
+        )
+        .await;
+        let resolved = resolve_bundle_ref(BUNDLE_REF, &client, &mut Vec::new())
             .await
             .unwrap();
-        let msg = String::from_utf8(out).unwrap();
-        assert!(msg.contains("tools"), "got: {msg}");
-        assert!(msg.contains("sandbox"), "got: {msg}");
-        assert!(msg.contains("knowledge"), "got: {msg}");
+        let paths: Vec<&str> = resolved
+            .artifact_mounts
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"/etc/agent/tools/filesystem"),
+            "got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/etc/agent/knowledge/runbook"),
+            "got: {paths:?}"
+        );
     }
 
     #[tokio::test]
