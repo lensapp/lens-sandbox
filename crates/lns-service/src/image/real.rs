@@ -146,6 +146,28 @@ impl crate::artifact::ArtifactRegistry for RealRegistry {
         Ok(crate::image_store::pull(reference).await?.digest)
     }
 
+    async fn pull_artifact_layers(
+        &self,
+        reference: &Reference,
+        auth: &RegistryAuth,
+    ) -> Result<Vec<Vec<u8>>> {
+        let (manifest, _digest, _config) = self
+            .client
+            .pull_manifest_and_config(reference, auth)
+            .await
+            .with_context(|| format!("pulling manifest for {reference}"))?;
+        let mut layers = Vec::with_capacity(manifest.layers.len());
+        for descriptor in &manifest.layers {
+            let mut out = CountingSink::new(&|_| {});
+            self.client
+                .pull_blob(reference, descriptor, &mut out)
+                .await
+                .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
+            layers.push(out.into_bytes());
+        }
+        Ok(layers)
+    }
+
     async fn push_image_from_cache(
         &self,
         source_reference: &str,

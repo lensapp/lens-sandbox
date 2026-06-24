@@ -55,6 +55,12 @@ pub(crate) trait ArtifactRegistry: Send + Sync {
         target: &Reference,
         auth: &RegistryAuth,
     ) -> impl std::future::Future<Output = Result<String>> + Send;
+
+    fn pull_artifact_layers(
+        &self,
+        reference: &Reference,
+        auth: &RegistryAuth,
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<u8>>>> + Send;
 }
 
 fn auth_for(registry: &str, file: &RegistryAuthFile) -> RegistryAuth {
@@ -217,14 +223,99 @@ async fn materialize_mounts_with<R: ArtifactRegistry>(
                 mode: 0o644,
                 source: RuntimeSource::Bytes(head.config_blob),
             }),
+            Family::Tool | Family::Knowledge | Family::Fileset => {
+                let layers = client.pull_artifact_layers(&reference, &auth).await?;
+                if layers.is_empty() {
+                    crate::log::warn!("mount {} has no layer content", mount.reference);
+                }
+                for layer in &layers {
+                    specs.extend(expand_layer_to_specs(layer, &mount.path)?);
+                }
+            }
             other => anyhow::bail!(
-                "layer-content mounts are not yet supported ({} is a {})",
+                "{} is a {} artifact and cannot be mounted",
                 mount.reference,
                 other.slug()
             ),
         }
     }
     Ok(specs)
+}
+
+/// Expands one OCI layer tarball (optionally gzip-compressed) into runtime file specs rooted at `mount_root`; rejects path traversal before the runtime layer's second gate.
+fn expand_layer_to_specs(
+    layer_bytes: &[u8],
+    mount_root: &str,
+) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
+    use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
+    use std::io::Read;
+
+    let reader: Box<dyn Read> = if layer_bytes.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(layer_bytes))
+    } else {
+        Box::new(layer_bytes)
+    };
+    let mut archive = tar::Archive::new(reader);
+    let root = mount_root.trim_end_matches('/');
+    let mut specs = Vec::new();
+    for entry in archive.entries().context("reading layer tar")? {
+        let mut entry = entry.context("reading layer tar entry")?;
+        let etype = entry.header().entry_type();
+        let mode = entry.header().mode().unwrap_or(0o644) & 0o7777;
+        let rel = safe_rel_path(&entry.path().context("layer entry path")?)?;
+        if rel.is_empty() {
+            continue;
+        }
+        let guest_path = format!("{root}/{rel}");
+        if etype.is_dir() {
+            continue;
+        } else if etype.is_symlink() {
+            let target = entry
+                .link_name()
+                .context("layer symlink target")?
+                .ok_or_else(|| anyhow::anyhow!("symlink {guest_path} has no target"))?
+                .to_string_lossy()
+                .into_owned();
+            specs.push(RuntimeFileSpec {
+                guest_path,
+                mode,
+                source: RuntimeSource::Symlink(target),
+            });
+        } else if etype.is_file() {
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .context("reading layer file")?;
+            specs.push(RuntimeFileSpec {
+                guest_path,
+                mode,
+                source: RuntimeSource::Bytes(bytes),
+            });
+        }
+    }
+    Ok(specs)
+}
+
+/// Joins a tar entry path's normal components, rejecting any `..`, absolute, or non-UTF8 component (a tar-slip guard).
+fn safe_rel_path(path: &std::path::Path) -> Result<String> {
+    use std::path::Component;
+    let mut out = String::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(s) => {
+                let s = s
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("non-utf8 path in layer"))?;
+                if !out.is_empty() {
+                    out.push('/');
+                }
+                out.push_str(s);
+            }
+            Component::CurDir => {}
+            _ => anyhow::bail!("unsafe path component in layer entry: {}", path.display()),
+        }
+    }
+    Ok(out)
 }
 
 /// Materializes application-layer artifact mounts into runtime files injected at boot; model writes its config blob at the mount path (layer-content families land in a later stage).
@@ -250,6 +341,8 @@ mod tests {
         image_digest: String,
         fail: bool,
         image_fail: bool,
+        layers: Vec<Vec<u8>>,
+        layers_fail: bool,
         seen_auth: Mutex<Option<RegistryAuth>>,
         image_pulled: Mutex<Option<String>>,
         image_pushed: Mutex<Option<(String, String)>>,
@@ -295,6 +388,17 @@ mod tests {
                 anyhow::bail!("image pull failed");
             }
             Ok(self.image_digest.clone())
+        }
+
+        async fn pull_artifact_layers(
+            &self,
+            _reference: &Reference,
+            _auth: &RegistryAuth,
+        ) -> Result<Vec<Vec<u8>>> {
+            if self.layers_fail {
+                anyhow::bail!("layer fetch failed");
+            }
+            Ok(self.layers.clone())
         }
 
         async fn push_image_from_cache(
@@ -669,19 +773,176 @@ mod tests {
         );
     }
 
+    fn tar_layer(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(std::io::Cursor::new(&mut bytes));
+            for (name, mode, content) in entries {
+                let mut h = tar::Header::new_gnu();
+                h.set_path(name).unwrap();
+                h.set_mode(*mode);
+                h.set_size(content.len() as u64);
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_cksum();
+                b.append(&h, &content[..]).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn layered_mount(path: &str) -> lns_ipc::ArtifactMount {
+        lns_ipc::ArtifactMount {
+            reference: "registry.example.test/org/acme/tools/t:v1".into(),
+            path: path.into(),
+            read_only: true,
+        }
+    }
+
     #[tokio::test]
-    async fn materialize_mounts_defers_layer_content_families() {
+    async fn materialize_mounts_expands_a_tool_layer_under_its_path() {
         let fake = FakeRegistry {
             head: Some(head(TOOL_CMT, None)),
+            layers: vec![tar_layer(&[("bin/run", 0o755, b"#!/bin/sh\n")])],
+            ..Default::default()
+        };
+        let specs = materialize_mounts_with(
+            &fake,
+            &empty_store(),
+            &[layered_mount("/etc/agent/tools/t")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].guest_path, "/etc/agent/tools/t/bin/run");
+        assert_eq!(specs[0].mode, 0o755);
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_warns_but_succeeds_on_an_empty_layer_set() {
+        let fake = FakeRegistry {
+            head: Some(head(TOOL_CMT, None)),
+            layers: vec![],
+            ..Default::default()
+        };
+        let specs = materialize_mounts_with(
+            &fake,
+            &empty_store(),
+            &[layered_mount("/etc/agent/tools/t")],
+        )
+        .await
+        .unwrap();
+        assert!(specs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_surfaces_a_layer_fetch_error() {
+        let fake = FakeRegistry {
+            head: Some(head(TOOL_CMT, None)),
+            layers_fail: true,
+            ..Default::default()
+        };
+        let err = materialize_mounts_with(
+            &fake,
+            &empty_store(),
+            &[layered_mount("/etc/agent/tools/t")],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("layer fetch failed"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_mounts_rejects_a_runtime_layer_family() {
+        let fake = FakeRegistry {
+            head: Some(head(POLICY_CMT, None)),
             ..Default::default()
         };
         let err = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
             .await
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("not yet supported"),
+            format!("{err:#}").contains("cannot be mounted"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn expand_layer_to_specs_handles_files_and_gzip() {
+        let plain = tar_layer(&[("config.yaml", 0o644, b"provider: anthropic\n")]);
+        let specs = expand_layer_to_specs(&plain, "/opt/data").unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].guest_path, "/opt/data/config.yaml");
+        assert!(matches!(
+            &specs[0].source,
+            crate::runtime_layer::RuntimeSource::Bytes(_)
+        ));
+
+        let mut gz = Vec::new();
+        {
+            use std::io::Write;
+            let mut enc = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::fast());
+            enc.write_all(&plain).unwrap();
+            enc.finish().unwrap();
+        }
+        let from_gz = expand_layer_to_specs(&gz, "/opt/data").unwrap();
+        assert_eq!(from_gz[0].guest_path, "/opt/data/config.yaml");
+    }
+
+    #[test]
+    fn expand_layer_to_specs_expands_a_symlink_and_skips_dirs() {
+        let mut bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(std::io::Cursor::new(&mut bytes));
+            let mut d = tar::Header::new_gnu();
+            d.set_path("sub/").unwrap();
+            d.set_entry_type(tar::EntryType::Directory);
+            d.set_size(0);
+            d.set_mode(0o755);
+            d.set_cksum();
+            b.append(&d, std::io::empty()).unwrap();
+            let mut s = tar::Header::new_gnu();
+            s.set_entry_type(tar::EntryType::Symlink);
+            s.set_size(0);
+            s.set_mode(0o777);
+            s.set_link_name("real").unwrap();
+            s.set_path("link").unwrap();
+            s.set_cksum();
+            b.append(&s, std::io::empty()).unwrap();
+            b.finish().unwrap();
+        }
+        let specs = expand_layer_to_specs(&bytes, "/opt/data").unwrap();
+        assert_eq!(specs.len(), 1, "dir skipped, symlink kept");
+        assert!(matches!(
+            &specs[0].source,
+            crate::runtime_layer::RuntimeSource::Symlink(t) if t == "real"
+        ));
+    }
+
+    #[test]
+    fn safe_rel_path_joins_normal_skips_curdir_and_rejects_escapes() {
+        use std::path::Path;
+        assert_eq!(safe_rel_path(Path::new("./a/b")).unwrap(), "a/b");
+        assert!(
+            format!("{:#}", safe_rel_path(Path::new("../escape")).unwrap_err())
+                .contains("unsafe path")
+        );
+        assert!(
+            format!("{:#}", safe_rel_path(Path::new("/etc/passwd")).unwrap_err())
+                .contains("unsafe path")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_rel_path_rejects_non_utf8_components() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let p = std::path::Path::new(OsStr::from_bytes(b"a/\xff"));
+        assert!(format!("{:#}", safe_rel_path(p).unwrap_err()).contains("non-utf8"));
     }
 
     #[tokio::test]
