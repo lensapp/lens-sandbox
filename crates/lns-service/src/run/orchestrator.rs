@@ -81,13 +81,6 @@ async fn orchestrate(
     let mut run_scratch =
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
-    if let Some(mcp) = args.mcp_config.as_ref() {
-        log::debug!(
-            path = %mcp.target,
-            bytes = mcp.content.len(),
-            "mcp config resolved; guest rootfs write happens during boot"
-        );
-    }
 
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
