@@ -70,12 +70,12 @@ fn palette(kind: ButtonKind) -> [StateColors; 3] {
             },
             StateColors {
                 fill: tint(window::CATEGORY, 74),
-                stroke: window::CATEGORY,
+                stroke: tint(window::CATEGORY, 140),
                 fg: window::CATEGORY,
             },
             StateColors {
                 fill: tint(window::CATEGORY, 110),
-                stroke: window::CATEGORY,
+                stroke: tint(window::CATEGORY, 140),
                 fg: window::CATEGORY,
             },
         ],
@@ -104,12 +104,12 @@ fn palette(kind: ButtonKind) -> [StateColors; 3] {
             },
             StateColors {
                 fill: tint(window::STATUS_CRITICAL, 74),
-                stroke: window::STATUS_CRITICAL,
+                stroke: tint(window::STATUS_CRITICAL, 90),
                 fg: window::STATUS_CRITICAL,
             },
             StateColors {
                 fill: tint(window::STATUS_CRITICAL, 110),
-                stroke: window::STATUS_CRITICAL,
+                stroke: tint(window::STATUS_CRITICAL, 90),
                 fg: window::STATUS_CRITICAL,
             },
         ],

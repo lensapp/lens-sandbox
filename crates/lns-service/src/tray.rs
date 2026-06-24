@@ -31,6 +31,14 @@ const CONNECTING_ITEM_HEIGHT: f32 = 112.0;
 const CARD_ITEM_HEIGHT: f32 = 282.0;
 const TOKEN_REVEAL_EXTRA: f32 = 150.0;
 
+const FOLD_SECONDS: f32 = 0.34;
+const SLIDE_SECONDS: f32 = 0.22;
+const PILE_PEEK: f32 = 9.0;
+const PILE_INSET: f32 = 10.0;
+const PILE_MAX_LEDGES: usize = 2;
+const PILE_HEADER_H: f32 = 19.0;
+const PILE_HEADER_BUTTON_CENTER: f32 = 16.0;
+
 /// Builds the tray icon + Quit menu and installs the global menu-event handler (Quit signals shutdown); `on_event` lets the caller repaint after any menu event.
 fn build_tray_icon(
     shutdown: Arc<Shutdown>,
@@ -129,6 +137,7 @@ pub fn run_tray(
         native_options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(window::lds_visuals());
+            window::quiet_debug_overlays(&cc.egui_ctx);
             window::install_system_fonts(&cc.egui_ctx);
             window::install_icon_font(&cc.egui_ctx);
             window::install_ctx(cc.egui_ctx.clone());
@@ -313,6 +322,10 @@ impl eframe::App for TrayApp {
         self.fit_height_to_content(ui.ctx(), target);
 
         match action {
+            Some(CardAction::CloseAll) => {
+                close_all(&self.window_state, &snapshot);
+                ui.ctx().request_repaint();
+            }
             Some(CardAction::Decide { id, decision }) => {
                 self.window_state.decide(&id, decision);
                 ui.ctx().request_repaint();
@@ -364,6 +377,8 @@ const BTN_GAP: f32 = 12.0;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CardAction {
+    /// Dismiss every card at once (the pile's close-all header button), denying or cancelling each held request.
+    CloseAll,
     Decide {
         id: String,
         decision: Decision,
@@ -439,11 +454,40 @@ pub fn render_stack(
     remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
-    use egui::{Frame, Margin};
-
     if snapshot.order.is_empty() {
         return (None, 0.0);
     }
+    if snapshot.order.len() == 1 {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), false));
+        return render_single(
+            ui,
+            snapshot,
+            credential_inputs,
+            token_drafts,
+            remember,
+            scroll_max,
+        );
+    }
+    render_pile(
+        ui,
+        snapshot,
+        credential_inputs,
+        token_drafts,
+        remember,
+        scroll_max,
+    )
+}
+
+fn render_single(
+    ui: &mut egui::Ui,
+    snapshot: &Snapshot,
+    credential_inputs: &mut HashMap<String, String>,
+    token_drafts: &mut HashMap<String, TokenDraft>,
+    remember: &mut HashMap<String, bool>,
+    scroll_max: f32,
+) -> (Option<CardAction>, f32) {
+    use egui::{Frame, Margin};
 
     ui.style_mut().spacing.scroll.floating = true;
     ui.style_mut().spacing.scroll.fade.strength = 0.0;
@@ -490,6 +534,506 @@ pub fn render_stack(
                 .inner
         });
     (out.inner, out.content_size.y)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ledge_alpha(depth: usize) -> f32 {
+    match depth {
+        1 => 0.60,
+        _ => 0.32,
+    }
+}
+
+struct PileGeom {
+    left: f32,
+    top: f32,
+    width: f32,
+}
+
+/// The two layouts a notification pile animates between, derived purely from measured card heights so the rendering and the window sizing agree: each card's expanded slot offset, the folded/expanded content heights, and how many ledges peek when collapsed.
+struct PileLayout {
+    expanded_y: Vec<f32>,
+    expanded_h: f32,
+    folded_h: f32,
+    visible: usize,
+}
+
+impl PileLayout {
+    fn new(heights: &[f32]) -> Self {
+        let n = heights.len();
+        let mut expanded_y = vec![0.0_f32; n];
+        expanded_y[0] = PILE_HEADER_H;
+        for i in 1..n {
+            expanded_y[i] = expanded_y[i - 1] + heights[i - 1] + theme::CARD_GAP;
+        }
+        let expanded_h = expanded_y[n - 1] + heights[n - 1];
+        let visible = (n - 1).min(PILE_MAX_LEDGES);
+        let folded_h = heights[0] + visible as f32 * PILE_PEEK;
+        Self {
+            expanded_y,
+            expanded_h,
+            folded_h,
+            visible,
+        }
+    }
+
+    fn depth(&self, i: usize) -> usize {
+        i.min(self.visible).max(1)
+    }
+
+    /// Card `i`'s top offset at fold fraction `t`, lerping from its folded peek to its fanned-out slot.
+    fn card_y(&self, i: usize, t: f32) -> f32 {
+        let folded = if i == 0 {
+            0.0
+        } else {
+            self.depth(i) as f32 * PILE_PEEK
+        };
+        lerp(folded, self.expanded_y[i], t)
+    }
+
+    /// Card `i`'s per-side horizontal inset at fold fraction `t`: narrowed as a ledge when folded, flush when fanned out.
+    fn card_inset(&self, i: usize, t: f32) -> f32 {
+        if i == 0 {
+            return 0.0;
+        }
+        lerp(self.depth(i) as f32 * PILE_INSET, 0.0, t)
+    }
+}
+
+struct PileMemory {
+    expanded: bool,
+    heights: Vec<f32>,
+}
+
+/// Keyed by underlying id, not list position, so a mid-list removal can't reuse a neighbour's scope id (an egui id-clash flash) or cached height.
+fn card_key(item: &StackItem, snapshot: &Snapshot) -> egui::Id {
+    match *item {
+        StackItem::Network(i) => egui::Id::new(("pile-net", &snapshot.pending[i].id)),
+        StackItem::Credential(i) => {
+            egui::Id::new(("pile-cred", &snapshot.pending_credentials[i].id))
+        }
+        StackItem::SignIn(i) => egui::Id::new(("pile-signin", &snapshot.sign_ins[i].credential_id)),
+        StackItem::Connecting(i) => egui::Id::new(("pile-conn", &snapshot.connecting[i])),
+        StackItem::Inform(i) => egui::Id::new(("pile-inform", i)),
+    }
+}
+
+fn read_pile_memory(ctx: &egui::Context, snapshot: &Snapshot) -> PileMemory {
+    let expanded = ctx
+        .data(|d| d.get_temp::<bool>(egui::Id::new("approval-pile-expanded")))
+        .unwrap_or(false);
+    let cache = ctx
+        .data(|d| d.get_temp::<HashMap<egui::Id, f32>>(egui::Id::new("approval-pile-heights")))
+        .unwrap_or_default();
+    let heights = snapshot
+        .order
+        .iter()
+        .map(|item| {
+            cache
+                .get(&card_key(item, snapshot))
+                .copied()
+                .unwrap_or_else(|| item_height(item))
+        })
+        .collect();
+    PileMemory { expanded, heights }
+}
+
+/// Reads and updates the pile's scroll offset; only the fully-expanded pile scrolls, and only when its fanned-out content overflows the window.
+fn pile_scroll_offset(
+    ctx: &egui::Context,
+    ui: &egui::Ui,
+    geom: &PileGeom,
+    expanded: bool,
+    max_scroll: f32,
+) -> f32 {
+    let id = egui::Id::new("approval-pile-scroll");
+    let mut scroll = ctx.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    if !expanded || max_scroll <= 0.0 {
+        scroll = 0.0;
+    } else {
+        let region = egui::Rect::from_min_size(
+            egui::pos2(geom.left, geom.top),
+            egui::vec2(geom.width, ui.max_rect().height()),
+        );
+        if ui.rect_contains_pointer(region) {
+            let dy = ui.input(|i| i.smooth_scroll_delta.y);
+            if dy != 0.0 {
+                ctx.request_repaint();
+            }
+            scroll -= dy;
+        }
+        scroll = scroll.clamp(0.0, max_scroll);
+    }
+    ctx.data_mut(|d| d.insert_temp(id, scroll));
+    scroll
+}
+
+fn close_all(state: &WindowState, snapshot: &Snapshot) {
+    let mut had_inform = false;
+    for item in &snapshot.order {
+        match *item {
+            StackItem::Network(i) => {
+                state.decide(&snapshot.pending[i].id, Decision::DenyOnce);
+            }
+            StackItem::Credential(i) => {
+                state.decide_credential(
+                    &snapshot.pending_credentials[i].id,
+                    CredentialDecisionRequest::Deny,
+                );
+            }
+            StackItem::SignIn(i) => {
+                state.cancel_sign_in(&snapshot.sign_ins[i].credential_id);
+            }
+            StackItem::Inform(_) => had_inform = true,
+            StackItem::Connecting(_) => {}
+        }
+    }
+    if had_inform {
+        state.clear_informs();
+    }
+}
+
+fn paint_pile_ledges(ui: &egui::Ui, geom: &PileGeom, layout: &PileLayout, top_h: f32, t: f32) {
+    use egui::{Color32, CornerRadius, Stroke, StrokeKind, pos2, vec2};
+
+    if t >= 0.999 {
+        return;
+    }
+    let radius = CornerRadius::same(theme::CARD_CORNER_RADIUS);
+    for depth in (1..=layout.visible).rev() {
+        let inset = depth as f32 * PILE_INSET;
+        let rect = egui::Rect::from_min_size(
+            pos2(geom.left + inset, geom.top + depth as f32 * PILE_PEEK),
+            vec2(geom.width - 2.0 * inset, top_h),
+        );
+        let a = ledge_alpha(depth) * (1.0 - t);
+        let fill = Color32::from_rgba_unmultiplied(
+            window::BG_SECONDARY.r(),
+            window::BG_SECONDARY.g(),
+            window::BG_SECONDARY.b(),
+            (theme::CARD_FILL_ALPHA as f32 * a) as u8,
+        );
+        ui.painter().rect(
+            rect,
+            radius,
+            fill,
+            Stroke::new(1.0, window::BORDER.gamma_multiply(a)),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+/// Renders the real cards at their interpolated positions (deepest first so the top card wins input), clipped under the header so scrolled cards vanish behind it, and returns the fired action plus each card's freshly-measured height.
+#[allow(clippy::too_many_arguments)]
+fn render_pile_cards(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    snapshot: &Snapshot,
+    credential_inputs: &mut HashMap<String, String>,
+    token_drafts: &mut HashMap<String, TokenDraft>,
+    remember: &mut HashMap<String, bool>,
+    geom: &PileGeom,
+    layout: &PileLayout,
+    heights: &[f32],
+    t: f32,
+    scroll: f32,
+) -> (Option<CardAction>, Vec<f32>) {
+    use egui::{Layout, Rect, UiBuilder, pos2, vec2};
+
+    let order = &snapshot.order;
+    let n = order.len();
+    let mut measured = heights.to_vec();
+    let mut action: Option<CardAction> = None;
+    let allow_close = !(0.001..=0.999).contains(&t);
+    let clip = Rect::from_min_max(
+        pos2(geom.left - 8.0, geom.top + PILE_HEADER_H * t),
+        pos2(geom.left + geom.width + 8.0, ui.max_rect().bottom()),
+    );
+
+    let mut indices: Vec<usize> = (1..n).rev().collect();
+    indices.push(0);
+    for i in indices {
+        if i != 0 && t <= 0.001 {
+            continue;
+        }
+        let key = card_key(&order[i], snapshot);
+        let inset = layout.card_inset(i, t);
+        let w = geom.width - 2.0 * inset;
+        // Animate the layout slot (not the scroll offset, which must track the wheel 1:1) so a removal slides neighbours up macOS-style; during the fold the slot is already driven by `t`, so track it instantly.
+        let slot_y = geom.top + layout.card_y(i, t);
+        let settle = if t >= 0.999 { SLIDE_SECONDS } else { 0.0 };
+        let y = ctx.animate_value_with_time(key.with("slide"), slot_y, settle) - scroll;
+        let min = pos2(geom.left + inset, y);
+        let alpha = if i == 0 { 1.0 } else { t };
+        let res = ui.scope_builder(
+            UiBuilder::new()
+                .id_salt(key)
+                .max_rect(Rect::from_min_size(min, vec2(w, 10_000.0)))
+                .layout(Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_clip_rect(clip);
+                ui.set_opacity(alpha);
+                ui.set_width(w);
+                render_item(
+                    ui,
+                    &order[i],
+                    snapshot,
+                    credential_inputs,
+                    token_drafts,
+                    remember,
+                    w,
+                )
+            },
+        );
+        let (item_action, card_resp) = res.inner;
+        measured[i] = card_resp.rect.height();
+        if action.is_none() {
+            action = item_action;
+        }
+        if action.is_none()
+            && allow_close
+            && let Some(close) = pile_close(ui, &order[i], snapshot, card_resp.rect, key)
+        {
+            action = Some(close);
+        }
+    }
+    (action, measured)
+}
+
+/// The hover ✕ on a settled card, mirroring [`render_single`]'s close affordance.
+fn pile_close(
+    ui: &mut egui::Ui,
+    item: &StackItem,
+    snapshot: &Snapshot,
+    card_rect: egui::Rect,
+    key: egui::Id,
+) -> Option<CardAction> {
+    let close_rect = egui::Rect::from_center_size(
+        card_rect.left_top() + egui::vec2(3.0, 3.0),
+        egui::Vec2::splat(22.0),
+    );
+    if ui.rect_contains_pointer(card_rect.union(close_rect))
+        && let Some(close) = close_action(item, snapshot)
+        && close_button(ui, key.with("close"), close_rect).clicked()
+    {
+        return Some(close);
+    }
+    None
+}
+
+enum PileHeaderEvent {
+    ShowLess,
+    CloseAll,
+}
+
+/// A macOS-style translucent capsule that reads on any wallpaper, brightening on hover and depressing on press; returns its response and the (press-scaled) content rect to draw a label or glyph into.
+fn pile_pill(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    id: egui::Id,
+    alpha: f32,
+) -> (egui::Response, egui::Rect) {
+    use egui::{Color32, CornerRadius, Sense, Stroke, StrokeKind};
+
+    let resp = ui.interact(rect, id, Sense::click());
+    let hover = ctx.animate_bool_with_time(id.with("hover"), resp.hovered(), 0.10);
+    let press =
+        ctx.animate_bool_with_time(id.with("press"), resp.is_pointer_button_down_on(), 0.06);
+    let r = egui::Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.06 * press));
+    let radius = CornerRadius::same((r.height() * 0.5) as u8);
+    let fill_a = ((170.0 + 55.0 * hover) * alpha).clamp(0.0, 255.0) as u8;
+    let stroke_a = ((55.0 + 45.0 * hover) * alpha).clamp(0.0, 255.0) as u8;
+    ui.painter().rect(
+        r,
+        radius,
+        Color32::from_rgba_unmultiplied(96, 97, 104, fill_a),
+        Stroke::new(1.0, Color32::from_white_alpha(stroke_a)),
+        StrokeKind::Inside,
+    );
+    if resp.hovered() {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    (resp, r)
+}
+
+/// The fanned-out header: a "Show Less" pill and a circular close-all button, right-aligned and fading in with the pile; returns whichever was clicked.
+fn pile_header(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    geom: &PileGeom,
+    t: f32,
+) -> Option<PileHeaderEvent> {
+    use egui::{Align2, Color32, FontId, Id, Rect, Stroke, Vec2, pos2, vec2};
+
+    if t <= 0.01 {
+        return None;
+    }
+    let h = 22.0;
+    let cy = geom.top - theme::STACK_MARGIN as f32 + PILE_HEADER_BUTTON_CENTER;
+    let right = geom.left + geom.width;
+    let label = "Show Less";
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(12.0), Color32::WHITE)
+        .rect
+        .width();
+
+    let close_rect = Rect::from_center_size(pos2(right - h / 2.0, cy), Vec2::splat(h));
+    let pill_rect = Rect::from_center_size(
+        pos2(close_rect.left() - 8.0 - (text_w + 24.0) / 2.0, cy),
+        vec2(text_w + 24.0, h),
+    );
+    let fg = Color32::from_rgba_unmultiplied(236, 237, 242, (255.0 * t) as u8);
+    let mut event = None;
+
+    let (show_less, content) = pile_pill(ui, ctx, pill_rect, Id::new("approval-pile-showless"), t);
+    ui.painter().text(
+        content.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(12.0),
+        fg,
+    );
+    if show_less.clicked() {
+        event = Some(PileHeaderEvent::ShowLess);
+    }
+
+    let (close_all, content) = pile_pill(ui, ctx, close_rect, Id::new("approval-pile-closeall"), t);
+    let arm = content.width() * 0.18;
+    let c = content.center();
+    let x = Stroke::new(1.6, fg);
+    ui.painter()
+        .line_segment([c - vec2(arm, arm), c + vec2(arm, arm)], x);
+    ui.painter()
+        .line_segment([c + vec2(arm, -arm), c - vec2(arm, -arm)], x);
+    if close_all.clicked() {
+        event = Some(PileHeaderEvent::CloseAll);
+    }
+
+    event
+}
+
+/// The click target over a collapsed pile — the whole top card and its peeking ledges — registered under the cards so the top card's own buttons still win; returns whether it was clicked to fan the pile out.
+fn pile_expand_hit(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    geom: &PileGeom,
+    layout: &PileLayout,
+    t: f32,
+    expanded: bool,
+) -> bool {
+    use egui::{Id, Rect, Sense, pos2};
+
+    if expanded || t >= 0.5 {
+        return false;
+    }
+    let hit = Rect::from_min_max(
+        pos2(geom.left, geom.top),
+        pos2(geom.left + geom.width, geom.top + layout.folded_h + 6.0),
+    );
+    let resp = ui.interact(hit, Id::new("approval-pile-expand"), Sense::click());
+    if resp.contains_pointer() {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// Renders the multi-card stack as a macOS-style notification pile: collapsed it shows the top card with the rest peeking as stacked ledges; a click fans them out, a "Show Less" header folds them back, and the fully-fanned list scrolls when it overflows — every position, width, and opacity animating between the two layouts.
+fn render_pile(
+    ui: &mut egui::Ui,
+    snapshot: &Snapshot,
+    credential_inputs: &mut HashMap<String, String>,
+    token_drafts: &mut HashMap<String, TokenDraft>,
+    remember: &mut HashMap<String, bool>,
+    scroll_max: f32,
+) -> (Option<CardAction>, f32) {
+    use egui::{Id, vec2};
+
+    let ctx = ui.ctx().clone();
+    let mut mem = read_pile_memory(&ctx, snapshot);
+    let t = ease_out_cubic(ctx.animate_bool_with_time(
+        Id::new("approval-pile-t"),
+        mem.expanded,
+        FOLD_SECONDS,
+    ));
+    let layout = PileLayout::new(&mem.heights);
+    let margin = theme::STACK_MARGIN as f32;
+    let geom = PileGeom {
+        left: ui.max_rect().min.x + margin,
+        top: ui.max_rect().min.y + margin,
+        width: WINDOW_WIDTH - 2.0 * margin,
+    };
+    let top_h = mem.heights[0];
+
+    let viewport_h = (scroll_max - 2.0 * margin).max(0.0);
+    let max_scroll = (layout.expanded_h - viewport_h).max(0.0);
+    let scroll = pile_scroll_offset(&ctx, ui, &geom, mem.expanded, max_scroll);
+
+    paint_pile_ledges(ui, &geom, &layout, top_h, t);
+    let expand_clicked = pile_expand_hit(ui, &ctx, &geom, &layout, t, mem.expanded);
+    let (mut action, measured) = render_pile_cards(
+        ui,
+        &ctx,
+        snapshot,
+        credential_inputs,
+        token_drafts,
+        remember,
+        &geom,
+        &layout,
+        &mem.heights,
+        t,
+        scroll,
+    );
+    match pile_header(ui, &ctx, &geom, t) {
+        Some(PileHeaderEvent::ShowLess) => {
+            mem.expanded = false;
+            ctx.request_repaint();
+        }
+        Some(PileHeaderEvent::CloseAll) => {
+            action.get_or_insert(CardAction::CloseAll);
+            ctx.request_repaint();
+        }
+        None => {}
+    }
+    if expand_clicked {
+        mem.expanded = true;
+        ctx.request_repaint();
+    }
+
+    let cache: HashMap<egui::Id, f32> = snapshot
+        .order
+        .iter()
+        .zip(&measured)
+        .map(|(item, h)| (card_key(item, snapshot), *h))
+        .collect();
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::new("approval-pile-expanded"), mem.expanded);
+        d.insert_temp(Id::new("approval-pile-heights"), cache);
+    });
+
+    let window_h = if mem.expanded || t > 0.001 {
+        layout.expanded_h
+    } else {
+        layout.folded_h
+    };
+    let target = (window_h + 2.0 * margin).min(scroll_max);
+    // Settle the window height only when fanned out, so a removal shrinks it smoothly; during the fold it snaps so the fan-out never clips against a lagging window.
+    let settle = if mem.expanded && t >= 0.999 {
+        SLIDE_SECONDS
+    } else {
+        0.0
+    };
+    let total = ctx.animate_value_with_time(Id::new("approval-pile-window-h"), target, settle);
+    ui.allocate_space(vec2(WINDOW_WIDTH, total));
+    (action, total)
 }
 
 fn render_item(
@@ -1320,6 +1864,118 @@ mod tests {
         assert!(
             !inputs.contains_key("stale"),
             "stale buffer must be dropped"
+        );
+    }
+
+    fn shape_has_stroke_color(shape: &egui::Shape, c: egui::Color32) -> bool {
+        match shape {
+            egui::Shape::Rect(r) => r.stroke.color == c,
+            egui::Shape::LineSegment { stroke, .. } => stroke.color == c,
+            egui::Shape::Vec(v) => v.iter().any(|s| shape_has_stroke_color(s, c)),
+            _ => false,
+        }
+    }
+
+    fn pile_seed() -> Snapshot {
+        let net = |id: &str, host: &str, offer: Option<&str>| PendingPrompt {
+            id: id.into(),
+            host: host.into(),
+            action: format!("CONNECT {host}:443"),
+            offer: offer.map(str::to_string),
+            token_fallback: None,
+        };
+        Snapshot {
+            pending: vec![net("n0", "a.test", None), net("n1", "b.test", Some("Svc"))],
+            pending_credentials: vec![credential_prompt("c0"), credential_prompt("c1")],
+            sign_ins: Vec::new(),
+            informs: vec!["warn".into()],
+            connecting: vec!["Svc".into()],
+            order: vec![
+                StackItem::Network(0),
+                StackItem::Network(1),
+                StackItem::Credential(0),
+                StackItem::Credential(1),
+                StackItem::Connecting(0),
+                StackItem::Inform(0),
+            ],
+        }
+    }
+
+    #[test]
+    fn clash_detector_catches_a_deliberate_id_clash() {
+        let ctx = egui::Context::default();
+        let error = ctx.global_style().visuals.error_fg_color;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let id = egui::Id::new("dup");
+            ui.interact(
+                egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(50.0, 20.0)),
+                id,
+                egui::Sense::click(),
+            );
+            ui.interact(
+                egui::Rect::from_min_size(egui::pos2(200.0, 200.0), egui::vec2(50.0, 20.0)),
+                id,
+                egui::Sense::click(),
+            );
+        });
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|cs| shape_has_stroke_color(&cs.shape, error)),
+            "the detector must catch a deliberate id clash, else the negative test is meaningless"
+        );
+    }
+
+    #[test]
+    fn pile_unfold_animation_has_no_id_clash() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(2.0);
+        window::install_icon_font(&ctx);
+        let snapshot = pile_seed();
+        let error = ctx.global_style().visuals.error_fg_color;
+        let (mut ci, mut td, mut rem) = (HashMap::new(), HashMap::new(), HashMap::new());
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), true));
+
+        let mut clash = false;
+        let mut time = 0.0_f64;
+        for frame in 0..16 {
+            time += 0.03;
+            let mut events = Vec::new();
+            if frame == 0 {
+                events.push(egui::Event::PointerMoved(egui::pos2(70.0, 40.0)));
+            }
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(WINDOW_WIDTH, 6000.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                render_stack(ui, &snapshot, &mut ci, &mut td, &mut rem, 6000.0);
+            });
+            let reds = [error, egui::Color32::RED, egui::Color32::ORANGE];
+            if output
+                .shapes
+                .iter()
+                .any(|cs| reds.iter().any(|c| shape_has_stroke_color(&cs.shape, *c)))
+            {
+                clash = true;
+            }
+        }
+        assert!(
+            !clash,
+            "egui painted a red debug overlay during the unfold animation"
         );
     }
 
