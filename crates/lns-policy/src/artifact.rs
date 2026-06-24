@@ -15,10 +15,12 @@ pub enum Family {
     Knowledge,
     Integration,
     Bundle,
+    Model,
+    Fileset,
 }
 
 impl Family {
-    pub const ALL: [Family; 8] = [
+    pub const ALL: [Family; 10] = [
         Family::Agent,
         Family::Policy,
         Family::Tool,
@@ -27,6 +29,8 @@ impl Family {
         Family::Knowledge,
         Family::Integration,
         Family::Bundle,
+        Family::Model,
+        Family::Fileset,
     ];
 
     pub fn slug(self) -> &'static str {
@@ -39,6 +43,8 @@ impl Family {
             Family::Knowledge => "knowledge",
             Family::Integration => "integration",
             Family::Bundle => "bundle",
+            Family::Model => "model",
+            Family::Fileset => "fileset",
         }
     }
 
@@ -53,6 +59,26 @@ impl Family {
             Family::Knowledge => "knowledge",
             Family::Integration => "integrations",
             Family::Bundle => "bundles",
+            Family::Model => "models",
+            Family::Fileset => "filesets",
+        }
+    }
+
+    /// Application-layer families carry content the agent consumes, mounted into its filesystem; runtime-layer families are applied around the agent.
+    pub fn is_application_layer(self) -> bool {
+        matches!(
+            self,
+            Family::Model | Family::Tool | Family::Knowledge | Family::Fileset
+        )
+    }
+
+    /// The canonical guest mount path for an application-layer artifact (overridden by an explicit envelope `mount`); `None` for fileset (explicit path required) and runtime-layer families.
+    pub fn default_mount_path(self, name: &str) -> Option<String> {
+        match self {
+            Family::Model => Some("/etc/agent/model".to_string()),
+            Family::Tool => Some(format!("/etc/agent/tools/{name}")),
+            Family::Knowledge => Some(format!("/etc/agent/knowledge/{name}")),
+            _ => None,
         }
     }
 
@@ -117,6 +143,15 @@ pub struct ArtifactMetadata {
     pub name: String,
 }
 
+/// The optional top-level mount on an application-layer artifact's envelope (the registry rejects it on runtime-layer families).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mount {
+    pub path: String,
+    #[serde(default)]
+    pub read_only: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PortMapping {
     pub host: u16,
@@ -138,8 +173,6 @@ pub struct AgentSpec {
     pub image: String,
     #[serde(default)]
     pub command: Option<String>,
-    #[serde(default)]
-    pub isolation: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -180,11 +213,13 @@ impl AgentArtifact {
     }
 }
 
-/// A reference to another artifact inside a bundle's component list.
+/// An `ArtifactRef {ref, digest?}` — a reference to another artifact inside a bundle's component list.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ComponentRef {
     #[serde(rename = "ref")]
     pub reference: String,
+    #[serde(default)]
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -197,6 +232,8 @@ pub struct Components {
     pub tools: Vec<ComponentRef>,
     #[serde(default)]
     pub sandbox: Option<ComponentRef>,
+    #[serde(default)]
+    pub model: Option<ComponentRef>,
     #[serde(default)]
     pub knowledge: Vec<ComponentRef>,
 }
@@ -252,10 +289,94 @@ pub struct SandboxArtifact {
     pub isolation: Option<String>,
     #[serde(default)]
     pub resources: Option<SandboxResources>,
+    #[serde(default)]
+    pub supervisor_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    pub base_image: Option<String>,
 }
 
 impl SandboxArtifact {
     pub fn from_config_blob(blob: &[u8]) -> io::Result<SandboxArtifact> {
+        serde_json::from_slice(blob).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// The parsed `model` artifact (`kind: Model`) — application-layer; its config blob is mounted at `/etc/agent/model`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelArtifact {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ArtifactMetadata,
+    #[serde(default)]
+    pub mount: Option<Mount>,
+    pub spec: ModelSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelSpec {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+impl ModelArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<ModelArtifact> {
+        let artifact: ModelArtifact = serde_json::from_slice(blob)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if artifact.kind != "Model" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected a Model artifact, got kind {:?}", artifact.kind),
+            ));
+        }
+        if artifact.spec.provider.trim().is_empty() || artifact.spec.model.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model spec.provider and spec.model must not be empty",
+            ));
+        }
+        Ok(artifact)
+    }
+}
+
+/// The parsed `fileset` artifact (`kind: FileSet`) — application-layer; content lives in the OCI layers, mounted at the required `mount.path`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesetArtifact {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ArtifactMetadata,
+    pub mount: Mount,
+}
+
+impl FilesetArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<FilesetArtifact> {
+        let artifact: FilesetArtifact = serde_json::from_slice(blob)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if artifact.kind != "FileSet" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected a FileSet artifact, got kind {:?}", artifact.kind),
+            ));
+        }
+        Ok(artifact)
+    }
+}
+
+/// The envelope fields the resolver needs to mount any application-layer artifact (name + optional mount), without modelling each family's full spec.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MountedArtifact {
+    pub metadata: ArtifactMetadata,
+    #[serde(default)]
+    pub mount: Option<Mount>,
+}
+
+impl MountedArtifact {
+    pub fn from_config_blob(blob: &[u8]) -> io::Result<MountedArtifact> {
         serde_json::from_slice(blob).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
@@ -282,6 +403,14 @@ mod tests {
         assert_eq!(
             Family::Bundle.config_media_type(),
             "application/vnd.lens.bundle.config.v1+json"
+        );
+        assert_eq!(
+            Family::Model.artifact_type(),
+            "application/vnd.lens.model.v1+json"
+        );
+        assert_eq!(
+            Family::Fileset.config_media_type(),
+            "application/vnd.lens.fileset.config.v1+json"
         );
         // Every family round-trips slug <-> media types.
         for f in Family::ALL {
@@ -378,7 +507,7 @@ mod tests {
             "localhost:5000/org/acme/images/some-agent:v1"
         );
         assert_eq!(agent.spec.command.as_deref(), Some("run it"));
-        assert_eq!(agent.spec.isolation.as_deref(), Some("microvm"));
+        // a stray `isolation` on the agent (now sandbox-only) is harmlessly ignored — the clean break
         assert_eq!(
             agent.spec.credentials,
             vec![CredentialRef {
@@ -538,5 +667,197 @@ mod tests {
     fn sandbox_artifact_rejects_malformed_json() {
         let err = SandboxArtifact::from_config_blob(b"not json").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sandbox_artifact_parses_supervisor_capabilities_and_base_image() {
+        let blob = to_config_blob(
+            "name: r\nisolation: microvm\nsupervisorVersion: 1.2.3\n\
+             capabilities: [net]\nbaseImage: img@sha256:abc\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let s = SandboxArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(s.supervisor_version.as_deref(), Some("1.2.3"));
+        assert_eq!(s.capabilities, Some(vec!["net".to_string()]));
+        assert_eq!(s.base_image.as_deref(), Some("img@sha256:abc"));
+    }
+
+    #[test]
+    fn family_application_layer_split_and_default_mounts() {
+        assert!(Family::Model.is_application_layer());
+        assert!(Family::Tool.is_application_layer());
+        assert!(Family::Knowledge.is_application_layer());
+        assert!(Family::Fileset.is_application_layer());
+        assert!(!Family::Agent.is_application_layer());
+        assert!(!Family::Sandbox.is_application_layer());
+        assert_eq!(
+            Family::Model.default_mount_path("hermes"),
+            Some("/etc/agent/model".to_string())
+        );
+        assert_eq!(
+            Family::Tool.default_mount_path("fs"),
+            Some("/etc/agent/tools/fs".to_string())
+        );
+        assert_eq!(
+            Family::Knowledge.default_mount_path("rb"),
+            Some("/etc/agent/knowledge/rb".to_string())
+        );
+        assert_eq!(Family::Fileset.default_mount_path("x"), None);
+        assert_eq!(Family::Agent.default_mount_path("x"), None);
+    }
+
+    #[test]
+    fn mount_parses_path_and_optional_read_only() {
+        let m: Mount = serde_json::from_str(r#"{"path":"/etc/agent/model"}"#).unwrap();
+        assert_eq!(m.path, "/etc/agent/model");
+        assert_eq!(m.read_only, None);
+        let m: Mount = serde_json::from_str(r#"{"path":"/p","readOnly":true}"#).unwrap();
+        assert_eq!(m.read_only, Some(true));
+    }
+
+    #[test]
+    fn component_ref_parses_optional_digest() {
+        let bare: ComponentRef = serde_json::from_str(r#"{"ref":"a/b:v1"}"#).unwrap();
+        assert_eq!(bare.reference, "a/b:v1");
+        assert_eq!(bare.digest, None);
+        let pinned: ComponentRef =
+            serde_json::from_str(r#"{"ref":"a/b:v1","digest":"sha256:abc"}"#).unwrap();
+        assert_eq!(pinned.digest.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn components_parses_a_single_model_ref() {
+        let blob = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\n\
+             metadata:\n  name: sys\ncomponents:\n  \
+             agents:\n    - { ref: org/acme/agents/a:v1 }\n  \
+             model:\n    ref: org/acme/models/m:v1\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let bundle = BundleArtifact::from_config_blob(&blob).unwrap();
+        assert_eq!(
+            bundle.components.model.unwrap().reference,
+            "org/acme/models/m:v1"
+        );
+    }
+
+    fn model_blob(extra: &str) -> Vec<u8> {
+        to_config_blob(
+            format!(
+                "apiVersion: lens.dev/v1alpha1\nkind: Model\n\
+                 metadata:\n  name: some-model\n{extra}\
+                 spec:\n  provider: anthropic\n  model: claude-sonnet-4-6\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn model_artifact_parses_provider_model_and_default_mount() {
+        let m = ModelArtifact::from_config_blob(&model_blob("")).unwrap();
+        assert_eq!(m.spec.provider, "anthropic");
+        assert_eq!(m.spec.model, "claude-sonnet-4-6");
+        assert!(m.mount.is_none());
+    }
+
+    #[test]
+    fn model_artifact_honors_an_explicit_mount_override() {
+        let m = ModelArtifact::from_config_blob(&model_blob("mount:\n  path: /custom/model\n"))
+            .unwrap();
+        assert_eq!(m.mount.unwrap().path, "/custom/model");
+    }
+
+    #[test]
+    fn model_artifact_rejects_empty_provider_and_wrong_kind() {
+        let empty = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Model\nmetadata:\n  name: m\n\
+             spec:\n  provider: ' '\n  model: x\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            ModelArtifact::from_config_blob(&empty).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let wrong = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: m\n\
+             spec:\n  provider: a\n  model: b\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            format!("{}", ModelArtifact::from_config_blob(&wrong).unwrap_err()).contains("Model")
+        );
+    }
+
+    #[test]
+    fn model_artifact_rejects_malformed_json() {
+        assert_eq!(
+            ModelArtifact::from_config_blob(b"nope").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn fileset_artifact_requires_a_mount() {
+        let ok = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: FileSet\nmetadata:\n  name: cfg\n\
+             mount:\n  path: /opt/data/config.yaml\n  readOnly: false\nspec: {}\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let fs = FilesetArtifact::from_config_blob(&ok).unwrap();
+        assert_eq!(fs.mount.path, "/opt/data/config.yaml");
+        assert_eq!(fs.mount.read_only, Some(false));
+
+        let no_mount = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: FileSet\nmetadata:\n  name: cfg\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            FilesetArtifact::from_config_blob(&no_mount)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn fileset_artifact_rejects_wrong_kind() {
+        let blob = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Tool\nmetadata:\n  name: t\n\
+             mount:\n  path: /x\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            format!("{}", FilesetArtifact::from_config_blob(&blob).unwrap_err())
+                .contains("FileSet")
+        );
+    }
+
+    #[test]
+    fn mounted_artifact_reads_name_and_optional_mount() {
+        let tool = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Tool\nmetadata:\n  name: filesystem\n\
+             spec:\n  kind: mcp\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let m = MountedArtifact::from_config_blob(&tool).unwrap();
+        assert_eq!(m.metadata.name, "filesystem");
+        assert!(m.mount.is_none());
+
+        let knowledge = to_config_blob(
+            "apiVersion: lens.dev/v1alpha1\nkind: Knowledge\nmetadata:\n  name: rb\n\
+             mount:\n  path: /custom/kb\nspec:\n  format: runbook\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let m = MountedArtifact::from_config_blob(&knowledge).unwrap();
+        assert_eq!(m.mount.unwrap().path, "/custom/kb");
     }
 }
