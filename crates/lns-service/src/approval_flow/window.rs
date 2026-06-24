@@ -462,6 +462,13 @@ pub fn ctx() -> Option<egui::Context> {
     CTX.get().cloned()
 }
 
+pub fn quiet_debug_overlays(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.debug.warn_if_rect_changes_id = false;
+        style.debug.show_unaligned = false;
+    });
+}
+
 pub const BG_PRIMARY: Color32 = Color32::from_rgb(0x0f, 0x10, 0x12);
 pub const BG_SECONDARY: Color32 = Color32::from_rgb(0x16, 0x17, 0x19);
 pub const BG_TERTIARY: Color32 = Color32::from_rgb(0x1c, 0x1e, 0x20);
@@ -1335,6 +1342,19 @@ mod tests {
         assert_eq!(v.selection.bg_fill, Color32::from_gray(64));
         assert_eq!(v.hyperlink_color, ACCENT_GREEN);
         assert!(v.dark_mode);
+    }
+
+    #[test]
+    fn quiet_debug_overlays_turns_off_the_red_and_orange_debug_paint() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| {
+            s.debug.warn_if_rect_changes_id = true;
+            s.debug.show_unaligned = true;
+        });
+        quiet_debug_overlays(&ctx);
+        let debug = ctx.global_style().debug;
+        assert!(!debug.warn_if_rect_changes_id);
+        assert!(!debug.show_unaligned);
     }
 
     #[test]

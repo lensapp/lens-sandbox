@@ -5,7 +5,7 @@ use lns_policy::integrations::TokenFallback;
 use lns_service::approval_flow::session::PendingPrompt;
 use lns_service::approval_flow::window::{
     CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,
-    lds_visuals,
+    lds_visuals, quiet_debug_overlays,
 };
 use lns_service::tray::{
     CardAction, MIN_WINDOW_HEIGHT, TokenDraft, WINDOW_WIDTH, content_cap, position_top_right,
@@ -74,6 +74,10 @@ impl eframe::App for Preview {
 }
 
 fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
+    if let CardAction::CloseAll = action {
+        snapshot.order.clear();
+        return;
+    }
     let item = match action {
         CardAction::Decide { id, .. }
         | CardAction::ConnectOffer { id }
@@ -95,7 +99,7 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
             .position(|c| c.credential_id == *credential_id)
             .map(StackItem::SignIn),
         CardAction::DismissInform { index } => Some(StackItem::Inform(*index)),
-        CardAction::OpenBrowser { .. } => None,
+        CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
     };
     if let Some(item) = item {
         snapshot.order.retain(|entry| *entry != item);
@@ -118,15 +122,6 @@ fn seed() -> Snapshot {
                 action: "CONNECT openrouter.ai:443".into(),
                 offer: Some("OpenRouter".into()),
                 token_fallback: None,
-            },
-            PendingPrompt {
-                id: "net-offer-token".into(),
-                host: "www.googleapis.com".into(),
-                action: "CONNECT www.googleapis.com:443".into(),
-                offer: Some("Google".into()),
-                token_fallback: Some(TokenFallback {
-                    help: Some("https://developers.google.com/oauthplayground".into()),
-                }),
             },
         ],
         pending_credentials: vec![
@@ -171,7 +166,6 @@ fn seed() -> Snapshot {
         order: vec![
             StackItem::Network(0),
             StackItem::Network(1),
-            StackItem::Network(2),
             StackItem::Credential(0),
             StackItem::Credential(1),
             StackItem::Credential(2),
@@ -199,6 +193,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(lds_visuals());
+            quiet_debug_overlays(&cc.egui_ctx);
             install_system_fonts(&cc.egui_ctx);
             install_icon_font(&cc.egui_ctx);
             Ok(Box::new(Preview {
