@@ -93,9 +93,18 @@ pub(crate) async fn launch<S: Spawner>(
     }
 
     let ch_args = cloud_hypervisor_args(spec, layout);
-    let mut cloud_hypervisor = spawner
+    let mut cloud_hypervisor = match spawner
         .spawn(&bins.cloud_hypervisor, &ch_args)
-        .context("spawning cloud-hypervisor")?;
+        .context("spawning cloud-hypervisor")
+    {
+        Ok(child) => child,
+        Err(e) => {
+            // virtiofsd is already running; reap it before bailing so a
+            // cloud-hypervisor spawn failure can't leave a zombie behind.
+            kill_and_reap_all(&mut virtiofsd).await;
+            return Err(e);
+        }
+    };
     if let Err(e) = wait_for_socket(&layout.vsock, timeouts.cloud_hypervisor).await {
         let _ = cloud_hypervisor.start_kill();
         let _ = cloud_hypervisor.wait().await;
@@ -221,6 +230,8 @@ mod tests {
 
     struct FakeSpawner {
         suppress: Vec<PathBuf>,
+        /// Program file names whose `spawn` should fail (e.g. "cloud-hypervisor").
+        fail_program: Vec<String>,
         spawned: Arc<Mutex<Vec<Spawned>>>,
     }
 
@@ -228,12 +239,21 @@ mod tests {
         fn ready() -> Self {
             Self {
                 suppress: Vec::new(),
+                fail_program: Vec::new(),
                 spawned: Arc::new(Mutex::new(Vec::new())),
             }
         }
         fn suppressing(socket: PathBuf) -> Self {
             Self {
                 suppress: vec![socket],
+                fail_program: Vec::new(),
+                spawned: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn failing_to_spawn(program: &str) -> Self {
+            Self {
+                suppress: Vec::new(),
+                fail_program: vec![program.to_string()],
                 spawned: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -261,6 +281,13 @@ mod tests {
     impl Spawner for FakeSpawner {
         type Child = FakeChild;
         fn spawn(&self, program: &Path, args: &[String]) -> std::io::Result<FakeChild> {
+            let name = program.file_name().unwrap().to_string_lossy().into_owned();
+            if self.fail_program.contains(&name) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "fake spawn failure",
+                ));
+            }
             let socket = spawned_socket(args);
             if !self.suppress.contains(&socket) {
                 std::fs::write(&socket, b"").unwrap();
@@ -268,7 +295,7 @@ mod tests {
             let killed = Arc::new(AtomicBool::new(false));
             let waited = Arc::new(AtomicBool::new(false));
             self.spawned.lock().unwrap().push(Spawned {
-                program: program.file_name().unwrap().to_string_lossy().into_owned(),
+                program: name,
                 args: args.to_vec(),
                 killed: killed.clone(),
                 waited: waited.clone(),
@@ -423,6 +450,39 @@ mod tests {
                 .iter()
                 .all(|r| r.waited.load(Ordering::SeqCst)),
             "both cloud-hypervisor and virtiofsd must be reaped after kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_reaps_virtiofsd_when_cloud_hypervisor_fails_to_spawn() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = SocketLayout::for_run_dir(d.path());
+        let spawner = FakeSpawner::failing_to_spawn("cloud-hypervisor");
+        let err = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
+            .await
+            .map(|_| ())
+            .expect_err("a cloud-hypervisor spawn failure must abort the launch");
+
+        assert!(
+            format!("{err:#}").contains("spawning cloud-hypervisor"),
+            "got {err:#}"
+        );
+        let recs = spawner.records();
+        assert_eq!(
+            recs.len(),
+            1,
+            "only the content virtiofsd is recorded; cloud-hypervisor never spawns"
+        );
+        // Regression: a cloud-hypervisor spawn failure used to drop the
+        // already-running virtiofsd with only best-effort kill_on_drop, which
+        // can leave a zombie. It must now be killed and reaped before we bail.
+        assert!(
+            recs[0].killed.load(Ordering::SeqCst),
+            "the content virtiofsd must be killed when cloud-hypervisor fails to spawn"
+        );
+        assert!(
+            recs[0].waited.load(Ordering::SeqCst),
+            "the content virtiofsd must be reaped (waited on), not just signalled"
         );
     }
 
