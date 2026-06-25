@@ -1811,7 +1811,7 @@ pub fn refresh_window_shadows() {
     }
 }
 
-/// Belt to the deferred hide: dropping the shadow before `orderOut` backstops the rare frame where the emptied content hasn't composited in time, so the card-shaped shadow can't outlive the window; re-enabled on the next show.
+/// Dropped before the hide so the card-shaped shadow can't outlive the window; re-enabled on the next show.
 #[cfg(target_os = "macos")]
 fn set_window_shadows(enabled: bool) {
     use objc2::MainThreadMarker;
