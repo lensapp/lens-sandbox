@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.13.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.12.0...lns-v0.13.0) (2026-06-25)
+
+
+### Features
+
+* **build:** derive guest musl target from host CPU arch ([d5ddfe8](https://github.com/lensapp/lens-sandbox/commit/d5ddfe8c6ec34ec6812e890d4ed5727cf4f68934))
+* **forward:** enable port publishing (-p) on Linux ([95c53e9](https://github.com/lensapp/lens-sandbox/commit/95c53e99b799fbd7e7e4c36fb7f9cdaf82cc28c7))
+* **run:** unify the run orchestrator across Vz and Cloud Hypervisor ([ae7f9ff](https://github.com/lensapp/lens-sandbox/commit/ae7f9ff13737a20a58cbd6c78f6c8acdd0406fe6))
+* **service:** add a reusable ui component system (theme, button, card) ([c5287a1](https://github.com/lensapp/lens-sandbox/commit/c5287a1d929ec59968c4d0cf345fc19d8b3fd87f))
+* **service:** category icons, badges, and tonal buttons for approval cards ([7837e3f](https://github.com/lensapp/lens-sandbox/commit/7837e3fdf508dba3b5f710804d2defebd8519041))
+* **service:** fold stacked approvals into a macOS-style notification pile ([dde2cb7](https://github.com/lensapp/lens-sandbox/commit/dde2cb70c33225dc63c35df03781b9abbfcf098b))
+* **service:** redesign approval cards as macOS-notification-style panels ([4757fa6](https://github.com/lensapp/lens-sandbox/commit/4757fa64b6532a9f917b623164c13da6e04926b1))
+* **service:** render the approval window in the macOS system font ([09bbcba](https://github.com/lensapp/lens-sandbox/commit/09bbcba9830b174e7ac772b1c1795aaca9bba16b))
+* **tray:** run the Linux tray on a dedicated GTK main loop ([562137d](https://github.com/lensapp/lens-sandbox/commit/562137df147d87e55d22b937401aa2a06e4ecfa2))
+* **vm:** Cloud Hypervisor backend foundations + GuestTransport seam ([1d24773](https://github.com/lensapp/lens-sandbox/commit/1d24773727ada1269f62b6483a0473f9e12d61f5))
+* **vm:** enforce read-only host binds at the host on Cloud Hypervisor ([2aa3650](https://github.com/lensapp/lens-sandbox/commit/2aa3650ff2be30f1a4343ce9e11f15a4ecd1f0f2))
+* **vm:** resolve cloud-hypervisor/virtiofsd from PATH on Linux ([8dd4795](https://github.com/lensapp/lens-sandbox/commit/8dd479516c643700d96e4e4bda51fa98f17a2671))
+* **vm:** serve host bind mounts as virtio-fs shares on Cloud Hypervisor ([7350ccb](https://github.com/lensapp/lens-sandbox/commit/7350ccb4324cf504adc8825124eec5ef314b6819))
+
+
+### Bug Fixes
+
+* **cloud-hypervisor:** add KVM preflight, surface console.log on failure, reap virtiofsd ([e5d9487](https://github.com/lensapp/lens-sandbox/commit/e5d9487dd98d8c0531fb5e675e579551e2cb0b71))
+* **cloud-hypervisor:** address review — seek console tail, fix modprobe hint ([d47d277](https://github.com/lensapp/lens-sandbox/commit/d47d277058aa8df01acdcd095db3987ec7543310))
+* **cloud-hypervisor:** apply || in the production KVM hint to match test ([f90fa33](https://github.com/lensapp/lens-sandbox/commit/f90fa33155f0ec36c04800ef3cca693e6256d2ab))
+* **cloud-hypervisor:** reap virtiofsd when cloud-hypervisor fails to spawn ([5034fb0](https://github.com/lensapp/lens-sandbox/commit/5034fb09bb2d441a02f6c3f0fe2d616d95055c4f))
+* **lns-service:** close the Linux build (de-gate test RunHandle, document unsafe) ([0d6b88c](https://github.com/lensapp/lens-sandbox/commit/0d6b88ce0635d5563877ec9568b4083e672e9898))
+* **policy:** make add_rule idempotent so re-approvals don't duplicate routes ([8d3e000](https://github.com/lensapp/lens-sandbox/commit/8d3e0007e3515b7636c61a72861daf52d48c9b3f))
+* **run:** surface the real boot error when launch drops the connector ([a606da1](https://github.com/lensapp/lens-sandbox/commit/a606da113b8e2bf961d05655f7d3fa25d8b5b8c2))
+* **service:** gate quiet_debug_overlays behind debug_assertions ([47cc53a](https://github.com/lensapp/lens-sandbox/commit/47cc53adb579ffd19b650a11d734c516e42563d1))
+* **tray:** recolor the macOS template icon to white on Linux ([73a4878](https://github.com/lensapp/lens-sandbox/commit/73a48787f5fe6b3da84bedd0db7631de4745ad4f))
+* **vm:** also gid-map the bind so the workload can write under the namespace sandbox ([e07025b](https://github.com/lensapp/lens-sandbox/commit/e07025b40dd20dfef63898b5fe9e478cc5244c7c))
+* **vm:** declare image_type=raw on Cloud Hypervisor disks ([5a834ac](https://github.com/lensapp/lens-sandbox/commit/5a834ac4be15bbf6e47c72513e62e5059dc4e8a0))
+* **vm:** integrate the host-bind field into the Cloud Hypervisor path ([c4a8736](https://github.com/lensapp/lens-sandbox/commit/c4a8736eaa6377c716da973151f157ebf878508d))
+* **vm:** make host binds reachable by the workload on Cloud Hypervisor ([9809029](https://github.com/lensapp/lens-sandbox/commit/980902948ad3419dd74e8dea5b8480e4542855c1))
+* **vm:** map the workload uid to the host user for binds (virtiofsd 1.10.0) ([f0502ae](https://github.com/lensapp/lens-sandbox/commit/f0502ae5fc5a3f47ec08d72805b04268c161cbc8))
+* **vm:** resolve virtiofsd from /usr/libexec so no env var is needed ([f1b99df](https://github.com/lensapp/lens-sandbox/commit/f1b99df99d8ff8ad637d1591044fbf86eaad9665))
+* **vm:** run bind virtiofsd under the namespace sandbox so --uid-map applies ([5b9d8fe](https://github.com/lensapp/lens-sandbox/commit/5b9d8fe8ac91d92abc20481c9e4a18c79c224ace))
+
 ## [0.12.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.11.0...lns-v0.12.0) (2026-06-17)
 
 
