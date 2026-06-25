@@ -234,6 +234,7 @@ mod tests {
             env_file: Vec::new(),
             publish: Vec::new(),
             mounts: Vec::new(),
+            quiet: false,
             cmd: Vec::new(),
         }
     }
