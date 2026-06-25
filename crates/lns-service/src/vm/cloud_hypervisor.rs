@@ -49,8 +49,8 @@ pub(super) async fn run_async_with<S: process::Spawner>(
         KvmStatus::Missing => {
             bail!(
                 "/dev/kvm is not available. Load the KVM module \
-                 (modprobe kvm_intel | kvm_amd) and ensure your user can \
-                 access /dev/kvm (sudo usermod -aG kvm $USER, then re-login)."
+                 (sudo modprobe kvm_intel || sudo modprobe kvm_amd) and ensure \
+                 your user can access /dev/kvm (sudo usermod -aG kvm $USER, then re-login)."
             );
         }
         KvmStatus::NotAccessible => {
