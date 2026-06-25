@@ -1,0 +1,11 @@
+{
+  "name": "lns-sandbox",
+  "version": "0.1.0",
+  "description": "Route Claude Code's code-execution commands into Lens Sandbox microVMs. Untrusted interpreters and download-and-run one-shots are intercepted and run inside `lns`, with network and credential access gated by lns policy.",
+  "author": {
+    "name": "Hung-Han (Henry) Chen",
+    "email": "hchen@mirantis.com"
+  },
+  "keywords": ["sandbox", "microvm", "security", "lns", "isolation"],
+  "license": "Apache-2.0"
+}
