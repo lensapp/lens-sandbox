@@ -132,6 +132,9 @@ fn seed() -> Snapshot {
                 host_value_available: true,
                 oauth_display_name: None,
                 token_fallback: None,
+                env_var: Some("OPENAI_API_KEY".into()),
+                injection_domains: vec!["api.openai.com".into()],
+                is_project_defined: false,
             },
             CredentialCardPrompt {
                 id: "cred-novalue".into(),
@@ -140,6 +143,9 @@ fn seed() -> Snapshot {
                 host_value_available: false,
                 oauth_display_name: None,
                 token_fallback: None,
+                env_var: Some("ANTHROPIC_API_KEY".into()),
+                injection_domains: vec!["api.anthropic.com".into()],
+                is_project_defined: true,
             },
             CredentialCardPrompt {
                 id: "cred-oauth".into(),
@@ -150,6 +156,9 @@ fn seed() -> Snapshot {
                 token_fallback: Some(TokenFallback {
                     help: Some("https://github.com/settings/personal-access-tokens/new".into()),
                 }),
+                env_var: None,
+                injection_domains: vec!["api.github.com".into(), "github.com".into()],
+                is_project_defined: false,
             },
         ],
         sign_ins: vec![SignInCard {
@@ -160,6 +169,9 @@ fn seed() -> Snapshot {
             token_fallback: Some(TokenFallback {
                 help: Some("https://github.com/settings/personal-access-tokens/new".into()),
             }),
+            env_var: None,
+            injection_domains: vec!["api.github.com".into(), "github.com".into()],
+            is_project_defined: false,
         }],
         informs: vec!["sign-in to GitHub failed: device code expired".into()],
         connecting: vec!["OpenRouter".into()],
