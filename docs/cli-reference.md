@@ -36,8 +36,8 @@ run, which requires a `COMMAND` after `--`.
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
 | `-v`, `--volume <SPEC>`      |                  | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. |
-| `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload.                 |
-| `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY.      |
+| `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
+| `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Comma-separated detach chord (single chars or `ctrl-X`).                |
 | `--sandbox-user <NAME>`      | `sandbox`        | Username the workload runs as inside the guest.                         |

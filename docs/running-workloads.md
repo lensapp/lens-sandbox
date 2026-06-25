@@ -258,8 +258,8 @@ The format is `[host_ip:]hostport:containerport[/proto]`:
 
 | Flag                  | Default | Meaning                                                              |
 | --------------------- | ------- | -------------------------------------------------------------------- |
-| `-i`, `--interactive` | `true`  | Keep stdin open and forward host stdin to the workload.              |
-| `-t`, `--tty`         | `true`  | Allocate a PTY. Pipe mode is selected automatically when stdin isn't a TTY. |
+| `-i`, `--interactive` | `true`  | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
+| `-t`, `--tty`         | `true`  | Allocate a PTY. Pipe mode is selected automatically when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`      | `false` | Start the run and return immediately; it keeps running in the service.|
 
 By default a run is attached to your terminal. Detach to leave it running in the
