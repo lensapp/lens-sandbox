@@ -358,4 +358,20 @@ mod tests {
         let parsed: HostFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(frame, parsed);
     }
+
+    #[test]
+    fn domain_accessor_returns_domain_for_both_injection_variants() {
+        let header = CredentialInjection::Header {
+            domain: "api.some-provider.example".into(),
+            header: "Authorization".into(),
+            value: "Bearer some-secret".into(),
+        };
+        assert_eq!(header.domain(), "api.some-provider.example");
+
+        let uri = CredentialInjection::UriPlaceholder {
+            domain: "api.some-provider.example".into(),
+            value: "some-secret".into(),
+        };
+        assert_eq!(uri.domain(), "api.some-provider.example");
+    }
 }
