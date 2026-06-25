@@ -12,7 +12,7 @@
     {
       "type": "linked-versions",
       "groupName": "lns-bundle",
-      "components": ["lns", "lns-service", "e2e-tests"]
+      "components": ["lns", "lns-cli", "lns-service", "e2e-tests"]
     }
   ],
   "exclude-paths": [
@@ -22,11 +22,24 @@
     "docs"
   ],
   "packages": {
-    "crates/lns-cli": {
-      "release-type": "rust",
+    ".": {
+      "release-type": "simple",
       "component": "lns",
       "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "exclude-paths": [
+        "scripts/lns-install",
+        "crates/e2e-tests",
+        "crates/bump-kernel",
+        "crates/coverage-strip-ast"
+      ]
+    },
+    "crates/lns-cli": {
+      "release-type": "rust",
+      "component": "lns-cli",
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
     },
     "crates/lns-service": {
       "release-type": "rust",

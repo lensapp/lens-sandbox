@@ -52,9 +52,9 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      lns-released: ${{ steps.release.outputs['crates/lns-cli--release_created'] }}
-      lns-version: ${{ steps.release.outputs['crates/lns-cli--version'] }}
-      lns-tag: ${{ steps.release.outputs['crates/lns-cli--tag_name'] }}
+      lns-released: ${{ steps.release.outputs['release_created'] }}
+      lns-version: ${{ steps.release.outputs['version'] }}
+      lns-tag: ${{ steps.release.outputs['tag_name'] }}
       lns-install-released: ${{ steps.release.outputs['scripts/lns-install--release_created'] }}
       lns-install-tag: ${{ steps.release.outputs['scripts/lns-install--tag_name'] }}
     steps:
