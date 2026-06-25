@@ -4,6 +4,7 @@
   "release-label": "autorelease: tagged,release",
   "separate-pull-requests": true,
   "include-component-in-tag": true,
+  "group-pull-request-title-pattern": "chore${scope}: release ${component} libraries",
   "plugins": [
     {
       "type": "cargo-workspace",
