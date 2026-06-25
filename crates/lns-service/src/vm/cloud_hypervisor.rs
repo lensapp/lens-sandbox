@@ -252,7 +252,10 @@ mod tests {
         );
         let msg = format!("{err:#}");
         assert!(msg.contains("/dev/kvm is not available"), "got {msg}");
-        assert!(msg.contains("modprobe kvm_intel | kvm_amd"), "got {msg}");
+        assert!(
+            msg.contains("sudo modprobe kvm_intel || sudo modprobe kvm_amd"),
+            "got {msg}"
+        );
         assert!(msg.contains("sudo usermod -aG kvm $USER"), "got {msg}");
     }
 

@@ -54,10 +54,21 @@ fn real_kvm_check() -> super::KvmStatus {
 }
 
 fn real_read_console_tail(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
 
     const MAX_TAIL_BYTES: usize = 4096;
     let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    // Read at most MAX_TAIL_BYTES + 1: the extra byte lets truncate_tail decide
+    // whether the file was actually larger than the cap (so the "truncated"
+    // header is emitted) without slurping the whole file into memory.
+    let want = MAX_TAIL_BYTES as u64 + 1;
+    if len > want {
+        file.seek(SeekFrom::End(-(want as i64))).ok()?;
+    }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     if buf.is_empty() {
