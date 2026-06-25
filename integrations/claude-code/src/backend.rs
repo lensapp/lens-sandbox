@@ -144,8 +144,6 @@ impl EphemeralLns for RealEphemeral {
     }
 }
 
-/// Drops the guest supervisor's tracing and `[agent]` markers that a PTY-mode `lns run` merges onto
-/// stdout; remove this filter once lensapp/lens-sandbox#94 lands a non-interactive (no-PTY) mode.
 pub fn is_supervisor_noise(line: &str) -> bool {
     let stripped = strip_ansi(line);
     let trimmed = stripped.trim_start();

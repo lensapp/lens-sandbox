@@ -28,35 +28,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// PreToolUse hook: read the Bash tool call on stdin and route code execution into an lns microVM.
+    #[command(
+        about = "PreToolUse entrypoint: rewrites sandbox-worthy Bash commands to run inside lns."
+    )]
     Hook,
-    /// Wrapper the rewritten command points at: ensure a sandbox and run the original command inside it.
+    #[command(about = "Run a hook-rewritten command inside an lns sandbox.")]
     Exec(ExecArgs),
-    /// SessionStart check: warn when `lns` is missing or its service is not running.
+    #[command(about = "SessionStart health check for lns and its service.")]
     Doctor,
-    /// Show the effective config, lns health, and active plugin sandboxes.
+    #[command(about = "Show effective config, lns health, and active plugin sandboxes.")]
     Status,
-    /// Grant the sandbox read-only (or `--rw`) access to a host path by adding it to the project config.
+    #[command(about = "Expose a host path to the sandbox (read-only by default).")]
     Grant(GrantArgs),
-    /// Remove the plugin's leftover sandboxes (`cc-*`).
+    #[command(about = "Remove leftover plugin sandboxes (cc-*).")]
     Clean,
 }
 
 #[derive(clap::Args)]
 struct ExecArgs {
-    /// Runtime key the command was classified as (selects the sandbox image).
+    #[arg(help = "Runtime key selecting the sandbox image.")]
     runtime: String,
-    /// Base64-encoded original command string to run inside the sandbox.
-    #[arg(long)]
+    #[arg(long, help = "Base64-encoded command to run in the sandbox.")]
     b64: String,
 }
 
 #[derive(clap::Args)]
 struct GrantArgs {
-    /// Host path to expose (bare path is bound at the same absolute path inside the sandbox).
+    #[arg(help = "Host path to expose (bare path binds at the same absolute path).")]
     path: String,
-    /// Grant read-write instead of the default read-only.
-    #[arg(long)]
+    #[arg(long, help = "Grant read-write instead of the default read-only.")]
     rw: bool,
 }
 
@@ -132,8 +132,6 @@ fn run_exec(args: &ExecArgs) -> ExitCode {
 }
 
 fn select_backend() -> Box<dyn Backend> {
-    // Ephemeral (per-command `lns run`) is the default until lensapp/lens-sandbox#94 lets the
-    // persistent box reuse a clean non-interactive `lns sandbox exec`.
     match std::env::var("LNS_CC_BACKEND").ok().as_deref() {
         Some("persistent") => Box::new(boxmgr::PersistentBackend::new(boxmgr::RealLns)),
         _ => Box::new(backend::EphemeralBackend::new(backend::RealEphemeral)),

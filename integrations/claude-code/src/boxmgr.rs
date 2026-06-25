@@ -84,9 +84,6 @@ fn boot_args(spec: &BoxSpec) -> Vec<String> {
     args
 }
 
-/// Persistent backend: one long-lived box per (cwd, runtime), exec'd into per command. Blocked until
-/// lensapp/lens-sandbox#94 makes non-interactive `lns sandbox exec` reachable; selected via
-/// `LNS_CC_BACKEND=persistent`.
 pub struct PersistentBackend<R: LnsRunner> {
     runner: R,
 }
@@ -153,8 +150,6 @@ impl LnsRunner for RealLns {
     }
 
     fn exec(&self, name: &str, argv: &[String]) -> Result<i32, String> {
-        // `--tty false --interactive false` is the non-interactive form unlocked by
-        // lensapp/lens-sandbox#94; today's CLI rejects it, so this path needs that fix to run.
         let status = Command::new("lns")
             .args([
                 "sandbox",
