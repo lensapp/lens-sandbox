@@ -441,10 +441,9 @@ mod tests {
 
     #[test]
     fn run_detach_conflicts_with_explicitly_provided_interactive() {
-        let err = match parse_run(&["-d", "--interactive=true", "alpine:3.20"]) {
-            Ok(_) => panic!("explicit -i with -d should conflict"),
-            Err(e) => e,
-        };
+        let err = parse_run(&["-d", "--interactive=true", "alpine:3.20"])
+            .err()
+            .expect("explicit -i with -d should conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
