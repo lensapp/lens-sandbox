@@ -99,6 +99,9 @@ impl CredentialNotifier for WindowCredentialNotifier {
                 user_code: prompt.user_code.clone(),
                 verification_uri: prompt.verification_uri.clone(),
                 token_fallback: prompt.token_fallback.clone(),
+                env_var: prompt.env_var.clone(),
+                injection_domains: prompt.injection_domains.clone(),
+                is_project_defined: prompt.is_project_defined,
             },
             cancel,
         );
@@ -132,6 +135,9 @@ mod tests {
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
@@ -249,6 +255,9 @@ mod tests {
             token_fallback: Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
             }),
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
