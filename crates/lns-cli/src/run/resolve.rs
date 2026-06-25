@@ -689,6 +689,7 @@ mod tests {
             mounts: Vec::new(),
             cmd: Vec::new(),
             mount: Vec::new(),
+            quiet: false,
             artifact_mounts: Vec::new(),
         }
     }

@@ -29,7 +29,7 @@ async fn step_from_pipe(
     let bytes = read_frame_bytes_async(&mut pipe.client)
         .await
         .expect("read frame");
-    pre_phase_step(&bytes, writer, progress).expect("pre_phase_step")
+    pre_phase_step(&bytes, writer, progress, false).expect("pre_phase_step")
 }
 
 async fn send_and_step(world: &mut BehaviourWorld, resp: Response) -> PrePhaseStep {
@@ -115,7 +115,7 @@ fn pulled_line_erases_bar(world: &mut BehaviourWorld) -> Result<(), String> {
 }
 
 fn emit_started_run_42(world: &mut BehaviourWorld) {
-    render_started_run(42, &mut world.phase_output).expect("render Started");
+    render_started_run(42, &mut world.phase_output, false).expect("render Started");
     if world.detached {
         writeln!(world.detached_stdout, "run #42").expect("write run id");
     }
@@ -631,6 +631,7 @@ async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>)
         lns_cli::service::DetachBehaviour::SignalAndDrain,
         &mut stdout,
         &mut status,
+        false,
     )
     .await
     .expect("drive_attached_session_with_writers");

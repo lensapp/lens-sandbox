@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use eframe::egui;
 use lns_policy::integrations::TokenFallback;
@@ -8,19 +9,46 @@ use lns_service::approval_flow::window::{
     lds_visuals, quiet_debug_overlays,
 };
 use lns_service::tray::{
-    CardAction, MIN_WINDOW_HEIGHT, TokenDraft, WINDOW_WIDTH, content_cap, position_top_right,
-    refresh_window_shadows, render_stack,
+    CardAction, MIN_WINDOW_HEIGHT, TokenDraft, ViewportPlacement, WINDOW_WIDTH, content_cap,
+    install_activation_policy, refresh_window_shadows, render_stack,
 };
 
 const SEED_HEIGHT: f32 = 300.0;
+
+/// Once every card is dismissed the window hides (exactly like production); reseed the stack after this many seconds so the close-then-hide path can be reproduced repeatedly.
+const RESHOW_DELAY: f64 = 1.5;
 
 struct Preview {
     snapshot: Snapshot,
     credential_inputs: HashMap<String, String>,
     token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
-    current_height: f32,
-    placed: bool,
+    placement: ViewportPlacement,
+    reshow_at: Option<f64>,
+}
+
+impl Preview {
+    fn maybe_reseed(&mut self, ctx: &egui::Context) {
+        if !self.snapshot.order.is_empty() {
+            self.reshow_at = None;
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        match self.reshow_at {
+            None => {
+                eprintln!("[approval-preview] stack empty → hiding window");
+                self.reshow_at = Some(now + RESHOW_DELAY);
+                ctx.request_repaint_after(Duration::from_secs_f64(RESHOW_DELAY));
+            }
+            Some(at) if now >= at => {
+                eprintln!("[approval-preview] reseeding → re-showing window");
+                self.snapshot = seed();
+                self.reshow_at = None;
+                ctx.request_repaint();
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 impl eframe::App for Preview {
@@ -29,19 +57,14 @@ impl eframe::App for Preview {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.placed {
-            return;
-        }
-        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
-            ctx.request_repaint();
-            return;
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position_top_right(
-            monitor,
-        )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.request_repaint();
-        self.placed = true;
+        self.maybe_reseed(ctx);
+        let revealed = self
+            .token_drafts
+            .values()
+            .filter(|d| d.is_revealed())
+            .count();
+        self.placement
+            .sync_visibility(ctx, &self.snapshot.order, revealed);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -56,14 +79,7 @@ impl eframe::App for Preview {
             cap,
         );
         let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
-        if (self.current_height - target).abs() > 0.5 {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                    WINDOW_WIDTH,
-                    target,
-                )));
-            self.current_height = target;
-        }
+        self.placement.fit_height(ui.ctx(), target);
         if let Some(action) = action {
             eprintln!("[approval-preview] {action:?}");
             dismiss_card(&mut self.snapshot, &action);
@@ -107,6 +123,31 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
 }
 
 fn seed() -> Snapshot {
+    if std::env::var_os("APPROVAL_PREVIEW_ONE").is_some() {
+        seed_one()
+    } else {
+        seed_all()
+    }
+}
+
+fn seed_one() -> Snapshot {
+    Snapshot {
+        pending: vec![PendingPrompt {
+            id: "net-allow".into(),
+            host: "pypi.org".into(),
+            action: "CONNECT pypi.org:443".into(),
+            offer: None,
+            token_fallback: None,
+        }],
+        pending_credentials: vec![],
+        sign_ins: vec![],
+        informs: vec![],
+        connecting: vec![],
+        order: vec![StackItem::Network(0)],
+    }
+}
+
+fn seed_all() -> Snapshot {
     Snapshot {
         pending: vec![
             PendingPrompt {
@@ -192,14 +233,17 @@ fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_title("approval preview")
         .with_decorations(false)
+        .with_resizable(true)
         .with_transparent(true)
         .with_always_on_top()
+        .with_mouse_passthrough(true)
         .with_visible(false)
         .with_inner_size([WINDOW_WIDTH, SEED_HEIGHT]);
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    install_activation_policy(&mut options);
     eframe::run_native(
         "approval preview",
         options,
@@ -213,8 +257,8 @@ fn main() -> eframe::Result {
                 credential_inputs: HashMap::new(),
                 token_drafts: HashMap::new(),
                 remember: HashMap::new(),
-                current_height: SEED_HEIGHT,
-                placed: false,
+                placement: ViewportPlacement::new(),
+                reshow_at: None,
             }))
         }),
     )

@@ -172,6 +172,14 @@ pub struct RunArgs {
     pub mount: Vec<String>,
 
     #[arg(
+        short = 'q',
+        long = "quiet",
+        default_value_t = false,
+        help = "Suppress the launch banner and ✓ status lines; warnings, errors, and the workload's own output are still printed. Useful for scripted/programmatic callers."
+    )]
+    pub quiet: bool,
+
+    #[arg(
         last = true,
         help = "Override entrypoint+cmd. Everything after `--` is the command."
     )]
@@ -248,6 +256,14 @@ pub struct ExecArgs {
         help = "Detach chord; on trigger closes only this exec session, leaving the primary session and VM running."
     )]
     pub detach_keys: DetachChord,
+
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        default_value_t = false,
+        help = "Suppress ✓ status lines; warnings, errors, and the workload's own output are still printed."
+    )]
+    pub quiet: bool,
 
     #[arg(
         last = true,

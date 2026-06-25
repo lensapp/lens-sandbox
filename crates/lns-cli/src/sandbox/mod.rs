@@ -508,6 +508,7 @@ where
         crate::service::DetachBehaviour::LeaveRunning,
         stdout,
         stderr,
+        false,
     )
     .await
 }
@@ -619,6 +620,7 @@ mod tests {
             interactive: false,
             tty: false,
             detach_keys: crate::cli::DetachChord(Vec::new()),
+            quiet: false,
             cmd: vec!["echo".into()],
         });
         let mut out = Vec::new();

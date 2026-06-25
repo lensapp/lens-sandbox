@@ -146,14 +146,22 @@ fn resolve_host_binds(
 
 pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let resolved_policy = print_run_summary(&args, &cwd, &mut std::io::stderr())?;
+    let quiet = args.quiet;
+    let resolved_policy = if quiet {
+        let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
+        path
+    } else {
+        print_run_summary(&args, &cwd, &mut std::io::stderr())?
+    };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
     let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
-    let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
-    if !dispositions.is_empty() {
-        eprint!("{dispositions}");
+    if !quiet {
+        let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
+        if !dispositions.is_empty() {
+            eprint!("{dispositions}");
+        }
     }
     let binds: Vec<lns_ipc::BindMount> = resolved_binds.iter().map(|b| b.to_wire()).collect();
 
@@ -209,13 +217,15 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         other => anyhow::bail!("expected RunStarted, got {other:?}"),
     };
 
-    let mut progress = crate::run::progress::ProgressRenderer::new(std::io::stderr().is_terminal());
-    let outcome = drive_pre_phase(&mut stream, &mut std::io::stderr(), &mut progress).await?;
+    let mut progress =
+        crate::run::progress::ProgressRenderer::new(!quiet && std::io::stderr().is_terminal());
+    let outcome =
+        drive_pre_phase(&mut stream, &mut std::io::stderr(), &mut progress, quiet).await?;
     if let PrePhaseOutcome::EarlyExit(code) = outcome {
         return Ok(code);
     }
 
-    render_started_run(run_id, &mut std::io::stderr()).ok();
+    render_started_run(run_id, &mut std::io::stderr(), quiet).ok();
 
     if detached {
         println!("run #{run_id}");
@@ -228,6 +238,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         run_id,
         tty,
         detach_chord,
+        quiet,
     )
     .await
 }
@@ -276,7 +287,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     };
     crate::log::debug!(run_id = run_id, "exec session opened");
 
-    drive_attached_session(stream, Some(socket), run_id, tty, detach_chord).await
+    drive_attached_session(stream, Some(socket), run_id, tty, detach_chord, args.quiet).await
 }
 
 pub async fn kill(args: KillArgs) -> Result<()> {
@@ -330,6 +341,7 @@ pub(crate) async fn drive_attached_session<S>(
     run_id: u32,
     tty: bool,
     detach_chord: Vec<u8>,
+    quiet: bool,
 ) -> Result<i32>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
@@ -346,6 +358,7 @@ where
         DetachBehaviour::SignalAndDrain,
         &mut stdout,
         &mut stderr,
+        quiet,
     )
     .await
 }
@@ -361,6 +374,7 @@ pub async fn drive_attached_session_with_writers<S, O, E>(
     detach: DetachBehaviour,
     stdout: &mut O,
     stderr: &mut E,
+    quiet: bool,
 ) -> Result<i32>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
@@ -413,6 +427,7 @@ where
                     stdout,
                     stderr,
                     &mut last_stdout_byte,
+                    quiet,
                 )
                 .await;
             }
@@ -430,7 +445,7 @@ where
                         stderr.flush().await.ok();
                     }
                     WireFrame::Json(Response::RunLog { level, verb, message }) => {
-                        render_attached_run_log(level, verb.as_deref(), &message, tty, stderr)
+                        render_attached_run_log(level, verb.as_deref(), &message, tty, stderr, quiet)
                             .await?;
                     }
                     WireFrame::Json(Response::RunProgress { .. }) => {}
@@ -471,6 +486,7 @@ async fn render_attached_run_log<E>(
     message: &str,
     tty: bool,
     stderr: &mut E,
+    quiet: bool,
 ) -> Result<()>
 where
     E: AsyncWriteExt + Unpin,
@@ -480,7 +496,10 @@ where
         return Ok(());
     }
     let mut line = Vec::<u8>::new();
-    render_status_line(level, verb, message, &mut line)?;
+    render_status_line(level, verb, message, &mut line, quiet)?;
+    if line.is_empty() {
+        return Ok(());
+    }
     if tty {
         line = lf_to_crlf(&line);
     }
@@ -507,6 +526,7 @@ async fn exit_code_after_detach<S, O, E>(
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
+    quiet: bool,
 ) -> i32
 where
     S: AsyncReadExt + Unpin,
@@ -515,7 +535,7 @@ where
 {
     match detach {
         DetachBehaviour::SignalAndDrain => {
-            drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte).await
+            drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte, quiet).await
         }
         DetachBehaviour::LeaveRunning => 0,
     }
@@ -527,6 +547,7 @@ async fn drain_after_chord<S, O, E>(
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
+    quiet: bool,
 ) -> i32
 where
     S: AsyncReadExt + Unpin,
@@ -535,7 +556,7 @@ where
 {
     match timeout(
         Duration::from_secs(5),
-        drain_to_exit(stream, tty, stdout, stderr, last_stdout_byte),
+        drain_to_exit(stream, tty, stdout, stderr, last_stdout_byte, quiet),
     )
     .await
     {
@@ -557,6 +578,7 @@ async fn drain_to_exit<S, O, E>(
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
+    quiet: bool,
 ) -> Result<i32>
 where
     S: AsyncReadExt + Unpin,
@@ -582,7 +604,8 @@ where
                 verb,
                 message,
             }) => {
-                render_attached_run_log(level, verb.as_deref(), &message, tty, stderr).await?;
+                render_attached_run_log(level, verb.as_deref(), &message, tty, stderr, quiet)
+                    .await?;
             }
             WireFrame::Json(Response::RunExit { code }) => return Ok(code),
             WireFrame::Json(Response::Error { message }) => {
@@ -786,6 +809,7 @@ pub fn pre_phase_step<W>(
     bytes: &[u8],
     writer: &mut W,
     progress: &mut crate::run::progress::ProgressRenderer,
+    quiet: bool,
 ) -> Result<PrePhaseStep>
 where
     W: std::io::Write,
@@ -808,7 +832,7 @@ where
             verb,
             message,
         }) => {
-            render_status_line(level, verb.as_deref(), &message, writer)?;
+            render_status_line(level, verb.as_deref(), &message, writer, quiet)?;
             if verb.as_deref() == Some("SessionReady") {
                 Ok(PrePhaseStep::SessionReady)
             } else {
@@ -829,6 +853,7 @@ pub async fn drive_pre_phase<S, W>(
     stream: &mut S,
     writer: &mut W,
     progress: &mut crate::run::progress::ProgressRenderer,
+    quiet: bool,
 ) -> Result<PrePhaseOutcome>
 where
     S: AsyncReadExt + Unpin,
@@ -846,7 +871,7 @@ where
             }
         }
         .context("reading pre-phase frame")?;
-        match pre_phase_step(&bytes, writer, progress)? {
+        match pre_phase_step(&bytes, writer, progress, quiet)? {
             PrePhaseStep::Continue => {}
             PrePhaseStep::SessionReady => return Ok(PrePhaseOutcome::SessionReady),
             PrePhaseStep::EarlyExit(code) => return Ok(PrePhaseOutcome::EarlyExit(code)),
@@ -859,7 +884,11 @@ pub fn render_status_line(
     verb: Option<&str>,
     message: &str,
     writer: &mut impl std::io::Write,
+    quiet: bool,
 ) -> std::io::Result<()> {
+    if quiet && !matches!(level, LogLevel::Warn | LogLevel::Error) {
+        return Ok(());
+    }
     let marker = match level {
         LogLevel::Error => '✗',
         LogLevel::Warn => '⚠',
@@ -873,12 +902,17 @@ pub fn render_status_line(
     }
 }
 
-pub fn render_started_run(run_id: u32, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+pub fn render_started_run(
+    run_id: u32,
+    writer: &mut impl std::io::Write,
+    quiet: bool,
+) -> std::io::Result<()> {
     render_status_line(
         LogLevel::Info,
         Some("Started"),
         &format!("run #{run_id}"),
         writer,
+        quiet,
     )
 }
 
@@ -902,7 +936,7 @@ mod tests {
             let frame = encode_frame(&Response::RunExit { code: 7 }).expect("encode RunExit");
             server.write_all(&frame).await.expect("write RunExit");
         });
-        let code = drive_attached_session(client, None, 42, false, Vec::new())
+        let code = drive_attached_session(client, None, 42, false, Vec::new(), false)
             .await
             .expect("drive_attached_session");
         assert_eq!(code, 7);
@@ -919,7 +953,14 @@ mod tests {
     #[test]
     fn render_pre_phase_log_emits_check_marker_and_lowercased_verb() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Resolved"), "ubuntu:latest", &mut buf).unwrap();
+        render_status_line(
+            LogLevel::Info,
+            Some("Resolved"),
+            "ubuntu:latest",
+            &mut buf,
+            false,
+        )
+        .unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ resolved ubuntu:latest\n");
     }
@@ -932,6 +973,7 @@ mod tests {
             Some("Resolve"),
             "registry timeout",
             &mut buf,
+            false,
         )
         .unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -941,7 +983,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_special_cases_session_ready_phrase() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ session ready\n");
     }
@@ -949,7 +991,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_special_cases_image_cached_phrase() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("ImageCached"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("ImageCached"), "", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ image cached\n");
     }
@@ -957,7 +999,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_omits_trailing_space_when_message_empty() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Booted"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("Booted"), "", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ booted\n");
     }
@@ -965,7 +1007,14 @@ mod tests {
     #[test]
     fn render_pre_phase_log_emits_no_ansi_escape_sequences() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Booted"), "microVM (1.1s)", &mut buf).unwrap();
+        render_status_line(
+            LogLevel::Info,
+            Some("Booted"),
+            "microVM (1.1s)",
+            &mut buf,
+            false,
+        )
+        .unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\x1b'), "ANSI escape leaked: {s:?}");
     }
@@ -973,7 +1022,7 @@ mod tests {
     #[test]
     fn render_pre_phase_log_falls_back_to_lowercased_verb_for_unknown_verbs() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, None, "unverbed", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, None, "unverbed", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓  unverbed\n");
     }
@@ -1006,7 +1055,7 @@ mod tests {
             write_response(&mut server, run_log("SessionReady", "")).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
@@ -1028,7 +1077,7 @@ mod tests {
             write_response(&mut server, Response::RunExit { code: 42 }).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::EarlyExit(42));
@@ -1047,7 +1096,7 @@ mod tests {
             .await;
         });
         let mut buf = Vec::<u8>::new();
-        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .expect_err("daemon Error must surface");
         assert!(format!("{err:#}").contains("no such image"));
@@ -1062,7 +1111,7 @@ mod tests {
             server.write_all(&frame).await.expect("write");
         });
         let mut buf = Vec::<u8>::new();
-        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+        let err = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .expect_err("stdout before SessionReady is a protocol violation");
         assert!(format!("{err:#}").contains("unexpected frame"));
@@ -1077,7 +1126,7 @@ mod tests {
             write_response(&mut server, run_log("SessionReady", "")).await;
         });
         let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress())
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
@@ -1098,7 +1147,7 @@ mod tests {
         });
         let mut buf = Vec::<u8>::new();
         let mut progress = crate::run::progress::ProgressRenderer::new(true);
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress)
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress, false)
             .await
             .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
@@ -1123,7 +1172,7 @@ mod tests {
         });
         let mut buf = Vec::<u8>::new();
         let mut progress = crate::run::progress::ProgressRenderer::new(true);
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress)
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut progress, false)
             .await
             .unwrap();
         assert_eq!(outcome, PrePhaseOutcome::SessionReady);
@@ -1148,7 +1197,7 @@ mod tests {
             let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode RunExit");
             server.write_all(&exit).await.expect("write RunExit");
         });
-        let code = drive_attached_session(client, None, 42, false, Vec::new())
+        let code = drive_attached_session(client, None, 42, false, Vec::new(), false)
             .await
             .expect("a stray progress frame must not kill an attached session");
         assert_eq!(code, 0);
@@ -1164,7 +1213,7 @@ mod tests {
             .expect("encode Error");
             server.write_all(&frame).await.expect("write Error");
         });
-        let err = drive_attached_session(client, None, 42, false, Vec::new())
+        let err = drive_attached_session(client, None, 42, false, Vec::new(), false)
             .await
             .expect_err("daemon Error must surface as anyhow::Error");
         assert!(
@@ -1176,7 +1225,7 @@ mod tests {
     #[test]
     fn render_status_line_renders_started_run_in_check_cadence_not_right_aligned() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Started"), "run #42", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("Started"), "run #42", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ started run #42\n");
         assert!(
@@ -1188,14 +1237,21 @@ mod tests {
     #[test]
     fn render_started_run_routes_run_id_through_the_check_renderer() {
         let mut buf = Vec::<u8>::new();
-        render_started_run(7, &mut buf).unwrap();
+        render_started_run(7, &mut buf, false).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "✓ started run #7\n");
     }
 
     #[test]
     fn render_status_line_renders_finished_in_check_cadence() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Finished"), "in 2.53s", &mut buf).unwrap();
+        render_status_line(
+            LogLevel::Info,
+            Some("Finished"),
+            "in 2.53s",
+            &mut buf,
+            false,
+        )
+        .unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ finished in 2.53s\n");
     }
@@ -1208,6 +1264,7 @@ mod tests {
             Some("Resolve"),
             "registry timeout",
             &mut buf,
+            false,
         )
         .unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -1216,7 +1273,7 @@ mod tests {
 
     fn render_marker(level: LogLevel) -> char {
         let mut buf = Vec::<u8>::new();
-        render_status_line(level, Some("Verb"), "msg", &mut buf).unwrap();
+        render_status_line(level, Some("Verb"), "msg", &mut buf, false).unwrap();
         String::from_utf8(buf)
             .unwrap()
             .chars()
@@ -1238,7 +1295,7 @@ mod tests {
     #[test]
     fn render_status_line_phrases_session_ready() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf).unwrap();
+        render_status_line(LogLevel::Info, Some("SessionReady"), "", &mut buf, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s, "✓ session ready\n");
         assert!(!s.contains("SessionReady"), "raw verb leaked: {s:?}");
@@ -1253,6 +1310,7 @@ mod tests {
             "broker handshake",
             false,
             &mut stderr,
+            false,
         )
         .await
         .expect("render debug");
@@ -1271,6 +1329,7 @@ mod tests {
             "in 1.10s",
             false,
             &mut stderr,
+            false,
         )
         .await
         .expect("render info");
@@ -1286,6 +1345,7 @@ mod tests {
             "workload exited with code 1",
             true,
             &mut stderr,
+            false,
         )
         .await
         .expect("render warn");
@@ -1360,6 +1420,7 @@ mod tests {
             DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
+            false,
         )
         .await
         .expect("drive");
@@ -1386,6 +1447,7 @@ mod tests {
             &mut captured,
             &mut status,
             &mut last,
+            false,
         )
         .await;
 
@@ -1419,6 +1481,7 @@ mod tests {
             &mut captured,
             &mut status,
             &mut last,
+            false,
         )
         .await;
 
@@ -1450,6 +1513,7 @@ mod tests {
             DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
+            false,
         )
         .await
         .expect("drive");
@@ -1479,6 +1543,7 @@ mod tests {
             DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
+            false,
         )
         .await
         .expect("drive");
@@ -1510,6 +1575,7 @@ mod tests {
             DetachBehaviour::SignalAndDrain,
             &mut captured,
             &mut status,
+            false,
         )
         .await
         .expect("drive");
@@ -1658,5 +1724,75 @@ mod tests {
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn render_status_line_quiet_suppresses_info() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(
+            LogLevel::Info,
+            Some("Resolved"),
+            "ubuntu:latest",
+            &mut buf,
+            true,
+        )
+        .unwrap();
+        assert!(buf.is_empty(), "quiet must suppress Info lines");
+    }
+
+    #[test]
+    fn render_status_line_quiet_still_emits_warn() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(LogLevel::Warn, Some("SlowPull"), "retrying", &mut buf, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("⚠ slowpull retrying"),
+            "quiet must still emit Warn: {s:?}"
+        );
+    }
+
+    #[test]
+    fn render_status_line_quiet_still_emits_error() {
+        let mut buf = Vec::<u8>::new();
+        render_status_line(
+            LogLevel::Error,
+            Some("Resolve"),
+            "not found",
+            &mut buf,
+            true,
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("✗ resolve not found"),
+            "quiet must still emit Error: {s:?}"
+        );
+    }
+
+    #[test]
+    fn render_started_run_quiet_suppresses_output() {
+        let mut buf = Vec::<u8>::new();
+        render_started_run(7, &mut buf, true).unwrap();
+        assert!(buf.is_empty(), "quiet must suppress the started-run line");
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_quiet_suppresses_info_but_detects_session_ready() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(&mut server, run_log("Resolved", "ubuntu:latest")).await;
+            write_response(&mut server, run_log("Pulled", "7 layers")).await;
+            write_response(&mut server, run_log("Booted", "microVM")).await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), true)
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        assert!(
+            buf.is_empty(),
+            "quiet must suppress all Info status lines: {buf:?}"
+        );
     }
 }
