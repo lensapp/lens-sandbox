@@ -3,6 +3,10 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 
+mod classify;
+mod hook;
+mod rewrite;
+
 #[derive(Parser)]
 #[command(
     name = "lns-cc",
@@ -42,13 +46,31 @@ fn main() -> ExitCode {
 }
 
 fn run_hook() -> ExitCode {
-    discard_stdin();
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return ExitCode::SUCCESS;
+    };
+    if let Some(output) = hook::process_hook(&input, &exe.to_string_lossy(), true) {
+        println!("{output}");
+    }
     ExitCode::SUCCESS
 }
 
-fn run_exec(_args: &ExecArgs) -> ExitCode {
-    eprintln!("lns-cc exec: not implemented yet (arrives in P2)");
-    ExitCode::FAILURE
+fn run_exec(args: &ExecArgs) -> ExitCode {
+    match rewrite::decode_command(&args.b64) {
+        Some(command) => {
+            eprintln!("lns-cc exec: not implemented yet (arrives in P2)");
+            eprintln!("  would run in `{}` sandbox: {command}", args.runtime);
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("lns-cc exec: could not decode --b64 payload");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_doctor() -> ExitCode {
