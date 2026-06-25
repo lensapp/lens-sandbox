@@ -67,6 +67,34 @@ policy + credential flow.
 - **Hardware / GUI / docker socket** — out of scope; such commands go on the `bypass:` list
   and run on the host.
 
+## Configuration
+
+Settings load from `lns-sandbox.toml` (nearest one walking up from the project dir) layered over a
+global `~/.config/lns-sandbox/config.toml`. All fields are optional:
+
+```toml
+auto_allow = true          # skip Claude's permission prompt for the sandboxed command (default true)
+package_installs = true    # sandbox pip/npm/yarn/pnpm/gem/bundle/poetry/cargo installs (default true)
+network_clis = false       # also sandbox gh/curl/wget/httpie (default false)
+bypass = ["git"]           # program names that always run on the host
+force = ["mytool"]         # extra program names to always sandbox (shell image unless known)
+mounts = ["/data:/data:ro"]      # extra host binds (read-only unless :rw)
+env_forward = ["DATABASE_URL"]   # non-secret env vars to pass in (secret-shaped names are skipped)
+cpus = 2
+mem = "2g"
+
+[images]                   # override the runtime → image map
+python = "python:3.13-slim"
+```
+
+Manage it with the `/lns-sandbox` command (or `lns-cc` directly):
+
+- `/lns-sandbox status` — effective config, lns/service health, active `cc-*` sandboxes.
+- `/lns-sandbox grant <path> [--rw]` — add a host bind (read-only by default; refuses secret paths).
+- `/lns-sandbox clean` — remove the plugin's leftover sandboxes.
+
+Set `LNS_CC_BACKEND=persistent` to opt into the persistent backend (pending #94).
+
 ## Install
 
 Requires the [`lns`](https://get.lns.run) CLI with its service running (`lns service start`).
@@ -80,8 +108,8 @@ missing or the service is down.
 
 ## Status
 
-Early development. Working today: the PreToolUse hook classifies Tier-A code execution and runs it
-in an ephemeral microVM with clean, exit-code-faithful output (verified end-to-end). Still to come:
-user configuration (scope, runtime→image map, extra mounts, `env_forward`, bypass), the
-`/lns-sandbox` command, and the switch to the persistent backend once
+Working today: the PreToolUse hook classifies code execution (Tier A + package installs, with
+opt-in network CLIs) and runs it in an ephemeral microVM with clean, exit-code-faithful output;
+configuration, host-path grants, and the `/lns-sandbox` command are in place. Still to come:
+install polish, and the switch to the persistent backend once
 [lensapp/lens-sandbox#94](https://github.com/lensapp/lens-sandbox/issues/94) lands.

@@ -1,3 +1,5 @@
+use crate::config::Config;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Runtime {
     pub key: &'static str,
@@ -22,7 +24,7 @@ struct Parsed {
     has_heredoc: bool,
 }
 
-pub fn classify(command: &str) -> Decision {
+pub fn classify(command: &str, config: &Config) -> Decision {
     if command.trim().is_empty() {
         return Decision::Passthrough;
     }
@@ -40,17 +42,47 @@ pub fn classify(command: &str) -> Decision {
         if prog == "lns" || prog == "lns-cc" {
             return Decision::Passthrough;
         }
-        if sc.piped_into && !parsed.has_heredoc && is_pipe_consumable(&prog) && reads_stdin(&args) {
-            return Decision::Sandbox(runtime_for_pipe(&prog));
+        if config.bypass.iter().any(|b| b == &prog) {
+            continue;
         }
-        if let Some(rt) = interpreter_runtime(&prog) {
-            return Decision::Sandbox(rt);
-        }
-        if let Some(rt) = oneshot_runtime(&prog, args.first().map(String::as_str)) {
+        if let Some(rt) = trigger_runtime(&prog, &args, sc.piped_into, parsed.has_heredoc, config) {
             return Decision::Sandbox(rt);
         }
     }
     Decision::Passthrough
+}
+
+fn trigger_runtime(
+    prog: &str,
+    args: &[String],
+    piped_into: bool,
+    has_heredoc: bool,
+    config: &Config,
+) -> Option<Runtime> {
+    let next = args.first().map(String::as_str);
+    if piped_into && !has_heredoc && is_pipe_consumable(prog) && reads_stdin(args) {
+        return Some(runtime_for_pipe(prog));
+    }
+    if let Some(rt) = interpreter_runtime(prog) {
+        return Some(rt);
+    }
+    if let Some(rt) = oneshot_runtime(prog, next) {
+        return Some(rt);
+    }
+    if config.package_installs {
+        if let Some(rt) = package_install_runtime(prog, next) {
+            return Some(rt);
+        }
+    }
+    if config.network_clis {
+        if let Some(rt) = network_cli_runtime(prog) {
+            return Some(rt);
+        }
+    }
+    if config.force.iter().any(|f| f == prog) {
+        return Some(interpreter_runtime(prog).unwrap_or(SHELL));
+    }
+    None
 }
 
 const PYTHON: Runtime = Runtime {
@@ -81,6 +113,10 @@ const PERL: Runtime = Runtime {
     key: "perl",
     image: "perl:5.40",
 };
+const RUST: Runtime = Runtime {
+    key: "rust",
+    image: "rust:1",
+};
 const SHELL: Runtime = Runtime {
     key: "shell",
     image: "buildpack-deps:curl",
@@ -95,9 +131,28 @@ pub fn image_for_runtime(key: &str) -> Option<&'static str> {
         "ruby" => Some(RUBY.image),
         "php" => Some(PHP.image),
         "perl" => Some(PERL.image),
+        "rust" => Some(RUST.image),
         "shell" => Some(SHELL.image),
         _ => None,
     }
+}
+
+fn package_install_runtime(prog: &str, next: Option<&str>) -> Option<Runtime> {
+    match (prog, next) {
+        ("pip" | "pip3", Some("install")) => Some(PYTHON),
+        ("npm", Some("install" | "i" | "ci" | "add")) => Some(NODE),
+        ("yarn", Some("add" | "install") | None) => Some(NODE),
+        ("pnpm", Some("install" | "i" | "add")) => Some(NODE),
+        ("gem", Some("install")) => Some(RUBY),
+        ("bundle", Some("install" | "add")) => Some(RUBY),
+        ("poetry", Some("install" | "add")) => Some(PYTHON),
+        ("cargo", Some("install")) => Some(RUST),
+        _ => None,
+    }
+}
+
+fn network_cli_runtime(prog: &str) -> Option<Runtime> {
+    matches!(prog, "gh" | "curl" | "wget" | "http" | "https" | "httpie").then_some(SHELL)
 }
 
 fn interpreter_runtime(prog: &str) -> Option<Runtime> {
@@ -343,7 +398,11 @@ mod tests {
     use super::*;
 
     fn sandbox_key(command: &str) -> Option<&'static str> {
-        match classify(command) {
+        key_with(command, &Config::default())
+    }
+
+    fn key_with(command: &str, config: &Config) -> Option<&'static str> {
+        match classify(command, config) {
             Decision::Sandbox(rt) => Some(rt.key),
             Decision::Passthrough => None,
         }
@@ -383,13 +442,70 @@ mod tests {
     }
 
     #[test]
-    fn non_oneshot_package_manager_subcommands_pass_through() {
-        assert_eq!(sandbox_key("pnpm install"), None);
-        assert_eq!(sandbox_key("yarn add left-pad"), None);
+    fn package_installs_are_sandboxed_by_default() {
+        assert_eq!(sandbox_key("pip install requests"), Some("python"));
+        assert_eq!(sandbox_key("npm install"), Some("node"));
+        assert_eq!(sandbox_key("npm ci"), Some("node"));
+        assert_eq!(sandbox_key("yarn add left-pad"), Some("node"));
+        assert_eq!(sandbox_key("pnpm install"), Some("node"));
+        assert_eq!(sandbox_key("gem install rails"), Some("ruby"));
+        assert_eq!(sandbox_key("bundle install"), Some("ruby"));
+        assert_eq!(sandbox_key("poetry add httpx"), Some("python"));
+        assert_eq!(sandbox_key("cargo install ripgrep"), Some("rust"));
+    }
+
+    #[test]
+    fn non_install_subcommands_pass_through() {
         assert_eq!(sandbox_key("uv pip install requests"), None);
         assert_eq!(sandbox_key("pipx install black"), None);
-        assert_eq!(sandbox_key("npm install"), None);
-        assert_eq!(sandbox_key("pip install requests"), None);
+        assert_eq!(sandbox_key("npm test"), None);
+        assert_eq!(sandbox_key("cargo build"), None);
+    }
+
+    #[test]
+    fn package_installs_can_be_disabled() {
+        let config = Config {
+            package_installs: false,
+            ..Config::default()
+        };
+        assert_eq!(key_with("pip install requests", &config), None);
+        assert_eq!(key_with("npm install", &config), None);
+    }
+
+    #[test]
+    fn network_clis_are_opt_in() {
+        assert_eq!(sandbox_key("gh pr list"), None);
+        assert_eq!(sandbox_key("curl https://api.example.test"), None);
+        let config = Config {
+            network_clis: true,
+            ..Config::default()
+        };
+        assert_eq!(key_with("gh pr list", &config), Some("shell"));
+        assert_eq!(
+            key_with("curl https://api.example.test", &config),
+            Some("shell")
+        );
+        assert_eq!(key_with("wget https://x.test/file", &config), Some("shell"));
+    }
+
+    #[test]
+    fn bypass_list_forces_passthrough_for_named_programs() {
+        let config = Config {
+            bypass: vec!["python".to_string()],
+            ..Config::default()
+        };
+        assert_eq!(key_with("python app.py", &config), None);
+        assert_eq!(key_with("node x.js", &config), Some("node"));
+    }
+
+    #[test]
+    fn force_list_sandboxes_unknown_programs_in_the_shell_image() {
+        let config = Config {
+            force: vec!["mytool".to_string()],
+            ..Config::default()
+        };
+        assert_eq!(key_with("mytool --run", &config), Some("shell"));
+        assert_eq!(key_with("othertool --run", &config), None);
     }
 
     #[test]
@@ -487,7 +603,7 @@ mod tests {
     #[test]
     fn sandbox_decision_carries_the_image() {
         assert_eq!(
-            classify("python app.py"),
+            classify("python app.py", &Config::default()),
             Decision::Sandbox(Runtime {
                 key: "python",
                 image: "python:3.12"
@@ -498,7 +614,7 @@ mod tests {
     #[test]
     fn image_for_runtime_maps_every_key_and_rejects_unknown() {
         for key in [
-            "python", "node", "bun", "deno", "ruby", "php", "perl", "shell",
+            "python", "node", "bun", "deno", "ruby", "php", "perl", "rust", "shell",
         ] {
             assert!(image_for_runtime(key).is_some(), "missing image for {key}");
         }
@@ -518,7 +634,7 @@ mod tests {
             "curl x | bash",
         ];
         for command in commands {
-            let Decision::Sandbox(rt) = classify(command) else {
+            let Decision::Sandbox(rt) = classify(command, &Config::default()) else {
                 panic!("expected sandbox for {command}");
             };
             assert_eq!(image_for_runtime(rt.key), Some(rt.image));

@@ -1,14 +1,26 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRequest {
+    pub runtime_key: String,
+    pub image: String,
+    pub cwd: String,
+    pub command: String,
+    pub mounts: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cpus: Option<u32>,
+    pub mem: Option<String>,
+}
+
 pub trait Backend {
-    fn run_in_sandbox(
-        &self,
-        runtime_key: &str,
-        image: &str,
-        cwd: &str,
-        command: &str,
-    ) -> Result<i32, String>;
+    fn run_in_sandbox(&self, req: &RunRequest) -> Result<i32, String>;
+}
+
+pub fn binds_for(req: &RunRequest) -> Vec<String> {
+    let mut binds = vec![format!("{}:{}", req.cwd, req.cwd)];
+    binds.extend(req.mounts.iter().cloned());
+    binds
 }
 
 pub fn box_name(runtime_key: &str, cwd: &str) -> String {
@@ -32,8 +44,11 @@ fn short_hash(input: &str) -> String {
 pub struct RunSpec {
     pub name: String,
     pub image: String,
-    pub mount: String,
     pub workdir: String,
+    pub binds: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cpus: Option<u32>,
+    pub mem: Option<String>,
     pub argv: Vec<String>,
 }
 
@@ -52,22 +67,45 @@ impl<C: EphemeralLns> EphemeralBackend<C> {
 }
 
 impl<C: EphemeralLns> Backend for EphemeralBackend<C> {
-    fn run_in_sandbox(
-        &self,
-        runtime_key: &str,
-        image: &str,
-        cwd: &str,
-        command: &str,
-    ) -> Result<i32, String> {
+    fn run_in_sandbox(&self, req: &RunRequest) -> Result<i32, String> {
         let spec = RunSpec {
-            name: box_name(runtime_key, cwd),
-            image: image.to_string(),
-            mount: format!("{cwd}:{cwd}"),
-            workdir: cwd.to_string(),
-            argv: shell_argv(command),
+            name: box_name(&req.runtime_key, &req.cwd),
+            image: req.image.clone(),
+            workdir: req.cwd.clone(),
+            binds: binds_for(req),
+            env: req.env.clone(),
+            cpus: req.cpus,
+            mem: req.mem.clone(),
+            argv: shell_argv(&req.command),
         };
         self.lns.run_filtered(&spec)
     }
+}
+
+pub fn lns_run_args(spec: &RunSpec) -> Vec<String> {
+    let mut args = vec!["run".to_string(), "--name".to_string(), spec.name.clone()];
+    for bind in &spec.binds {
+        args.push("-v".to_string());
+        args.push(bind.clone());
+    }
+    args.push("-w".to_string());
+    args.push(spec.workdir.clone());
+    for (key, value) in &spec.env {
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    if let Some(cpus) = spec.cpus {
+        args.push("--cpus".to_string());
+        args.push(cpus.to_string());
+    }
+    if let Some(mem) = &spec.mem {
+        args.push("-m".to_string());
+        args.push(mem.clone());
+    }
+    args.push(spec.image.clone());
+    args.push("--".to_string());
+    args.extend(spec.argv.iter().cloned());
+    args
 }
 
 pub struct RealEphemeral;
@@ -80,18 +118,7 @@ impl EphemeralLns for RealEphemeral {
         let devnull =
             std::fs::File::open("/dev/null").map_err(|e| format!("cannot open /dev/null: {e}"))?;
         let mut child = Command::new("lns")
-            .args([
-                "run",
-                "--name",
-                &spec.name,
-                "-v",
-                &spec.mount,
-                "-w",
-                &spec.workdir,
-            ])
-            .arg(&spec.image)
-            .arg("--")
-            .args(&spec.argv)
+            .args(lns_run_args(spec))
             .stdin(Stdio::from(devnull))
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -202,6 +229,19 @@ mod tests {
         );
     }
 
+    fn request(cwd: &str, command: &str) -> RunRequest {
+        RunRequest {
+            runtime_key: "python".to_string(),
+            image: "python:3.12".to_string(),
+            cwd: cwd.to_string(),
+            command: command.to_string(),
+            mounts: Vec::new(),
+            env: Vec::new(),
+            cpus: None,
+            mem: None,
+        }
+    }
+
     #[test]
     fn ephemeral_backend_builds_real_path_mount_and_returns_code() {
         let fake = FakeEphemeral {
@@ -210,15 +250,68 @@ mod tests {
         };
         let backend = EphemeralBackend::new(fake);
         let code = backend
-            .run_in_sandbox("python", "python:3.12", "/Users/me/proj", "python app.py")
+            .run_in_sandbox(&request("/Users/me/proj", "python app.py"))
             .unwrap();
         assert_eq!(code, 5);
         let spec = backend.lns.seen.borrow().clone().unwrap();
         assert_eq!(spec.name, box_name("python", "/Users/me/proj"));
         assert_eq!(spec.image, "python:3.12");
-        assert_eq!(spec.mount, "/Users/me/proj:/Users/me/proj");
+        assert_eq!(
+            spec.binds,
+            vec!["/Users/me/proj:/Users/me/proj".to_string()]
+        );
         assert_eq!(spec.workdir, "/Users/me/proj");
         assert_eq!(spec.argv, shell_argv("python app.py"));
+    }
+
+    #[test]
+    fn extra_mounts_are_appended_after_the_cwd_bind() {
+        let mut req = request("/proj", "python app.py");
+        req.mounts = vec!["/data:/data:ro".to_string()];
+        let binds = binds_for(&req);
+        assert_eq!(
+            binds,
+            vec!["/proj:/proj".to_string(), "/data:/data:ro".to_string()]
+        );
+    }
+
+    #[test]
+    fn lns_run_args_renders_binds_env_and_resources() {
+        let spec = RunSpec {
+            name: "cc-python-abc".to_string(),
+            image: "python:3.12".to_string(),
+            workdir: "/proj".to_string(),
+            binds: vec!["/proj:/proj".to_string(), "/data:/data:ro".to_string()],
+            env: vec![("FOO".to_string(), "bar".to_string())],
+            cpus: Some(2),
+            mem: Some("2g".to_string()),
+            argv: shell_argv("python app.py"),
+        };
+        assert_eq!(
+            lns_run_args(&spec),
+            vec![
+                "run",
+                "--name",
+                "cc-python-abc",
+                "-v",
+                "/proj:/proj",
+                "-v",
+                "/data:/data:ro",
+                "-w",
+                "/proj",
+                "-e",
+                "FOO=bar",
+                "--cpus",
+                "2",
+                "-m",
+                "2g",
+                "python:3.12",
+                "--",
+                "bash",
+                "-lc",
+                "python app.py",
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use crate::backend::{box_name, shell_argv, Backend};
+use crate::backend::{binds_for, box_name, shell_argv, Backend, RunRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxState {
@@ -13,8 +13,11 @@ pub enum BoxState {
 pub struct BoxSpec {
     pub name: String,
     pub image: String,
-    pub mount: String,
     pub workdir: String,
+    pub binds: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cpus: Option<u32>,
+    pub mem: Option<String>,
 }
 
 pub trait LnsRunner {
@@ -24,12 +27,15 @@ pub trait LnsRunner {
     fn exec(&self, name: &str, argv: &[String]) -> Result<i32, String>;
 }
 
-pub fn box_spec(runtime_key: &str, image: &str, cwd: &str) -> BoxSpec {
+pub fn box_spec(req: &RunRequest) -> BoxSpec {
     BoxSpec {
-        name: box_name(runtime_key, cwd),
-        image: image.to_string(),
-        mount: format!("{cwd}:{cwd}"),
-        workdir: cwd.to_string(),
+        name: box_name(&req.runtime_key, &req.cwd),
+        image: req.image.clone(),
+        workdir: req.cwd.clone(),
+        binds: binds_for(req),
+        env: req.env.clone(),
+        cpus: req.cpus,
+        mem: req.mem.clone(),
     }
 }
 
@@ -42,6 +48,40 @@ pub fn ensure_box<R: LnsRunner>(runner: &R, spec: &BoxSpec) -> Result<(), String
         }
         BoxState::NotFound => runner.boot(spec),
     }
+}
+
+fn boot_args(spec: &BoxSpec) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        spec.name.clone(),
+    ];
+    for bind in &spec.binds {
+        args.push("-v".to_string());
+        args.push(bind.clone());
+    }
+    args.push("-w".to_string());
+    args.push(spec.workdir.clone());
+    for (key, value) in &spec.env {
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    if let Some(cpus) = spec.cpus {
+        args.push("--cpus".to_string());
+        args.push(cpus.to_string());
+    }
+    if let Some(mem) = &spec.mem {
+        args.push("-m".to_string());
+        args.push(mem.clone());
+    }
+    args.push(spec.image.clone());
+    args.extend([
+        "--".to_string(),
+        "sleep".to_string(),
+        "infinity".to_string(),
+    ]);
+    args
 }
 
 /// Persistent backend: one long-lived box per (cwd, runtime), exec'd into per command. Blocked until
@@ -58,16 +98,10 @@ impl<R: LnsRunner> PersistentBackend<R> {
 }
 
 impl<R: LnsRunner> Backend for PersistentBackend<R> {
-    fn run_in_sandbox(
-        &self,
-        runtime_key: &str,
-        image: &str,
-        cwd: &str,
-        command: &str,
-    ) -> Result<i32, String> {
-        let spec = box_spec(runtime_key, image, cwd);
+    fn run_in_sandbox(&self, req: &RunRequest) -> Result<i32, String> {
+        let spec = box_spec(req);
         ensure_box(&self.runner, &spec)?;
-        self.runner.exec(&spec.name, &shell_argv(command))
+        self.runner.exec(&spec.name, &shell_argv(&req.command))
     }
 }
 
@@ -96,18 +130,7 @@ impl LnsRunner for RealLns {
 
     fn boot(&self, spec: &BoxSpec) -> Result<(), String> {
         let out = Command::new("lns")
-            .args([
-                "run",
-                "-d",
-                "--name",
-                &spec.name,
-                "-v",
-                &spec.mount,
-                "-w",
-                &spec.workdir,
-            ])
-            .arg(&spec.image)
-            .args(["--", "sleep", "infinity"])
+            .args(boot_args(spec))
             .output()
             .map_err(|e| format!("failed to run `lns run`: {e}"))?;
         if out.status.success() {
@@ -195,19 +218,68 @@ mod tests {
         }
     }
 
+    fn req(runtime: &str, image: &str, cwd: &str) -> RunRequest {
+        RunRequest {
+            runtime_key: runtime.to_string(),
+            image: image.to_string(),
+            cwd: cwd.to_string(),
+            command: "python app.py".to_string(),
+            mounts: Vec::new(),
+            env: Vec::new(),
+            cpus: None,
+            mem: None,
+        }
+    }
+
+    fn spec(runtime: &str, image: &str, cwd: &str) -> BoxSpec {
+        box_spec(&req(runtime, image, cwd))
+    }
+
     #[test]
     fn box_spec_mounts_cwd_at_its_real_path() {
-        let spec = box_spec("python", "python:3.12", "/Users/me/proj");
+        let spec = spec("python", "python:3.12", "/Users/me/proj");
         assert_eq!(spec.name, box_name("python", "/Users/me/proj"));
-        assert_eq!(spec.mount, "/Users/me/proj:/Users/me/proj");
+        assert_eq!(
+            spec.binds,
+            vec!["/Users/me/proj:/Users/me/proj".to_string()]
+        );
         assert_eq!(spec.workdir, "/Users/me/proj");
         assert_eq!(spec.image, "python:3.12");
     }
 
     #[test]
+    fn boot_args_render_detached_keepalive_with_binds() {
+        let mut request = req("python", "python:3.12", "/p");
+        request.mounts = vec!["/data:/data:ro".to_string()];
+        request.cpus = Some(2);
+        let spec = box_spec(&request);
+        assert_eq!(
+            boot_args(&spec),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                &spec.name,
+                "-v",
+                "/p:/p",
+                "-v",
+                "/data:/data:ro",
+                "-w",
+                "/p",
+                "--cpus",
+                "2",
+                "python:3.12",
+                "--",
+                "sleep",
+                "infinity",
+            ]
+        );
+    }
+
+    #[test]
     fn running_box_is_reused_without_boot() {
         let runner = FakeRunner::new(Ok(BoxState::Running));
-        let spec = box_spec("python", "python:3.12", "/p");
+        let spec = spec("python", "python:3.12", "/p");
         ensure_box(&runner, &spec).unwrap();
         assert_eq!(
             runner.calls.borrow().clone(),
@@ -218,7 +290,7 @@ mod tests {
     #[test]
     fn missing_box_is_booted() {
         let runner = FakeRunner::new(Ok(BoxState::NotFound));
-        let spec = box_spec("node", "node:22", "/p");
+        let spec = spec("node", "node:22", "/p");
         ensure_box(&runner, &spec).unwrap();
         assert_eq!(
             runner.calls.borrow().clone(),
@@ -232,7 +304,7 @@ mod tests {
     #[test]
     fn stopped_box_is_removed_then_rebooted() {
         let runner = FakeRunner::new(Ok(BoxState::Stopped));
-        let spec = box_spec("ruby", "ruby:3.3", "/p");
+        let spec = spec("ruby", "ruby:3.3", "/p");
         ensure_box(&runner, &spec).unwrap();
         assert_eq!(
             runner.calls.borrow().clone(),
@@ -247,7 +319,7 @@ mod tests {
     #[test]
     fn inspect_error_aborts_before_boot() {
         let runner = FakeRunner::new(Err("service down".to_string()));
-        let spec = box_spec("python", "python:3.12", "/p");
+        let spec = spec("python", "python:3.12", "/p");
         assert_eq!(ensure_box(&runner, &spec), Err("service down".to_string()));
         assert_eq!(runner.calls.borrow().len(), 1);
     }
@@ -258,7 +330,7 @@ mod tests {
         runner.exec_code = 7;
         let backend = PersistentBackend::new(runner);
         let code = backend
-            .run_in_sandbox("python", "python:3.12", "/p", "python app.py")
+            .run_in_sandbox(&req("python", "python:3.12", "/p"))
             .unwrap();
         assert_eq!(code, 7);
         let name = box_name("python", "/p");
@@ -273,7 +345,7 @@ mod tests {
     fn persistent_backend_surfaces_ensure_failure_without_exec() {
         let backend = PersistentBackend::new(FakeRunner::new(Err("boom".to_string())));
         let err = backend
-            .run_in_sandbox("python", "python:3.12", "/p", "python app.py")
+            .run_in_sandbox(&req("python", "python:3.12", "/p"))
             .unwrap_err();
         assert_eq!(err, "boom");
         assert!(backend
