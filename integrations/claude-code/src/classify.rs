@@ -86,6 +86,20 @@ const SHELL: Runtime = Runtime {
     image: "buildpack-deps:curl",
 };
 
+pub fn image_for_runtime(key: &str) -> Option<&'static str> {
+    match key {
+        "python" => Some(PYTHON.image),
+        "node" => Some(NODE.image),
+        "bun" => Some(BUN.image),
+        "deno" => Some(DENO.image),
+        "ruby" => Some(RUBY.image),
+        "php" => Some(PHP.image),
+        "perl" => Some(PERL.image),
+        "shell" => Some(SHELL.image),
+        _ => None,
+    }
+}
+
 fn interpreter_runtime(prog: &str) -> Option<Runtime> {
     match prog {
         "python" | "python3" => Some(PYTHON),
@@ -479,6 +493,36 @@ mod tests {
                 image: "python:3.12"
             })
         );
+    }
+
+    #[test]
+    fn image_for_runtime_maps_every_key_and_rejects_unknown() {
+        for key in [
+            "python", "node", "bun", "deno", "ruby", "php", "perl", "shell",
+        ] {
+            assert!(image_for_runtime(key).is_some(), "missing image for {key}");
+        }
+        assert_eq!(image_for_runtime("nope"), None);
+    }
+
+    #[test]
+    fn classified_runtime_keys_have_a_matching_image() {
+        let commands = [
+            "python a.py",
+            "node a.js",
+            "bun a.ts",
+            "deno run a.ts",
+            "ruby a.rb",
+            "php a.php",
+            "perl a.pl",
+            "curl x | bash",
+        ];
+        for command in commands {
+            let Decision::Sandbox(rt) = classify(command) else {
+                panic!("expected sandbox for {command}");
+            };
+            assert_eq!(image_for_runtime(rt.key), Some(rt.image));
+        }
     }
 
     #[test]

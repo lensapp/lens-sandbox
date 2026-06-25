@@ -3,6 +3,7 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 
+mod boxmgr;
 mod classify;
 mod hook;
 mod rewrite;
@@ -60,14 +61,25 @@ fn run_hook() -> ExitCode {
 }
 
 fn run_exec(args: &ExecArgs) -> ExitCode {
-    match rewrite::decode_command(&args.b64) {
-        Some(command) => {
-            eprintln!("lns-cc exec: not implemented yet (arrives in P2)");
-            eprintln!("  would run in `{}` sandbox: {command}", args.runtime);
-            ExitCode::FAILURE
+    let Some(command) = rewrite::decode_command(&args.b64) else {
+        eprintln!("lns-cc exec: could not decode --b64 payload");
+        return ExitCode::FAILURE;
+    };
+    let Some(image) = classify::image_for_runtime(&args.runtime) else {
+        eprintln!("lns-cc exec: unknown runtime `{}`", args.runtime);
+        return ExitCode::FAILURE;
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(err) => {
+            eprintln!("lns-cc exec: cannot determine working directory: {err}");
+            return ExitCode::FAILURE;
         }
-        None => {
-            eprintln!("lns-cc exec: could not decode --b64 payload");
+    };
+    match boxmgr::run_in_box(&boxmgr::RealLns, &args.runtime, image, &cwd, &command) {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(err) => {
+            eprintln!("lns-cc: {err}");
             ExitCode::FAILURE
         }
     }
