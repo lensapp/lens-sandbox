@@ -86,16 +86,24 @@ pub struct RunArgs {
     #[arg(
         short = 'i',
         long = "interactive",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Keep stdin open (forward host stdin to the guest workload)."
+        default_missing_value = "true",
+        help = "Keep stdin open (forward host stdin to the guest workload). Pass `--interactive=false` (or `-i=false`) to disable."
     )]
     pub interactive: bool,
 
     #[arg(
         short = 't',
         long = "tty",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Allocate a PTY in the broker; pipe mode is selected automatically when stdin is not a TTY."
+        default_missing_value = "true",
+        help = "Allocate a PTY in the broker; pipe mode is selected automatically when stdin is not a TTY. Pass `--tty=false` (or `-t=false`) to disable."
     )]
     pub tty: bool,
 
@@ -202,16 +210,24 @@ pub struct ExecArgs {
     #[arg(
         short = 'i',
         long = "interactive",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "`-i` — keep stdin open. Mirrors `docker exec -i`."
+        default_missing_value = "true",
+        help = "`-i` — keep stdin open. Mirrors `docker exec -i`. Pass `--interactive=false` (or `-i=false`) for a non-interactive exec."
     )]
     pub interactive: bool,
 
     #[arg(
         short = 't',
         long = "tty",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Allocate a PTY for the exec session."
+        default_missing_value = "true",
+        help = "Allocate a PTY for the exec session. Pass `--tty=false` (or `-t=false`) for a non-interactive exec."
     )]
     pub tty: bool,
 
@@ -349,6 +365,110 @@ fn parse_port(s: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct RunHarness {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    #[derive(Parser)]
+    struct ExecHarness {
+        #[command(flatten)]
+        args: ExecArgs,
+    }
+
+    fn parse_run(argv: &[&str]) -> Result<RunArgs, clap::Error> {
+        let mut full = vec!["run"];
+        full.extend_from_slice(argv);
+        RunHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    fn parse_exec(argv: &[&str]) -> Result<ExecArgs, clap::Error> {
+        let mut full = vec!["exec"];
+        full.extend_from_slice(argv);
+        ExecHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    #[test]
+    fn run_interactive_and_tty_default_to_true() {
+        let args = parse_run(&["alpine:3.20"]).expect("defaults parse");
+        assert!(args.interactive, "interactive should default to true");
+        assert!(args.tty, "tty should default to true");
+    }
+
+    #[test]
+    fn run_interactive_and_tty_accept_explicit_false() {
+        let args = parse_run(&["--interactive=false", "--tty=false", "alpine:3.20"])
+            .expect("explicit false should parse");
+        assert!(!args.interactive, "interactive should be false");
+        assert!(!args.tty, "tty should be false");
+    }
+
+    #[test]
+    fn run_short_flags_accept_explicit_false() {
+        let args =
+            parse_run(&["-i=false", "-t=false", "alpine:3.20"]).expect("short =false should parse");
+        assert!(!args.interactive);
+        assert!(!args.tty);
+    }
+
+    #[test]
+    fn run_interactive_and_tty_accept_explicit_true() {
+        let args = parse_run(&["--interactive=true", "--tty=true", "alpine:3.20"])
+            .expect("explicit true should parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+    }
+
+    #[test]
+    fn run_bare_flags_followed_by_positional_stay_true() {
+        // `-i` / `-t` with no value must use default_missing_value and NOT swallow
+        // the following positional image arg (require_equals guards this).
+        let args = parse_run(&["-i", "-t", "alpine:3.20"]).expect("bare flags parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+        assert_eq!(args.image.as_deref(), Some("alpine:3.20"));
+    }
+
+    #[test]
+    fn run_detach_still_works_with_default_flag_values() {
+        // -d conflicts_with_all [interactive, tty]; defaults must not trip the conflict.
+        let args = parse_run(&["-d", "alpine:3.20"]).expect("detach with defaults should parse");
+        assert!(args.detach);
+    }
+
+    #[test]
+    fn run_detach_conflicts_with_explicitly_provided_interactive() {
+        let err = match parse_run(&["-d", "--interactive=true", "alpine:3.20"]) {
+            Ok(_) => panic!("explicit -i with -d should conflict"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn exec_interactive_and_tty_default_to_true() {
+        let args = parse_exec(&["demo", "--", "echo", "hi"]).expect("defaults parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+    }
+
+    #[test]
+    fn exec_interactive_and_tty_accept_explicit_false() {
+        let args = parse_exec(&[
+            "--tty=false",
+            "--interactive=false",
+            "demo",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .expect("explicit false should parse");
+        assert!(!args.interactive, "interactive should be false");
+        assert!(!args.tty, "tty should be false");
+    }
 
     #[test]
     fn parse_detach_keys_arg_returns_chord_bytes_on_valid_input() {
