@@ -18,22 +18,17 @@ fi
 
 cat <<EOF
 
-Enable the plugin in Claude Code, either:
+Test it in Claude Code:
 
-  1. As a plugin (recommended) — register this directory; Claude Code reads
-     .claude-plugin/plugin.json and hooks/hooks.json automatically:
-       $DIR
+  1. Fastest (no install) — launch with the plugin loaded directly:
+       claude --plugin-dir "$DIR"
+     Run /reload-plugins after any rebuild.
 
-  2. Quick trial — add to ~/.claude/settings.json:
-       "hooks": {
-         "PreToolUse": [
-           { "matcher": "Bash",
-             "hooks": [ { "type": "command", "command": "$DIR/bin/lns-cc hook" } ] }
-         ],
-         "SessionStart": [
-           { "hooks": [ { "type": "command", "command": "$DIR/bin/lns-cc doctor" } ] }
-         ]
-       }
+  2. Install as a plugin (persists across sessions):
+       /plugin marketplace add "$DIR"
+       /plugin install lns-sandbox@lns-plugins
+       /reload-plugins
 
-Then run any sandbox-worthy command (e.g. python -c "print('hi')") in a new session.
+Verify with /plugin (Installed tab) and /help (shows /lns-sandbox), then run any
+sandbox-worthy command, e.g. python -c "print('hi')".
 EOF

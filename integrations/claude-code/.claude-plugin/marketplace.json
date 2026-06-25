@@ -1,0 +1,12 @@
+{
+  "name": "lns-plugins",
+  "owner": {
+    "name": "Hung-Han (Henry) Chen"
+  },
+  "plugins": [
+    {
+      "name": "lns-sandbox",
+      "source": "./"
+    }
+  ]
+}
