@@ -31,8 +31,9 @@
     "crates/lns-service": {
       "release-type": "rust",
       "component": "lns-service",
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
     },
     "crates/e2e-tests": {
       "release-type": "rust",
