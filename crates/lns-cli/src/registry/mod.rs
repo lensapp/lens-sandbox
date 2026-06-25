@@ -2,11 +2,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::FromArgMatches;
 use lns_policy::artifact::{self, Family};
 
 use crate::cli::{PullArgs, PushArgs};
-use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
+use crate::command::{CommandSpec, subcommand};
 use crate::integration::LocalBoxFuture;
 
 mod real;
@@ -22,21 +21,10 @@ pub fn augment_push(app: clap::Command) -> clap::Command {
 pub const PUSH_SPEC: CommandSpec = CommandSpec {
     name: "push",
     augment: augment_push,
-    run: run_push,
+    run: real::run_push,
     announces_update_check: true,
     owns_terminal: false,
 };
-
-pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = PushArgs::from_arg_matches(matches)?;
-        let cwd = ctx.cwd()?;
-        crate::service::require_running().await;
-        let client = RealRegistryClient::new(crate::service::socket_path()?);
-        let mut out = ctx.out;
-        push(&args, &cwd, &client, &mut out).await
-    })
-}
 
 pub fn augment_pull(app: clap::Command) -> clap::Command {
     app.subcommand(
@@ -48,20 +36,10 @@ pub fn augment_pull(app: clap::Command) -> clap::Command {
 pub const PULL_SPEC: CommandSpec = CommandSpec {
     name: "pull",
     augment: augment_pull,
-    run: run_pull,
+    run: real::run_pull,
     announces_update_check: true,
     owns_terminal: false,
 };
-
-pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = PullArgs::from_arg_matches(matches)?;
-        crate::service::require_running().await;
-        let client = RealRegistryClient::new(crate::service::socket_path()?);
-        let mut out = ctx.out;
-        pull(&args, &client, &mut out).await
-    })
-}
 
 pub enum Pulled {
     Artifact {
@@ -232,6 +210,15 @@ mod tests {
     use anyhow::bail;
     use std::sync::Mutex;
     use tempfile::TempDir;
+
+    #[test]
+    fn push_and_pull_specs_register_under_their_verbs() {
+        assert_eq!(PUSH_SPEC.name, "push");
+        assert_eq!(PULL_SPEC.name, "pull");
+        // augment must wire each verb's subcommand into the CLI.
+        augment_push(clap::Command::new("lns"));
+        augment_pull(clap::Command::new("lns"));
+    }
 
     #[derive(Default)]
     struct FakeClient {
@@ -652,5 +639,33 @@ mod tests {
             "layer carries the packed content"
         );
         assert!(String::from_utf8(out).unwrap().contains("1 layer"));
+    }
+
+    #[tokio::test]
+    async fn push_packs_an_absolute_content_path() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("fs.yaml"),
+            "apiVersion: lens.dev/v1alpha1\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("payload")).unwrap();
+        std::fs::write(dir.path().join("payload/config.yaml"), b"model: {}\n").unwrap();
+        let client = FakeClient {
+            push_digest: "sha256:abc".into(),
+            ..Default::default()
+        };
+        let mut args = push_args("fs.yaml", "localhost:5000/org/acme/filesets/cfg:v1", None);
+        args.content = Some(dir.path().join("payload"));
+        let mut out = Vec::new();
+        assert_eq!(push(&args, dir.path(), &client, &mut out).await.unwrap(), 0);
+        let layers = client.pushed_layers.lock().unwrap().clone();
+        assert_eq!(layers.len(), 1, "one content layer pushed");
+        assert!(
+            read_gz_tar_names(&layers[0])
+                .iter()
+                .any(|n| n.contains("config.yaml")),
+            "absolute content path packed"
+        );
     }
 }

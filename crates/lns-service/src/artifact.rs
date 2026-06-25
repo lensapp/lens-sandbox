@@ -71,10 +71,7 @@ fn auth_for(registry: &str, file: &RegistryAuthFile) -> RegistryAuth {
     }
 }
 
-fn resolve(
-    reference: &str,
-    store: &dyn RegistryAuthStore,
-) -> Result<(Reference, RegistryAuth)> {
+fn resolve(reference: &str, store: &dyn RegistryAuthStore) -> Result<(Reference, RegistryAuth)> {
     let reference: Reference = reference
         .parse()
         .with_context(|| format!("invalid registry reference: {reference}"))?;
@@ -443,9 +440,7 @@ mod tests {
 
     /// A path that never exists, so the real store's `load()` returns an empty map (→ anonymous).
     fn empty_store() -> JsonFileRegistryAuthStore {
-        JsonFileRegistryAuthStore::new(
-            std::env::temp_dir().join("lns-artifact-cov-absent.json"),
-        )
+        JsonFileRegistryAuthStore::new(std::env::temp_dir().join("lns-artifact-cov-absent.json"))
     }
 
     /// Pointing the real store at a directory makes `load()` surface a non-NotFound IO error.
@@ -812,14 +807,20 @@ mod tests {
             .unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].guest_path, "/etc/agent/model");
-        let crate::runtime_layer::RuntimeSource::Bytes(b) = &specs[0].source else {
-            panic!("expected model spec bytes");
-        };
-        let written: serde_json::Value = serde_json::from_slice(b).unwrap();
-        assert_eq!(
-            written,
-            serde_json::json!({"provider": "some-provider", "model": "some-model"})
+        assert!(
+            matches!(
+                &specs[0].source,
+                crate::runtime_layer::RuntimeSource::Bytes(_)
+            ),
+            "expected model spec bytes"
         );
+        if let crate::runtime_layer::RuntimeSource::Bytes(b) = &specs[0].source {
+            let written: serde_json::Value = serde_json::from_slice(b).unwrap();
+            assert_eq!(
+                written,
+                serde_json::json!({"provider": "some-provider", "model": "some-model"})
+            );
+        }
     }
 
     #[test]
@@ -979,6 +980,13 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let mut b = tar::Builder::new(std::io::Cursor::new(&mut bytes));
+            let mut root = tar::Header::new_gnu();
+            root.set_path("./").unwrap();
+            root.set_entry_type(tar::EntryType::Directory);
+            root.set_size(0);
+            root.set_mode(0o755);
+            root.set_cksum();
+            b.append(&root, std::io::empty()).unwrap();
             let mut d = tar::Header::new_gnu();
             d.set_path("sub/").unwrap();
             d.set_entry_type(tar::EntryType::Directory);

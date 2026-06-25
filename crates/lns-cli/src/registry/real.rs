@@ -1,12 +1,36 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use clap::FromArgMatches;
 use lns_ipc::{Request, Response, decode_frame, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use super::{Pulled, RegistryClient};
+use crate::cli::{PullArgs, PushArgs};
+use crate::command::{RunCtx, RunFuture};
 use crate::integration::LocalBoxFuture;
+
+pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = PushArgs::from_arg_matches(matches)?;
+        let cwd = ctx.cwd()?;
+        crate::service::require_running().await;
+        let client = RealRegistryClient::new(crate::service::socket_path()?);
+        let mut out = ctx.out;
+        super::push(&args, &cwd, &client, &mut out).await
+    })
+}
+
+pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = PullArgs::from_arg_matches(matches)?;
+        crate::service::require_running().await;
+        let client = RealRegistryClient::new(crate::service::socket_path()?);
+        let mut out = ctx.out;
+        super::pull(&args, &client, &mut out).await
+    })
+}
 
 pub struct RealRegistryClient {
     socket: PathBuf,
