@@ -1,6 +1,6 @@
 //! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,9 @@ pub struct CredentialPendingPrompt {
     pub oauth_display_name: Option<String>,
     /// Some when the integration declares a token fallback, so the consent card can also reveal "use a token instead".
     pub token_fallback: Option<TokenFallback>,
+    pub env_var: Option<String>,
+    pub injection_domains: Vec<String>,
+    pub is_project_defined: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,9 @@ pub struct SignInPrompt {
     pub verification_uri: String,
     /// Some when the integration declares a token fallback, so the sign-in card can offer "use a token instead" to a user blocked from the browser dance.
     pub token_fallback: Option<TokenFallback>,
+    pub env_var: Option<String>,
+    pub injection_domains: Vec<String>,
+    pub is_project_defined: bool,
 }
 
 /// Abstracts the desktop notification surface so tests can drive prompts without the real system.
@@ -112,6 +118,7 @@ pub struct CredentialSession {
     policy_emitter: PolicyEmitter,
     timeout: Duration,
     custom_providers: Arc<Vec<DefProvider>>,
+    bundled_ids: HashSet<String>,
     connectable: HashSet<String>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
@@ -155,6 +162,7 @@ impl CredentialSession {
             policy_emitter,
             timeout,
             custom_providers: Arc::new(Vec::new()),
+            bundled_ids: HashSet::new(),
             connectable: HashSet::new(),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
@@ -234,6 +242,11 @@ impl CredentialSession {
         self
     }
 
+    pub fn with_bundled_ids(mut self, bundled_ids: HashSet<String>) -> Self {
+        self.bundled_ids = bundled_ids;
+        self
+    }
+
     /// Marks the catalog integrations that aren't connected yet: detecting one offers to connect, and accepting runs `connect` to allow its routes live.
     pub fn with_connect_emitter(
         mut self,
@@ -290,12 +303,17 @@ impl CredentialSession {
         } else {
             req.action
         };
+        let (env_var, injection_domains, is_project_defined) =
+            self.provider_disclosure(&req.credential_id);
         self.notifier.present(&CredentialPendingPrompt {
             id: req.id,
             credential_id: req.credential_id,
             action,
             token_fallback,
             oauth_display_name,
+            env_var,
+            injection_domains,
+            is_project_defined,
         });
     }
 
@@ -307,6 +325,24 @@ impl CredentialSession {
                 .get(credential_id),
             Some(CredentialEntry::Deny)
         )
+    }
+
+    fn provider_disclosure(&self, credential_id: &str) -> (Option<String>, Vec<String>, bool) {
+        self.custom_providers
+            .iter()
+            .find(|p| p.id() == credential_id)
+            .map(|p| {
+                let domains: Vec<String> = p
+                    .unarmed_injections()
+                    .iter()
+                    .map(|inj| inj.domain().to_string())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let is_project = !self.bundled_ids.contains(p.id());
+                (Some(p.env_var().to_string()), domains, is_project)
+            })
+            .unwrap_or((None, Vec::new(), false))
     }
 
     /// True when `credential_id` already holds a usable value and injects into the host named in `action`, so a gate for it is a propagation race the host can safely allow rather than re-prompt. A request to a host the credential does not inject into (a real leak attempt) returns false and still prompts.
@@ -455,6 +491,8 @@ impl CredentialSession {
     ) -> bool {
         let display_name = self.display_name_for(credential_id);
         let token_fallback = self.token_fallbacks.get(credential_id).cloned();
+        let (env_var, injection_domains, is_project_defined) =
+            self.provider_disclosure(credential_id);
         let challenge = (self.pkce_challenge_gen)();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
         let card_id = credential_id.to_string();
@@ -466,6 +504,9 @@ impl CredentialSession {
                     user_code: None,
                     verification_uri: auth_url.to_string(),
                     token_fallback,
+                    env_var,
+                    injection_domains,
+                    is_project_defined,
                 },
                 cancel_tx,
             );
@@ -513,6 +554,8 @@ impl CredentialSession {
         };
         let display_name = self.display_name_for(credential_id);
         let token_fallback = self.token_fallbacks.get(credential_id).cloned();
+        let (env_var, injection_domains, is_project_defined) =
+            self.provider_disclosure(credential_id);
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
         let card_id = credential_id.to_string();
         let present = move |code: &crate::oauth::DeviceCode| {
@@ -523,6 +566,9 @@ impl CredentialSession {
                     user_code: Some(code.user_code.clone()),
                     verification_uri: code.verification_uri.clone(),
                     token_fallback,
+                    env_var,
+                    injection_domains,
+                    is_project_defined,
                 },
                 cancel_tx,
             );

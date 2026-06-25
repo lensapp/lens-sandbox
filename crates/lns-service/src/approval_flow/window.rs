@@ -40,6 +40,9 @@ pub struct CredentialCardPrompt {
     pub host_value_available: bool,
     pub oauth_display_name: Option<String>,
     pub token_fallback: Option<TokenFallback>,
+    pub env_var: Option<String>,
+    pub injection_domains: Vec<String>,
+    pub is_project_defined: bool,
 }
 
 /// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the integration lets a blocked user pivot to a pasted token.
@@ -50,6 +53,9 @@ pub struct SignInCard {
     pub user_code: Option<String>,
     pub verification_uri: String,
     pub token_fallback: Option<TokenFallback>,
+    pub env_var: Option<String>,
+    pub injection_domains: Vec<String>,
+    pub is_project_defined: bool,
 }
 
 pub struct WindowState {
@@ -195,6 +201,9 @@ impl WindowState {
                 host_value_available,
                 oauth_display_name: prompt.oauth_display_name,
                 token_fallback: prompt.token_fallback,
+                env_var: prompt.env_var,
+                injection_domains: prompt.injection_domains,
+                is_project_defined: prompt.is_project_defined,
             },
             decision_tx,
             seq,
@@ -484,6 +493,7 @@ pub const ACCENT_GREEN_HOVER: Color32 = Color32::from_rgb(0x6e, 0xe7, 0x9a);
 pub const ACCENT_GREEN_PRESSED: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 pub const STATUS_CRITICAL: Color32 = Color32::from_rgb(0xf4, 0x71, 0x74);
 pub const STATUS_WARNING: Color32 = Color32::from_rgb(0xff, 0xb1, 0x4a);
+pub const TEXT_WARN: Color32 = STATUS_WARNING;
 pub const CATEGORY: Color32 = Color32::from_rgb(0x3d, 0x90, 0xce);
 
 pub fn lds_visuals() -> egui::Visuals {
@@ -614,6 +624,9 @@ mod tests {
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
@@ -1053,6 +1066,9 @@ mod tests {
             user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
@@ -1277,6 +1293,9 @@ mod tests {
             action: "use of some-oauth placeholder".into(),
             oauth_display_name: Some(name.into()),
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 

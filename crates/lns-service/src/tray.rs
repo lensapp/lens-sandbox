@@ -1365,6 +1365,32 @@ fn render_credential_card(
                     .monospace()
                     .color(window::TEXT_MUTED),
             );
+            if let Some(env) = &prompt.env_var {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("Reads host env: ${env}"))
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
+            if !prompt.injection_domains.is_empty() {
+                ui.add_space(2.0);
+                let domains = prompt.injection_domains.join(", ");
+                ui.label(
+                    RichText::new(format!("Sends to: {domains}"))
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
+            if prompt.is_project_defined {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Project-defined provider (not built-in)")
+                        .size(theme::FONT_CAPTION)
+                        .strong()
+                        .color(window::TEXT_WARN),
+                );
+            }
             if !prompt.host_value_available {
                 ui.add_space(8.0);
                 ui.colored_label(
@@ -1841,6 +1867,9 @@ mod tests {
             host_value_available: false,
             oauth_display_name: None,
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 

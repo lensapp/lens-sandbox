@@ -422,6 +422,12 @@ async fn start_credential_subsystem(
             policy_emitter,
         )
         .with_custom_providers(custom_providers)
+        .with_bundled_ids(
+            lns_policy::integrations::bundled_integrations()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect(),
+        )
         .with_connect_emitter(connectable_ids, connect_emitter)
         .with_oauth(
             oauth.configs,
