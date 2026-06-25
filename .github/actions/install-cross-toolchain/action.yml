@@ -10,9 +10,7 @@ description: >-
   (malloc/memcpy/…) are ABI-identical on aarch64; rust-lld does the final link
   against the Rust musl target's own sysroot, so those symbols resolve against
   musl, not glibc. macOS downloads a prebuilt aarch64-musl cross-gcc,
-  sha-pinned. We avoid taiki-e/setup-cross-toolchain-action because it also
-  sets CARGO_BUILD_TARGET, redirecting the host build of lns-cli/lns-service
-  to the cross target.
+  sha-pinned.
 
 runs:
   using: composite
