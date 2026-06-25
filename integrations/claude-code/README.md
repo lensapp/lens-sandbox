@@ -100,11 +100,12 @@ Set `LNS_CC_BACKEND=persistent` to opt into the persistent backend (pending #94)
 Requires the [`lns`](https://get.lns.run) CLI with its service running (`lns service start`).
 
 ```sh
-make build                 # builds bin/lns-cc
+./install.sh               # builds bin/lns-cc and prints how to register the plugin
 ```
 
-Then add this directory as a Claude Code plugin. A `SessionStart` check warns if `lns` is
-missing or the service is down.
+Then register this directory as a Claude Code plugin (it ships `.claude-plugin/plugin.json` and
+`hooks/hooks.json`), or use the quick-trial `settings.json` snippet `install.sh` prints. A
+`SessionStart` check warns if `lns` is missing or the service is down.
 
 ## Status
 
