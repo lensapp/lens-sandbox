@@ -28,6 +28,10 @@
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "exclude-paths": [
+        ".github",
+        ".husky",
+        ".vscode",
+        "docs",
         "scripts/lns-install",
         "crates/e2e-tests",
         "crates/bump-kernel",
