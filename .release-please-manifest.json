@@ -1,4 +1,5 @@
 {
+  ".": "0.12.0",
   "crates/lns-cli": "0.12.0",
   "crates/lns-service": "0.12.0",
   "crates/e2e-tests": "0.0.0",
