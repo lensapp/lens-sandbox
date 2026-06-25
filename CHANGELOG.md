@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.13.0...lns-v0.14.0) (2026-06-25)
+
+
+### Features
+
+* **lns-cli:** add -q/--quiet to lns run and exec ([c1b1828](https://github.com/lensapp/lens-sandbox/commit/c1b182806c51a0bb930f0f987444f64f6d2bd908)), closes [#101](https://github.com/lensapp/lens-sandbox/issues/101)
+
+
+### Bug Fixes
+
+* **cli:** make -i/-t negatable on run and exec ([20cf5e4](https://github.com/lensapp/lens-sandbox/commit/20cf5e445bf177242c3479804bcd137d2ccd5413)), closes [#94](https://github.com/lensapp/lens-sandbox/issues/94)
+* **lns-service:** clear the approval card's drop shadow when it closes ([e806007](https://github.com/lensapp/lens-sandbox/commit/e80600746fe43513b3d1cf33e1e068e6bb072640))
+* **lns-service:** disclose env var + destination domain on credential approval card (M10) ([0a82e8e](https://github.com/lensapp/lens-sandbox/commit/0a82e8e25def3fbb338cc42a6eb9b45364895079))
+* **lns-service:** update approval_preview example for new disclosure fields (M10) ([0c19072](https://github.com/lensapp/lens-sandbox/commit/0c190721032c318d2d98f3334acaf7f0fe580899))
+
 ## [0.13.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.12.0...lns-v0.13.0) (2026-06-25)
 
 
