@@ -22,6 +22,8 @@ pub struct BehaviourWorld {
     pub attached_stdout_is_terminal: Option<bool>,
     pub uc: UpdateCheckRig,
     pub signin_outcome: Option<lns_cli::integration::SignInOutcome>,
+    /// True when the integration under test signs in via the pkce browser redirect, so the fake sign-in renders the browser-opened prompt instead of a device code.
+    pub signin_is_pkce: bool,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
     pub image: ImageCliRig,
@@ -38,6 +40,28 @@ pub struct BehaviourWorld {
     pub resolve_guard: Option<tempfile::NamedTempFile>,
     pub resolve_writer: String,
     pub resolve_error: Option<String>,
+    pub host_bind: HostBindRig,
+}
+
+use lns_policy::host_bind_decisions::SecretDisposition;
+
+/// Scripted host directory + recorded decisions for driving `resolve_binds`.
+#[derive(Debug, Default)]
+pub struct HostBindRig {
+    pub entries: Vec<String>,
+    pub lensignore: Option<String>,
+    pub missing: bool,
+    pub decisions: std::collections::HashMap<String, SecretDisposition>,
+    pub answer: Option<String>,
+    pub outcome: Option<HostBindOutcome>,
+}
+
+#[derive(Debug)]
+pub struct HostBindOutcome {
+    pub result: Result<Vec<lns_cli::run::host_bind::ResolvedBind>, String>,
+    pub prompt: String,
+    pub persisted: std::collections::HashMap<String, SecretDisposition>,
+    pub summary: String,
 }
 
 /// An in-memory stand-in for the service-backed OCI registry: push stores the
@@ -115,6 +139,7 @@ pub struct ResolvedRunView {
     pub summary: String,
     pub env: Vec<String>,
     pub volumes: Vec<String>,
+    pub binds: Vec<String>,
     pub publish: Vec<String>,
 }
 

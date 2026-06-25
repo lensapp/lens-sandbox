@@ -30,29 +30,33 @@ pub enum Request {
     },
     ExecImage(ExecImageArgs),
     Kill {
-        run_id: u32,
+        run: String,
         signal: SignalKind,
     },
     ListRuns,
     StopRun {
-        run_id: u32,
+        run: String,
         timeout_secs: u64,
     },
     InspectRun {
-        run_id: u32,
+        run: String,
     },
     RunLogs {
-        run_id: u32,
+        run: String,
         follow: bool,
     },
     AttachRun {
-        run_id: u32,
+        run: String,
     },
     RunStats {
-        run_id: u32,
+        run: String,
     },
     RemoveRun {
-        run_id: u32,
+        run: String,
+    },
+    RenameRun {
+        run: String,
+        new_name: String,
     },
     PruneRuns,
     BeginIntegrationSignIn {
@@ -91,6 +95,11 @@ pub enum Request {
     },
     Pull {
         reference: String,
+    },
+    RegistryLogin {
+        registry: String,
+        username: String,
+        secret: String,
     },
 }
 
@@ -147,10 +156,14 @@ pub enum Response {
         user_code: String,
         expires_in_secs: u64,
     },
+    OauthBrowserOpened {
+        authorization_url: String,
+    },
     OauthSignInComplete,
     OauthSignInFailed {
         reason: String,
     },
+    RegistryLoginVerified,
     VolumeList {
         volumes: Vec<VolumeInfo>,
     },
@@ -230,6 +243,7 @@ pub struct ImageInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub id: u32,
+    pub name: String,
     pub image: String,
     pub command: String,
     pub status: RunStatus,
@@ -266,7 +280,10 @@ pub struct RunConfig {
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
     pub artifact_mounts: Vec<ArtifactMount>,
+    #[serde(default)]
+    pub binds: Vec<BindMount>,
     pub detached: bool,
 }
 
@@ -282,6 +299,7 @@ impl RunConfig {
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
             artifact_mounts: args.artifact_mounts.clone(),
+            binds: args.binds.clone(),
             detached: args.detached,
         }
     }
@@ -312,6 +330,8 @@ pub struct PortPublish {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
     pub policy_path: Option<String>,
@@ -339,6 +359,8 @@ pub struct RunImageArgs {
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub artifact_mounts: Vec<ArtifactMount>,
+    #[serde(default)]
+    pub binds: Vec<BindMount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,7 +404,7 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
             "invalid volume target {target:?}: must be an absolute path"
         ));
     }
-    if target.chars().any(target_char_forbidden) {
+    if target.chars().any(cmdline_unsafe_char) {
         return Err(format!(
             "invalid volume target {target:?}: must not contain whitespace, quotes, or control characters"
         ));
@@ -395,7 +417,8 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn target_char_forbidden(c: char) -> bool {
+/// A char that can't safely ride the kernel cmdline value position the guest tokenizes (whitespace splits, `"` toggles quoting); rejected in volume targets, bind sources, and dropped-path names alike.
+pub fn cmdline_unsafe_char(c: char) -> bool {
     c.is_whitespace() || c.is_control() || c == '"'
 }
 
@@ -418,6 +441,108 @@ fn name_char_allowed(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
+pub fn validate_run_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("invalid run name: must not be empty".to_string());
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "invalid run name {name:?}: a name must not be all digits (those address a run by id)"
+        ));
+    }
+    match name.chars().find(|c| !name_char_allowed(*c)) {
+        Some(bad) => Err(format!(
+            "invalid run name {name:?}: character {bad:?} not allowed"
+        )),
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindMount {
+    pub host_source: String,
+    pub target: String,
+    pub read_only: bool,
+    #[serde(default)]
+    pub dropped_paths: Vec<String>,
+    /// Secret-shaped files the operator chose to expose; carried for the audit record, not consumed by the guest.
+    #[serde(default)]
+    pub kept_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindSpec {
+    pub host_source: String,
+    pub target: String,
+    pub read_only: bool,
+}
+
+impl BindSpec {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let read_only = spec.ends_with(":ro");
+        let body = spec
+            .strip_suffix(":ro")
+            .or_else(|| spec.strip_suffix(":rw"))
+            .unwrap_or(spec);
+        let (source, target) = body
+            .split_once(':')
+            .ok_or_else(|| format!("invalid host bind {spec:?}: expected /host-path:/path[:ro]"))?;
+        validate_volume_target(target)?;
+        validate_bind_source(source)?;
+        Ok(Self {
+            host_source: source.to_string(),
+            target: target.to_string(),
+            read_only,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSpec {
+    Named(VolumeMount),
+    Bind(BindSpec),
+}
+
+impl MountSpec {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        if Self::source_is_path(spec) {
+            BindSpec::parse(spec).map(MountSpec::Bind)
+        } else {
+            VolumeMount::parse(spec).map(MountSpec::Named)
+        }
+    }
+
+    fn source_is_path(spec: &str) -> bool {
+        let body = spec
+            .strip_suffix(":ro")
+            .or_else(|| spec.strip_suffix(":rw"))
+            .unwrap_or(spec);
+        let source = body.split_once(':').map_or(body, |(s, _)| s);
+        source.starts_with('/')
+    }
+
+    pub fn target(&self) -> &str {
+        match self {
+            MountSpec::Named(v) => &v.target,
+            MountSpec::Bind(b) => &b.target,
+        }
+    }
+}
+
+pub fn validate_bind_source(source: &str) -> Result<(), String> {
+    if !source.starts_with('/') {
+        return Err(format!(
+            "invalid host bind source {source:?}: must be an absolute path"
+        ));
+    }
+    if source.chars().any(cmdline_unsafe_char) {
+        return Err(format!(
+            "invalid host bind source {source:?}: must not contain whitespace, quotes, or control characters"
+        ));
+    }
+    Ok(())
+}
+
 fn default_tty() -> bool {
     true
 }
@@ -428,7 +553,7 @@ fn default_stdin() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecImageArgs {
-    pub run_id: u32,
+    pub run: String,
     pub argv: Vec<String>,
     pub env: Vec<String>,
     #[serde(default = "default_tty")]
@@ -455,7 +580,7 @@ mod tests {
     #[test]
     fn exec_image_args_tty_defaults_to_true_when_missing() {
         let frame = serde_json::json!({
-            "run_id": 1,
+            "run": "1",
             "argv": ["sh"],
             "env": []
         });
@@ -522,6 +647,7 @@ mod tests {
         };
         let req = Request::RunImage(RunImageArgs {
             image: Some("prism".into()),
+            name: None,
             cpus: 1,
             mem: 512,
             policy_path: None,
@@ -538,6 +664,7 @@ mod tests {
             published_ports: vec![mapping],
             volumes: Vec::new(),
             artifact_mounts: Vec::new(),
+            binds: Vec::new(),
         });
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -545,9 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn run_image_args_volumes_survive_postcard_round_trip() {
+    fn run_image_args_volumes_and_binds_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
+            name: None,
             cpus: 1,
             mem: 512,
             policy_path: None,
@@ -568,6 +696,13 @@ mod tests {
                 read_only: true,
             }],
             artifact_mounts: Vec::new(),
+            binds: vec![BindMount {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![".env".into()],
+                kept_paths: vec![".npmrc".into()],
+            }],
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -578,6 +713,7 @@ mod tests {
     fn run_image_args_artifact_mounts_survive_round_trip_and_default_empty() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
+            name: None,
             cpus: 1,
             mem: 512,
             policy_path: None,
@@ -598,6 +734,7 @@ mod tests {
                 path: "/etc/agent/model".into(),
                 read_only: true,
             }],
+            binds: vec![],
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -681,7 +818,7 @@ mod tests {
     #[test]
     fn stop_run_survives_a_request_round_trip() {
         let req = Request::StopRun {
-            run_id: 7,
+            run: "7".into(),
             timeout_secs: 10,
         };
         let frame = crate::encode_frame(&req).unwrap();
@@ -735,6 +872,7 @@ mod tests {
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
             image: Some("some-image:1".into()),
+            name: None,
             cpus: 2,
             mem: 1024,
             policy_path: Some("/work/lns-policy.yaml".into()),
@@ -764,6 +902,13 @@ mod tests {
                 path: "/etc/agent/model".into(),
                 read_only: true,
             }],
+            binds: vec![BindMount {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![],
+                kept_paths: vec![],
+            }],
         }
     }
 
@@ -779,12 +924,13 @@ mod tests {
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);
         assert_eq!(config.published_ports, args.published_ports);
         assert_eq!(config.volumes, args.volumes);
+        assert_eq!(config.binds, args.binds);
         assert!(config.detached);
     }
 
     #[test]
     fn inspect_run_survives_a_request_round_trip() {
-        let req = Request::InspectRun { run_id: 3 };
+        let req = Request::InspectRun { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -793,7 +939,10 @@ mod tests {
     #[test]
     fn run_logs_survives_a_request_round_trip() {
         for follow in [false, true] {
-            let req = Request::RunLogs { run_id: 3, follow };
+            let req = Request::RunLogs {
+                run: "3".into(),
+                follow,
+            };
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, req);
@@ -802,7 +951,7 @@ mod tests {
 
     #[test]
     fn attach_run_survives_a_request_round_trip() {
-        let req = Request::AttachRun { run_id: 3 };
+        let req = Request::AttachRun { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -810,7 +959,7 @@ mod tests {
 
     #[test]
     fn run_stats_survives_a_request_and_response_round_trip() {
-        let req = Request::RunStats { run_id: 3 };
+        let req = Request::RunStats { run: "3".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -833,6 +982,7 @@ mod tests {
             details: Box::new(RunDetails {
                 summary: RunSummary {
                     id: 3,
+                    name: "reviewer".into(),
                     image: "some-image:1".into(),
                     command: "echo hi".into(),
                     status: RunStatus::Running,
@@ -880,10 +1030,41 @@ mod tests {
 
     #[test]
     fn remove_run_survives_a_request_round_trip() {
-        let req = Request::RemoveRun { run_id: 7 };
+        let req = Request::RemoveRun { run: "7".into() };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn rename_run_survives_a_request_round_trip() {
+        let req = Request::RenameRun {
+            run: "reviewer".into(),
+            new_name: "auditor".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_image_args_name_survives_a_round_trip_and_defaults_to_none() {
+        let mut args = sample_run_args();
+        args.name = Some("reviewer".into());
+        let frame = crate::encode_frame(&args).unwrap();
+        let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded.name.as_deref(), Some("reviewer"));
+
+        let frame = serde_json::json!({
+            "image": "alpine",
+            "cpus": 1,
+            "mem": 512,
+            "policy_path": null,
+            "cmd": [],
+            "debug": false
+        });
+        let parsed: RunImageArgs = serde_json::from_value(frame).unwrap();
+        assert_eq!(parsed.name, None);
     }
 
     #[test]
@@ -918,6 +1099,9 @@ mod tests {
                 verification_uri: "https://example.com/login/device".into(),
                 user_code: "WDJB-MJHT".into(),
                 expires_in_secs: 900,
+            },
+            Response::OauthBrowserOpened {
+                authorization_url: "https://example.com/auth?code_challenge=abc".into(),
             },
             Response::OauthSignInComplete,
             Response::OauthSignInFailed {
@@ -978,6 +1162,26 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    #[test]
+    fn registry_login_request_survives_a_round_trip() {
+        let req = Request::RegistryLogin {
+            registry: "ghcr.io".into(),
+            username: "octocat".into(),
+            secret: "ghp_real_token".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn registry_login_verified_response_survives_a_round_trip() {
+        let resp = Response::RegistryLoginVerified;
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]
@@ -1048,6 +1252,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_run_name_accepts_the_volume_charset() {
+        for ok in ["reviewer", "build-cache", "agent.v2_3", "a", "x7"] {
+            validate_run_name(ok).unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_run_name_rejects_all_digit_names_so_ids_stay_unambiguous() {
+        let err = validate_run_name("7").unwrap_err();
+        assert!(err.contains("all digits"), "got: {err}");
+        validate_run_name("0042").unwrap_err();
+    }
+
+    #[test]
+    fn validate_run_name_rejects_empty_and_illegal_characters() {
+        validate_run_name("").unwrap_err();
+        let err = validate_run_name("has space").unwrap_err();
+        assert!(err.contains("not allowed"), "got: {err}");
+        validate_run_name("a/b").unwrap_err();
+        validate_run_name("a:b").unwrap_err();
+    }
+
+    #[test]
     fn validate_volume_name_rejects_empty_dots_and_separators() {
         for bad in ["", ".", "..", "a/b", "a:b"] {
             validate_volume_name(bad).unwrap_err();
@@ -1075,5 +1302,76 @@ mod tests {
         validate_volume_target("/srv/..").unwrap_err();
         validate_volume_target("/../etc").unwrap_err();
         validate_volume_target("/a/./b").unwrap_err();
+    }
+
+    #[test]
+    fn mount_spec_parse_routes_an_absolute_source_to_a_host_bind() {
+        let m = MountSpec::parse("/Users/me/proj:/work").unwrap();
+        assert_eq!(
+            m,
+            MountSpec::Bind(BindSpec {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn mount_spec_parse_routes_a_bare_name_to_a_named_volume() {
+        let m = MountSpec::parse("build-cache:/cache").unwrap();
+        assert_eq!(
+            m,
+            MountSpec::Named(VolumeMount {
+                name: "build-cache".into(),
+                target: "/cache".into(),
+                read_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn mount_spec_target_reads_through_either_variant() {
+        assert_eq!(MountSpec::parse("/h:/work").unwrap().target(), "/work");
+        assert_eq!(MountSpec::parse("vol:/data").unwrap().target(), "/data");
+    }
+
+    #[test]
+    fn bind_spec_parse_honors_ro_and_rw_suffixes() {
+        assert!(BindSpec::parse("/h:/work:ro").unwrap().read_only);
+        assert!(!BindSpec::parse("/h:/work:rw").unwrap().read_only);
+        assert!(!BindSpec::parse("/h:/work").unwrap().read_only);
+    }
+
+    #[test]
+    fn bind_spec_parse_rejects_a_relative_target() {
+        let err = BindSpec::parse("/Users/me/proj:work").unwrap_err();
+        assert!(err.contains("must be an absolute path"), "got: {err}");
+    }
+
+    #[test]
+    fn bind_spec_parse_rejects_a_missing_target_separator() {
+        BindSpec::parse("/Users/me/proj").unwrap_err();
+    }
+
+    #[test]
+    fn a_relative_dot_dot_source_stays_a_named_volume_and_keeps_its_error() {
+        let err = MountSpec::parse("../etc:/data").unwrap_err();
+        assert!(err.contains("invalid volume name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_bind_source_requires_absolute_and_clean_chars() {
+        validate_bind_source("/Users/me/proj").unwrap();
+        assert!(
+            validate_bind_source("relative/path")
+                .unwrap_err()
+                .contains("must be an absolute path")
+        );
+        assert!(
+            validate_bind_source("/has a space")
+                .unwrap_err()
+                .contains("must not contain whitespace")
+        );
     }
 }

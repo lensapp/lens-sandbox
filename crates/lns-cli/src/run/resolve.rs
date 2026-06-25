@@ -62,8 +62,12 @@ pub async fn resolve_into_run_args(
     if args.publish.is_empty() {
         args.publish = resolved.ports;
     }
-    if args.volumes.is_empty() {
-        args.volumes = resolved.volumes;
+    if args.mounts.is_empty() {
+        args.mounts = resolved
+            .volumes
+            .into_iter()
+            .map(lns_ipc::MountSpec::Named)
+            .collect();
     }
     args.artifact_mounts.extend(resolved.artifact_mounts);
     if args.policy.is_none()
@@ -667,6 +671,8 @@ mod tests {
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
             image: image.map(str::to_string),
+            name: None,
+            registry: None,
             cpus: None,
             mem: None,
             policy: None,
@@ -680,7 +686,7 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            volumes: Vec::new(),
+            mounts: Vec::new(),
             cmd: Vec::new(),
             mount: Vec::new(),
             artifact_mounts: Vec::new(),
@@ -815,8 +821,12 @@ mod tests {
         assert_eq!(args.sandbox_user.as_deref(), Some("runner"));
         assert_eq!(args.publish.len(), 1);
         assert_eq!(args.publish[0].host_port, 9119);
-        assert_eq!(args.volumes.len(), 1);
-        assert_eq!(args.volumes[0].name, "somedata");
+        assert_eq!(args.mounts.len(), 1);
+        assert!(
+            matches!(&args.mounts[0], lns_ipc::MountSpec::Named(v) if v.name == "somedata"),
+            "got: {:?}",
+            args.mounts
+        );
         assert_eq!(args.cpus, None, "a bare agent has no sizing");
     }
 
@@ -831,17 +841,21 @@ mod tests {
             container_port: 1,
             protocol: lns_ipc::Protocol::Tcp,
         }];
-        args.volumes = vec![lns_ipc::VolumeMount {
+        args.mounts = vec![lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
             name: "mine".into(),
             target: "/mnt".into(),
             read_only: false,
-        }];
+        })];
         let (args, _) = resolve_into_run_args(args, &client, &[], &mut Vec::new())
             .await
             .unwrap();
         assert_eq!(args.sandbox_user.as_deref(), Some("override"));
         assert_eq!(args.publish[0].host_port, 1, "explicit -p must win");
-        assert_eq!(args.volumes[0].name, "mine", "explicit -v must win");
+        assert!(
+            matches!(&args.mounts[0], lns_ipc::MountSpec::Named(v) if v.name == "mine"),
+            "explicit -v must win, got: {:?}",
+            args.mounts
+        );
     }
 
     #[tokio::test]

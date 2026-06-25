@@ -2,12 +2,22 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::FromArgMatches;
 use lns_ipc::{Request, Response, encode_frame};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 use super::{SandboxService, TermInfo, run_with_writers};
+use crate::command::{RunCtx, RunFuture};
 use crate::service::client::BoxFuture;
+
+pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxArgs::from_arg_matches(matches)?;
+        crate::service::require_running().await;
+        dispatch(args).await
+    })
+}
 
 pub struct RealSandboxService {
     socket: PathBuf,
@@ -52,9 +62,9 @@ impl SandboxService for RealSandboxService {
     }
 }
 
-pub async fn dispatch(args: crate::cli::SandboxArgs) -> Result<i32> {
+pub async fn dispatch(args: super::SandboxArgs) -> Result<i32> {
     let command = match args.command {
-        crate::cli::SandboxCommand::Exec(exec_args) => {
+        super::SandboxCommand::Exec(exec_args) => {
             return crate::service::exec_image(exec_args).await;
         }
         other => other,

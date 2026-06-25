@@ -11,6 +11,7 @@ use traits::{Clock, Fetcher, StateStore};
 
 const CDN_BASE: &str = "https://get.lns.run";
 const MANIFEST_NAME: &str = "lns-latest.json";
+pub(super) const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const LNS_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);

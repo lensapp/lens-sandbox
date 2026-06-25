@@ -56,8 +56,12 @@ rollback to an earlier prefix), it reports the mismatch and exits non-zero:
 audit chain TRUNCATED: <reason>
 ```
 
-An empty log verifies successfully (zero events) only when no anchor records a
-longer history. A missing log is reported distinctly from an empty one.
+The anchor is what makes truncation and rollback detectable, so `lns audit` does
+not treat its absence as success. If the anchor is present but corrupt or
+unreadable, it exits non-zero. If no anchor is found beside the log, it prints the
+event count, warns that truncation and rollback cannot be checked, and exits
+non-zero; pass `--allow-missing-anchor` to accept that degraded check with exit
+`0`. A missing log is reported distinctly from an empty one.
 
 ## Where logs live
 

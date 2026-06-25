@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use lns_ipc::{RunImageArgs, WireFrame};
@@ -10,13 +11,11 @@ use crate::{
     oci_layer_cache, runtime_layer, supervisor, upperfs, vm,
 };
 
-use super::emit_completion;
-#[cfg(target_os = "macos")]
 use super::{
-    build_workload_argv, connector_never_arrived, exec_env_strings, vm_ended_before_connector,
+    build_workload_argv, connector_never_arrived, emit_completion, exec_env_strings,
+    vm_ended_before_connector,
 };
 
-#[cfg(target_os = "macos")]
 pub async fn handle(
     run_id: u32,
     args: RunImageArgs,
@@ -29,14 +28,8 @@ pub async fn handle(
     emit_completion(&frame_tx, result).await;
 }
 
-#[cfg(not(target_os = "macos"))]
-pub async fn handle(run_id: u32, args: RunImageArgs, frame_tx: Sender<WireFrame>) {
-    let result = orchestrate(run_id, args, frame_tx.clone())
-        .instrument(tracing::Span::current())
-        .await;
-    emit_completion(&frame_tx, result).await;
-}
-#[allow(clippy::cognitive_complexity)] // top-level boot sequence: tools → caches → ingest → supervisor → runtime → vm spec
+#[allow(clippy::cognitive_complexity)]
+// top-level boot sequence: tools → caches → ingest → supervisor → runtime → vm spec → session
 #[tracing::instrument(
     name = "lns.run",
     skip_all,
@@ -53,22 +46,14 @@ async fn orchestrate(
     run_id: u32,
     args: RunImageArgs,
     frame_tx: Sender<WireFrame>,
-    #[cfg(target_os = "macos")] input_rx: tokio::sync::mpsc::Receiver<
-        crate::vm::session_client::SessionInput,
-    >,
+    input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
-    #[cfg(target_os = "macos")]
     let forwards = crate::forward::establish(
         std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id)),
         &crate::forward::plan(&args.published_ports),
     )?;
-
-    #[cfg(not(target_os = "macos"))]
-    if !args.published_ports.is_empty() {
-        anyhow::bail!("port publishing (-p) is only supported on macOS hosts");
-    }
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
@@ -101,8 +86,14 @@ async fn orchestrate(
         Ok::<_, anyhow::Error>((guest_tools, session, initrd))
     };
     let image_fut = async {
-        let image =
-            ingest::run(args.image.as_deref(), &args.cmd, &layer_cache, image::pull).await?;
+        let image = ingest::run(
+            args.image.as_deref(),
+            &args.cmd,
+            &image::want_arch(),
+            &layer_cache,
+            image::pull,
+        )
+        .await?;
         log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(image)
     };
@@ -138,6 +129,26 @@ async fn orchestrate(
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
     for vol in &args.volumes {
         crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
+    }
+
+    let bind_attachments: Vec<vm::BindAttachment> = args
+        .binds
+        .iter()
+        .map(|b| vm::BindAttachment {
+            host_source: std::path::PathBuf::from(&b.host_source),
+            target: b.target.clone(),
+            read_only: b.read_only,
+            dropped_paths: b.dropped_paths.clone(),
+        })
+        .collect();
+    for bind in &args.binds {
+        crate::audit::record_bind_attached(
+            run_id,
+            &bind.host_source,
+            &bind.target,
+            &bind.kept_paths,
+            &bind.dropped_paths,
+        )?;
     }
 
     let imageless = args.image.is_none();
@@ -209,8 +220,8 @@ async fn orchestrate(
         vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?
     };
 
-    #[cfg(target_os = "macos")]
-    let (connector_tx, connector_rx) = tokio::sync::oneshot::channel::<vm::VsockConnector>();
+    let (connector_tx, connector_rx) =
+        tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
     let spec = vm::VmSpec {
         run_id,
@@ -224,12 +235,13 @@ async fn orchestrate(
         descriptor_sha256: Some(descriptor.descriptor_sha256.clone()),
         upper_disk: upper_disk_path,
         volumes: volume_attachments,
-        #[cfg(target_os = "macos")]
+        binds: bind_attachments,
+        workload_uid: run_as.uid,
+        workload_gid: vm::host_known_workload_gid(&run_as),
         vsock: session.as_ref().map(|s| vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,
             fd_tx: s.relay.fd_tx.clone(),
         }),
-        #[cfg(target_os = "macos")]
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
@@ -237,111 +249,99 @@ async fn orchestrate(
         exec,
     };
 
-    #[cfg(not(target_os = "macos"))]
-    let _ = &frame_tx;
+    let initial_winsize = args
+        .initial_winsize
+        .map(|(rows, cols)| lns_session::Winsize { rows, cols });
+    let argv = build_workload_argv(image.config.as_ref(), &args.cmd, session.is_some());
+    let workdir = crate::workload_cwd::resolve(
+        args.workdir.as_deref(),
+        crate::workload_cwd::image_workdir(image.config.as_ref()).as_deref(),
+    );
+    let composed = exec_env_strings(
+        image.config.as_ref(),
+        &args.cmd,
+        &args.env,
+        session.is_some(),
+        session
+            .as_ref()
+            .map(|s| s.managed_env_vars.as_slice())
+            .unwrap_or(&[]),
+        workdir.as_deref(),
+    );
+    for refused in &composed.refused {
+        let _ = frame_tx
+            .send(WireFrame::Json(lns_ipc::Response::RunLog {
+                level: lns_ipc::LogLevel::Warn,
+                verb: None,
+                message: crate::workload_env::refusal_warning(refused),
+            }))
+            .await;
+    }
+    let env: Vec<String> = composed.env;
 
-    #[cfg(target_os = "macos")]
-    {
-        let initial_winsize = args
-            .initial_winsize
-            .map(|(rows, cols)| lns_session::Winsize { rows, cols });
-        let argv = build_workload_argv(image.config.as_ref(), &args.cmd, session.is_some());
-        let workdir = crate::workload_cwd::resolve(
-            args.workdir.as_deref(),
-            crate::workload_cwd::image_workdir(image.config.as_ref()).as_deref(),
-        );
-        let composed = exec_env_strings(
-            image.config.as_ref(),
-            &args.cmd,
-            &args.env,
-            session.is_some(),
-            session
-                .as_ref()
-                .map(|s| s.managed_env_vars.as_slice())
-                .unwrap_or(&[]),
-            workdir.as_deref(),
-        );
-        for refused in &composed.refused {
-            let _ = frame_tx
-                .send(WireFrame::Json(lns_ipc::Response::RunLog {
-                    level: lns_ipc::LogLevel::Warn,
-                    verb: None,
-                    message: crate::workload_env::refusal_warning(refused),
-                }))
-                .await;
-        }
-        let env: Vec<String> = composed.env;
+    let params = vm::session_client::SessionParams {
+        argv,
+        env,
+        cwd: workdir,
+        tty: args.tty,
+        stdin: args.stdin,
+        initial_winsize,
+    };
 
-        let params = vm::session_client::SessionParams {
-            argv,
-            env,
-            cwd: workdir,
-            tty: args.tty,
-            stdin: args.stdin,
-            initial_winsize,
-        };
+    let frame_tx_for_session = frame_tx.clone();
+    log::progress("Booting", "microVM", 0, 0);
+    let boot_start = std::time::Instant::now();
+    let mut vm_task = tokio::spawn(async move {
+        let _volume_leases = volume_leases;
+        vm::boot(spec, None).await
+    });
 
-        let frame_tx_for_session = frame_tx.clone();
-        log::progress("Booting", "microVM", 0, 0);
-        let boot_start = std::time::Instant::now();
-        let mut vm_task = tokio::spawn(async move {
-            let _volume_leases = volume_leases;
-            vm::boot(spec, None).await
-        });
-
-        let connector = tokio::select! {
-            biased;
-            r = &mut vm_task => return Err(vm_ended_before_connector(r)),
-            c = connector_rx => {
-                match c {
-                    Ok(c) => c,
-                    Err(_) => {
-                        vm_task.abort();
-                        return Err(connector_never_arrived());
-                    }
+    let connector = tokio::select! {
+        biased;
+        r = &mut vm_task => return Err(vm_ended_before_connector(r)),
+        c = connector_rx => {
+            match c {
+                Ok(c) => c,
+                Err(_) => {
+                    // The boot task only drops the connector while returning an error; await it (bounded) to surface that cause, not a generic message.
+                    return Err(
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut vm_task).await {
+                            Ok(r) => vm_ended_before_connector(r),
+                            Err(_) => {
+                                vm_task.abort();
+                                connector_never_arrived()
+                            }
+                        },
+                    );
                 }
             }
-        };
-        log::info!(
-            "Booted",
-            "microVM   ({:.2}s)",
-            boot_start.elapsed().as_secs_f64()
-        );
-        let connector = std::sync::Arc::new(connector);
-        crate::run_registry::set_connector(run_id, connector.clone());
-        let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
+        }
+    };
+    log::info!(
+        "Booted",
+        "microVM   ({:.2}s)",
+        boot_start.elapsed().as_secs_f64()
+    );
+    crate::run_registry::set_connector(run_id, connector.clone());
+    let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
-        log::progress("Connecting", "session", 0, 0);
-        let connect_started = std::time::Instant::now();
-        let fd = connector
-            .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(30))
-            .await?;
-        run_scratch.keep();
-        log::debug!("connected broker in {:.2?}", connect_started.elapsed());
-        let session_started = std::time::Instant::now();
-        let session_code =
-            vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx)
-                .await?;
-        log::debug!("workload ran for {:.2?}", session_started.elapsed());
-        log::debug!(code = session_code, "broker session ended");
-        crate::run_registry::set_exit_code(run_id, session_code);
+    log::progress("Connecting", "session", 0, 0);
+    let connect_started = std::time::Instant::now();
+    let fd = connector
+        .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(30))
+        .await?;
+    run_scratch.keep();
+    log::debug!("connected broker in {:.2?}", connect_started.elapsed());
+    let session_started = std::time::Instant::now();
+    let session_code =
+        vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx).await?;
+    log::debug!("workload ran for {:.2?}", session_started.elapsed());
+    log::debug!(code = session_code, "broker session ended");
+    crate::run_registry::set_exit_code(run_id, session_code);
 
-        super::shutdown::shutdown_after_session(
-            forwards,
-            std::time::Duration::from_secs(2),
-            vm_task,
-        )
+    super::shutdown::shutdown_after_session(forwards, std::time::Duration::from_secs(2), vm_task)
         .await?;
 
-        log::info!("Finished", "in {:.2?}", started.elapsed());
-        return Ok(session_code);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _volume_leases = volume_leases;
-        vm::boot(spec, None).await?;
-        run_scratch.keep();
-        log::info!("Finished", "in {:.2?}", started.elapsed());
-        Ok(0)
-    }
+    log::info!("Finished", "in {:.2?}", started.elapsed());
+    Ok(session_code)
 }

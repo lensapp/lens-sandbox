@@ -1,4 +1,5 @@
 use anyhow::Result;
+use oci_spec::image::{Arch, Os};
 
 use crate::image::PulledImage;
 use crate::oci_layer_cache::LayerCache;
@@ -13,12 +14,14 @@ pub struct IngestedImage {
 pub async fn run(
     image: Option<&str>,
     cmd: &[String],
+    guest_arch: &Arch,
     layer_cache: &LayerCache,
     pull: impl AsyncFnOnce(&str, &LayerCache) -> Result<PulledImage>,
 ) -> Result<IngestedImage> {
     match image {
         Some(image) => {
             let pulled = pull(image, layer_cache).await?;
+            ensure_runnable_here(&pulled.config, guest_arch)?;
             let bytes: Vec<Vec<u8>> = pulled
                 .layers
                 .into_iter()
@@ -43,6 +46,18 @@ pub async fn run(
             })
         }
     }
+}
+
+fn ensure_runnable_here(config: &oci_client::config::ConfigFile, guest_arch: &Arch) -> Result<()> {
+    if config.architecture == *guest_arch && config.os == Os::Linux {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "image is {}/{} but this sandbox runs linux/{guest_arch}; \
+         use a multi-arch image or one built for linux/{guest_arch}",
+        config.os,
+        config.architecture,
+    )
 }
 
 #[cfg(test)]
@@ -94,7 +109,9 @@ mod tests {
     #[tokio::test]
     async fn imageless_with_empty_cmd_bails_with_actionable_hint() {
         let (_dir, cache) = empty_cache();
-        let err = run(None, &[], &cache, failing_puller).await.unwrap_err();
+        let err = run(None, &[], &Arch::ARM64, &cache, failing_puller)
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("imageless mode requires a command"),
@@ -110,7 +127,9 @@ mod tests {
     async fn imageless_with_non_empty_cmd_returns_empty_ingest() {
         let (_dir, cache) = empty_cache();
         let cmd = vec!["echo".to_string(), "hello".to_string()];
-        let ingested = run(None, &cmd, &cache, failing_puller).await.unwrap();
+        let ingested = run(None, &cmd, &Arch::ARM64, &cache, failing_puller)
+            .await
+            .unwrap();
         assert!(ingested.digests.is_empty(), "imageless has no digests");
         assert!(ingested.bytes.is_empty(), "imageless has no payloads");
         assert!(
@@ -138,6 +157,7 @@ mod tests {
         let ingested = run(
             Some("alpine:3.20"),
             &[],
+            &Arch::ARM64,
             &cache,
             async |img: &str, c: &LayerCache| {
                 capturing_puller(&captured, &pulled_cell, img, c).await
@@ -169,9 +189,78 @@ mod tests {
     #[tokio::test]
     async fn oci_branch_propagates_puller_error_unchanged() {
         let (_dir, cache) = empty_cache();
-        let err = run(Some("alpine:3.20"), &[], &cache, failing_puller)
-            .await
-            .unwrap_err();
+        let err = run(
+            Some("alpine:3.20"),
+            &[],
+            &Arch::ARM64,
+            &cache,
+            failing_puller,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(format!("{err}"), "registry timeout");
+    }
+
+    #[tokio::test]
+    async fn oci_branch_bails_when_image_arch_does_not_match_the_guest() {
+        let (_dir, cache) = empty_cache();
+        let pulled_cell: Mutex<Option<PulledImage>> = Mutex::new(Some(sample_pulled()));
+        // sample_pulled() is linux/arm64; ask for an amd64 sandbox so the architectures disagree.
+        let err = run(
+            Some("alpine:3.20"),
+            &[],
+            &Arch::Amd64,
+            &cache,
+            async |_img: &str, _c: &LayerCache| Ok(pulled_cell.lock().unwrap().take().unwrap()),
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("image is linux/arm64") && msg.contains("sandbox runs linux/amd64"),
+            "mismatch error must name both architectures, got: {msg}"
+        );
+        assert!(
+            msg.contains("multi-arch"),
+            "error should point at the multi-arch fix, got: {msg}"
+        );
+    }
+
+    fn cfg(arch: &str, os: &str) -> oci_client::config::ConfigFile {
+        oci_client::config::ConfigFile {
+            architecture: arch.into(),
+            os: os.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ensure_runnable_here_accepts_a_matching_linux_arch() {
+        ensure_runnable_here(&cfg("arm64", "linux"), &Arch::ARM64).expect("exact match runs");
+        ensure_runnable_here(&cfg("amd64", "linux"), &Arch::Amd64).expect("exact match runs");
+    }
+
+    #[test]
+    fn ensure_runnable_here_rejects_a_foreign_arch() {
+        let err = format!(
+            "{:#}",
+            ensure_runnable_here(&cfg("amd64", "linux"), &Arch::ARM64).unwrap_err()
+        );
+        assert!(
+            err.contains("image is linux/amd64") && err.contains("linux/arm64"),
+            "mismatch must name both architectures: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_runnable_here_rejects_a_non_linux_os() {
+        let err = format!(
+            "{:#}",
+            ensure_runnable_here(&cfg("arm64", "windows"), &Arch::ARM64).unwrap_err()
+        );
+        assert!(
+            err.contains("windows/arm64"),
+            "a non-linux os must surface in the message: {err}"
+        );
     }
 }

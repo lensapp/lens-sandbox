@@ -12,21 +12,86 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use clap::FromArgMatches;
+
 use crate::chord::{DetachChordDetector, FeedAction};
 use crate::cli::{ExecArgs, KillArgs, RunArgs};
+use crate::command::{RunCtx, RunFuture};
 use lns_ipc::{ExecImageArgs, RunImageArgs};
 
 use super::{client::ServiceClient, real, require_running_check};
 use crate::run::summary::print_run_summary;
 
-pub async fn dispatch(cmd: &crate::cli::ServiceCommand) -> Result<()> {
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let mut args = RunArgs::from_arg_matches(matches)?;
+        args.env = crate::run::env_file::merged_run_env(&args.env_file, &args.env)?;
+        let config_path = crate::config::default_config_path()?;
+        let defaults = crate::config::load_run_defaults(&config_path)?;
+        let args = crate::config::apply_run_defaults(args, defaults);
+        require_running().await;
+        let client = crate::registry::RealRegistryClient::new(crate::service::socket_path()?);
+        let store = lns_policy::credentials::JsonFileCredentialStore::new(
+            lns_policy::credentials::default_credentials_path(),
+        );
+        let available = crate::run::resolve::available_credentials(
+            &lns_policy::credentials::CredentialStore::load(&store)?,
+        );
+        let args =
+            crate::run::resolve::resolve_explicit_mounts(args, &client, &mut std::io::stderr())
+                .await?;
+        let (args, _policy_guard) = crate::run::resolve::resolve_into_run_args(
+            args,
+            &client,
+            &available,
+            &mut std::io::stderr(),
+        )
+        .await?;
+        run_image(args, ctx.debug).await
+    })
+}
+
+pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = ExecArgs::from_arg_matches(matches)?;
+        require_running().await;
+        exec_image(args).await
+    })
+}
+
+pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = KillArgs::from_arg_matches(matches)?;
+        require_running().await;
+        kill(args).await?;
+        Ok(0)
+    })
+}
+
+pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        require_running().await;
+        ls().await?;
+        Ok(0)
+    })
+}
+
+pub fn service_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::ServiceArgs::from_arg_matches(matches)?;
+        dispatch(&args.command).await?;
+        Ok(0)
+    })
+}
+
+pub async fn dispatch(cmd: &super::ServiceCommand) -> Result<()> {
     let client = real_client()?;
     match cmd {
-        crate::cli::ServiceCommand::Start => super::cmd_start(&client).await,
-        crate::cli::ServiceCommand::Stop => super::cmd_stop(&client).await,
-        crate::cli::ServiceCommand::Status => super::cmd_status(&client).await,
-        crate::cli::ServiceCommand::Enable => super::cmd_enable(&client).await,
-        crate::cli::ServiceCommand::Disable => super::cmd_disable(&client).await,
+        super::ServiceCommand::Start => super::cmd_start(&client).await,
+        super::ServiceCommand::Stop => super::cmd_stop(&client).await,
+        super::ServiceCommand::Status => super::cmd_status(&client).await,
+        super::ServiceCommand::Enable => super::cmd_enable(&client).await,
+        super::ServiceCommand::Disable => super::cmd_disable(&client).await,
     }
 }
 
@@ -51,9 +116,46 @@ fn real_client() -> Result<real::RealServiceClient> {
     ))
 }
 
+/// A detached run must never block on the KEEP/DROP prompt, so it drops undecided secrets like a no-terminal run even when launched from a TTY.
+fn host_binds_interactive(detached: bool, stdin_is_tty: bool) -> bool {
+    !detached && stdin_is_tty
+}
+
+fn resolve_host_binds(
+    specs: &[lns_ipc::BindSpec],
+    interactive: bool,
+) -> Result<Vec<crate::run::host_bind::ResolvedBind>> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scan = crate::run::host_bind::RealDirScan;
+    let store = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
+        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
+    );
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    crate::run::host_bind::resolve_binds(
+        specs,
+        &scan,
+        &store,
+        interactive,
+        &mut input,
+        &mut std::io::stderr(),
+    )
+}
+
 pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let resolved_policy = print_run_summary(&args, &cwd, &mut std::io::stderr())?;
+
+    let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
+    let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
+    let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
+    let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
+    if !dispositions.is_empty() {
+        eprint!("{dispositions}");
+    }
+    let binds: Vec<lns_ipc::BindMount> = resolved_binds.iter().map(|b| b.to_wire()).collect();
 
     let client = real_client()?;
     let socket = client.socket();
@@ -75,6 +177,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
         image: args.image,
+        name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user: args.sandbox_user,
         sandbox_uid: args.sandbox_uid,
@@ -87,7 +190,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         initial_winsize,
         detached,
         published_ports: args.publish,
-        volumes: args.volumes,
+        volumes,
+        binds,
         artifact_mounts: args.artifact_mounts,
     });
     let frame = encode_frame(&request).context("encoding RunImage request")?;
@@ -138,7 +242,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         .await
         .with_context(|| format!("connecting to {}", socket.display()))?;
 
-    let target_run_id = args.run_id;
+    let target_run = args.run;
     let tty = args.tty && crate::raw_mode::stdin_is_tty();
     let stdin = args.interactive;
     let initial_winsize = if tty {
@@ -149,7 +253,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     let detach_chord = args.detach_keys.0.clone();
 
     let request = Request::ExecImage(ExecImageArgs {
-        run_id: target_run_id,
+        run: target_run,
         argv: args.cmd,
         env: Vec::new(),
         tty,
@@ -181,7 +285,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     let response = real::send_request(
         &socket,
         &Request::Kill {
-            run_id: args.run_id,
+            run: args.run.clone(),
             signal,
         },
     )
@@ -189,7 +293,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
     match response {
         Response::Acknowledged => {
-            println!("killed run #{}", args.run_id);
+            println!("killed run {}", crate::sandbox::run_label(&args.run));
             Ok(())
         }
         Response::Error { message } => anyhow::bail!("daemon error: {message}"),
@@ -304,6 +408,7 @@ where
             _ = early_exit_rx.recv() => {
                 break exit_code_after_detach(
                     detach,
+                    tty,
                     &mut stream,
                     stdout,
                     stderr,
@@ -325,7 +430,8 @@ where
                         stderr.flush().await.ok();
                     }
                     WireFrame::Json(Response::RunLog { level, verb, message }) => {
-                        render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
+                        render_attached_run_log(level, verb.as_deref(), &message, tty, stderr)
+                            .await?;
                     }
                     WireFrame::Json(Response::RunProgress { .. }) => {}
                     WireFrame::Json(Response::RunExit { code }) => break code,
@@ -363,6 +469,7 @@ async fn render_attached_run_log<E>(
     level: LogLevel,
     verb: Option<&str>,
     message: &str,
+    tty: bool,
     stderr: &mut E,
 ) -> Result<()>
 where
@@ -374,13 +481,28 @@ where
     }
     let mut line = Vec::<u8>::new();
     render_status_line(level, verb, message, &mut line)?;
+    if tty {
+        line = lf_to_crlf(&line);
+    }
     stderr.write_all(&line).await?;
     stderr.flush().await.ok();
     Ok(())
 }
 
+fn lf_to_crlf(line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len() + 2);
+    for &b in line {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
+}
+
 async fn exit_code_after_detach<S, O, E>(
     detach: DetachBehaviour,
+    tty: bool,
     stream: &mut S,
     stdout: &mut O,
     stderr: &mut E,
@@ -393,7 +515,7 @@ where
 {
     match detach {
         DetachBehaviour::SignalAndDrain => {
-            drain_after_chord(stream, stdout, stderr, last_stdout_byte).await
+            drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte).await
         }
         DetachBehaviour::LeaveRunning => 0,
     }
@@ -401,6 +523,7 @@ where
 
 async fn drain_after_chord<S, O, E>(
     stream: &mut S,
+    tty: bool,
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
@@ -412,7 +535,7 @@ where
 {
     match timeout(
         Duration::from_secs(5),
-        drain_to_exit(stream, stdout, stderr, last_stdout_byte),
+        drain_to_exit(stream, tty, stdout, stderr, last_stdout_byte),
     )
     .await
     {
@@ -430,6 +553,7 @@ where
 
 async fn drain_to_exit<S, O, E>(
     stream: &mut S,
+    tty: bool,
     stdout: &mut O,
     stderr: &mut E,
     last_stdout_byte: &mut Option<u8>,
@@ -458,7 +582,7 @@ where
                 verb,
                 message,
             }) => {
-                render_attached_run_log(level, verb.as_deref(), &message, stderr).await?;
+                render_attached_run_log(level, verb.as_deref(), &message, tty, stderr).await?;
             }
             WireFrame::Json(Response::RunExit { code }) => return Ok(code),
             WireFrame::Json(Response::Error { message }) => {
@@ -1123,9 +1247,15 @@ mod tests {
     #[tokio::test]
     async fn render_attached_run_log_keeps_debug_frames_off_the_user_writer() {
         let mut stderr = Vec::<u8>::new();
-        render_attached_run_log(LogLevel::Debug, None, "broker handshake", &mut stderr)
-            .await
-            .expect("render debug");
+        render_attached_run_log(
+            LogLevel::Debug,
+            None,
+            "broker handshake",
+            false,
+            &mut stderr,
+        )
+        .await
+        .expect("render debug");
         assert!(
             stderr.is_empty(),
             "debug run-log must not reach the user's status writer: {stderr:?}",
@@ -1135,10 +1265,61 @@ mod tests {
     #[tokio::test]
     async fn render_attached_run_log_writes_info_status_to_the_writer() {
         let mut stderr = Vec::<u8>::new();
-        render_attached_run_log(LogLevel::Info, Some("Finished"), "in 1.10s", &mut stderr)
-            .await
-            .expect("render info");
+        render_attached_run_log(
+            LogLevel::Info,
+            Some("Finished"),
+            "in 1.10s",
+            false,
+            &mut stderr,
+        )
+        .await
+        .expect("render info");
         assert_eq!(stderr, b"\xe2\x9c\x93 finished in 1.10s\n");
+    }
+
+    #[tokio::test]
+    async fn render_attached_run_log_uses_crlf_when_the_terminal_is_raw() {
+        let mut stderr = Vec::<u8>::new();
+        render_attached_run_log(
+            LogLevel::Warn,
+            None,
+            "workload exited with code 1",
+            true,
+            &mut stderr,
+        )
+        .await
+        .expect("render warn");
+        let rendered = String::from_utf8(stderr).expect("utf8");
+        assert!(
+            rendered.ends_with("\r\n"),
+            "in raw mode a status line must carriage-return so the next line starts at column 0: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("\n\r") && rendered.matches('\n').count() == 1,
+            "exactly one CRLF, no stray bare LF: {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn lf_to_crlf_expands_every_newline_and_leaves_other_bytes() {
+        assert_eq!(lf_to_crlf(b"a\nb\n"), b"a\r\nb\r\n");
+        assert_eq!(lf_to_crlf(b"no newline"), b"no newline");
+    }
+
+    #[test]
+    fn host_binds_interactive_is_suppressed_for_a_detached_run_even_with_a_tty() {
+        assert!(
+            host_binds_interactive(false, true),
+            "attached + tty prompts"
+        );
+        assert!(
+            !host_binds_interactive(true, true),
+            "a detached run must never block on the secret prompt, even from a terminal"
+        );
+        assert!(
+            !host_binds_interactive(false, false),
+            "no terminal cannot prompt"
+        );
     }
 
     #[test]
@@ -1200,6 +1381,7 @@ mod tests {
         let mut last = None;
         let code = exit_code_after_detach(
             DetachBehaviour::LeaveRunning,
+            false,
             &mut client,
             &mut captured,
             &mut status,
@@ -1232,6 +1414,7 @@ mod tests {
         let mut last = None;
         let code = exit_code_after_detach(
             DetachBehaviour::SignalAndDrain,
+            true,
             &mut client,
             &mut captured,
             &mut status,

@@ -228,6 +228,25 @@ if [ "$OS" = "linux" ] && [ ! -e /dev/kvm ]; then
   echo ""
 fi
 
+# On Linux lns drives an out-of-process cloud-hypervisor + virtiofsd; probe PATH (honoring the
+# LNS_*_BIN overrides) so users get a clear pointer instead of a run-time "not found on PATH" error.
+if [ "$OS" = "linux" ]; then
+  MISSING_VMM=""
+  if [ -z "${LNS_CLOUD_HYPERVISOR_BIN:-}" ] && ! command -v cloud-hypervisor >/dev/null 2>&1; then
+    MISSING_VMM="${MISSING_VMM} cloud-hypervisor"
+  fi
+  if [ -z "${LNS_VIRTIOFSD_BIN:-}" ] && ! command -v virtiofsd >/dev/null 2>&1; then
+    MISSING_VMM="${MISSING_VMM} virtiofsd"
+  fi
+  if [ -n "$MISSING_VMM" ]; then
+    warn "The microVM runtime is not on PATH. \`${BINARY_NAME} run\` needs cloud-hypervisor and virtiofsd."
+    echo "  Missing:${MISSING_VMM}"
+    echo "  Install them from your distro or a static build, or point lns at existing binaries with"
+    echo "    LNS_CLOUD_HYPERVISOR_BIN=/path/to/cloud-hypervisor LNS_VIRTIOFSD_BIN=/path/to/virtiofsd"
+    echo ""
+  fi
+fi
+
 # lns-service links against libgtk-3, libayatana-appindicator3, libxdo; probe via ldconfig so
 # minimal Linux installs (server, NixOS, Alpine) get a friendly error instead of an opaque loader crash.
 if [ "$OS" = "linux" ] && [ "$HAS_SERVICE" = true ] && command -v ldconfig >/dev/null 2>&1; then

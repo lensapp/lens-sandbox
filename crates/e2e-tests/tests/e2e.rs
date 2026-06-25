@@ -13,6 +13,12 @@ pub struct E2eWorld {
     pub home: Option<TempDir>,
     pub service_dir: Option<TempDir>,
     pub service_socket: Option<PathBuf>,
+    pub detached_runs: Vec<u32>,
+    pub last_run_id: Option<u32>,
+    pub created_volumes: Vec<String>,
+    pub policy_dir: Option<TempDir>,
+    pub policy_path: Option<PathBuf>,
+    pub host_bind_dir: Option<TempDir>,
 }
 
 impl E2eWorld {
@@ -41,10 +47,24 @@ impl E2eWorld {
             let _ = self.run_with_service_env(&["service", "stop"]);
         }
     }
+
+    pub fn kill_detached_runs(&self) {
+        for id in &self.detached_runs {
+            let _ = self.run_with_service_env(&["sandbox", "kill", &id.to_string()]);
+        }
+    }
+
+    pub fn remove_created_volumes(&self) {
+        for name in &self.created_volumes {
+            let _ = self.run_with_service_env(&["volume", "rm", name]);
+        }
+    }
 }
 
 impl Drop for E2eWorld {
     fn drop(&mut self) {
+        self.kill_detached_runs();
+        self.remove_created_volumes();
         self.shutdown_service();
     }
 }
@@ -52,12 +72,24 @@ impl Drop for E2eWorld {
 #[tokio::main]
 async fn main() {
     let features_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("features");
+    let microvm_only = std::env::var_os("LNS_E2E_MICROVM").is_some();
 
-    E2eWorld::cucumber()
-        .fail_on_skipped()
-        .filter_run(features_dir, |feat, _, sc| {
-            let headless_excluded = |t: &String| t == "gui" || t == "microvm";
-            !feat.tags.iter().any(headless_excluded) && !sc.tags.iter().any(headless_excluded)
+    let mut runner = E2eWorld::cucumber().fail_on_skipped();
+    if microvm_only {
+        runner = runner.max_concurrent_scenarios(1);
+    }
+    runner
+        .filter_run_and_exit(features_dir, move |feat, _, sc| {
+            let tagged =
+                |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
+            if tagged("gui") {
+                return false;
+            }
+            if microvm_only {
+                tagged("microvm")
+            } else {
+                !tagged("microvm")
+            }
         })
         .await;
 }

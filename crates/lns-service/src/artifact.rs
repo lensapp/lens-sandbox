@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use lns_policy::artifact::Family;
 use lns_policy::registry_auth::{
-    JsonFileRegistryCredentialStore, RegistryAuthFile, RegistryCredentialStore,
+    JsonFileRegistryAuthStore, RegistryAuthFile, RegistryAuthStore, credential_for,
     default_registry_auth_path,
 };
 use oci_client::Reference;
@@ -65,18 +65,15 @@ pub(crate) trait ArtifactRegistry: Send + Sync {
 }
 
 fn auth_for(registry: &str, file: &RegistryAuthFile) -> RegistryAuth {
-    match file.get(registry) {
-        Some(cred) => RegistryAuth::Basic(
-            cred.username.clone().unwrap_or_else(|| "any".to_string()),
-            cred.token.clone(),
-        ),
+    match credential_for(file, registry) {
+        Some(cred) => RegistryAuth::Basic(cred.username.clone(), cred.secret.clone()),
         None => RegistryAuth::Anonymous,
     }
 }
 
 fn resolve(
     reference: &str,
-    store: &dyn RegistryCredentialStore,
+    store: &dyn RegistryAuthStore,
 ) -> Result<(Reference, RegistryAuth)> {
     let reference: Reference = reference
         .parse()
@@ -99,7 +96,7 @@ pub(crate) fn resolve_auth(reference: &str) -> RegistryAuth {
 
 async fn push_artifact_with<R: ArtifactRegistry>(
     client: &R,
-    store: &dyn RegistryCredentialStore,
+    store: &dyn RegistryAuthStore,
     reference: &str,
     artifact_type: &str,
     config_media_type: &str,
@@ -121,7 +118,7 @@ async fn push_artifact_with<R: ArtifactRegistry>(
 
 async fn pull_with<R: ArtifactRegistry>(
     client: &R,
-    store: &dyn RegistryCredentialStore,
+    store: &dyn RegistryAuthStore,
     reference: &str,
 ) -> Result<Pulled> {
     let (parsed, auth) = resolve(reference, store)?;
@@ -142,7 +139,7 @@ async fn pull_with<R: ArtifactRegistry>(
 
 async fn push_image_with<R: ArtifactRegistry>(
     client: &R,
-    store: &dyn RegistryCredentialStore,
+    store: &dyn RegistryAuthStore,
     source_reference: &str,
     target_reference: &str,
 ) -> Result<String> {
@@ -164,8 +161,8 @@ fn registry_for(reference: &str) -> RealRegistry {
     RealRegistry::with_protocol(protocol)
 }
 
-fn store() -> JsonFileRegistryCredentialStore {
-    JsonFileRegistryCredentialStore::new(default_registry_auth_path())
+fn store() -> JsonFileRegistryAuthStore {
+    JsonFileRegistryAuthStore::new(default_registry_auth_path())
 }
 
 pub async fn push_artifact(
@@ -203,7 +200,7 @@ pub async fn pull(reference: &str) -> Result<Pulled> {
 
 async fn materialize_mounts_with<R: ArtifactRegistry>(
     client: &R,
-    store: &dyn RegistryCredentialStore,
+    store: &dyn RegistryAuthStore,
     mounts: &[lns_ipc::ArtifactMount],
 ) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
     use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
@@ -445,15 +442,15 @@ mod tests {
     }
 
     /// A path that never exists, so the real store's `load()` returns an empty map (→ anonymous).
-    fn empty_store() -> JsonFileRegistryCredentialStore {
-        JsonFileRegistryCredentialStore::new(
+    fn empty_store() -> JsonFileRegistryAuthStore {
+        JsonFileRegistryAuthStore::new(
             std::env::temp_dir().join("lns-artifact-cov-absent.json"),
         )
     }
 
     /// Pointing the real store at a directory makes `load()` surface a non-NotFound IO error.
-    fn failing_store() -> JsonFileRegistryCredentialStore {
-        JsonFileRegistryCredentialStore::new(std::env::temp_dir())
+    fn failing_store() -> JsonFileRegistryAuthStore {
+        JsonFileRegistryAuthStore::new(std::env::temp_dir())
     }
 
     const REF: &str = "registry.example.test/org/acme/policies/pii:v1";
@@ -462,18 +459,18 @@ mod tests {
     const OCI_CMT: &str = "application/vnd.oci.image.config.v1+json";
 
     #[test]
-    fn auth_for_builds_basic_defaulting_username_else_anonymous() {
+    fn auth_for_builds_basic_from_a_stored_credential_else_anonymous() {
         let mut f = RegistryAuthFile::new();
         f.insert(
             "reg.example".into(),
             RegistryCredential {
-                username: None,
-                token: "lns_tok".into(),
+                username: "ci-bot".into(),
+                secret: "lns_tok".into(),
             },
         );
         assert_eq!(
             auth_for("reg.example", &f),
-            RegistryAuth::Basic("any".into(), "lns_tok".into())
+            RegistryAuth::Basic("ci-bot".into(), "lns_tok".into())
         );
         assert_eq!(auth_for("absent", &f), RegistryAuth::Anonymous);
     }
@@ -486,13 +483,13 @@ mod tests {
             "LNS_REGISTRY_AUTH_PATH",
             dir.path().join("auth.json"),
         );
-        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
+        let store = JsonFileRegistryAuthStore::new(dir.path().join("auth.json"));
         let mut file = RegistryAuthFile::new();
         file.insert(
             "registry.example.test".into(),
             RegistryCredential {
-                username: None,
-                token: "lns_tok".into(),
+                username: "any".into(),
+                secret: "lns_tok".into(),
             },
         );
         store.save(&file).unwrap();
@@ -523,8 +520,8 @@ mod tests {
         f.insert(
             "reg.example".into(),
             RegistryCredential {
-                username: Some("ci-bot".into()),
-                token: "lns_tok".into(),
+                username: "ci-bot".into(),
+                secret: "lns_tok".into(),
             },
         );
         assert!(matches!(auth_for("reg.example", &f), RegistryAuth::Basic(u, _) if u == "ci-bot"));
@@ -537,13 +534,13 @@ mod tests {
             ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
+        let store = JsonFileRegistryAuthStore::new(dir.path().join("auth.json"));
         let mut file = RegistryAuthFile::new();
         file.insert(
             "registry.example.test".into(),
             RegistryCredential {
-                username: Some("any".into()),
-                token: "lns_secret".into(),
+                username: "any".into(),
+                secret: "lns_secret".into(),
             },
         );
         store.save(&file).unwrap();
@@ -667,13 +664,13 @@ mod tests {
             ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
+        let store = JsonFileRegistryAuthStore::new(dir.path().join("auth.json"));
         let mut file = RegistryAuthFile::new();
         file.insert(
             "registry.example.test".into(),
             RegistryCredential {
-                username: None,
-                token: "lns_tok".into(),
+                username: "any".into(),
+                secret: "lns_tok".into(),
             },
         );
         store.save(&file).unwrap();

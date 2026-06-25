@@ -45,6 +45,27 @@ integrations:
           domain: github.com
     tokenFallback:
       help: https://github.com/settings/personal-access-tokens/new
+  - id: google
+    name: Google
+    authKind: oauth
+    routes:
+      - match: www.googleapis.com
+    oauth:
+      clientId: "${LNS_OAUTH_CLIENT_ID_GOOGLE}"
+      clientSecret: "${LNS_OAUTH_CLIENT_SECRET_GOOGLE}"
+      scopes:
+        - openid
+        - email
+        - profile
+      deviceAuthorizationEndpoint: https://oauth2.googleapis.com/device/code
+      tokenEndpoint: https://oauth2.googleapis.com/token
+      envVar: GOOGLE_OAUTH_ACCESS_TOKEN
+      placeholder: ya29.LNSPLACEHOLDER000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: www.googleapis.com
+    tokenFallback:
+      help: https://developers.google.com/oauthplayground
   - id: openai
     authKind: credential
     routes:
@@ -68,6 +89,20 @@ integrations:
           header: x-api-key
         - kind: bearer_header
           domain: api.anthropic.com
+  - id: bedrock
+    name: Amazon Bedrock
+    authKind: credential
+    routes:
+      - match: bedrock-runtime.*.amazonaws.com
+      - match: bedrock.*.amazonaws.com
+    credential:
+      envVar: AWS_BEARER_TOKEN_BEDROCK
+      placeholder: ABSKLNSPLACEHOLDER000000000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: bedrock-runtime.*.amazonaws.com
+        - kind: bearer_header
+          domain: bedrock.*.amazonaws.com
   - id: linear
     authKind: credential
     routes:
@@ -88,3 +123,17 @@ integrations:
       injections:
         - kind: uri_placeholder
           domain: api.telegram.org
+  - id: openrouter
+    name: OpenRouter
+    authKind: oauth
+    routes:
+      - match: openrouter.ai
+    oauth:
+      flow: pkce
+      authorizationEndpoint: https://openrouter.ai/auth
+      tokenEndpoint: https://openrouter.ai/api/v1/auth/keys
+      envVar: OPENROUTER_API_KEY
+      placeholder: sk-or-v1-LNSPLACEHOLDER0000000000000000000000000000000000000000000000000000
+      injections:
+        - kind: bearer_header
+          domain: openrouter.ai

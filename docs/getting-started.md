@@ -5,15 +5,24 @@ sandbox.
 
 ## Prerequisites
 
-Lens Sandbox runs on **macOS on Apple Silicon** (M-series). It boots a real
-microVM using Apple's Virtualization framework, which ships with macOS — there's
-nothing extra to install. Intel Macs cannot host the guest VM and are rejected by
-the installer.
+Lens Sandbox boots a real microVM under a hardware hypervisor:
+
+- **macOS on Apple Silicon** (M-series) — uses Apple's Virtualization framework,
+  which ships with macOS, so there's nothing extra to install. Intel Macs cannot
+  host the guest VM and are rejected by the installer.
+- **Linux on x86_64 or aarch64** — uses KVM via Cloud Hypervisor. You need
+  `/dev/kvm` accessible to your user (typically `sudo usermod -aG kvm $USER`) and
+  the `cloud-hypervisor` and `virtiofsd` binaries available on `PATH` (or pointed
+  to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN`). The installer checks
+  for both and tells you what's missing.
+
+The security model is identical on both: the same per-directory policy, the same
+credential-shaped placeholders, the same "policy you run into, not write."
 
 ## Platform support
 
-macOS on Apple Silicon is the supported platform today. Linux and Windows support
-are on the roadmap and not yet available.
+macOS on Apple Silicon and Linux (x86_64 / aarch64) are supported. Windows support
+is on the roadmap and not yet available.
 
 ## Install
 
@@ -83,9 +92,10 @@ lns run
 
 You run Lens Sandbox from a project directory — that's where it looks for
 `lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
-make host files available to the workload, attach a volume (see
-[Running workloads](running-workloads.md)). The workload's own working directory
-comes from the image.
+give the workload your actual project files, bind-mount the directory with
+`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for scratch
+space that persists across runs instead, attach a named volume. The workload's own
+working directory comes from the image.
 
 ## What happens on an unknown request
 

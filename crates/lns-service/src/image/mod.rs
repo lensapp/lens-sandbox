@@ -11,7 +11,7 @@ use crate::oci_layer_cache::LayerCache;
 pub(crate) mod manifest_cache;
 mod real;
 pub(crate) use real::RealRegistry;
-pub use real::pull;
+pub use real::{pull, verify_login};
 
 pub(crate) trait Registry: Send + Sync {
     fn pull_manifest_and_config(
@@ -108,12 +108,12 @@ impl PullProgress {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn want_arch() -> oci_spec::image::Arch {
+pub(crate) fn want_arch() -> oci_spec::image::Arch {
     oci_spec::image::Arch::ARM64
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn want_arch() -> oci_spec::image::Arch {
+pub(crate) fn want_arch() -> oci_spec::image::Arch {
     oci_spec::image::Arch::Amd64
 }
 

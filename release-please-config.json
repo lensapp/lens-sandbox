@@ -4,7 +4,18 @@
   "release-label": "autorelease: tagged,release",
   "separate-pull-requests": true,
   "include-component-in-tag": true,
-  "plugins": ["cargo-workspace"],
+  "group-pull-request-title-pattern": "chore${scope}: release ${component} libraries",
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "lns",
+      "components": ["lns", "lns-cli", "lns-service", "e2e-tests"]
+    }
+  ],
   "exclude-paths": [
     ".github",
     ".husky",
@@ -12,11 +23,42 @@
     "docs"
   ],
   "packages": {
-    "crates/lns-cli": {
-      "release-type": "rust",
+    ".": {
+      "release-type": "simple",
       "component": "lns",
       "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "exclude-paths": [
+        ".github",
+        ".husky",
+        ".vscode",
+        "docs",
+        "scripts/lns-install",
+        "crates/e2e-tests",
+        "crates/bump-kernel",
+        "crates/coverage-strip-ast"
+      ]
+    },
+    "crates/lns-cli": {
+      "release-type": "rust",
+      "component": "lns-cli",
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
+    },
+    "crates/lns-service": {
+      "release-type": "rust",
+      "component": "lns-service",
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
+    },
+    "crates/e2e-tests": {
+      "release-type": "rust",
+      "component": "e2e-tests",
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "skip-changelog": true
     },
     "scripts/lns-install": {
       "release-type": "simple",

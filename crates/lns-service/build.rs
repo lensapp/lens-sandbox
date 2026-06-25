@@ -4,8 +4,26 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TARGET: &str = "aarch64-unknown-linux-musl";
 const PROFILE: &str = "release-init";
+
+fn guest_target() -> (&'static str, &'static str) {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH set by cargo");
+    match arch.as_str() {
+        "aarch64" => (
+            "aarch64-unknown-linux-musl",
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER",
+        ),
+        "x86_64" => (
+            "x86_64-unknown-linux-musl",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER",
+        ),
+        other => panic!(
+            "guest cross-build: unsupported host target_arch=\"{other}\" \
+             (lns supports aarch64 and x86_64 hosts only). The guest runs the \
+             host CPU arch under KVM, so the musl target must match it."
+        ),
+    }
+}
 
 const STATIC_NFT_VERSION: &str = "1.1.5";
 
@@ -205,13 +223,14 @@ fn cross_build_and_stage(
     out_dir: &Path,
     pkg: &str,
 ) -> PathBuf {
+    let (target, linker_var) = guest_target();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(&cargo);
-    cmd.args(["build", "-p", pkg, "--profile", PROFILE, "--target", TARGET])
+    cmd.args(["build", "-p", pkg, "--profile", PROFILE, "--target", target])
         .current_dir(workspace);
 
-    if std::env::var_os("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER").is_none() {
-        cmd.env("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER", "rust-lld");
+    if std::env::var_os(linker_var).is_none() {
+        cmd.env(linker_var, "rust-lld");
     }
 
     cmd.env_remove("RUSTFLAGS");
@@ -223,16 +242,16 @@ fn cross_build_and_stage(
         .unwrap_or_else(|e| panic!("invoking cargo to cross-build {pkg} failed to start: {e}"));
     if !status.success() {
         panic!(
-            "lns-service's build.rs failed to cross-build {pkg} for {TARGET}. \
+            "lns-service's build.rs failed to cross-build {pkg} for {target}. \
              Check that the target is installed:\n\
              \n\
-             \trustup target add {TARGET}\n\
+             \trustup target add {target}\n\
              \n\
              Or set LNS_INIT_BIN=/path/to/pre-built/lns-init to bypass the cross-build."
         );
     }
 
-    let elf = target_dir.join(TARGET).join(PROFILE).join(pkg);
+    let elf = target_dir.join(target).join(PROFILE).join(pkg);
     if !elf.is_file() {
         panic!(
             "{pkg} build succeeded but artifact not found at {} — \

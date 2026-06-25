@@ -2,11 +2,24 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use clap::FromArgMatches;
 use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_async};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 use super::sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use crate::command::{RunCtx, RunFuture};
+
+pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::IntegrationArgs::from_arg_matches(matches)?;
+        let cwd = ctx.cwd()?;
+        let catalog_path = lns_policy::integrations::default_integrations_path();
+        let signin = RealIntegrationSignIn::new(crate::service::socket_path()?);
+        let mut out = ctx.out;
+        crate::integration::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
+    })
+}
 
 pub struct RealIntegrationSignIn {
     socket: PathBuf,
@@ -50,6 +63,12 @@ impl IntegrationSignIn for RealIntegrationSignIn {
                             out,
                             "Open {verification_uri} and enter code {user_code} (expires in {}m)",
                             expires_in_secs / 60
+                        )?;
+                    }
+                    Response::OauthBrowserOpened { authorization_url } => {
+                        writeln!(
+                            out,
+                            "Opening your browser to authorize… (if it didn't open, visit {authorization_url})"
                         )?;
                     }
                     Response::OauthSignInComplete => return Ok(SignInOutcome::Completed),

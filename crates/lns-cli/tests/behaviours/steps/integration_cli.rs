@@ -1,8 +1,8 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::command::parse_args;
+use lns_cli::integration::IntegrationArgs;
 use lns_cli::integration::{self, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 use lns_policy::Policy;
 use std::io::Write;
@@ -19,9 +19,10 @@ fn policy_file(world: &mut BehaviourWorld) -> PathBuf {
     cwd(world).join("lns-policy.yaml")
 }
 
-/// Stands in for the running service: renders the verification prompt and returns the scripted outcome.
+/// Stands in for the running service: renders the sign-in prompt the CLI would show and returns the scripted outcome.
 struct FakeSignIn {
     outcome: SignInOutcome,
+    pkce: bool,
 }
 impl IntegrationSignIn for FakeSignIn {
     fn sign_in<'a>(
@@ -30,11 +31,19 @@ impl IntegrationSignIn for FakeSignIn {
         out: &'a mut dyn Write,
     ) -> LocalBoxFuture<'a, anyhow::Result<SignInOutcome>> {
         let outcome = self.outcome.clone();
+        let pkce = self.pkce;
         Box::pin(async move {
-            writeln!(
-                out,
-                "Open https://example.com/login/device and enter code WDJB-MJHT to connect {id}"
-            )?;
+            if pkce {
+                writeln!(
+                    out,
+                    "Opening your browser to authorize {id}… (if it didn't open, visit https://openrouter.ai/auth?code_challenge=abc)"
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "Open https://example.com/login/device and enter code WDJB-MJHT to connect {id}"
+                )?;
+            }
             Ok(outcome)
         })
     }
@@ -48,14 +57,12 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
             .signin_outcome
             .clone()
             .unwrap_or(SignInOutcome::Completed),
+        pkce: world.signin_is_pkce,
     };
     let mut full = vec!["lns".to_string(), "integration".to_string()];
     full.extend(tail.iter().map(|s| s.to_string()));
-    let run = match Cli::try_parse_from(&full) {
-        Ok(cli) => {
-            let Command::Integration(args) = cli.command else {
-                panic!("expected an integration command");
-            };
+    let run = match parse_args::<IntegrationArgs, _, _>(&full) {
+        Ok(args) => {
             let mut buf = Vec::<u8>::new();
             match integration::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
                 Ok(exit_code) => CliRun {
@@ -78,7 +85,9 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
 
 #[given(regex = r#"^a user catalog declares the "([^"]+)" oauth integration$"#)]
 fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
-    use lns_policy::integrations::{AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth};
+    use lns_policy::integrations::{
+        AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+    };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let dir = cwd(world);
     Catalog {
@@ -95,15 +104,62 @@ fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
             }],
             credential: None,
             oauth: Some(OauthAuth {
-                client_id: "Iv1.some-oauth".into(),
+                flow: OauthFlow::Device,
+                client_id: Some("Iv1.some-oauth".into()),
+                client_secret: None,
                 scopes: vec!["repo".into()],
-                device_authorization_endpoint: "https://example.com/device/code".into(),
+                device_authorization_endpoint: Some("https://example.com/device/code".into()),
+                authorization_endpoint: None,
                 token_endpoint: "https://example.com/oauth/token".into(),
                 env_var: "SOME_OAUTH_TOKEN".into(),
                 placeholder: "some-oauth-placeholder-0000000000000000".into(),
                 injections: vec![InjectionDef {
                     kind: InjectionKind::BearerHeader,
                     domain: "api.some-oauth.example".into(),
+                    header: None,
+                }],
+            }),
+            token_fallback: None,
+        }],
+    }
+    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .unwrap();
+}
+
+#[given(regex = r#"^a user catalog declares the "([^"]+)" pkce integration$"#)]
+fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::integrations::{
+        AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+    };
+    use lns_policy::providers::{InjectionDef, InjectionKind};
+    world.signin_is_pkce = true;
+    let dir = cwd(world);
+    Catalog {
+        integrations: vec![Integration {
+            id,
+            name: None,
+            auth_kind: AuthKind::Oauth,
+            routes: vec![IntegrationRoute {
+                match_pattern: "api.some-pkce.example".into(),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: None,
+            oauth: Some(OauthAuth {
+                flow: OauthFlow::Pkce,
+                client_id: None,
+                client_secret: None,
+                scopes: Vec::new(),
+                device_authorization_endpoint: None,
+                authorization_endpoint: Some("https://api.some-pkce.example/auth".into()),
+                token_endpoint: "https://api.some-pkce.example/api/v1/auth/keys".into(),
+                env_var: "SOME_PKCE_TOKEN".into(),
+                placeholder: "some-pkce-LNSPLACEHOLDER0000000000000000".into(),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: "api.some-pkce.example".into(),
                     header: None,
                 }],
             }),
@@ -167,6 +223,41 @@ fn no_token_material(world: &mut BehaviourWorld) {
     assert!(
         !text.contains("token") && !text.contains("access"),
         "the shareable policy must hold no token material: {text}"
+    );
+}
+
+#[then("the browser is opened to the authorization page")]
+fn shows_browser_opened(world: &mut BehaviourWorld) {
+    let out = &world
+        .result
+        .as_ref()
+        .expect("a run must have happened")
+        .output;
+    assert!(
+        out.contains("Opening your browser") && out.contains("/auth?"),
+        "expected a browser-opening prompt to the authorization page, got: {out}"
+    );
+}
+
+#[then("no user code is shown")]
+fn shows_no_user_code(world: &mut BehaviourWorld) {
+    let out = &world
+        .result
+        .as_ref()
+        .expect("a run must have happened")
+        .output;
+    assert!(
+        !out.contains("enter code"),
+        "a pkce sign-in has no user code to type, got: {out}"
+    );
+}
+
+#[then("lns-policy.yaml carries no credential material")]
+fn no_credential_material(world: &mut BehaviourWorld) {
+    let text = std::fs::read_to_string(policy_file(world)).unwrap_or_default();
+    assert!(
+        !text.contains("key") && !text.contains("token") && !text.contains("secret"),
+        "the shareable policy must hold no credential material: {text}"
     );
 }
 

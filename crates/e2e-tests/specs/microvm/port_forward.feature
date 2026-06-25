@@ -1,12 +1,13 @@
-# Out of scope for cargo test / regular CI: needs Vz/KVM and a booted guest.
-# Lives under specs/microvm/ (not the globbed features/ dir), so it is inert
-# documentation until a virt-capable runner is provisioned — then move it under
-# the harness and select with `--tags @microvm`. See CLAUDE.md "Out of scope".
+# Parked under specs/microvm/ (not the globbed features/ dir): these scenarios
+# need a guest that serves a TCP port, which an imageless run cannot provide —
+# the bundled busybox ships no server applet (no httpd/nc/telnetd/…), confirmed
+# by inspecting the cached binary. So, like volume_seeding.feature, they need a
+# real image with a server, blocked on a local-image path (`lns image import`).
+# The CLI grammar, service-side forward, and connection-refused path are covered
+# by Layer 2 contract tests; this file is the live host->guest byte-path, inert
+# until an image source exists. See CLAUDE.md "Out of scope".
 @microvm
 Feature: published ports are reachable from the host through a real microVM
-  This pins the live host→guest byte-path that the Layer 2 contract tests
-  cannot exercise: the CLI grammar, the service-side forward, and the guest
-  forwarder wired together against a booted guest serving a real port.
 
   Scenario: a published web port answers on the host loopback
     Given a microVM image that serves HTTP on guest port 3003

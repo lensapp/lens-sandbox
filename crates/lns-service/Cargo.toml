@@ -1,6 +1,6 @@
 [package]
 name = "lns-service"
-version = "0.0.0"
+version = "0.13.0"
 edition = "2024"
 description = "Lens Sandbox background service — tray-resident process exposing local IPC and orchestrating microVM runs"
 license = "Apache-2.0"
@@ -59,6 +59,8 @@ rand       = "0.8"
 dirs       = "5"
 uuid       = { version = "1", features = ["v4"] }
 hex        = "0.4"
+base64     = "0.22"
+form_urlencoded = "1"
 thiserror  = "2"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 zerocopy   = { version = "0.8", features = ["derive"] }
@@ -73,6 +75,7 @@ anstyle = "1"
 # no HTTP stack is involved.
 serde_yaml      = "0.9"
 notify          = "6"
+egui_material_icons = { version = "0.6", default-features = false, features = ["filled"] }
 
 # Apple Virtualization.framework bindings — macOS only. These pull in just
 # the Vz/Foundation symbols we use; the linkage to the underlying frameworks
@@ -118,6 +121,15 @@ objc2-virtualization  = { version = "0.3", features = [
 ] }
 block2                = "0.6"
 dispatch2             = "0.3"
+# Core Text resolves the host's system UI / monospace font file at runtime, so the approval window renders in San Francisco without hardcoding private font paths.
+objc2-core-text       = "0.3"
+objc2-core-foundation = "0.3"
+
+# The tray icon uses GTK on Linux (via tray-icon → libappindicator → glib 0.18),
+# so the tray must be created on a thread running a GTK main loop; this gives us
+# gtk::init / gtk::main and re-exports the matching glib as gtk::glib.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

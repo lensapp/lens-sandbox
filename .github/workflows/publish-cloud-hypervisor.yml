@@ -1,0 +1,99 @@
+name: Publish lns cloud-hypervisor
+
+# Re-hosts upstream's static cloud-hypervisor binary on the CDN origin, sha-pinned,
+# so `lns run` on Linux resolves it without a host install. Sibling of
+# publish-virtiofsd.yml — but no build: cloud-hypervisor ships fully-static release
+# artifacts for both arches (x86_64 `cloud-hypervisor-static`, aarch64
+# `cloud-hypervisor-static-aarch64`), so we download, verify static, sha, and upload.
+# Re-hosting (rather than hot-linking GitHub) keeps the install path on one CDN with
+# one overwrite/pin discipline, same as the kernel.
+#
+# Repo secrets required (shared with publish-kernel): S3_ENDPOINT_URL, S3_BUCKET,
+# S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY.
+#
+# Required GitHub environment `vmm-publish`: configure it with required reviewers so a
+# human approves before the CDN-write secrets reach a run. WARNING: if the environment
+# does not exist, GitHub auto-creates it UNPROTECTED and the gate is a no-op.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: cloud-hypervisor release tag to re-host (e.g. v52.0)
+        required: true
+        default: v52.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-cloud-hypervisor-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    environment: vmm-publish
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            upstream_asset: cloud-hypervisor-static
+          - arch: aarch64
+            upstream_asset: cloud-hypervisor-static-aarch64
+    steps:
+      - name: Download + verify upstream static binary
+        id: artifact
+        env:
+          VERSION: ${{ inputs.version }}
+          UPSTREAM_ASSET: ${{ matrix.upstream_asset }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${VERSION}/${UPSTREAM_ASSET}"
+          curl -fsSL -o cloud-hypervisor "$url"
+          chmod +x cloud-hypervisor
+          file cloud-hypervisor
+          if ! file cloud-hypervisor | grep -q "statically linked\|static-pie"; then
+            echo "::error::upstream ${UPSTREAM_ASSET} is not statically linked — refusing to publish a host-dep binary"
+            exit 1
+          fi
+          name="lns-cloud-hypervisor-${VERSION#v}-${{ matrix.arch }}"
+          mv cloud-hypervisor "$name"
+          sha256sum "$name" | awk '{print $1}' > "$name.sha256.value"
+          sha256sum "$name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "::notice::$name sha256=$(cat "$name.sha256.value")"
+
+      - name: Refuse to overwrite an existing CDN artifact
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          NAME: ${{ steps.artifact.outputs.name }}
+        run: |
+          set -euo pipefail
+          if aws s3 ls "s3://${S3_BUCKET}/${NAME}" --endpoint-url "$S3_ENDPOINT_URL" >/dev/null 2>&1; then
+            echo "::error::s3://${S3_BUCKET}/${NAME} already exists — bump the version or follow the overwrite procedure."
+            exit 1
+          fi
+
+      - name: Upload to CDN origin
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          NAME: ${{ steps.artifact.outputs.name }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "$NAME" "s3://${S3_BUCKET}/${NAME}" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "application/octet-stream"
+          aws s3 cp "$NAME.sha256" "s3://${S3_BUCKET}/${NAME}.sha256" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/plain"
+          echo "::notice::Published https://get.lns.run/${NAME}"

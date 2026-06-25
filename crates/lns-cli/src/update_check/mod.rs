@@ -1,14 +1,9 @@
 pub mod real;
 
-use crate::cli::Command;
 use anyhow::Result;
 use lns_ipc::UpdateStatus;
 use serde::Serialize;
 use std::io::Write;
-
-pub fn should_announce(command: &Command) -> bool {
-    !matches!(command, Command::Update(_))
-}
 
 pub fn announce_enabled(env_get: impl Fn(&str) -> Option<String>) -> bool {
     env_get(lns_ipc::NO_UPDATE_CHECK_ENV).is_none()

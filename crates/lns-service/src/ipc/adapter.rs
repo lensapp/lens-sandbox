@@ -14,8 +14,10 @@ use crate::log;
 use crate::shutdown::Shutdown;
 use crate::time_fmt::rfc3339_now;
 
-use super::{PostPumpAction, PumpOutcome, handle_request, post_pump_action, pump_responses};
-#[cfg(target_os = "macos")]
+use super::{
+    PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
+    pump_responses,
+};
 use super::{build_session_params, validate_exec};
 
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,6 +34,9 @@ pub async fn run_server(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (stream, _) = accept_result.context("accept failed")?;
+                if !peer_is_trusted(&stream) {
+                    continue;
+                }
                 let shutdown = shutdown.clone();
                 let start = started_at;
                 tokio::spawn(async move {
@@ -51,7 +56,7 @@ pub async fn run_server(
 }
 
 async fn bind_or_replace_stale(socket_path: &Path) -> anyhow::Result<UnixListener> {
-    match UnixListener::bind(socket_path) {
+    match bind_secure(socket_path) {
         Ok(listener) => return Ok(listener),
         Err(e) if e.kind() != io::ErrorKind::AddrInUse => {
             return Err(e).with_context(|| format!("failed to bind {}", socket_path.display()));
@@ -69,8 +74,48 @@ async fn bind_or_replace_stale(socket_path: &Path) -> anyhow::Result<UnixListene
     std::fs::remove_file(socket_path)
         .with_context(|| format!("removing stale socket {}", socket_path.display()))?;
 
-    UnixListener::bind(socket_path)
-        .with_context(|| format!("failed to rebind {}", socket_path.display()))
+    bind_secure(socket_path).with_context(|| format!("failed to rebind {}", socket_path.display()))
+}
+
+fn bind_secure(socket_path: &Path) -> io::Result<UnixListener> {
+    let listener = UnixListener::bind(socket_path)?;
+    set_socket_mode_0600(socket_path)?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn set_socket_mode_0600(socket_path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_socket_mode_0600(_socket_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn peer_is_trusted(stream: &UnixStream) -> bool {
+    match stream.peer_cred() {
+        Ok(cred) => {
+            let authorized = peer_is_authorized(cred.uid(), service_euid());
+            if !authorized {
+                log::warn!(
+                    peer_uid = cred.uid(),
+                    "rejected IPC connection from another user"
+                );
+            }
+            authorized
+        }
+        Err(e) => {
+            log::warn!(error = %e, "rejected IPC connection: peer credentials unavailable");
+            false
+        }
+    }
+}
+
+fn service_euid() -> u32 {
+    // SAFETY: geteuid is reentrant and always succeeds per POSIX.
+    unsafe { libc::geteuid() }
 }
 
 async fn is_instance_alive(socket_path: &Path) -> bool {
@@ -104,23 +149,29 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
-        Request::RunLogs { run_id, follow } => handle_logs(stream, run_id, follow).await,
-        Request::AttachRun { run_id } => handle_attach(stream, run_id).await,
-        Request::RunStats { run_id } => handle_stats(stream, run_id).await,
+        Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
+        Request::AttachRun { run } => handle_attach(stream, run).await,
+        Request::RunStats { run } => handle_stats(stream, run).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
 }
 
-#[cfg(target_os = "macos")]
-async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let response = match crate::run_registry::connector(run_id) {
         None => Response::Error {
             message: format!("no active run with id {run_id}"),
         },
         Some(connector) => crate::guest_stats::response_from(
             crate::vm::session_client::capture_session_output(
-                &connector,
+                connector.as_ref(),
                 crate::guest_stats::sample_argv(),
             )
             .await,
@@ -131,17 +182,14 @@ async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()>
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-async fn handle_stats(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
-    let _ = write_error(
-        &mut stream,
-        format!("sampling stats for run {run_id} is macOS-only in this build"),
-    )
-    .await;
-    Ok(())
-}
-
-async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyhow::Result<()> {
+async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
@@ -151,7 +199,14 @@ async fn handle_logs(mut stream: UnixStream, run_id: u32, follow: bool) -> anyho
     crate::run_log::stream_to(&buffer, &mut stream, follow, 0).await
 }
 
-async fn handle_attach(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()> {
+async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
@@ -162,28 +217,44 @@ async fn handle_attach(mut stream: UnixStream, run_id: u32) -> anyhow::Result<()
     crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
-/// Drives an oauth integration's device sign-in host-side, streaming the verification prompt to the client and persisting the obtained token set for the next run to arm.
+/// Drives an integration's interactive sign-in host-side, dispatching on its oauth `flow` and persisting the obtained credential for the next run to arm.
 async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
-    use crate::oauth::{
-        DeviceCode, OauthConfig, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
-    };
+    use lns_policy::integrations::OauthFlow;
 
     let user = lns_policy::integrations::Catalog::load_or_default(
         &lns_policy::integrations::default_integrations_path(),
     )
     .unwrap_or_default();
     let catalog = lns_policy::integrations::effective_integrations(&user);
-    let Some(cfg) = catalog
+    let Some(oauth) = catalog
         .iter()
         .find(|i| i.id == id)
         .and_then(|i| i.oauth.as_ref())
-        .map(OauthConfig::from)
     else {
         let frame = encode_frame(&Response::OauthSignInFailed {
             reason: format!("{id:?} is not an oauth integration"),
         })?;
         stream.write_all(&frame).await?;
         return Ok(());
+    };
+    match oauth.flow {
+        OauthFlow::Device => {
+            handle_device_sign_in(stream, &id, crate::oauth::OauthConfig::from(oauth)).await
+        }
+        OauthFlow::Pkce => {
+            handle_pkce_sign_in(stream, &id, crate::oauth::PkceConfig::from(oauth)).await
+        }
+    }
+}
+
+/// Streams the device-flow verification prompt to the client and persists the obtained token set.
+async fn handle_device_sign_in(
+    mut stream: UnixStream,
+    id: &str,
+    cfg: crate::oauth::OauthConfig,
+) -> anyhow::Result<()> {
+    use crate::oauth::{
+        DeviceCode, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
     };
 
     let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
@@ -212,7 +283,7 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     };
 
     let response = match outcome {
-        Ok(SignIn::Completed(token)) => match persist_oauth_token(&id, &token, &RealClock) {
+        Ok(SignIn::Completed(token)) => match persist_oauth_token(id, &token, &RealClock) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
                 reason: format!("storing the token failed: {e}"),
@@ -240,6 +311,64 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     Ok(())
 }
 
+/// Opens the browser to the PKCE authorization URL (sending it to the client too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
+async fn handle_pkce_sign_in(
+    mut stream: UnixStream,
+    id: &str,
+    cfg: crate::oauth::PkceConfig,
+) -> anyhow::Result<()> {
+    use crate::oauth::{
+        PkceChallenge, PkceSignIn, RealAuthCodeFlow, RealCallbackListener, run_pkce_flow,
+    };
+
+    let challenge = PkceChallenge::generate();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let flow = run_pkce_flow(
+        &RealAuthCodeFlow,
+        &RealCallbackListener,
+        &cfg,
+        &challenge,
+        move |url: &str| {
+            let _ = url_tx.send(url.to_string());
+            crate::browser::open(url);
+        },
+        std::future::pending::<()>(),
+        crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
+    );
+    tokio::pin!(flow);
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            Some(url) = url_rx.recv() => {
+                let frame = encode_frame(&Response::OauthBrowserOpened { authorization_url: url })?;
+                stream.write_all(&frame).await?;
+            }
+            res = &mut flow => break res,
+        }
+    };
+
+    let response = match outcome {
+        Ok(PkceSignIn::Completed(key)) => match persist_pkce_key(id, key) {
+            Ok(()) => Response::OauthSignInComplete,
+            Err(e) => Response::OauthSignInFailed {
+                reason: format!("storing the key failed: {e}"),
+            },
+        },
+        Ok(PkceSignIn::Cancelled) => Response::OauthSignInFailed {
+            reason: "the sign-in was cancelled".into(),
+        },
+        Ok(PkceSignIn::TimedOut) => Response::OauthSignInFailed {
+            reason: "the sign-in timed out before the browser redirected back".into(),
+        },
+        Err(e) => Response::OauthSignInFailed {
+            reason: format!("{e:#}"),
+        },
+    };
+    let frame = encode_frame(&response)?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
 fn persist_oauth_token(
     id: &str,
     token: &crate::oauth::TokenSet,
@@ -251,6 +380,16 @@ fn persist_oauth_token(
     let store = JsonFileCredentialStore::new(default_credentials_path());
     let mut state = store.load()?;
     state.insert(id.to_string(), crate::oauth::entry_from_token(clock, token));
+    store.save(&state)
+}
+
+fn persist_pkce_key(id: &str, key: String) -> std::io::Result<()> {
+    use crate::credential_flow::store::{
+        CredentialEntry, CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+    let store = JsonFileCredentialStore::new(default_credentials_path());
+    let mut state = store.load()?;
+    state.insert(id.to_string(), CredentialEntry::Stored { value: key });
     store.save(&state)
 }
 
@@ -276,13 +415,19 @@ async fn handle_one_shot(
 const FRAME_CHAN_BUF: usize = 512;
 
 async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyhow::Result<()> {
+    if let Some(name) = &args.name
+        && let Err(message) = crate::run_registry::ensure_name_available(name)
+    {
+        let _ = write_error(&mut stream, message).await;
+        return Ok(());
+    }
+
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
 
     let run_id = crate::run_registry::allocate_run_id();
     let detached = args.detached;
 
-    #[cfg(target_os = "macos")]
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
 
     let image_label = args
@@ -291,6 +436,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         .unwrap_or_else(|| "<imageless>".to_string());
     let command_label = args.cmd.join(" ");
     let started_label = rfc3339_now();
+    let requested_name = args.name.clone();
     let config = lns_ipc::RunConfig::from_run_args(&args);
 
     let logs = Arc::new(crate::run_log::RunLogBuffer::default());
@@ -302,25 +448,19 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     ));
     let run_args = args;
     let run_task = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
-        {
-            crate::run::handle(run_id, run_args, task_frame_tx, input_rx).await;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            crate::run::handle(run_id, run_args, task_frame_tx).await;
-        }
+        crate::run::handle(run_id, run_args, task_frame_tx, input_rx).await;
     });
 
-    crate::run_registry::register(
+    let abort = run_task.abort_handle();
+    let registered = crate::run_registry::register_named(
         run_id,
+        requested_name,
         crate::run_registry::RunHandle {
             cancel_tx,
             task: run_task,
-            #[cfg(target_os = "macos")]
             input_tx: Some(input_tx),
-            #[cfg(target_os = "macos")]
             connector: None,
+            name: String::new(),
             image: image_label,
             command: command_label,
             started: started_label,
@@ -329,6 +469,11 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             config,
         },
     );
+    if let Err(message) = registered {
+        abort.abort();
+        let _ = write_error(&mut stream, message).await;
+        return Ok(());
+    }
 
     drop(frame_tx);
 
@@ -373,9 +518,14 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
-    let target_run_id = args.run_id;
+    let target_run_id = match crate::run_registry::resolve(&args.run) {
+        Ok(id) => id,
+        Err(message) => {
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
     let Some(connector) = crate::run_registry::connector(target_run_id) else {
         let _ = write_error(
             &mut stream,
@@ -457,16 +607,6 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     drop(input_keepalive);
     session_task.abort();
     let _ = session_task.await;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-async fn handle_exec(mut stream: UnixStream, _args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
-    let _ = write_error(
-        &mut stream,
-        "lns exec is macOS-only in this build".to_string(),
-    )
-    .await;
     Ok(())
 }
 

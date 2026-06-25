@@ -148,15 +148,21 @@ mod tests {
             action: "use".into(),
             oauth_display_name: None,
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         });
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(
             &SignInPrompt {
                 credential_id: "some-provider".into(),
                 display_name: "GitHub".into(),
-                user_code: "WXYZ-1234".into(),
+                user_code: Some("WXYZ-1234".into()),
                 verification_uri: "https://example.com/device".into(),
                 token_fallback: None,
+                env_var: None,
+                injection_domains: vec![],
+                is_project_defined: false,
             },
             cancel_tx,
         );

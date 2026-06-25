@@ -19,8 +19,70 @@ const NOT_RUNNING_MESSAGE: &str =
 mod orchestrator;
 pub use orchestrator::{
     DetachBehaviour, PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers,
-    drive_pre_phase, exec_image, kill, ls, pre_phase_step, render_started_run, render_status_line,
-    require_running, run_image,
+    drive_pre_phase, exec_command, exec_image, kill, ls, pre_phase_step, render_started_run,
+    render_status_line, require_running, run_command, run_image,
+};
+
+use crate::command::{CommandSpec, subcommand};
+
+#[derive(clap::Args)]
+pub struct ServiceArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ServiceCommand {
+    #[command(about = "Start the Lens Sandbox background service.")]
+    Start,
+    #[command(about = "Stop the Lens Sandbox background service.")]
+    Stop,
+    #[command(about = "Show status of the Lens Sandbox background service.")]
+    Status,
+    #[command(
+        about = "Register a per-user login agent and start the service now and on every login."
+    )]
+    Enable,
+    #[command(about = "Stop the service and unregister the per-user login agent.")]
+    Disable,
+}
+
+pub fn augment_kill(app: clap::Command) -> clap::Command {
+    app.subcommand(subcommand::<crate::cli::KillArgs>("kill").hide(true))
+}
+
+pub const KILL_SPEC: CommandSpec = CommandSpec {
+    name: "kill",
+    augment: augment_kill,
+    run: orchestrator::kill_command,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn augment_ls(app: clap::Command) -> clap::Command {
+    app.subcommand(clap::Command::new("ls").hide(true))
+}
+
+pub const LS_SPEC: CommandSpec = CommandSpec {
+    name: "ls",
+    augment: augment_ls,
+    run: orchestrator::ls_command,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<ServiceArgs>("service").about("Manage the Lens Sandbox background service."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "service",
+    augment,
+    run: orchestrator::service_command,
+    announces_update_check: true,
+    owns_terminal: false,
 };
 
 fn require_running_check(alive: bool) -> Result<(), &'static str> {
@@ -198,6 +260,9 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
     let id_w = "ID"
         .len()
         .max(rows.iter().map(|r| count_digits(r.id)).max().unwrap_or(0));
+    let name_w = "NAME"
+        .len()
+        .max(rows.iter().map(|r| r.name.len()).max().unwrap_or(0));
     let status_w = "STATUS".len().max(
         rows.iter()
             .map(|r| status_str(r.status).len())
@@ -213,12 +278,14 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
 
     writeln!(
         out,
-        "{:<id_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  STARTED",
+        "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  STARTED",
         "ID",
+        "NAME",
         "STATUS",
         "IMAGE",
         "COMMAND",
         id_w = id_w,
+        name_w = name_w,
         status_w = status_w,
         image_w = image_w,
         cmd_w = cmd_w,
@@ -226,13 +293,15 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
     for r in rows {
         writeln!(
             out,
-            "{:<id_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {}",
+            "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {}",
             r.id,
+            r.name,
             status_str(r.status),
             r.image,
             r.command,
             friendly_started(&r.started),
             id_w = id_w,
+            name_w = name_w,
             status_w = status_w,
             image_w = image_w,
             cmd_w = cmd_w,
@@ -608,6 +677,7 @@ exit 0
     fn render_ls_table_emits_header_and_one_row_per_run() {
         let rows = vec![RunSummary {
             id: 7,
+            name: "reviewer".into(),
             image: "alpine:3.20".into(),
             command: "echo hi".into(),
             started: "2024-03-15T08:30:00Z".into(),
@@ -616,13 +686,14 @@ exit 0
         let mut buf: Vec<u8> = Vec::new();
         render_ls_table(&mut buf, &rows).expect("render");
         let out = String::from_utf8(buf).unwrap();
-        for tok in ["ID", "STATUS", "STARTED", "IMAGE", "COMMAND"] {
+        for tok in ["ID", "NAME", "STATUS", "STARTED", "IMAGE", "COMMAND"] {
             assert!(
                 out.contains(tok),
                 "expected header token {tok:?} in {out:?}"
             );
         }
         assert!(out.contains("7"), "id 7 missing in {out:?}");
+        assert!(out.contains("reviewer"), "name missing in {out:?}");
         assert!(out.contains("alpine:3.20"), "image missing in {out:?}");
     }
 
@@ -638,6 +709,7 @@ exit 0
     fn render_ls_table_renders_exited_status_with_code() {
         let rows = vec![RunSummary {
             id: 42,
+            name: "auditor".into(),
             image: "<imageless>".into(),
             command: "true".into(),
             started: "2024-03-15T08:30:00Z".into(),

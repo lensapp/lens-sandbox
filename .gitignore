@@ -9,6 +9,11 @@ coverage
 # Per-package build artifacts
 bin/
 
+# Auto-created when running `lns`; a runtime artifact, not source. The e2e
+# harness boots real runs with the crate dir as cwd (make e2e-microvm).
+/lns-policy.yaml
+/crates/e2e-tests/lns-policy.yaml
+
 # Claude Code local settings
 .claude/settings.local.json
 

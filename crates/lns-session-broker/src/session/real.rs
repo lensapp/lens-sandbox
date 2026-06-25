@@ -4,8 +4,14 @@ use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_long, c_uint};
 use std::ptr;
 use std::sync::mpsc::SyncSender;
+use std::time::Duration;
 
 use lns_session::{ClientFrame, ServerFrame, Winsize, encode_frame};
+
+const PTY_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+// Bounded wait for the host to read the final frames and close the connection before we let PID 1 power off, so output and the exit frame aren't cut off mid-flight; returns as soon as the host closes (the common case is sub-millisecond).
+const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
     LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close, dispatch_frame,
@@ -188,24 +194,31 @@ fn drive_session_tty(
         return Err(SessionError::Io(io::Error::last_os_error()));
     }
 
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel::<()>();
     let conn_for_out = conn.clone();
     let out_thread = std::thread::spawn(move || {
         pump_fd_to_vsock_stdout(out_dup, conn_for_out);
+        let _ = drained_tx.send(());
     });
 
+    let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_for_ctrl = conn.clone();
     let ctrl_thread = std::thread::spawn(move || {
         client_loop_tty(conn_for_ctrl, stdin_dup, ctrl_dup, child_pid);
+        let _ = host_closed_tx.send(());
     });
 
     let exit_code = forker.wait(child_pid)?;
 
+    // Wait for the pump to flush the workload's final output, bounded because a daemonized child holding the slave open never EOFs the master and an unbounded join would hang.
+    let _ = drained_rx.recv_timeout(PTY_DRAIN_GRACE);
+
     send_exit(&conn, exit_code);
+
+    let _ = host_closed_rx.recv_timeout(HOST_DRAIN_GRACE);
 
     shutdown_read(conn.raw());
     let _ = ctrl_thread.join();
-
-    // A daemonized child can keep the PTY slave open, so read(out_dup) would block forever; drop the handle rather than join to avoid hanging teardown.
     drop(out_thread);
 
     Ok(SessionOutcome { exit_code })
@@ -228,19 +241,24 @@ fn drive_session_pipes(
         pump_fd_to_vsock_stderr(stderr_r, conn_err);
     });
 
+    let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_in = conn.clone();
     let in_thread = std::thread::spawn(move || {
         client_loop_pipes(conn_in, stdin_w, child_pid);
+        let _ = host_closed_tx.send(());
     });
 
     let exit_code = forker.wait(child_pid)?;
 
-    shutdown_read(conn.raw());
-    let _ = in_thread.join();
     let _ = out_thread.join();
     let _ = err_thread.join();
 
     send_exit(&conn, exit_code);
+
+    let _ = host_closed_rx.recv_timeout(HOST_DRAIN_GRACE);
+
+    shutdown_read(conn.raw());
+    let _ = in_thread.join();
     Ok(SessionOutcome { exit_code })
 }
 

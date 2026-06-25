@@ -74,8 +74,12 @@ pub fn format_summary(
     let mut s = String::with_capacity(512);
     s.push_str("lns run\n");
     writeln!(s, "  Image:     {}", image_line(args)).unwrap();
-    for vol in &args.volumes {
+    let (volumes, binds) = crate::cli::split_mounts(&args.mounts);
+    for vol in &volumes {
         writeln!(s, "  Volume:    {}", volume_line(vol)).unwrap();
+    }
+    for bind in &binds {
+        writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -113,6 +117,29 @@ fn image_line(args: &RunArgs) -> String {
 fn volume_line(vol: &lns_ipc::VolumeMount) -> String {
     let mode = if vol.read_only { " (ro)" } else { "" };
     format!("{} → {}{mode}", vol.name, vol.target)
+}
+
+fn bind_line(bind: &lns_ipc::BindSpec) -> String {
+    let mode = if bind.read_only {
+        "read-only"
+    } else {
+        "read-write"
+    };
+    format!("{} → {} ({mode})", bind.host_source, bind.target)
+}
+
+/// Renders the post-scan secret disposition of each host bind (printed after KEEP/DROP resolution); empty when no bind exposed or dropped a secret.
+pub fn format_bind_dispositions(binds: &[crate::run::host_bind::ResolvedBind]) -> String {
+    let mut s = String::new();
+    for bind in binds {
+        for name in &bind.kept {
+            writeln!(s, "  {name}: kept (exposed)").unwrap();
+        }
+        for name in &bind.dropped {
+            writeln!(s, "  {name}: dropped").unwrap();
+        }
+    }
+    s
 }
 
 fn flags_line(args: &RunArgs) -> String {
@@ -191,6 +218,8 @@ mod tests {
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
             image: image.map(str::to_string),
+            name: None,
+            registry: None,
             cpus: None,
             mem: None,
             policy: None,
@@ -204,7 +233,7 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            volumes: Vec::new(),
+            mounts: Vec::new(),
             cmd: Vec::new(),
             mount: Vec::new(),
             artifact_mounts: Vec::new(),
@@ -312,17 +341,17 @@ mod tests {
     #[test]
     fn summary_lists_attached_volumes_with_target_and_ro_marker() {
         let mut args = run_args(Some("ubuntu"));
-        args.volumes = vec![
-            lns_ipc::VolumeMount {
+        args.mounts = vec![
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
-            },
-            lns_ipc::VolumeMount {
+            }),
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
                 name: "ro-cfg".into(),
                 target: "/cfg".into(),
                 read_only: true,
-            },
+            }),
         ];
         let s = format_summary(
             &args,
@@ -338,6 +367,72 @@ mod tests {
             s.contains("Volume:    ro-cfg → /cfg (ro)"),
             "missing ro volume line: {s}"
         );
+    }
+
+    #[test]
+    fn summary_lists_a_host_bind_with_its_mode() {
+        let mut args = run_args(Some("ubuntu"));
+        args.mounts = vec![lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+        })];
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Bind:      /Users/me/proj → /work (read-write)"),
+            "missing bind line: {s}"
+        );
+    }
+
+    #[test]
+    fn summary_marks_a_read_only_host_bind() {
+        let mut args = run_args(Some("ubuntu"));
+        args.mounts = vec![lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+            host_source: "/Users/me/cfg".into(),
+            target: "/cfg".into(),
+            read_only: true,
+        })];
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Bind:      /Users/me/cfg → /cfg (read-only)"),
+            "missing read-only bind line: {s}"
+        );
+    }
+
+    #[test]
+    fn bind_dispositions_render_kept_and_dropped_secrets() {
+        let binds = vec![crate::run::host_bind::ResolvedBind {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+            kept: vec![".env".into()],
+            dropped: vec![".npmrc".into()],
+        }];
+        let s = format_bind_dispositions(&binds);
+        assert!(s.contains(".env: kept (exposed)"), "missing kept line: {s}");
+        assert!(s.contains(".npmrc: dropped"), "missing dropped line: {s}");
+    }
+
+    #[test]
+    fn bind_dispositions_are_empty_without_detected_secrets() {
+        let binds = vec![crate::run::host_bind::ResolvedBind {
+            host_source: "/Users/me/proj".into(),
+            target: "/work".into(),
+            read_only: false,
+            kept: vec![],
+            dropped: vec![],
+        }];
+        assert!(format_bind_dispositions(&binds).is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Registry login credentials live in `~/.lns-registry-auth.json` (0600), separate from workload credentials: these are host-side registry tokens that must never reach a sandboxed workload.
+//! Registry logins live in `~/.lns-registry-auth.json`, not `lns-policy.yaml`, to keep the shareable policy file free of per-machine secrets.
 
 use std::collections::HashMap;
 use std::fs;
@@ -7,18 +7,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::secret_file::atomic_write_0600;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryCredential {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    pub token: String,
+    pub username: String,
+    pub secret: String,
 }
 
 pub type RegistryAuthFile = HashMap<String, RegistryCredential>;
 
-pub trait RegistryCredentialStore: Send + Sync {
+pub trait RegistryAuthStore: Send + Sync {
     fn load(&self) -> io::Result<RegistryAuthFile>;
     fn save(&self, state: &RegistryAuthFile) -> io::Result<()>;
 }
@@ -33,17 +30,17 @@ pub fn default_registry_auth_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".lns-registry-auth.json"))
 }
 
-pub struct JsonFileRegistryCredentialStore {
+pub struct JsonFileRegistryAuthStore {
     pub path: PathBuf,
 }
 
-impl JsonFileRegistryCredentialStore {
+impl JsonFileRegistryAuthStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
-impl RegistryCredentialStore for JsonFileRegistryCredentialStore {
+impl RegistryAuthStore for JsonFileRegistryAuthStore {
     fn load(&self) -> io::Result<RegistryAuthFile> {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text)
@@ -56,68 +53,85 @@ impl RegistryCredentialStore for JsonFileRegistryCredentialStore {
     fn save(&self, state: &RegistryAuthFile) -> io::Result<()> {
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        atomic_write_0600(&self.path, json.as_bytes())
+        crate::secure_file::write_json_secret_atomic(&self.path, json.as_bytes())
     }
+}
+
+const DOCKER_HUB_CANONICAL: &str = "docker.io";
+
+/// Folds the Docker Hub aliases onto the single key `oci_client::Reference::registry()` resolves to, so a login and the later pull look up the same entry.
+pub fn canonical_registry(host: &str) -> String {
+    let lowered = host.trim().trim_end_matches('/').to_ascii_lowercase();
+    match lowered.as_str() {
+        ""
+        | "docker.io"
+        | "index.docker.io"
+        | "registry-1.docker.io"
+        | "registry.hub.docker.com" => DOCKER_HUB_CANONICAL.to_string(),
+        _ => lowered,
+    }
+}
+
+/// A registry must be a bare `host[:port]` — the value we can canonicalize and compare against a parsed reference's registry.
+pub fn validate_registry_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("registry host must not be empty".to_string());
+    }
+    if host.contains("://") {
+        return Err(format!(
+            "registry {host:?} must be a bare host, not a URL (drop the scheme)"
+        ));
+    }
+    if host.contains('/') {
+        return Err(format!(
+            "registry {host:?} must be a bare host[:port], not a path"
+        ));
+    }
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("registry {host:?} must not contain whitespace"));
+    }
+    Ok(())
+}
+
+/// The stored credential for `registry`, looked up under its canonical key.
+pub fn credential_for<'a>(
+    file: &'a RegistryAuthFile,
+    registry: &str,
+) -> Option<&'a RegistryCredential> {
+    file.get(&canonical_registry(registry))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn sample_state() -> RegistryAuthFile {
+    fn sample() -> RegistryAuthFile {
         let mut m = RegistryAuthFile::new();
         m.insert(
-            "registry.some-registry.example".into(),
+            "ghcr.io".into(),
             RegistryCredential {
-                username: Some("any".into()),
-                token: "lns_some_token".into(),
+                username: "octocat".into(),
+                secret: "ghp_real_token".into(),
             },
         );
         m
     }
 
     #[test]
-    fn credential_serializes_username_alongside_token() {
-        let entry = RegistryCredential {
-            username: Some("any".into()),
-            token: "lns_tok".into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&entry).unwrap(),
-            json!({"username": "any", "token": "lns_tok"})
-        );
-    }
-
-    #[test]
-    fn credential_omits_username_when_absent() {
-        let entry = RegistryCredential {
-            username: None,
-            token: "lns_tok".into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&entry).unwrap(),
-            json!({"token": "lns_tok"})
-        );
-    }
-
-    #[test]
     fn credential_round_trips_through_json() {
-        for username in [Some("any".to_string()), None] {
-            let entry = RegistryCredential {
-                username,
-                token: "lns_tok".into(),
-            };
-            let s = serde_json::to_string(&entry).unwrap();
-            let parsed: RegistryCredential = serde_json::from_str(&s).unwrap();
-            assert_eq!(entry, parsed);
-        }
+        let cred = RegistryCredential {
+            username: "u".into(),
+            secret: "s".into(),
+        };
+        let s = serde_json::to_string(&cred).unwrap();
+        let back: RegistryCredential = serde_json::from_str(&s).unwrap();
+        assert_eq!(cred, back);
     }
 
     #[test]
     fn load_returns_empty_state_when_file_missing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = JsonFileRegistryCredentialStore::new(dir.path().join("absent.json"));
+        let store = JsonFileRegistryAuthStore::new(dir.path().join("never.json"));
         assert!(store.load().unwrap().is_empty());
     }
 
@@ -126,85 +140,107 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("auth.json");
         fs::write(&path, "{ not json").unwrap();
-        let store = JsonFileRegistryCredentialStore::new(path);
-        assert_eq!(store.load().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let err = JsonFileRegistryAuthStore::new(path).load().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn load_propagates_non_not_found_io_errors() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = JsonFileRegistryCredentialStore::new(dir.path().to_path_buf());
-        assert_ne!(store.load().unwrap_err().kind(), io::ErrorKind::NotFound);
+        let err = JsonFileRegistryAuthStore::new(dir.path().to_path_buf())
+            .load()
+            .unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn save_then_load_round_trips_full_state() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = JsonFileRegistryCredentialStore::new(dir.path().join("auth.json"));
-        let original = sample_state();
+        let store = JsonFileRegistryAuthStore::new(dir.path().join("auth.json"));
+        let original = sample();
         store.save(&original).unwrap();
         assert_eq!(store.load().unwrap(), original);
     }
 
     #[test]
-    fn save_writes_file_with_mode_0600_so_registry_tokens_are_not_world_readable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("auth.json");
-        let store = JsonFileRegistryCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "got 0o{mode:o}, want 0o600");
+    fn canonical_registry_folds_docker_hub_aliases_to_docker_io() {
+        for alias in [
+            "",
+            "docker.io",
+            "index.docker.io",
+            "registry-1.docker.io",
+            "registry.hub.docker.com",
+            "DOCKER.IO",
+            "docker.io/",
+        ] {
+            assert_eq!(canonical_registry(alias), "docker.io", "alias {alias:?}");
+        }
     }
 
     #[test]
-    fn save_does_not_follow_a_symlink_planted_at_the_tmp_path() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let attacker_target = dir.path().join("attacker-target");
-        let attacker_contents = b"victim-data-must-survive";
-        fs::write(&attacker_target, attacker_contents).unwrap();
-        let path = dir.path().join("auth.json");
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        std::os::unix::fs::symlink(&attacker_target, PathBuf::from(tmp)).unwrap();
-
-        let store = JsonFileRegistryCredentialStore::new(path);
-        let _ = store.save(&sample_state());
-
+    fn canonical_registry_lowercases_and_trims_other_hosts() {
+        assert_eq!(canonical_registry(" GHCR.IO "), "ghcr.io");
+        assert_eq!(canonical_registry("localhost:5000"), "localhost:5000");
         assert_eq!(
-            fs::read(&attacker_target).unwrap(),
-            attacker_contents,
-            "a symlink at the tmp path must not redirect the credential write"
+            canonical_registry("registry.example.test"),
+            "registry.example.test"
         );
     }
 
     #[test]
-    fn save_overwrites_existing_file_atomically() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("auth.json");
-        let store = JsonFileRegistryCredentialStore::new(path);
-        store.save(&sample_state()).unwrap();
-        let mut second = RegistryAuthFile::new();
-        second.insert(
-            "other.example".into(),
+    fn validate_registry_host_accepts_bare_hosts_and_ports() {
+        validate_registry_host("ghcr.io").unwrap();
+        validate_registry_host("localhost:5000").unwrap();
+        validate_registry_host("registry.example.test").unwrap();
+    }
+
+    #[test]
+    fn validate_registry_host_rejects_empty_urls_paths_and_whitespace() {
+        assert!(validate_registry_host("").unwrap_err().contains("empty"));
+        assert!(
+            validate_registry_host("https://ghcr.io")
+                .unwrap_err()
+                .contains("URL")
+        );
+        assert!(
+            validate_registry_host("ghcr.io/owner")
+                .unwrap_err()
+                .contains("path")
+        );
+        assert!(
+            validate_registry_host("ghcr io")
+                .unwrap_err()
+                .contains("whitespace")
+        );
+    }
+
+    #[test]
+    fn credential_for_looks_up_under_the_canonical_key() {
+        let mut file = RegistryAuthFile::new();
+        file.insert(
+            "docker.io".into(),
             RegistryCredential {
-                username: None,
-                token: "lns_other".into(),
+                username: "hubuser".into(),
+                secret: "hubsecret".into(),
             },
         );
-        store.save(&second).unwrap();
-        assert_eq!(store.load().unwrap(), second);
+        // A pull reference resolves Docker Hub to its own registry alias; the lookup must still hit the stored docker.io entry.
+        assert_eq!(
+            credential_for(&file, "index.docker.io").unwrap().username,
+            "hubuser"
+        );
+        assert!(credential_for(&file, "ghcr.io").is_none());
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn default_registry_auth_path_uses_override_when_set() {
         use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", "/tmp/custom-registry-auth.json");
+        let _g1 = EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", "/tmp/custom-auth.json");
         let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
         assert_eq!(
             default_registry_auth_path(),
-            PathBuf::from("/tmp/custom-registry-auth.json")
+            PathBuf::from("/tmp/custom-auth.json")
         );
     }
 

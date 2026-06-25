@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
+use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
@@ -23,6 +24,12 @@ pub struct BehaviourWorld {
     /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
     pub oauth_id: Option<String>,
 
+    /// Set when a sign-in scenario needs the accept step to spawn the sign-in so a later step can cancel it mid-flight.
+    pub spawn_connect: bool,
+
+    /// The in-flight sign-in spawned by an accept step, awaited by the cancel step.
+    pub connect_task: Option<tokio::task::JoinHandle<()>>,
+
     pub image_env: Option<Vec<String>>,
     pub image_workdir: Option<String>,
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
@@ -38,10 +45,21 @@ pub struct BehaviourWorld {
 
     pub volume: Option<VolumeRig>,
 
+    pub bind: Option<BindRig>,
+
     pub image: Option<ImageRig>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<u32>,
+
+    /// Run id registered by a naming scenario, addressable later by name or id.
+    pub naming_run: Option<u32>,
+    /// Name a naming scenario last assigned or observed.
+    pub naming_name: Option<String>,
+    /// First auto-generated name captured when comparing auto-name uniqueness.
+    pub naming_first_name: Option<String>,
+    /// Refusal message from the last registration / rename in a naming scenario.
+    pub naming_error: Option<String>,
 }
 
 impl BehaviourWorld {
@@ -74,6 +92,13 @@ impl BehaviourWorld {
             self.volume = Some(VolumeRig::new());
         }
         self.volume.as_mut().expect("volume rig must exist")
+    }
+
+    pub fn bind(&mut self) -> &mut BindRig {
+        if self.bind.is_none() {
+            self.bind = Some(BindRig::new());
+        }
+        self.bind.as_mut().expect("bind rig must exist")
     }
 
     pub fn image(&mut self) -> &mut ImageRig {

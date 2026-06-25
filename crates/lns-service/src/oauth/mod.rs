@@ -1,4 +1,4 @@
-//! Host-side OAuth 2.0 Device Authorization Grant (RFC 8628): the orchestration is here and unit-tested via a fake; the reqwest/SystemTime leaves live in `real.rs`.
+//! Host-side interactive OAuth sign-in: the RFC 8628 device grant and the browser-redirect authorization-code + PKCE flow; the orchestration is here and unit-tested via fakes, while the reqwest/socket/SystemTime leaves live in `real.rs`.
 
 mod real;
 pub mod traits;
@@ -6,11 +6,16 @@ pub mod traits;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+use base64::Engine;
+use sha2::{Digest, Sha256};
 
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
-pub use real::{RealClock, RealDeviceFlow};
-pub use traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
+pub use real::{RealAuthCodeFlow, RealCallbackListener, RealClock, RealDeviceFlow};
+pub use traits::{
+    AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
+    OauthConfig, PkceConfig, PollOutcome, TokenSet,
+};
 
 /// RFC 8628 §3.5: a `slow_down` response bumps the poll interval by 5 seconds.
 const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
@@ -71,6 +76,121 @@ pub async fn run_device_flow(
             }
         }
     }
+}
+
+/// A PKCE challenge: the random verifier, its base64url(SHA-256) `S256` challenge, and a CSRF `state` nonce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkceChallenge {
+    pub verifier: String,
+    pub challenge: String,
+    pub state: String,
+}
+
+impl PkceChallenge {
+    /// Draws a fresh high-entropy verifier and state and derives the verifier's S256 challenge.
+    pub fn generate() -> Self {
+        let verifier = random_token();
+        let challenge = s256_challenge(&verifier);
+        let state = random_token();
+        Self {
+            verifier,
+            challenge,
+            state,
+        }
+    }
+}
+
+fn random_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn s256_challenge(verifier: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Builds the provider authorization URL carrying the PKCE challenge and a `callback_url` that embeds the loopback `redirect_url` plus the `state` nonce, so the provider round-trips `state` by redirecting to that exact URL rather than by echoing a sibling param.
+pub fn authorization_url(
+    cfg: &PkceConfig,
+    redirect_url: &str,
+    challenge: &PkceChallenge,
+) -> String {
+    let scope = cfg.scopes.join(" ");
+    let callback_url = format!(
+        "{redirect_url}?{}",
+        form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", &challenge.state)
+            .finish()
+    );
+    let mut ser = form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("callback_url", &callback_url)
+        .append_pair("code_challenge", &challenge.challenge)
+        .append_pair("code_challenge_method", "S256");
+    if !scope.is_empty() {
+        ser.append_pair("scope", &scope);
+    }
+    format!("{}?{}", cfg.authorization_endpoint, ser.finish())
+}
+
+/// Extracts `code` and `state` from a loopback callback's HTTP request line (`GET /callback?code=…&state=… HTTP/1.1`).
+pub(crate) fn parse_callback_target(request_line: &str) -> Result<CallbackParams> {
+    let target = request_line.split_whitespace().nth(1).unwrap_or("");
+    let query = target.split_once('?').map_or("", |(_, q)| q);
+    let mut code = None;
+    let mut state = None;
+    for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    match (code, state) {
+        (Some(code), Some(state)) => Ok(CallbackParams { code, state }),
+        _ => bail!("pkce callback missing code or state in {request_line:?}"),
+    }
+}
+
+/// The terminal result of driving a PKCE sign-in to completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PkceSignIn {
+    Completed(String),
+    Cancelled,
+    TimedOut,
+}
+
+/// Binds a loopback callback, hands the authorization URL to `on_authorization_url` (which presents it and opens the browser), and exchanges the returned code for the provider's key; cancel and timeout resolve without a key, while a state mismatch or a failed bind/exchange fail closed as `Err`.
+pub async fn run_pkce_flow(
+    flow: &dyn AuthCodeFlow,
+    listener: &dyn CallbackListener,
+    cfg: &PkceConfig,
+    challenge: &PkceChallenge,
+    on_authorization_url: impl FnOnce(&str),
+    cancel: impl std::future::Future<Output = ()>,
+    timeout: Duration,
+) -> Result<PkceSignIn> {
+    let handle = listener.bind().await?;
+    let auth_url = authorization_url(cfg, handle.redirect_url(), challenge);
+    on_authorization_url(&auth_url);
+    tokio::pin!(cancel);
+    let params = tokio::select! {
+        biased;
+        () = &mut cancel => return Ok(PkceSignIn::Cancelled),
+        () = tokio::time::sleep(timeout) => return Ok(PkceSignIn::TimedOut),
+        result = handle.wait() => result?,
+    };
+    if params.state != challenge.state {
+        bail!(
+            "pkce callback state {:?} did not match the issued nonce",
+            params.state
+        );
+    }
+    let key = flow
+        .exchange_code(cfg, &params.code, &challenge.verifier)
+        .await?;
+    Ok(PkceSignIn::Completed(key))
 }
 
 /// Turns a freshly-obtained grant into the stored entry, stamping an absolute expiry off the injected clock.
@@ -237,6 +357,7 @@ mod tests {
     fn sample_cfg() -> OauthConfig {
         OauthConfig {
             client_id: "Iv1.test".into(),
+            client_secret: String::new(),
             scopes: vec!["repo".into()],
             device_authorization_endpoint: "https://example.com/device/code".into(),
             token_endpoint: "https://example.com/oauth/token".into(),
@@ -365,6 +486,413 @@ mod tests {
             flow.polls.lock().unwrap().is_empty(),
             "the pivot must short-circuit before consuming a poll"
         );
+    }
+
+    #[test]
+    fn pkce_challenge_s256_binds_the_verifier_to_the_challenge() {
+        let c = PkceChallenge::generate();
+        assert_eq!(
+            c.challenge,
+            s256_challenge(&c.verifier),
+            "the challenge must be base64url(sha256(verifier))"
+        );
+        assert!(
+            c.challenge
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+            "an S256 challenge is unpadded base64url: {}",
+            c.challenge
+        );
+        let verifier_len = c.verifier.len();
+        assert!(
+            (43..=128).contains(&verifier_len),
+            "the verifier must satisfy RFC 7636's 43..=128 length, got {verifier_len}"
+        );
+    }
+
+    #[test]
+    fn pkce_challenge_draws_distinct_unguessable_verifier_and_state_each_time() {
+        let a = PkceChallenge::generate();
+        let b = PkceChallenge::generate();
+        assert_ne!(a.verifier, b.verifier, "verifiers must be unguessable");
+        assert_ne!(a.state, b.state, "state nonces must be unguessable");
+        assert_ne!(
+            a.verifier, a.state,
+            "the verifier and state are independent nonces"
+        );
+    }
+
+    fn pkce_cfg(scopes: &[&str]) -> PkceConfig {
+        PkceConfig {
+            authorization_endpoint: "https://provider.example/auth".into(),
+            token_endpoint: "https://provider.example/api/v1/auth/keys".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn query_pairs(url: &str) -> std::collections::HashMap<String, String> {
+        reqwest::Url::parse(url)
+            .expect("a valid url")
+            .query_pairs()
+            .into_owned()
+            .collect()
+    }
+
+    #[test]
+    fn authorization_url_carries_the_callback_challenge_method_and_state() {
+        let challenge = PkceChallenge {
+            verifier: "v".into(),
+            challenge: "the-challenge".into(),
+            state: "the-state".into(),
+        };
+        let url = authorization_url(
+            &pkce_cfg(&[]),
+            "http://localhost:54321/callback",
+            &challenge,
+        );
+        assert!(
+            url.starts_with("https://provider.example/auth?"),
+            "got: {url}"
+        );
+        let pairs = query_pairs(&url);
+        assert_eq!(
+            pairs.get("callback_url").map(String::as_str),
+            Some("http://localhost:54321/callback?state=the-state"),
+            "the state nonce rides inside the callback_url so the provider round-trips it by redirecting there"
+        );
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some("the-challenge")
+        );
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert!(
+            !pairs.contains_key("state"),
+            "state is embedded in callback_url, not sent as a sibling param the provider must echo"
+        );
+        assert!(
+            !pairs.contains_key("scope"),
+            "no scope param when none configured"
+        );
+        assert!(!pairs.contains_key("client_id"), "PKCE sends no client id");
+    }
+
+    #[test]
+    fn authorization_url_appends_space_joined_scopes_when_present() {
+        let challenge = PkceChallenge {
+            verifier: "v".into(),
+            challenge: "c".into(),
+            state: "s".into(),
+        };
+        let url = authorization_url(
+            &pkce_cfg(&["read", "write"]),
+            "http://localhost:1/callback",
+            &challenge,
+        );
+        assert_eq!(
+            query_pairs(&url).get("scope").map(String::as_str),
+            Some("read write")
+        );
+    }
+
+    #[test]
+    fn parse_callback_target_extracts_code_and_state_ignoring_extra_params() {
+        let p =
+            parse_callback_target("GET /callback?iss=provider&code=abc123&state=xyz789 HTTP/1.1")
+                .unwrap();
+        assert_eq!(p.code, "abc123");
+        assert_eq!(p.state, "xyz789");
+    }
+
+    #[test]
+    fn parse_callback_target_errors_when_a_parameter_is_missing() {
+        let err = parse_callback_target("GET /callback?code=only HTTP/1.1").unwrap_err();
+        assert!(
+            err.to_string().contains("missing code or state"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_callback_target_errors_on_a_malformed_request_line() {
+        let err = parse_callback_target("GET").unwrap_err();
+        assert!(
+            err.to_string().contains("missing code or state"),
+            "got: {err}"
+        );
+    }
+
+    struct FakeAuthCodeFlow {
+        result: Mutex<Option<Result<String>>>,
+        seen: Mutex<Vec<(String, String)>>,
+    }
+    impl FakeAuthCodeFlow {
+        fn returning(result: Result<String>) -> Self {
+            Self {
+                result: Mutex::new(Some(result)),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl AuthCodeFlow for FakeAuthCodeFlow {
+        fn exchange_code<'a>(
+            &'a self,
+            _cfg: &'a PkceConfig,
+            code: &'a str,
+            verifier: &'a str,
+        ) -> BoxFuture<'a, Result<String>> {
+            let pair = (code.to_string(), verifier.to_string());
+            Box::pin(async move {
+                self.seen.lock().unwrap().push(pair);
+                self.result
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("exchange_code called but not scripted")
+            })
+        }
+    }
+
+    enum WaitPlan {
+        Returns(CallbackParams),
+        Pends,
+        Fails,
+    }
+    struct FakeCallbackListener {
+        bind_fails: bool,
+        wait: Mutex<Option<WaitPlan>>,
+    }
+    impl FakeCallbackListener {
+        fn returning(params: CallbackParams) -> Self {
+            Self {
+                bind_fails: false,
+                wait: Mutex::new(Some(WaitPlan::Returns(params))),
+            }
+        }
+        fn pending() -> Self {
+            Self {
+                bind_fails: false,
+                wait: Mutex::new(Some(WaitPlan::Pends)),
+            }
+        }
+        fn wait_failing() -> Self {
+            Self {
+                bind_fails: false,
+                wait: Mutex::new(Some(WaitPlan::Fails)),
+            }
+        }
+        fn bind_failing() -> Self {
+            Self {
+                bind_fails: true,
+                wait: Mutex::new(None),
+            }
+        }
+    }
+    impl CallbackListener for FakeCallbackListener {
+        fn bind(&self) -> BoxFuture<'_, Result<Box<dyn CallbackHandle>>> {
+            Box::pin(async move {
+                if self.bind_fails {
+                    bail!("cannot bind loopback callback listener");
+                }
+                let plan = self.wait.lock().unwrap().take().expect("bind called twice");
+                Ok(Box::new(FakeCallbackHandle { plan }) as Box<dyn CallbackHandle>)
+            })
+        }
+    }
+    struct FakeCallbackHandle {
+        plan: WaitPlan,
+    }
+    impl CallbackHandle for FakeCallbackHandle {
+        fn redirect_url(&self) -> &str {
+            "http://localhost:0/callback"
+        }
+        fn wait(self: Box<Self>) -> BoxFuture<'static, Result<CallbackParams>> {
+            Box::pin(async move {
+                match self.plan {
+                    WaitPlan::Returns(p) => Ok(p),
+                    WaitPlan::Pends => std::future::pending().await,
+                    WaitPlan::Fails => bail!("callback connection failed"),
+                }
+            })
+        }
+    }
+
+    fn pkce_test_cfg() -> PkceConfig {
+        PkceConfig {
+            authorization_endpoint: "https://provider.example/auth".into(),
+            token_endpoint: "https://provider.example/api/v1/auth/keys".into(),
+            scopes: Vec::new(),
+        }
+    }
+    fn fixed_challenge() -> PkceChallenge {
+        PkceChallenge {
+            verifier: "fixed-verifier".into(),
+            challenge: "fixed-challenge".into(),
+            state: "fixed-state".into(),
+        }
+    }
+
+    // A shared no-op so the never-called case (a failed bind) reuses a body covered by the tests that do present.
+    fn noop_url(_: &str) {}
+
+    #[tokio::test]
+    async fn run_pkce_flow_completes_and_exchanges_the_verifier_behind_the_challenge() {
+        let flow = FakeAuthCodeFlow::returning(Ok("sk-or-the-key".into()));
+        let listener = FakeCallbackListener::returning(CallbackParams {
+            code: "the-code".into(),
+            state: "fixed-state".into(),
+        });
+        let urls = Mutex::new(Vec::new());
+        let out = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            |url| urls.lock().unwrap().push(url.to_string()),
+            std::future::pending::<()>(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, PkceSignIn::Completed("sk-or-the-key".into()));
+        assert_eq!(
+            flow.seen.lock().unwrap().as_slice(),
+            &[("the-code".to_string(), "fixed-verifier".to_string())],
+            "the exchange must send the returned code and the verifier behind the issued challenge"
+        );
+        let captured = urls.lock().unwrap();
+        assert_eq!(captured.len(), 1, "the authorization URL is surfaced once");
+        assert!(
+            captured[0].contains("code_challenge=fixed-challenge"),
+            "got: {}",
+            captured[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pkce_flow_cancel_aborts_without_exchanging() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("must not exchange")));
+        let listener = FakeCallbackListener::pending();
+        let out = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::ready(()),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, PkceSignIn::Cancelled);
+        assert!(
+            flow.seen.lock().unwrap().is_empty(),
+            "a cancelled sign-in must not reach the exchange"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_pkce_flow_times_out_when_no_callback_arrives() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("must not exchange")));
+        let listener = FakeCallbackListener::pending();
+        let out = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::pending::<()>(),
+            Duration::from_secs(120),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, PkceSignIn::TimedOut);
+        assert!(flow.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_pkce_flow_rejects_a_callback_whose_state_mismatches() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("must not exchange")));
+        let listener = FakeCallbackListener::returning(CallbackParams {
+            code: "c".into(),
+            state: "forged".into(),
+        });
+        let err = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::pending::<()>(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did not match"), "got: {err}");
+        assert!(
+            flow.seen.lock().unwrap().is_empty(),
+            "a forged state must never reach the exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pkce_flow_surfaces_a_failed_exchange() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("invalid_code")));
+        let listener = FakeCallbackListener::returning(CallbackParams {
+            code: "c".into(),
+            state: "fixed-state".into(),
+        });
+        let err = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::pending::<()>(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid_code"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_pkce_flow_fails_closed_when_the_listener_cannot_bind() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("must not exchange")));
+        let listener = FakeCallbackListener::bind_failing();
+        let err = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::pending::<()>(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("bind"), "got: {err}");
+        assert!(flow.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_pkce_flow_surfaces_a_callback_connection_error() {
+        let flow = FakeAuthCodeFlow::returning(Err(anyhow!("must not exchange")));
+        let listener = FakeCallbackListener::wait_failing();
+        let err = run_pkce_flow(
+            &flow,
+            &listener,
+            &pkce_test_cfg(),
+            &fixed_challenge(),
+            noop_url,
+            std::future::pending::<()>(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("connection failed"), "got: {err}");
     }
 
     #[tokio::test]

@@ -28,14 +28,16 @@ run, which requires a `COMMAND` after `--`.
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
 | `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
+| `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
+| `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare image reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
 | `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
-| `-v`, `--volume <SPEC>`      |                  | Attach a named volume as `name:/path[:ro]` (repeatable); persists across runs. |
+| `-v`, `--volume <SPEC>`      |                  | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. |
-| `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload.                 |
-| `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY.      |
+| `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
+| `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Comma-separated detach chord (single chars or `ctrl-X`).                |
 | `--sandbox-user <NAME>`      | `sandbox`        | Username the workload runs as inside the guest.                         |
@@ -83,22 +85,51 @@ lns image pull <IMAGE> | ls | rm <IMAGE> | prune [-f]
 
 See [Running workloads — images](running-workloads.md#managing-the-image-cache).
 
+## `lns login` / `lns logout`
+
+Store credentials for a private OCI registry so `lns run` and `lns image pull`
+can fetch its images. Credentials are verified against the registry before they
+are saved (the background service must be running), and multiple registries can
+be logged in at once.
+
+```bash
+echo "$TOKEN" | lns login -u <USERNAME> --password-stdin <REGISTRY>
+lns login --list
+lns logout <REGISTRY>
+```
+
+| Form                                  | Meaning                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `docker.io`). Pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `--password`. |
+| `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
+| `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
+
+The registry is matched by host: a bare `lns run alpine` uses the `run.registry`
+default (or Docker Hub), while a fully-qualified `lns run ghcr.io/org/app` always
+targets that registry and uses its stored login if present. Credentials live in
+a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
+`LNS_REGISTRY_AUTH_PATH`), separate from any shareable policy.
+
 ## `lns sandbox`
 
-Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune.
+Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.
 
 ```bash
 lns sandbox ls
-lns sandbox exec [OPTIONS] <RUN_ID> -- <COMMAND...>
-lns sandbox kill <RUN_ID> [--signal <SIG>]
-lns sandbox stop <RUN_ID> [-t <SECONDS>]
-lns sandbox logs [-f] <RUN_ID>
-lns sandbox attach <RUN_ID> [--detach-keys <CHORD>]
-lns sandbox inspect <RUN_ID>
-lns sandbox stats <RUN_ID>
-lns sandbox rm <RUN_ID>
+lns sandbox exec [OPTIONS] <RUN> -- <COMMAND...>
+lns sandbox kill <RUN> [--signal <SIG>]
+lns sandbox stop <RUN> [-t <SECONDS>]
+lns sandbox logs [-f] <RUN>
+lns sandbox attach <RUN> [--detach-keys <CHORD>]
+lns sandbox inspect <RUN>
+lns sandbox stats <RUN>
+lns sandbox rm <RUN>
+lns sandbox rename <RUN> <NEW_NAME>
 lns sandbox prune
 ```
+
+`<RUN>` is a run's numeric id (`7`) or its name (`reviewer`) — the two are
+interchangeable everywhere a run is addressed.
 
 | Subcommand | Meaning |
 | ---------- | ------- |
@@ -111,6 +142,7 @@ lns sandbox prune
 | `inspect`  | Print the run's state and launch configuration as JSON, with the policy file's parsed contents embedded when it is readable. |
 | `stats`    | Sample the sandbox's CPU share and memory over one second, via the guest's `/proc`. |
 | `rm`       | Remove a single finished run from the list (`docker rm`-style). Refuses a run that is still running — stop it first. |
+| `rename`   | Give a run a name or change it (`docker rename`-style); the new name resolves immediately and must be unique among listed runs. |
 | `prune`    | Remove every finished run from the list at once (`docker container prune`-style); running runs are left untouched. |
 
 The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
@@ -121,11 +153,13 @@ as hidden aliases; the `lns sandbox` forms are the documented ones.
 Verify the audit chain of a run.
 
 ```bash
-lns audit <RUN_ID>
+lns audit <RUN_ID> [--allow-missing-anchor]
 ```
 
 `RUN_ID` is the identifier surfaced by `lns run` as `✓ started run #<id>`. Exits `0`
-on an intact chain, non-zero if tampering is detected. See [Audit](audit.md).
+on an intact chain, non-zero if tampering is detected, or if the anchor that guards
+against truncation is missing, corrupt, or unreadable. `--allow-missing-anchor`
+accepts a missing anchor (chain-only check) with exit `0`. See [Audit](audit.md).
 
 ## `lns service`
 
@@ -228,6 +262,7 @@ lns config list
 | ------------- | ------------- | ---------------------------------------------------------- |
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
+| `run.registry`| `--registry`  | Default registry host for bare image references (e.g. `ghcr.io`). |
 | `run.env`     | `-e`          | `KEY=VALUE` (multiple values allowed).                     |
 | `run.volume`  | `-v`          | `name:/path[:ro]` (multiple values allowed).               |
 | `run.publish` | `-p`          | `[host_ip:]hostport:containerport[/proto]` (multiple values allowed). |

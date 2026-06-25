@@ -99,6 +99,9 @@ impl CredentialNotifier for WindowCredentialNotifier {
                 user_code: prompt.user_code.clone(),
                 verification_uri: prompt.verification_uri.clone(),
                 token_fallback: prompt.token_fallback.clone(),
+                env_var: prompt.env_var.clone(),
+                injection_domains: prompt.injection_domains.clone(),
+                is_project_defined: prompt.is_project_defined,
             },
             cancel,
         );
@@ -132,6 +135,9 @@ mod tests {
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
             token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
@@ -244,11 +250,14 @@ mod tests {
         SignInPrompt {
             credential_id: "some-oauth".into(),
             display_name: "GitHub".into(),
-            user_code: "WXYZ-1234".into(),
+            user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
             }),
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
         }
     }
 
@@ -260,7 +269,7 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.sign_ins.len(), 1);
         assert_eq!(snap.sign_ins[0].display_name, "GitHub");
-        assert_eq!(snap.sign_ins[0].user_code, "WXYZ-1234");
+        assert_eq!(snap.sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
         assert_eq!(
             snap.sign_ins[0].token_fallback,
             Some(lns_policy::integrations::TokenFallback {

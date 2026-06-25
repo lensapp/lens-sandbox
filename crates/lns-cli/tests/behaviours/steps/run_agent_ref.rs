@@ -1,7 +1,6 @@
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::RunArgs;
 use lns_cli::registry::RegistryClient;
 use lns_cli::run::resolve::resolve_into_run_args;
 use lns_policy::artifact::Family;
@@ -53,10 +52,8 @@ async fn given_agent_needs_credential(
 
 #[when(regex = r#"^the developer launches "([^"]+)"$"#)]
 async fn when_developer_runs(world: &mut BehaviourWorld, reference: String) {
-    let cli = Cli::try_parse_from(["lns", "run", &reference]).expect("parse run argv");
-    let Command::Run(args) = cli.command else {
-        panic!("expected a run command");
-    };
+    let args: RunArgs =
+        lns_cli::command::parse_args(["lns", "run", &reference]).expect("parse run argv");
     let available = world.available_creds.clone();
     let mut buf = Vec::new();
     match resolve_into_run_args(args, &world.registry, &available, &mut buf).await {

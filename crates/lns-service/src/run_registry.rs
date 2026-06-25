@@ -1,30 +1,30 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use lns_ipc::RunStatus;
-#[cfg(target_os = "macos")]
+use lns_ipc::{RunStatus, validate_run_name};
+
+use crate::run_name;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-#[cfg(target_os = "macos")]
-use crate::vm::VsockConnector;
-#[cfg(target_os = "macos")]
+use crate::vm::GuestTransport;
 use crate::vm::session_client::SessionInput;
 
 static NEXT_RUN_ID: AtomicU32 = AtomicU32::new(1);
+
+static NEXT_NAME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 static ACTIVE: Mutex<Option<HashMap<u32, RunHandle>>> = Mutex::new(None);
 
 pub struct RunHandle {
     pub cancel_tx: oneshot::Sender<i32>,
     pub task: JoinHandle<()>,
-    #[cfg(target_os = "macos")]
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
-    #[cfg(target_os = "macos")]
-    pub connector: Option<std::sync::Arc<VsockConnector>>,
+    pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
+    pub name: String,
     pub image: String,
     pub command: String,
     pub started: String,
@@ -58,6 +58,110 @@ pub fn register(run_id: u32, handle: RunHandle) {
     g.get_or_insert_with(HashMap::new).insert(run_id, handle);
 }
 
+pub fn register_named(
+    run_id: u32,
+    requested: Option<String>,
+    handle: RunHandle,
+) -> Result<String, String> {
+    let mut next_name = || run_name::name_for_index(NEXT_NAME_SEQ.fetch_add(1, Ordering::Relaxed));
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    let map = g.get_or_insert_with(HashMap::new);
+    register_named_in(map, run_id, requested, handle, &mut next_name)
+}
+
+fn register_named_in(
+    map: &mut HashMap<u32, RunHandle>,
+    run_id: u32,
+    requested: Option<String>,
+    mut handle: RunHandle,
+    next_name: &mut dyn FnMut() -> String,
+) -> Result<String, String> {
+    let name = match requested {
+        Some(requested) => {
+            check_name_available(Some(&*map), &requested)?;
+            requested
+        }
+        None => unique_auto_name(map, next_name),
+    };
+    handle.name = name.clone();
+    map.insert(run_id, handle);
+    Ok(name)
+}
+
+pub fn ensure_name_available(name: &str) -> Result<(), String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    check_name_available(g.as_ref(), name)
+}
+
+fn check_name_available(map: Option<&HashMap<u32, RunHandle>>, name: &str) -> Result<(), String> {
+    validate_run_name(name)?;
+    match map.and_then(|m| name_holder(m, name)) {
+        Some(holder) => Err(format!("name {name:?} already in use by run #{holder}")),
+        None => Ok(()),
+    }
+}
+
+fn unique_auto_name(
+    map: &HashMap<u32, RunHandle>,
+    next_name: &mut dyn FnMut() -> String,
+) -> String {
+    for _ in 0..run_name::pool_size() {
+        let candidate = next_name();
+        if name_holder(map, &candidate).is_none() {
+            return candidate;
+        }
+    }
+    let base = next_name();
+    (0..=map.len() as u32)
+        .map(|n| format!("{base}_{n}"))
+        .find(|name| name_holder(map, name).is_none())
+        .expect("more distinct suffixes than names in use")
+}
+
+fn name_holder(map: &HashMap<u32, RunHandle>, name: &str) -> Option<u32> {
+    map.iter().find(|(_, h)| h.name == name).map(|(id, _)| *id)
+}
+
+pub fn resolve(handle: &str) -> Result<u32, String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    resolve_in(g.as_ref(), handle)
+}
+
+fn resolve_in(map: Option<&HashMap<u32, RunHandle>>, handle: &str) -> Result<u32, String> {
+    if let Ok(id) = handle.parse::<u32>() {
+        return Ok(id);
+    }
+    map.and_then(|m| name_holder(m, handle))
+        .ok_or_else(|| format!("no such run: {handle}"))
+}
+
+pub fn rename(handle: &str, new_name: &str) -> Result<(), String> {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    rename_in(g.as_mut(), handle, new_name)
+}
+
+fn rename_in(
+    map: Option<&mut HashMap<u32, RunHandle>>,
+    handle: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    validate_run_name(new_name)?;
+    let map = map.ok_or_else(|| format!("no such run: {handle}"))?;
+    let target = resolve_in(Some(&*map), handle)?;
+    if let Some(holder) = name_holder(map, new_name)
+        && holder != target
+    {
+        return Err(format!("name {new_name:?} already in use by run #{holder}"));
+    }
+    match map.get_mut(&target) {
+        Some(h) => {
+            h.name = new_name.to_string();
+            Ok(())
+        }
+        None => Err(format!("no such run: {handle}")),
+    }
+}
+
 pub fn deregister(run_id: u32) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(m) = g.as_mut() {
@@ -65,7 +169,6 @@ pub fn deregister(run_id: u32) {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn input_sender(run_id: u32) -> Option<mpsc::Sender<SessionInput>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
@@ -80,16 +183,14 @@ pub fn log_buffer(run_id: u32) -> Option<std::sync::Arc<crate::run_log::RunLogBu
         .map(|h| h.logs.clone())
 }
 
-#[cfg(target_os = "macos")]
-pub fn connector(run_id: u32) -> Option<std::sync::Arc<VsockConnector>> {
+pub fn connector(run_id: u32) -> Option<std::sync::Arc<dyn GuestTransport>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(&run_id))
         .and_then(|h| h.connector.clone())
 }
 
-#[cfg(target_os = "macos")]
-pub fn set_connector(run_id: u32, connector: std::sync::Arc<VsockConnector>) {
+pub fn set_connector(run_id: u32, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(&run_id)) {
         h.connector = Some(connector);
@@ -138,6 +239,7 @@ fn summary_of(id: u32, h: &RunHandle) -> lns_ipc::RunSummary {
     let status = h.status.lock().map(|s| *s).unwrap_or(RunStatus::Running);
     lns_ipc::RunSummary {
         id,
+        name: h.name.clone(),
         image: h.image.clone(),
         command: h.command.clone(),
         status,
@@ -229,10 +331,9 @@ mod tests {
             RunHandle {
                 cancel_tx,
                 task,
-                #[cfg(target_os = "macos")]
                 input_tx: None,
-                #[cfg(target_os = "macos")]
                 connector: None,
+                name: String::new(),
                 image: String::new(),
                 command: String::new(),
                 started: String::new(),
@@ -242,6 +343,198 @@ mod tests {
             },
             cancel_rx,
         )
+    }
+
+    fn gen_amber() -> String {
+        "amber_otter".to_string()
+    }
+
+    async fn named_handle(map: &mut HashMap<u32, RunHandle>, id: u32, name: &str) {
+        let (mut h, _rx) = make_handle();
+        h.name = name.to_string();
+        map.insert(id, h);
+    }
+
+    #[tokio::test]
+    async fn register_named_in_keeps_an_explicit_valid_name() {
+        let mut map = HashMap::new();
+        let (h, _rx) = make_handle();
+        let name = register_named_in(
+            &mut map,
+            1,
+            Some("reviewer".into()),
+            h,
+            &mut (gen_amber as fn() -> String),
+        )
+        .unwrap();
+        assert_eq!(name, "reviewer");
+        assert_eq!(map.get(&1).unwrap().name, "reviewer");
+    }
+
+    #[tokio::test]
+    async fn register_named_in_rejects_a_name_held_by_a_listed_run() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 7, "reviewer").await;
+        let (h, _rx) = make_handle();
+        let err = register_named_in(
+            &mut map,
+            8,
+            Some("reviewer".into()),
+            h,
+            &mut (gen_amber as fn() -> String),
+        )
+        .unwrap_err();
+        assert!(err.contains("already in use by run #7"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn register_named_in_rejects_an_invalid_explicit_name() {
+        let mut map = HashMap::new();
+        let (h, _rx) = make_handle();
+        register_named_in(
+            &mut map,
+            1,
+            Some("7".into()),
+            h,
+            &mut (gen_amber as fn() -> String),
+        )
+        .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn register_named_in_auto_generates_when_no_name_is_requested() {
+        let mut map = HashMap::new();
+        let (h, _rx) = make_handle();
+        let name =
+            register_named_in(&mut map, 1, None, h, &mut (gen_amber as fn() -> String)).unwrap();
+        assert_eq!(name, "amber_otter");
+    }
+
+    #[tokio::test]
+    async fn register_named_in_regenerates_until_the_auto_name_is_unique() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 7, "amber_otter").await;
+        let (h, _rx) = make_handle();
+        let mut seq = ["amber_otter", "amber_otter", "bold_falcon"].into_iter();
+        let mut next_name = || seq.next().unwrap().to_string();
+        let name = register_named_in(&mut map, 8, None, h, &mut next_name).unwrap();
+        assert_eq!(name, "bold_falcon");
+    }
+
+    #[tokio::test]
+    async fn register_named_in_suffixes_a_name_when_the_pretty_pool_is_exhausted() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 7, "amber_otter").await;
+        let (h, _rx) = make_handle();
+        let mut next_name = || "amber_otter".to_string();
+        let name = register_named_in(&mut map, 8, None, h, &mut next_name).unwrap();
+        assert_eq!(name, "amber_otter_0");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn ensure_name_available_rejects_taken_or_invalid_names_and_accepts_free_ones() {
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id, Some(format!("rev-{id}")), h).unwrap();
+        assert!(ensure_name_available(&format!("rev-{id}")).is_err());
+        assert!(ensure_name_available("7").is_err());
+        assert!(ensure_name_available(&format!("free-{id}")).is_ok());
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn resolve_in_passes_numeric_ids_through_and_looks_up_names() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        assert_eq!(resolve_in(Some(&map), "3"), Ok(3));
+        assert_eq!(resolve_in(Some(&map), "reviewer"), Ok(3));
+        // Numeric handles pass through unchecked; the downstream id-op is the existence gate.
+        assert_eq!(resolve_in(Some(&map), "9"), Ok(9));
+        assert_eq!(resolve_in(None, "5"), Ok(5));
+        assert!(
+            resolve_in(Some(&map), "ghost")
+                .unwrap_err()
+                .contains("no such run: ghost")
+        );
+        assert!(
+            resolve_in(None, "reviewer")
+                .unwrap_err()
+                .contains("no such run")
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_in_changes_the_name_in_place() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        rename_in(Some(&mut map), "reviewer", "auditor").unwrap();
+        assert_eq!(map.get(&3).unwrap().name, "auditor");
+        assert_eq!(resolve_in(Some(&map), "auditor"), Ok(3));
+        assert!(
+            resolve_in(Some(&map), "reviewer")
+                .unwrap_err()
+                .contains("no such run")
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_in_to_a_held_name_is_refused() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        named_handle(&mut map, 4, "auditor").await;
+        let err = rename_in(Some(&mut map), "auditor", "reviewer").unwrap_err();
+        assert!(err.contains("already in use by run #3"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rename_in_to_the_runs_own_name_is_a_noop_success() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        rename_in(Some(&mut map), "reviewer", "reviewer").unwrap();
+        assert_eq!(map.get(&3).unwrap().name, "reviewer");
+    }
+
+    #[tokio::test]
+    async fn rename_in_rejects_an_invalid_new_name() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        rename_in(Some(&mut map), "reviewer", "7").unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn rename_in_reports_no_such_run_for_unknown_name_id_or_empty_registry() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, 3, "reviewer").await;
+        let err = rename_in(Some(&mut map), "ghost", "auditor").unwrap_err();
+        assert!(err.contains("no such run: ghost"), "got: {err}");
+        let err = rename_in(Some(&mut map), "999", "auditor").unwrap_err();
+        assert!(err.contains("no such run: 999"), "got: {err}");
+        let err = rename_in(None, "ghost", "auditor").unwrap_err();
+        assert!(err.contains("no such run: ghost"), "got: {err}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn register_named_assigns_an_auto_name_and_resolves_by_name_and_id() {
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        let name = register_named(id, None, h).unwrap();
+        assert!(!name.is_empty());
+        assert_eq!(resolve(&name), Ok(id));
+        assert_eq!(resolve(&id.to_string()), Ok(id));
+        deregister(id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn rename_via_the_global_registry_updates_the_name() {
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id, Some(format!("rev-{id}")), h).unwrap();
+        rename(&format!("rev-{id}"), &format!("aud-{id}")).unwrap();
+        assert_eq!(resolve(&format!("aud-{id}")), Ok(id));
+        deregister(id);
     }
 
     #[tokio::test]
@@ -332,14 +625,24 @@ mod tests {
         assert_eq!(next, 1, "expected id 1 (no prior runs), got {next}");
     }
 
-    #[cfg(target_os = "macos")]
+    struct StubTransport;
+    impl crate::vm::GuestTransport for StubTransport {
+        fn connect(
+            &self,
+            _port: u32,
+            _timeout: std::time::Duration,
+        ) -> futures_util::future::BoxFuture<'_, anyhow::Result<std::os::fd::RawFd>> {
+            Box::pin(async { Ok(0) })
+        }
+        fn request_stop(&self) {}
+    }
+
     #[tokio::test]
     async fn input_sender_returns_none_for_unknown_id() {
         let id = allocate_run_id() + 2_000_000;
         assert!(input_sender(id).is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn input_sender_returns_clone_when_handle_has_one() {
         let id = allocate_run_id();
@@ -354,14 +657,12 @@ mod tests {
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn connector_returns_none_for_unknown_id() {
         let id = allocate_run_id() + 2_000_001;
         assert!(connector(id).is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn connector_returns_none_when_handle_has_no_connector() {
         let id = allocate_run_id();
@@ -373,27 +674,31 @@ mod tests {
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_connector_populates_handle_field() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
         register(id, handle);
 
-        let conn = std::sync::Arc::new(crate::vm::VsockConnector::new_for_testing());
-        set_connector(id, conn);
+        set_connector(id, std::sync::Arc::new(StubTransport));
 
-        assert!(connector(id).is_some());
+        let stored = connector(id).expect("connector should be stored");
+        stored.request_stop();
+        assert_eq!(
+            stored
+                .connect(1, std::time::Duration::ZERO)
+                .await
+                .expect("stub connect"),
+            0
+        );
 
         deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_connector_is_noop_when_run_not_registered() {
         let id = allocate_run_id() + 2_000_002;
-        let conn = std::sync::Arc::new(crate::vm::VsockConnector::new_for_testing());
-        set_connector(id, conn);
+        set_connector(id, std::sync::Arc::new(StubTransport));
 
         assert!(connector(id).is_none());
     }

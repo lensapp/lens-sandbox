@@ -1,72 +1,70 @@
 @microvm
 Feature: named volumes persist workload state across runs
-  `lns run` starts from a blank, discarded writable layer every time.
-  A named volume is host-backed storage, identified by name, that a user
-  explicitly attaches to a guest path so a stateful workload's data
-  survives between runs. Ephemeral-by-default is preserved: no volume is
-  attached unless the user asks for one.
+  `lns run` starts from a blank, discarded writable layer every time. A named
+  volume is host-backed storage, attached with `-v name:/path[:ro]`, whose
+  contents survive between runs. Ephemeral-by-default is preserved: no volume
+  is attached unless the user asks for one.
 
-  These scenarios are guest-observable: they require a booted microVM
-  with the overlay rootfs, so they are tagged @microvm and run only on a
-  virt-capable runner. The host-side store, locking, validation, and
-  spec-assembly behaviour has a runnable companion in
-  crates/lns-service/tests/behaviours/volumes.feature.
+  These are guest-observable and need a booted microVM, so they are @microvm
+  and run only via `make e2e-microvm`. They are imageless — the commands use
+  /bin/sh builtins (echo, read, redirects) and the bundled busybox by full
+  path, so no registry pull is needed. The image-seeding scenarios that need
+  a real image live parked in specs/microvm/volume_seeding.feature until
+  `lns image import` exists.
 
-  Scenario: First attach of a new name creates the volume, seeded from the image
-    Given no volume named "prism-data" exists
-    And the image ships seed files at `/data`
-    When the user runs `lns run -v prism-data:/data <image>`
-    Then a volume named "prism-data" is created in the global store
-    And it is seeded with the image's contents at `/data`
-    And it is mounted at `/data` in the guest, writable
-    And the run summary lists the attached volume and its guest path
+  Scenario: data written to a volume is there on the next run
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo persisted-data > /data/marker'" with volume "e2e-vol-persist" at "/data"
+    Then the exit code is 0
+    And volume "e2e-vol-persist" is released
+    When the user runs a microVM command "/bin/sh -c 'read v < /data/marker; echo got=$v'" with volume "e2e-vol-persist" at "/data"
+    Then the exit code is 0
+    And the output contains "got=persisted-data"
 
-  Scenario: An existing volume is reused as-is, not re-seeded from the image
-    Given volume "prism-data" already holds data
-    And the image ships different seed files at `/data`
-    When a later `lns run -v prism-data:/data <image>` starts
-    Then `/data` shows the volume's contents, not the image's seed files
+  Scenario: without a volume the run is fully ephemeral
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo ghost > /run/marker; read v < /run/marker; echo wrote=$v'"
+    Then the exit code is 0
+    And the output contains "wrote=ghost"
+    When the user runs a microVM command "/bin/sh -c 'if [ -f /run/marker ]; then echo PRESENT; else echo ABSENT; fi'"
+    Then the exit code is 0
+    And the output contains "ABSENT"
 
-  Scenario: Data written to a volume is there on the next run
-    Given a run wrote a file under `/data` with volume "prism-data" attached
-    When a later `lns run -v prism-data:/data <image>` starts
-    Then the previously written file is present under `/data`
+  Scenario: a volume is name-keyed, not path-keyed
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo keyed-by-name > /data/marker'" with volume "e2e-vol-key" at "/data"
+    Then the exit code is 0
+    And volume "e2e-vol-key" is released
+    When the user runs a microVM command "/bin/sh -c 'read v < /srv/state/marker; echo got=$v'" with volume "e2e-vol-key" at "/srv/state"
+    Then the exit code is 0
+    And the output contains "got=keyed-by-name"
 
-  Scenario: Without -v the run is fully ephemeral (invariant preserved)
-    Given a run wrote a file under `/data` with no volume attached
-    When a later `lns run <image>` starts with no volume attached
-    Then `/data` is empty — nothing from the previous run persists
+  Scenario: a read-only attach exposes data but rejects writes
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo seeded-content > /data/marker'" with volume "e2e-vol-ro" at "/data"
+    Then the exit code is 0
+    And volume "e2e-vol-ro" is released
+    When the user runs a microVM command "/bin/sh -c 'read v < /data/marker; echo read=$v; if echo blocked > /data/blocked 2>/dev/null; then echo WROTE; else echo BLOCKED; fi'" with read-only volume "e2e-vol-ro" at "/data"
+    Then the exit code is 0
+    And the output contains "read=seeded-content"
+    And the output contains "BLOCKED"
 
-  Scenario: A volume is name-keyed, not path-keyed
-    Given volume "prism-data" holds data written while mounted at `/data`
-    When a later run attaches it with `-v prism-data:/srv/state`
-    Then the same data appears under `/srv/state`
+  Scenario: an invalid volume name is rejected before the VM boots
+    Given the Lens Sandbox service is running
+    When I run "run -v ../etc:/data -- /bin/true"
+    Then the exit code is non-zero
+    And the output contains "invalid volume name"
 
-  Scenario: A read-only attach exposes data but rejects writes
-    Given volume "prism-data" holds data
-    When a run attaches it with `-v prism-data:/data:ro`
-    Then the workload can read `/data`
-    And writes under `/data` fail
-    And the volume's contents are unchanged after the run
+  Scenario: attaching a volume is recorded in the audit history
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo ok'" with volume "e2e-vol-audit" at "/data"
+    Then the exit code is 0
+    And the audit chain for that run records volume "e2e-vol-audit" at "/data"
 
-  Scenario: First read-only attach of a new volume is still seeded from the image
-    Given no volume named "prism-data" exists
-    And the image ships seed files at `/data`
-    When the user runs `lns run -v prism-data:/data:ro <image>`
-    Then `/data` shows the image's seed files, read-only
-    And writes under `/data` fail
-
-  Scenario: The same volume cannot be attached to two live runs at once
-    Given a run is live with volume "prism-data" attached
-    When a second `lns run -v prism-data:/data <image>` is started
-    Then the second run fails with a clear "volume in use by run #N" error
-    And the first run is unaffected
-
-  Scenario: An invalid volume name is rejected before the VM boots
-    When the user runs `lns run -v "../etc:/data" <image>`
-    Then the command fails with a volume-name validation error
-    And no VM is booted and no host path outside the store is touched
-
-  Scenario: Attaching a volume is recorded in the audit history
-    When a run attaches volume "prism-data" at `/data`
-    Then the audit chain records the volume name and guest mount path
+  Scenario: the same volume cannot be attached to two live runs at once
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'" with volume "e2e-vol-live" at "/data"
+    Then the exit code is 0
+    When the user runs a microVM command "/bin/sh -c 'echo got-it'" with volume "e2e-vol-live" at "/data"
+    Then the exit code is non-zero
+    And the output contains "in use"

@@ -130,6 +130,7 @@ fn worker_count() -> usize {
 
 // Files above this stream straight to the content store rather than buffering in RAM, so a layer of multi-GB blobs can't balloon the in-flight queue.
 const MAX_BUFFERED_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_NAME_BYTES: usize = 255;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -503,7 +504,15 @@ fn normalize_path(p: &Path) -> Result<Option<PathBuf>> {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
-            Component::Normal(seg) => out.push(seg),
+            Component::Normal(seg) => {
+                if seg.as_bytes().len() > MAX_NAME_BYTES {
+                    bail!(
+                        "tar entry path component exceeds the {MAX_NAME_BYTES}-byte name limit: {}",
+                        p.display()
+                    );
+                }
+                out.push(seg);
+            }
             Component::CurDir | Component::RootDir | Component::Prefix(_) => continue,
             Component::ParentDir => {
                 bail!("tar entry path contains `..`: {}", p.display())
@@ -744,6 +753,22 @@ mod tests {
     fn normalize_path_rejects_dotdot() {
         let err = normalize_path(Path::new("foo/../escape")).unwrap_err();
         assert!(format!("{err:#}").contains(".."));
+    }
+
+    #[test]
+    fn normalize_path_rejects_an_overlong_name_component() {
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        let err = normalize_path(Path::new(&long)).unwrap_err();
+        assert!(format!("{err:#}").contains("name limit"), "{err:#}");
+    }
+
+    #[test]
+    fn normalize_path_accepts_a_name_component_at_the_limit() {
+        let ok = "a".repeat(MAX_NAME_BYTES);
+        assert_eq!(
+            normalize_path(Path::new(&ok)).unwrap(),
+            Some(PathBuf::from(&ok))
+        );
     }
 
     #[test]

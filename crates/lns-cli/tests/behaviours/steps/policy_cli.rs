@@ -1,10 +1,9 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::cli::{
-    PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs, TransportArg,
+use lns_cli::policy::{
+    self, PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs, TransportArg,
 };
-use lns_cli::policy;
 use lns_policy::{Policy, RouteRule, Verdict};
 use std::path::{Path, PathBuf};
 

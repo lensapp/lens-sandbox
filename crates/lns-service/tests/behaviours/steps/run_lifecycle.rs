@@ -7,26 +7,29 @@ pub fn register_run(run_id: u32) {
     register_run_with(run_id, "some-image", lns_ipc::RunConfig::default());
 }
 
-pub fn register_run_with(run_id: u32, image: &str, config: lns_ipc::RunConfig) {
+pub fn fresh_handle(
+    image: &str,
+    config: lns_ipc::RunConfig,
+) -> lns_service::run_registry::RunHandle {
     let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async {});
-    lns_service::run_registry::register(
-        run_id,
-        lns_service::run_registry::RunHandle {
-            cancel_tx,
-            task,
-            #[cfg(target_os = "macos")]
-            input_tx: None,
-            #[cfg(target_os = "macos")]
-            connector: None,
-            image: image.into(),
-            command: "some-command".into(),
-            started: "2026-01-01T00:00:00Z".into(),
-            status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
-            logs: std::sync::Arc::new(lns_service::run_log::RunLogBuffer::default()),
-            config,
-        },
-    );
+    lns_service::run_registry::RunHandle {
+        cancel_tx,
+        task,
+        input_tx: None,
+        connector: None,
+        name: String::new(),
+        image: image.into(),
+        command: "some-command".into(),
+        started: "2026-01-01T00:00:00Z".into(),
+        status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+        logs: std::sync::Arc::new(lns_service::run_log::RunLogBuffer::default()),
+        config,
+    }
+}
+
+pub fn register_run_with(run_id: u32, image: &str, config: lns_ipc::RunConfig) {
+    lns_service::run_registry::register(run_id, fresh_handle(image, config));
 }
 
 #[given("a registered run that has already exited")]
@@ -46,13 +49,29 @@ async fn registered_running_run(world: &mut BehaviourWorld) {
 
 #[when(regex = r#"^a RemoveRun request for run (\d+) arrives$"#)]
 async fn remove_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
-    world.response = Some(run_one_shot(&Request::RemoveRun { run_id }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::RemoveRun {
+                run: run_id.to_string(),
+            },
+            world.started_at(),
+        )
+        .await,
+    );
 }
 
 #[when("a RemoveRun request for that run arrives")]
 async fn remove_registered_run(world: &mut BehaviourWorld) {
     let run_id = world.lifecycle_run.expect("a run must be registered first");
-    world.response = Some(run_one_shot(&Request::RemoveRun { run_id }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::RemoveRun {
+                run: run_id.to_string(),
+            },
+            world.started_at(),
+        )
+        .await,
+    );
     lns_service::run_registry::deregister(run_id);
 }
 
@@ -61,7 +80,7 @@ async fn stop_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
     world.response = Some(
         run_one_shot(
             &Request::StopRun {
-                run_id,
+                run: run_id.to_string(),
                 timeout_secs: 1,
             },
             world.started_at(),
@@ -76,7 +95,7 @@ async fn stop_registered_run(world: &mut BehaviourWorld) {
     world.response = Some(
         run_one_shot(
             &Request::StopRun {
-                run_id,
+                run: run_id.to_string(),
                 timeout_secs: 1,
             },
             world.started_at(),
@@ -118,13 +137,29 @@ async fn registered_run_with_config(
 
 #[when(regex = r#"^an InspectRun request for run (\d+) arrives$"#)]
 async fn inspect_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
-    world.response = Some(run_one_shot(&Request::InspectRun { run_id }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::InspectRun {
+                run: run_id.to_string(),
+            },
+            world.started_at(),
+        )
+        .await,
+    );
 }
 
 #[when("an InspectRun request for that run arrives")]
 async fn inspect_registered_run(world: &mut BehaviourWorld) {
     let run_id = world.lifecycle_run.expect("a run must be registered first");
-    world.response = Some(run_one_shot(&Request::InspectRun { run_id }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::InspectRun {
+                run: run_id.to_string(),
+            },
+            world.started_at(),
+        )
+        .await,
+    );
     lns_service::run_registry::deregister(run_id);
 }
 

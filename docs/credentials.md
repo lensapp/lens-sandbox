@@ -25,9 +25,10 @@ isn't configured for is not rewritten — the placeholder goes nowhere useful.
 
 Every credential provider is an [integration](integrations.md): a named service that
 bundles its placeholder, environment variable, and per-domain injection with the
-routes it needs. `openai`, `anthropic`, `linear`, `telegram`, `gitlab`, and
-`huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
-(device sign-in). Declare your own for an internal API with `lns integration add`
+routes it needs. `openai`, `anthropic`, `bedrock`, `linear`, `telegram`, `gitlab`,
+and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
+(device sign-in) and `openrouter` as an `oauth` integration (pkce browser sign-in).
+Declare your own for an internal API with `lns integration add`
 (see [Integrations](integrations.md)). Connect one to a project with
 `lns integration connect <id>`, which records it under `integrations:` in that
 directory's `lns-policy.yaml`.
@@ -45,10 +46,12 @@ on the host, store a specific value at the boundary, or deny (requests carrying 
 placeholder then fail at the boundary). The decision is remembered for next time.
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
-than a pasted secret it's a self-renewing **token set** obtained by an interactive
-device sign-in (`lns integration connect <id>`), refreshed automatically and
-re-prompted when the grant can no longer be refreshed. It lives in the same per-machine
-file and is never written to `lns-policy.yaml`.
+than a pasted secret it's obtained by an interactive **sign-in**
+(`lns integration connect <id>`). A device-flow integration yields a self-renewing
+**token set**, refreshed automatically and re-prompted when the grant can no longer be
+refreshed; a pkce integration yields a **durable key** captured through your browser,
+with no refresh or expiry. Either way it lives in the same per-machine file and is
+never written to `lns-policy.yaml`.
 
 ## Injection kinds
 

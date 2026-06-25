@@ -1,7 +1,6 @@
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::cli::RunArgs;
 use lns_cli::registry::RegistryClient;
 use lns_cli::run::resolve::resolve_explicit_mounts;
 use lns_policy::artifact::Family;
@@ -29,11 +28,9 @@ async fn given_fileset(world: &mut BehaviourWorld, reference: String, path: Stri
 
 #[when(regex = r#"^the developer runs an image with mount "([^"]+)"$"#)]
 async fn when_runs_with_mount(world: &mut BehaviourWorld, mount: String) {
-    let cli = Cli::try_parse_from(["lns", "run", "some-image:1", "--mount", &mount])
-        .expect("parse run argv");
-    let Command::Run(args) = cli.command else {
-        panic!("expected a run command");
-    };
+    let args: RunArgs =
+        lns_cli::command::parse_args(["lns", "run", "some-image:1", "--mount", &mount])
+            .expect("parse run argv");
     let mut buf = Vec::new();
     match resolve_explicit_mounts(args, &world.registry, &mut buf).await {
         Ok(args) => world.resolved_mounts = args.artifact_mounts,

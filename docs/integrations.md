@@ -106,14 +106,23 @@ A route may carry the same detail a [policy rule](policy.md#rules) can — a `sc
 and HTTP method/path `rules` for least-privilege access — beyond the bare `match`.
 
 `authKind` is `credential` or `oauth`. An `oauth` integration authenticates by an
-interactive **device sign-in** (RFC 8628) the background service drives for you:
-`lns integration connect <id>` prints a verification URL and a code, you authorize in
-a browser, and the obtained token is injected at the boundary like any credential —
-but it's short-lived and refreshed automatically, and a grant that can no longer be
-refreshed re-prompts the sign-in on next use. The bundled `github` integration
-signs in this way. Its live token is stored per machine, never in `lns-policy.yaml`.
-An `oauth` entry carries an `oauth:` block (client id, scopes, the device-authorization
-and token endpoints) in place of `credential:`.
+interactive **sign-in** the background service drives for you — `lns integration
+connect <id>` walks you through it and records the integration only once it completes,
+and the obtained credential is injected at the boundary like any other, stored per
+machine and never in `lns-policy.yaml`. An `oauth` entry carries an `oauth:` block (in
+place of `credential:`) whose `flow` selects one of two shapes:
+
+- **`flow: device`** (RFC 8628, the default) — `connect` prints a verification URL and
+  a code, and you authorize in a browser. The token is short-lived, refreshed
+  automatically, and a grant that can no longer be refreshed re-prompts the sign-in on
+  next use. The bundled `github` integration signs in this way; its block carries a
+  client id, scopes, and the device-authorization and token endpoints.
+- **`flow: pkce`** (OAuth 2.0 authorization code + PKCE) — `connect` opens your browser
+  to the provider's authorization page, and after you approve, the service captures the
+  returned key over a one-time loopback callback. The result is a **durable** key with
+  no refresh or expiry, so it stays armed across runs until the provider revokes it. The
+  bundled `openrouter` integration signs in this way; its block carries an authorization
+  endpoint and a token endpoint (and no client id).
 
 ## See also
 

@@ -15,9 +15,10 @@ pub use codec::{
 };
 pub use paths::{CachePathError, audit_anchor_for_run, audit_log_for_run, cache_root, data_root};
 pub use protocol::{
-    ArtifactMount, ExecImageArgs, ImageInfo, LogLevel, PortPublish, Protocol, Request, Response,
-    RunConfig, RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SignalKind,
-    StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure, validate_volume_name,
+    ArtifactMount, BindMount, BindSpec, ExecImageArgs, ImageInfo, LogLevel, MountSpec, PortPublish,
+    Protocol, Request, Response, RunConfig, RunDetails, RunImageArgs, RunStatsInfo, RunStatus,
+    RunSummary, SignalKind, StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure,
+    cmdline_unsafe_char, validate_bind_source, validate_run_name, validate_volume_name,
     validate_volume_target,
 };
 pub use socket::{SocketPathError, default_socket_path};

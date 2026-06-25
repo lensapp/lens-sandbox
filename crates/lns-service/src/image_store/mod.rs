@@ -432,6 +432,7 @@ mod tests {
     fn running(id: u32, image: &str) -> lns_ipc::RunSummary {
         lns_ipc::RunSummary {
             id,
+            name: String::new(),
             image: image.to_string(),
             command: String::new(),
             status: lns_ipc::RunStatus::Running,

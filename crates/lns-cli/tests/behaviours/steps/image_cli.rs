@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
-use clap::Parser;
 use cucumber::{given, then, when};
-use lns_cli::cli::{Cli, Command};
+use lns_cli::command::parse_args;
+use lns_cli::image::ImageArgs;
 use lns_cli::image::{self, ImageService};
 use lns_cli::integration::LocalBoxFuture;
 use lns_ipc::{ImageInfo, Request, Response};
@@ -164,11 +164,8 @@ fn prompt_answer(world: &mut BehaviourWorld, answer: String) {
 async fn run_image(world: &mut BehaviourWorld, tail: String) {
     let mut argv = vec!["lns".to_string(), "image".to_string()];
     argv.extend(tail.split_whitespace().map(str::to_string));
-    let run = match Cli::try_parse_from(&argv) {
-        Ok(cli) => {
-            let Command::Image(args) = cli.command else {
-                panic!("expected an image command");
-            };
+    let run = match parse_args::<ImageArgs, _, _>(&argv) {
+        Ok(args) => {
             let svc = FakeImageService::from_world(world);
             let stdin_text = world
                 .image

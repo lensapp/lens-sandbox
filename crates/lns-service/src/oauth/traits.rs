@@ -9,6 +9,7 @@ use lns_policy::integrations::OauthAuth;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OauthConfig {
     pub client_id: String,
+    pub client_secret: String,
     pub scopes: Vec<String>,
     pub device_authorization_endpoint: String,
     pub token_endpoint: String,
@@ -17,9 +18,13 @@ pub struct OauthConfig {
 impl From<&OauthAuth> for OauthConfig {
     fn from(o: &OauthAuth) -> Self {
         Self {
-            client_id: o.client_id.clone(),
+            client_id: o.client_id.clone().unwrap_or_default(),
+            client_secret: o.client_secret.clone().unwrap_or_default(),
             scopes: o.scopes.clone(),
-            device_authorization_endpoint: o.device_authorization_endpoint.clone(),
+            device_authorization_endpoint: o
+                .device_authorization_endpoint
+                .clone()
+                .unwrap_or_default(),
             token_endpoint: o.token_endpoint.clone(),
         }
     }
@@ -72,4 +77,52 @@ pub trait DeviceFlow: Send + Sync {
 /// Wall-clock source for token-expiry arithmetic, injected so refresh decisions are deterministic in tests.
 pub trait Clock: Send + Sync {
     fn now_unix(&self) -> u64;
+}
+
+/// The slice of an integration's oauth block the PKCE authorization-code flow needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkceConfig {
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub scopes: Vec<String>,
+}
+
+impl From<&OauthAuth> for PkceConfig {
+    fn from(o: &OauthAuth) -> Self {
+        Self {
+            authorization_endpoint: o.authorization_endpoint.clone().unwrap_or_default(),
+            token_endpoint: o.token_endpoint.clone(),
+            scopes: o.scopes.clone(),
+        }
+    }
+}
+
+/// The query parameters a provider returns to the loopback callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackParams {
+    pub code: String,
+    pub state: String,
+}
+
+/// The provider-facing side of the PKCE code exchange, injected so the orchestration is host-tested without real network.
+pub trait AuthCodeFlow: Send + Sync {
+    /// Exchanges an authorization `code` plus its PKCE `verifier` for the provider's durable key.
+    fn exchange_code<'a>(
+        &'a self,
+        cfg: &'a PkceConfig,
+        code: &'a str,
+        verifier: &'a str,
+    ) -> BoxFuture<'a, Result<String>>;
+}
+
+/// A transient loopback callback listener bound for one PKCE sign-in, injected so the orchestration is host-tested without a real socket.
+pub trait CallbackListener: Send + Sync {
+    /// Binds a loopback listener and reports the URL to register as `callback_url`, or fails closed if it can't bind.
+    fn bind(&self) -> BoxFuture<'_, Result<Box<dyn CallbackHandle>>>;
+}
+
+/// A bound listener awaiting the single browser redirect.
+pub trait CallbackHandle: Send {
+    fn redirect_url(&self) -> &str;
+    fn wait(self: Box<Self>) -> BoxFuture<'static, Result<CallbackParams>>;
 }

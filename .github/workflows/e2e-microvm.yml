@@ -1,0 +1,77 @@
+name: e2e-microvm
+
+# Boots a REAL microVM through the Linux Cloud Hypervisor (KVM) backend and
+# runs the @microvm Layer 1 scenarios. Standard GitHub-hosted x86_64 runners
+# expose /dev/kvm (the udev step below fixes group perms); ARM runners don't,
+# so this stays x86_64-only. Not a required check — it runs nightly and on
+# demand, separate from the PR gate, because real-VM boots are too slow and
+# flaky to block merges. Promote to a required gate once it proves stable.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-microvm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # De-facto version pins for the out-of-process VMM (the service resolves
+  # both from PATH at runtime; nothing in-tree pins them otherwise).
+  CLOUD_HYPERVISOR_VERSION: v52.0
+  # The x86_64 runner cross-builds the guest payloads for
+  # x86_64-unknown-linux-musl (build.rs derives the guest triple from the host
+  # arch) — same arrangement as ci.yml's check-release-build.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+  CC_x86_64_unknown_linux_musl: gcc
+  AR_x86_64_unknown_linux_musl: ar
+
+jobs:
+  e2e-microvm:
+    name: microVM e2e (x86_64 KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Linux system dependencies (tray-icon / GTK)
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          version: 1.0
+
+      - name: Install cloud-hypervisor
+        run: |
+          set -euo pipefail
+          url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CLOUD_HYPERVISOR_VERSION}/cloud-hypervisor-static"
+          curl -fsSL -o /tmp/cloud-hypervisor "$url"
+          sudo install -m0755 /tmp/cloud-hypervisor /usr/local/bin/cloud-hypervisor
+          cloud-hypervisor --version
+
+      - name: Install virtiofsd
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y virtiofsd
+          # apt ships virtiofsd off PATH under /usr/libexec; the service and the
+          # preflight both resolve that location, so no LNS_VIRTIOFSD_BIN needed.
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: x86_64-unknown-linux-musl
+          cache-workspaces: .
+          cache-on-failure: true
+          cache-shared-key: lns-ci-e2e-microvm
+
+      - run: CARGO_LOCKED=--locked make e2e-microvm

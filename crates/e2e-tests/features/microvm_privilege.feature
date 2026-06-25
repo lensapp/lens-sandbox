@@ -1,0 +1,33 @@
+@microvm
+Feature: the workload runs unprivileged inside a locked-down guest
+  The supervisor boots as root, installs the network cage, then drops the
+  workload to an unprivileged uid before exec. These scenarios are
+  guest-observable: they assert from inside a booted guest that the drop
+  happened and that the guest filesystem matches the sandbox invariants
+  (a clean /run tmpfs, the lns tooling under /.lens). They are imageless —
+  every command is a /bin/sh builtin or the bundled busybox by full path.
+
+  Scenario: the workload process runs as the unprivileged sandbox user, not root
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox id'"
+    Then the exit code is 0
+    And the output contains "uid=65534"
+    And the output does not contain "uid=0"
+
+  Scenario: whoami inside the guest is the sandbox user
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo who=$(/.lens/guest-tools/bin/busybox whoami)'"
+    Then the exit code is 0
+    And the output contains "who=sandbox"
+
+  Scenario: /run is a fresh tmpfs, not the workload's persistent root
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep /run /proc/mounts'"
+    Then the exit code is 0
+    And the output contains "tmpfs"
+
+  Scenario: the lns guest tooling under /.lens is present and executable
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox true && echo tooling-ok-$((7*6))'"
+    Then the exit code is 0
+    And the output contains "tooling-ok-42"

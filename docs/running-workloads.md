@@ -13,8 +13,10 @@ lns run [OPTIONS] [IMAGE] [-- COMMAND...]
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
-`lns-policy.yaml` that governs the run. To expose host files to the workload, attach
-a volume with `-v`.
+`lns-policy.yaml` that governs the run. To expose your actual host files to the
+workload, bind-mount a directory with `-v /host/path:/guest/path` (see
+[Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
+attach a named volume instead.
 
 ### Running an image
 
@@ -96,6 +98,23 @@ with `-w` (an absolute guest path, created inside the sandbox if missing):
 lns run -w /workspace ghcr.io/acme/agent
 ```
 
+### Naming a run
+
+Every run has a numeric id (`run #7`) **and** a name. Pass `--name` to choose
+one; omit it and Lens Sandbox assigns a memorable `adjective_noun` name. Either
+handle works anywhere a run id is accepted:
+
+```bash
+lns run -d --name reviewer ghcr.io/acme/agent
+lns sandbox logs reviewer
+lns sandbox stop reviewer
+```
+
+A name may contain letters, digits, `_`, `.`, and `-`, and must not be all
+digits (so it is never mistaken for an id). Names are unique among the runs
+`lns sandbox ls` shows, and free up once the run is removed. Rename a run at any
+time with `lns sandbox rename <run> <new-name>`.
+
 ### Persistent defaults
 
 Settings you'd otherwise repeat on every run can be stored once with
@@ -165,6 +184,58 @@ asks for confirmation unless you pass `-f`/`--force`. Everything else in a
 sandbox is ephemeral by design — volumes are the one place data persists, so
 removing one is permanent.
 
+### Host bind mounts
+
+When the source of a `-v` is an **absolute host path** rather than a name, it's a
+host bind: the workload sees your live host files at the target, Docker-style.
+
+```bash
+lns run -v "$(pwd)":/work ghcr.io/acme/agent        # the agent edits your repo
+lns run -v /etc/myapp:/config:ro ghcr.io/acme/app   # read-only
+```
+
+The format is `/host/path:/absolute/target[:ro]`. The source must be an absolute
+path that already exists (a missing path is refused, not silently created — the one
+deliberate divergence from `docker run`). Binds default to read-write; append `:ro`
+for read-only. Disambiguation is by shape: a leading `/` is a host bind, anything
+else is a named volume, so `-v build-cache:/cache` is still a volume.
+
+#### Secrets in a bind
+
+A bind exposes everything in the directory — including `.env` files, SSH keys, and
+other credentials that the [credential flow](credentials.md) is designed to keep
+*outside* the workload. Before the run starts, `lns` scans the **top level** of each
+bind for secret-shaped files (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.npmrc`,
+`.netrc`, `.ssh/`, `.aws/`, …) and asks you, once per file, whether to **keep** it
+(expose the real file) or **drop** it (hide it from the workload). Your choice is
+remembered per-machine, so later runs don't ask again:
+
+```text
+Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? [k]eep / [D]rop (default):
+```
+
+- **Keep** mounts the real file through; **Drop** masks it so the workload can't
+  read it (the file is never modified or deleted on the host).
+- The default on a bare Enter is **drop** — the safe choice.
+- A non-interactive run (`-d`, or no terminal) drops any undecided secret and notes
+  it on stderr, rather than exposing it unasked.
+- Decisions to **keep** a real secret are per-machine and never written to a shared
+  file. To share a "never expose these" rule with your team, commit a `.lensignore`
+  in the bind root — one path per line — and those paths are dropped with no prompt.
+  An entry may be a top-level name or a nested path relative to the bind root
+  (`packages/api/.env`); it must stay inside the bind (no leading `/`, no `..`), and a
+  rule for a file that isn't present is simply a no-op.
+
+The run summary lists each bind, its mode, and the disposition of every detected
+secret (`kept (exposed)` / `dropped`).
+
+> **The automatic scan is top-level only.** Only the immediate contents of the bind
+> root are scanned for secret shapes, so a secret nested in a subdirectory
+> (`packages/api/.env`, a key under `server/certs/`, credentials embedded in
+> `.git/config`) is exposed to the workload **without a prompt**. To hide a nested
+> secret you know about, name it in `.lensignore` (a nested path is honored); for an
+> untrusted subtree, bind a narrower path or use `:ro`.
+
 ### Publishing ports
 
 Expose a guest port on the host with `-p` (repeatable):
@@ -187,8 +258,8 @@ The format is `[host_ip:]hostport:containerport[/proto]`:
 
 | Flag                  | Default | Meaning                                                              |
 | --------------------- | ------- | -------------------------------------------------------------------- |
-| `-i`, `--interactive` | `true`  | Keep stdin open and forward host stdin to the workload.              |
-| `-t`, `--tty`         | `true`  | Allocate a PTY. Pipe mode is selected automatically when stdin isn't a TTY. |
+| `-i`, `--interactive` | `true`  | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
+| `-t`, `--tty`         | `true`  | Allocate a PTY. Pipe mode is selected automatically when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`      | `false` | Start the run and return immediately; it keeps running in the service.|
 
 By default a run is attached to your terminal. Detach to leave it running in the
@@ -231,12 +302,14 @@ lns sandbox logs -f 7          # ...and keep following until it exits
 lns sandbox attach 7           # re-join a detached run live
 lns sandbox inspect 7          # state + launch config as JSON
 lns sandbox stats 7            # CPU share and memory, sampled over 1s
+lns sandbox rename 7 reviewer  # name a run (or rename it), docker-rename style
 lns sandbox rm 7               # drop one finished run from the list
 lns sandbox prune              # drop every finished run from the list
 ```
 
-The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
-as hidden aliases.
+Every verb takes a run's **name** as readily as its numeric id — `lns sandbox
+stop reviewer` and `lns sandbox stop 7` are equivalent. The pre-namespace
+spellings `lns ls`, `lns exec`, and `lns kill` keep working as hidden aliases.
 
 ### Exec — another session inside a run
 

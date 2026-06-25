@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oci_client::{
-    Reference,
+    Reference, RegistryOperation,
     client::ClientConfig,
     manifest::{OciDescriptor, OciImageManifest},
     secrets::RegistryAuth,
@@ -52,6 +52,25 @@ impl RealRegistry {
             auth: crate::artifact::resolve_auth(reference),
         }
     }
+}
+
+const LOGIN_PROBE_REPOSITORY: &str = "lns/login-check";
+
+/// Verifies a registry login by running the exact pull-auth handshake a later pull would, against a throwaway repository scope: an accepted credential resolves, a rejected one errors.
+pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Result<()> {
+    let reference: Reference = format!("{registry}/{LOGIN_PROBE_REPOSITORY}")
+        .parse()
+        .with_context(|| format!("invalid registry {registry:?}"))?;
+    let client = oci_client::Client::new(ClientConfig {
+        platform_resolver: Some(Box::new(linux_platform_resolver)),
+        ..Default::default()
+    });
+    let auth = RegistryAuth::Basic(username.to_string(), secret.to_string());
+    client
+        .auth(&reference, &auth, RegistryOperation::Pull)
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 impl Registry for RealRegistry {

@@ -3,12 +3,63 @@ use std::io::{BufRead, Write};
 use anyhow::{Result, bail};
 use lns_ipc::{ImageInfo, Request, Response};
 
-use crate::cli::ImageCommand;
+use crate::command::{CommandSpec, subcommand};
 use crate::integration::LocalBoxFuture;
 
 mod real;
 
 pub use real::RealImageService;
+
+#[derive(clap::Args)]
+pub struct ImageArgs {
+    #[command(subcommand)]
+    pub command: ImageCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ImageCommand {
+    #[command(about = "Pull an image into the cache ahead of `lns run`, resolving its digest.")]
+    Pull(ImageRefArg),
+    #[command(about = "List cached images with their digest, size, age, and user.")]
+    Ls,
+    #[command(about = "Remove a cached image; refused while a run uses it.")]
+    Rm(ImageRefArg),
+    #[command(about = "Remove every cached image not used by a running sandbox.")]
+    Prune(ImagePruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ImageRefArg {
+    #[arg(help = "Image reference, e.g. `alpine:3.20` or `alpine@sha256:…`.")]
+    pub image: String,
+}
+
+#[derive(clap::Args)]
+pub struct ImagePruneArgs {
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Skip the confirmation prompt."
+    )]
+    pub force: bool,
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<ImageArgs>("image").about(
+            "Manage the cached OCI images that `lns run` boots from (`docker image`-style).",
+        ),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "image",
+    augment,
+    run: real::run,
+    announces_update_check: true,
+    owns_terminal: false,
+};
 
 /// Sends one image request to the running service; `None` means the service did not answer.
 pub trait ImageService {
@@ -269,8 +320,8 @@ mod tests {
         Ok((code, String::from_utf8(buf).unwrap()))
     }
 
-    fn ref_arg(image: &str) -> crate::cli::ImageRefArg {
-        crate::cli::ImageRefArg {
+    fn ref_arg(image: &str) -> ImageRefArg {
+        ImageRefArg {
             image: image.to_string(),
         }
     }
@@ -281,7 +332,7 @@ mod tests {
             ImageCommand::Pull(ref_arg("some-image:1.0")),
             ImageCommand::Ls,
             ImageCommand::Rm(ref_arg("some-image:1.0")),
-            ImageCommand::Prune(crate::cli::ImagePruneArgs { force: true }),
+            ImageCommand::Prune(ImagePruneArgs { force: true }),
         ] {
             let svc = CannedService::with([Some(Response::Pong)]);
             let err = run_cmd(&cmd, &svc).await.unwrap_err().to_string();
@@ -423,12 +474,9 @@ mod tests {
     #[tokio::test]
     async fn prune_without_force_reads_eof_as_decline() {
         let svc = CannedService::with([]);
-        let (code, out) = run_cmd(
-            &ImageCommand::Prune(crate::cli::ImagePruneArgs { force: false }),
-            &svc,
-        )
-        .await
-        .unwrap();
+        let (code, out) = run_cmd(&ImageCommand::Prune(ImagePruneArgs { force: false }), &svc)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
         assert!(out.contains("Aborted."), "got: {out}");
     }
@@ -459,12 +507,9 @@ mod tests {
             removed: Vec::new(),
             reclaimed_bytes: 0,
         })]);
-        let (code, out) = run_cmd(
-            &ImageCommand::Prune(crate::cli::ImagePruneArgs { force: true }),
-            &svc,
-        )
-        .await
-        .unwrap();
+        let (code, out) = run_cmd(&ImageCommand::Prune(ImagePruneArgs { force: true }), &svc)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
         assert!(out.contains("No unused images."), "got: {out}");
     }
@@ -475,12 +520,9 @@ mod tests {
             removed: Vec::new(),
             reclaimed_bytes: 2048,
         })]);
-        let (_, out) = run_cmd(
-            &ImageCommand::Prune(crate::cli::ImagePruneArgs { force: true }),
-            &svc,
-        )
-        .await
-        .unwrap();
+        let (_, out) = run_cmd(&ImageCommand::Prune(ImagePruneArgs { force: true }), &svc)
+            .await
+            .unwrap();
         assert!(out.contains("Total reclaimed space: 2 KiB"), "got: {out}");
     }
 

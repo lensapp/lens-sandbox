@@ -16,6 +16,7 @@ pub use real::mount_and_exec;
 const PROC: &str = "/proc";
 const SYS: &str = "/sys";
 const DEV: &str = "/dev";
+const DEV_NULL: &str = "/dev/null";
 const DEV_PTS: &str = "/dev/pts";
 const DEV_PTMX: &str = "/dev/ptmx";
 const CONTENT: &str = "/content";
@@ -99,6 +100,7 @@ pub(crate) trait Syscalls {
     fn chroot(&self, path: &CStr) -> std::io::Result<()>;
     fn chdir(&self, path: &CStr) -> std::io::Result<()>;
     fn path_exists(&self, path: &CStr) -> bool;
+    fn is_dir(&self, path: &CStr) -> bool;
     fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd>;
     fn fexecve(&self, fd: RawFd, argv0: &CStr) -> std::io::Error;
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
@@ -124,6 +126,7 @@ pub(crate) trait Syscalls {
 pub enum MountError {
     MissingCmdlineKey(&'static str),
     IncompleteVolume(usize),
+    IncompleteBind(usize),
     InteriorNul(&'static str),
     Syscall { op: String, err: std::io::Error },
     DescriptorDigestMismatch { expected: String, actual: String },
@@ -143,6 +146,12 @@ impl fmt::Display for MountError {
                 "volume.{idx} on the kernel cmdline is missing its dev or target \
                  (likely a truncated cmdline); refusing to boot rather than start \
                  the workload without its volume"
+            ),
+            Self::IncompleteBind(idx) => write!(
+                f,
+                "bind.{idx} on the kernel cmdline is missing its tag/target or a declared \
+                 dropped path (likely a truncated cmdline); refusing to boot rather than \
+                 risk exposing a secret the operator chose to drop"
             ),
             Self::InteriorNul(field) => {
                 write!(f, "cmdline field {field} contained an interior NUL")
@@ -359,6 +368,9 @@ pub fn validate_cmdline(p: &CmdlineParams) -> Result<(), MountError> {
     if let Some(&idx) = p.incomplete_volumes.first() {
         return Err(MountError::IncompleteVolume(idx));
     }
+    if let Some(&idx) = p.incomplete_binds.first() {
+        return Err(MountError::IncompleteBind(idx));
+    }
     Ok(())
 }
 
@@ -478,6 +490,43 @@ fn mount_volumes(
         do_mount(sys, &vol.dev, &target, "ext4", flags, None)?;
     }
     Ok(())
+}
+
+fn mount_binds(
+    sys: &dyn Syscalls,
+    binds: &[crate::cmdline::BindParam],
+    newroot: &str,
+) -> Result<(), MountError> {
+    for bind in binds {
+        let target = format!("{newroot}{}", bind.target);
+        do_mkdir_p(sys, &target, 0o755)?;
+        let flags = match bind.read_only {
+            true => MountFlags::read_only().nosuid().nodev(),
+            false => MountFlags::none().nosuid().nodev(),
+        };
+        do_mount(sys, &bind.tag, &target, "virtiofs", flags, None)?;
+        for dropped in &bind.dropped_paths {
+            mask_dropped_path(sys, &format!("{target}/{dropped}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Hides a dropped secret from the workload without deleting it from the live share: an empty tmpfs over a directory, a `/dev/null` bind over a file.
+fn mask_dropped_path(sys: &dyn Syscalls, path: &str) -> Result<(), MountError> {
+    let path_c = cstring(path, "mask-path")?;
+    if sys.is_dir(&path_c) {
+        do_mount(
+            sys,
+            "tmpfs",
+            path,
+            "tmpfs",
+            MountFlags::none().nosuid().nodev().noexec(),
+            Some("mode=0000,size=4k"),
+        )
+    } else {
+        do_mount(sys, DEV_NULL, path, "none", MountFlags::bind(), None)
+    }
 }
 
 fn mount_run_tmpfs(
@@ -706,6 +755,8 @@ fn mount_composefs_and_exec_broker_inner(
 
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
+    mount_binds(sys, &params.binds, newroot)?;
+
     mount_run_tmpfs(sys, newroot, run_ids)?;
 
     allow_unprivileged_low_ports(sys)?;
@@ -830,6 +881,8 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![],
         };
         assert!(validate_cmdline(&p).is_ok());
     }
@@ -843,6 +896,8 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![],
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("upper.dev"));
@@ -857,6 +912,8 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![],
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("content.tag"));
@@ -871,6 +928,8 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![],
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("composefs.descriptor.dev"));
@@ -885,9 +944,27 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![3],
+            binds: vec![],
+            incomplete_binds: vec![],
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("volume.3"), "{err}");
+    }
+
+    #[test]
+    fn validate_cmdline_refuses_to_boot_when_a_bind_drop_list_was_truncated() {
+        let p = CmdlineParams {
+            upper_dev: Some("/dev/vda".into()),
+            composefs_descriptor_dev: Some("/dev/vdb".into()),
+            content_tag: Some("lns-content".into()),
+            composefs_descriptor_sha256: None,
+            volumes: vec![],
+            incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![1],
+        };
+        let err = validate_cmdline(&p).unwrap_err();
+        assert!(format!("{err}").contains("bind.1"), "{err}");
     }
 
     #[test]
@@ -903,6 +980,8 @@ mod tests {
         assert!(format!("{missing}").contains("upper.dev"));
         let incomplete = MountError::IncompleteVolume(3);
         assert!(format!("{incomplete}").contains("volume.3"));
+        let incomplete_bind = MountError::IncompleteBind(2);
+        assert!(format!("{incomplete_bind}").contains("bind.2"));
         let read = MountError::DescriptorRead(std::io::Error::other("boom"));
         assert!(format!("{read}").contains("composefs descriptor"));
         let syscall = MountError::Syscall {
@@ -1212,6 +1291,7 @@ mod tests {
     struct FakeSyscalls {
         calls: RefCell<Vec<Call>>,
         ptmx_exists: bool,
+        dir_paths: Vec<String>,
         fail_when: FailWhen,
         digest_result: RefCell<Option<Result<(), MountError>>>,
     }
@@ -1221,9 +1301,15 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 ptmx_exists: true,
+                dir_paths: Vec::new(),
                 fail_when: Box::new(|_| None),
                 digest_result: RefCell::new(None),
             }
+        }
+
+        fn with_dir(mut self, path: &str) -> Self {
+            self.dir_paths.push(path.to_string());
+            self
         }
 
         fn fail_when(mut self, f: impl Fn(&Call) -> Option<std::io::ErrorKind> + 'static) -> Self {
@@ -1316,6 +1402,9 @@ mod tests {
                 .push(Call::PathExists(path.to_str().unwrap().to_string()));
             self.ptmx_exists
         }
+        fn is_dir(&self, path: &CStr) -> bool {
+            self.dir_paths.iter().any(|p| p == path.to_str().unwrap())
+        }
         fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd> {
             self.record(Call::OpenRo(path.to_str().unwrap().to_string()))?;
             Ok(7)
@@ -1389,6 +1478,8 @@ mod tests {
             composefs_descriptor_sha256: None,
             volumes: vec![],
             incomplete_volumes: vec![],
+            binds: vec![],
+            incomplete_binds: vec![],
         }
     }
 
@@ -1974,6 +2065,96 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Call::Mount { target, flags, .. }
             if target == "/newroot/cache" && *flags == MountFlags::read_only().nosuid().nodev()))
+        );
+    }
+
+    fn bind_param(
+        tag: &str,
+        target: &str,
+        read_only: bool,
+        drops: &[&str],
+    ) -> crate::cmdline::BindParam {
+        crate::cmdline::BindParam {
+            tag: tag.into(),
+            target: target.into(),
+            read_only,
+            dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn mount_binds_mounts_each_tag_as_virtiofs_under_newroot() {
+        let sys = FakeSyscalls::new();
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/work", false, &[])],
+            "/newroot",
+        )
+        .unwrap();
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(
+                |c| matches!(c, Call::Mount { source, target, fstype, flags, .. }
+                if source == "lns-bind-0" && target == "/newroot/work" && fstype == "virtiofs"
+                && *flags == MountFlags::none().nosuid().nodev())
+            ),
+            "expected a writable virtiofs mount at /newroot/work: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn mount_binds_marks_a_read_only_bind_read_only() {
+        let sys = FakeSyscalls::new();
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/cfg", true, &[])],
+            "/newroot",
+        )
+        .unwrap();
+        assert!(
+            sys.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Mount { target, flags, .. }
+                if target == "/newroot/cfg" && *flags == MountFlags::read_only().nosuid().nodev()))
+        );
+    }
+
+    #[test]
+    fn mount_binds_masks_a_dropped_file_with_a_dev_null_bind() {
+        let sys = FakeSyscalls::new();
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/work", false, &[".env"])],
+            "/newroot",
+        )
+        .unwrap();
+        let calls = sys.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::Mount { source, target, flags, .. }
+                if source == DEV_NULL && target == "/newroot/work/.env" && flags.bind)),
+            "a dropped file must be masked by a /dev/null bind: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn mount_binds_masks_a_dropped_directory_with_an_empty_tmpfs() {
+        let sys = FakeSyscalls::new().with_dir("/newroot/work/.ssh");
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/work", false, &[".ssh"])],
+            "/newroot",
+        )
+        .unwrap();
+        let calls = sys.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::Mount { target, fstype, data, .. }
+                if target == "/newroot/work/.ssh" && fstype == "tmpfs"
+                && data.as_deref() == Some("mode=0000,size=4k"))),
+            "a dropped directory must be masked by an empty tmpfs: {calls:?}"
         );
     }
 

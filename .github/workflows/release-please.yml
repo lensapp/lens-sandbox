@@ -22,11 +22,11 @@ on:
   workflow_dispatch:
     inputs:
       lns_tag:
-        description: 'lns-cli tag to (re)build, e.g. lns-cli-v0.1.0'
+        description: 'lns tag to (re)build, e.g. lns-v0.13.0'
         required: false
         type: string
       lns_version:
-        description: 'lns-cli version, e.g. 0.1.0'
+        description: 'lns version, e.g. 0.13.0'
         required: false
         type: string
       lns_install_tag:
@@ -34,7 +34,7 @@ on:
         required: false
         type: string
       force_build_lns:
-        description: 'Build + publish lns-cli release binaries (and lns-latest.json) even if release-please did not cut a release in this run'
+        description: 'Build + publish lns release binaries (and lns-latest.json) even if release-please did not cut a release in this run'
         type: boolean
         default: false
       force_deploy_install:
@@ -52,9 +52,9 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      lns-released: ${{ steps.release.outputs['crates/lns-cli--release_created'] }}
-      lns-version: ${{ steps.release.outputs['crates/lns-cli--version'] }}
-      lns-tag: ${{ steps.release.outputs['crates/lns-cli--tag_name'] }}
+      lns-released: ${{ steps.release.outputs['release_created'] }}
+      lns-version: ${{ steps.release.outputs['version'] }}
+      lns-tag: ${{ steps.release.outputs['tag_name'] }}
       lns-install-released: ${{ steps.release.outputs['scripts/lns-install--release_created'] }}
       lns-install-tag: ${{ steps.release.outputs['scripts/lns-install--tag_name'] }}
     steps:
@@ -154,10 +154,24 @@ jobs:
       # true secret) is baked into the official binary; fork builds ship
       # without it and fall back to a pasted PAT.
       LNS_OAUTH_CLIENT_ID_GITHUB: ${{ secrets.OAUTH_CLIENT_ID_GITHUB }}
+      # Google's device flow is a confidential client: its id AND secret
+      # are baked into the official binary (extractable, treated as a
+      # public client per RFC 8252). Fork builds ship without them and
+      # fall back to a pasted token.
+      LNS_OAUTH_CLIENT_ID_GOOGLE: ${{ secrets.OAUTH_CLIENT_ID_GOOGLE }}
+      LNS_OAUTH_CLIENT_SECRET_GOOGLE: ${{ secrets.OAUTH_CLIENT_SECRET_GOOGLE }}
       # build.rs already defaults to rust-lld; pinning here documents
       # intent and survives an org-level env override that picks a
       # nonexistent toolchain like `aarch64-linux-musl-gcc`.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      # On the x86_64 Linux runner the guests cross-build for
+      # x86_64-unknown-linux-musl (build.rs picks the triple from the host
+      # arch). cc-rs's default x86_64-linux-musl-gcc isn't installed, so point
+      # it at the runner's native gcc/ar; rust-lld links against the musl
+      # sysroot. The aarch64 runner ignores these and uses its own toolchain.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CC_x86_64_unknown_linux_musl: gcc
+      AR_x86_64_unknown_linux_musl: ar
       AWS_DEFAULT_REGION: us-east-1
       S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}

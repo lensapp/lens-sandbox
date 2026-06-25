@@ -29,6 +29,10 @@ pub(super) fn post_pump_action(outcome: &PumpOutcome, detached: bool) -> PostPum
     }
 }
 
+pub(super) fn peer_is_authorized(peer_uid: u32, self_uid: u32) -> bool {
+    peer_uid == self_uid
+}
+
 async fn pump_responses<W>(
     stream: &mut W,
     frame_rx: &mut mpsc::Receiver<WireFrame>,
@@ -119,9 +123,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::RunSignal { run_id, signal } => {
             forward_session_input(*run_id, session_input_from_signal(*signal), "RunSignal").await
         }
-        Request::Kill { run_id, signal } => {
-            forward_session_input(*run_id, session_input_from_signal(*signal), "Kill").await
-        }
+        Request::Kill { run, signal } => kill_request(run, *signal).await,
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
         },
@@ -182,37 +184,17 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
-        Request::StopRun {
-            run_id,
-            timeout_secs,
-        } => {
-            let id = *run_id;
-            stop_run_with(
-                id,
-                std::time::Duration::from_secs(*timeout_secs),
-                KILL_GRACE,
-                |signal| forward_session_input(id, session_input_from_signal(signal), "StopRun"),
-            )
-            .await
-        }
-        Request::InspectRun { run_id } => match crate::run_registry::inspect(*run_id) {
-            Some(details) => Response::RunInspect {
-                details: Box::new(details),
-            },
-            None => Response::Error {
-                message: format!("no active run with id {run_id}"),
-            },
-        },
-        Request::RemoveRun { run_id } => match crate::run_registry::remove_if_exited(*run_id) {
-            crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
-            crate::run_registry::RemoveOutcome::Running => Response::Error {
-                message: format!(
-                    "run {run_id} is still running; stop it first with `lns sandbox stop {run_id}`"
-                ),
-            },
-            crate::run_registry::RemoveOutcome::NotFound => Response::Error {
-                message: format!("no run with id {run_id}"),
-            },
+        Request::RegistryLogin {
+            registry,
+            username,
+            secret,
+        } => login_response(crate::image::verify_login(registry, username, secret).await),
+        Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
+        Request::InspectRun { run } => inspect_run_request(run),
+        Request::RemoveRun { run } => remove_run_request(run),
+        Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
+            Ok(()) => Response::Acknowledged,
+            Err(message) => Response::Error { message },
         },
         Request::PruneRuns => Response::RunsPruned {
             removed: crate::run_registry::prune_exited(),
@@ -257,6 +239,68 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
     }
 }
 
+async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    let Some(status) = crate::run_registry::status(id) else {
+        return Response::Error {
+            message: format!("no active run with id {id}"),
+        };
+    };
+    if matches!(status, lns_ipc::RunStatus::Exited { .. }) {
+        return Response::Acknowledged;
+    }
+    forward_session_input(id, session_input_from_signal(signal), "Kill").await
+}
+
+async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    stop_run_with(
+        id,
+        std::time::Duration::from_secs(timeout_secs),
+        KILL_GRACE,
+        |signal| forward_session_input(id, session_input_from_signal(signal), "StopRun"),
+    )
+    .await
+}
+
+fn inspect_run_request(run: &str) -> Response {
+    match crate::run_registry::resolve(run) {
+        Ok(id) => match crate::run_registry::inspect(id) {
+            Some(details) => Response::RunInspect {
+                details: Box::new(details),
+            },
+            None => Response::Error {
+                message: format!("no active run with id {id}"),
+            },
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
+fn remove_run_request(run: &str) -> Response {
+    let id = match crate::run_registry::resolve(run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    match crate::run_registry::remove_if_exited(id) {
+        crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+        crate::run_registry::RemoveOutcome::Running => Response::Error {
+            message: format!(
+                "run {id} is still running; stop it first with `lns sandbox stop {id}`"
+            ),
+        },
+        crate::run_registry::RemoveOutcome::NotFound => Response::Error {
+            message: format!("no run with id {id}"),
+        },
+    }
+}
+
 fn volume_response(result: anyhow::Result<Response>) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
@@ -290,6 +334,15 @@ fn pull_response(result: anyhow::Result<crate::artifact::Pulled>) -> Response {
             digest,
         },
         Ok(crate::artifact::Pulled::Image { digest }) => Response::PulledImage { digest },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+fn login_response(result: anyhow::Result<()>) -> Response {
+    match result {
+        Ok(()) => Response::RegistryLoginVerified,
         Err(e) => Response::Error {
             message: format!("{e:#}"),
         },
@@ -348,7 +401,6 @@ async fn wait_for_exit(run_id: u32, timeout: std::time::Duration) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn forward_session_input(
     run_id: u32,
     input: Option<crate::vm::session_client::SessionInput>,
@@ -372,25 +424,15 @@ async fn forward_session_input(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-async fn forward_session_input(_run_id: u32, _input: Option<()>, kind: &'static str) -> Response {
-    Response::Error {
-        message: format!("{kind} only supported on macOS hosts"),
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn session_input_from_stdin(bytes: Vec<u8>) -> Option<crate::vm::session_client::SessionInput> {
     Some(crate::vm::session_client::SessionInput::StdinBytes(bytes))
 }
-#[cfg(target_os = "macos")]
 fn session_input_from_resize(
     rows: u16,
     cols: u16,
 ) -> Option<crate::vm::session_client::SessionInput> {
     Some(crate::vm::session_client::SessionInput::Resize { rows, cols })
 }
-#[cfg(target_os = "macos")]
 fn session_input_from_signal(
     signal: lns_ipc::SignalKind,
 ) -> Option<crate::vm::session_client::SessionInput> {
@@ -399,7 +441,6 @@ fn session_input_from_signal(
     )))
 }
 
-#[cfg(target_os = "macos")]
 fn map_signal(s: lns_ipc::SignalKind) -> lns_session::SignalKind {
     match s {
         lns_ipc::SignalKind::Int => lns_session::SignalKind::Int,
@@ -411,7 +452,6 @@ fn map_signal(s: lns_ipc::SignalKind) -> lns_session::SignalKind {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String> {
     if args.argv.is_empty() {
         return Err("ExecImage.argv is empty".to_string());
@@ -421,13 +461,12 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
             "lns exec -t/-i against run #{} is not yet supported (input \
              routing for exec sessions awaits an IPC discriminator); for now lns exec \
              supports non-interactive commands only",
-            args.run_id
+            args.run
         ));
     }
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
 ) -> crate::vm::session_client::SessionParams {
@@ -443,22 +482,20 @@ pub(super) fn build_session_params(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_stdin(_bytes: Vec<u8>) -> Option<()> {
-    None
-}
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_resize(_rows: u16, _cols: u16) -> Option<()> {
-    None
-}
-#[cfg(not(target_os = "macos"))]
-fn session_input_from_signal(_signal: lns_ipc::SignalKind) -> Option<()> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_with_the_services_own_uid_is_authorized() {
+        assert!(peer_is_authorized(1000, 1000));
+    }
+
+    #[test]
+    fn a_peer_from_a_different_uid_is_rejected_in_both_directions() {
+        assert!(!peer_is_authorized(1000, 0));
+        assert!(!peer_is_authorized(0, 1000));
+    }
 
     #[tokio::test]
     async fn ping_returns_pong() {
@@ -497,6 +534,7 @@ mod tests {
         let _ = handle_request(
             &Request::RunImage(lns_ipc::RunImageArgs {
                 image: None,
+                name: None,
                 cpus: 1,
                 mem: 0,
                 policy_path: None,
@@ -513,6 +551,7 @@ mod tests {
                 published_ports: vec![],
                 volumes: vec![],
                 artifact_mounts: vec![],
+                binds: vec![],
             }),
             Instant::now(),
         )
@@ -732,7 +771,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_awaits_back_pressure_instead_of_dropping() {
         use crate::vm::session_client::SessionInput;
@@ -754,6 +792,7 @@ mod tests {
                 task,
                 input_tx: Some(input_tx),
                 connector: None,
+                name: String::new(),
                 image: String::new(),
                 command: String::new(),
                 started: String::new(),
@@ -787,7 +826,6 @@ mod tests {
         crate::run_registry::deregister(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_errors_when_run_not_registered() {
         let id = crate::run_registry::allocate_run_id() + 3_000_000;
@@ -976,20 +1014,95 @@ mod tests {
     async fn handle_request_kill_for_unregistered_run_returns_error() {
         let response = handle_request(
             &Request::Kill {
-                run_id: 999_999,
+                run: "999999".into(),
                 signal: lns_ipc::SignalKind::Kill,
             },
             Instant::now(),
         )
         .await;
-        assert!(matches!(response, Response::Error { .. }));
+        match response {
+            Response::Error { message } => assert!(
+                message.contains("no active run with id 999999"),
+                "an unknown run must report no-active-run, not a capability error; got: {message}"
+            ),
+            other => panic!("expected an unknown-run error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_kill_for_a_registered_run_passes_existence_and_forwards() {
+        let id = 557799;
+        register_running(id);
+        let response = handle_request(
+            &Request::Kill {
+                run: id.to_string(),
+                signal: lns_ipc::SignalKind::Kill,
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::run_registry::deregister(id);
+        match response {
+            Response::Error { message } => assert!(
+                !message.contains("no active run with id"),
+                "a registered run clears the existence check and reaches forwarding; got: {message}"
+            ),
+            other => panic!(
+                "expected a forwarding outcome for a sessionless registered run, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn handle_request_kill_of_an_already_exited_run_succeeds_without_forwarding() {
+        let id = crate::run_registry::allocate_run_id();
+        register_running(id);
+        crate::run_registry::set_exit_code(id, 0);
+        let response = handle_request(
+            &Request::Kill {
+                run: id.to_string(),
+                signal: lns_ipc::SignalKind::Kill,
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::run_registry::deregister(id);
+        assert_eq!(
+            response,
+            Response::Acknowledged,
+            "killing an exited run is already satisfied and must not forward to a dead session"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_addressing_an_unknown_name_reports_no_such_run() {
+        for req in [
+            Request::Kill {
+                run: "ghost".into(),
+                signal: lns_ipc::SignalKind::Term,
+            },
+            Request::InspectRun {
+                run: "ghost".into(),
+            },
+            Request::RemoveRun {
+                run: "ghost".into(),
+            },
+        ] {
+            match handle_request(&req, Instant::now()).await {
+                Response::Error { message } => {
+                    assert!(message.contains("no such run: ghost"), "got: {message}");
+                }
+                other => unreachable!("expected Error for {req:?}, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
     #[should_panic(expected = "ExecImage must be dispatched via handle_exec")]
     async fn exec_image_via_handle_request_panics() {
         let req = Request::ExecImage(lns_ipc::ExecImageArgs {
-            run_id: 1,
+            run: "1".into(),
             argv: vec![],
             env: vec![],
             tty: false,
@@ -999,7 +1112,6 @@ mod tests {
         let _ = handle_request(&req, Instant::now()).await;
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn map_signal_covers_every_variant() {
         for (input, expected) in [
@@ -1014,7 +1126,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_returns_error_when_input_is_none() {
         let response = forward_session_input(1, None, "Synthetic").await;
@@ -1037,10 +1148,9 @@ mod tests {
         let handle = crate::run_registry::RunHandle {
             cancel_tx,
             task,
-            #[cfg(target_os = "macos")]
             input_tx: None,
-            #[cfg(target_os = "macos")]
             connector: None,
+            name: String::new(),
             image: "test-image".into(),
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
@@ -1054,7 +1164,6 @@ mod tests {
         let _ = crate::run_registry::cancel(run_id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn forward_session_input_errors_when_input_channel_is_closed() {
         use std::sync::Mutex;
@@ -1069,6 +1178,7 @@ mod tests {
             task,
             input_tx: Some(input_tx),
             connector: None,
+            name: String::new(),
             image: "closed-channel-test".into(),
             command: "".into(),
             started: "1970-01-01T00:00:00Z".into(),
@@ -1144,35 +1254,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn forward_session_input_on_linux_returns_not_supported_error() {
-        let response = forward_session_input(1, None, "Synthetic").await;
-        assert!(matches!(response, Response::Error { .. }));
-        if let Response::Error { message } = &response {
-            assert!(message.contains("Synthetic"), "got: {message}");
-            assert!(message.to_lowercase().contains("macos"), "got: {message}");
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_stdin_returns_none_on_linux() {
-        assert!(session_input_from_stdin(b"x".to_vec()).is_none());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_resize_returns_none_on_linux() {
-        assert!(session_input_from_resize(24, 80).is_none());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn session_input_from_signal_returns_none_on_linux() {
-        assert!(session_input_from_signal(lns_ipc::SignalKind::Term).is_none());
-    }
-
     fn register_running(run_id: u32) {
         let (cancel_tx, _cancel_rx) = oneshot::channel();
         let task = tokio::spawn(async {});
@@ -1181,10 +1262,9 @@ mod tests {
             crate::run_registry::RunHandle {
                 cancel_tx,
                 task,
-                #[cfg(target_os = "macos")]
                 input_tx: None,
-                #[cfg(target_os = "macos")]
                 connector: None,
+                name: "reviewer".into(),
                 image: "stop-test".into(),
                 command: String::new(),
                 started: "1970-01-01T00:00:00Z".into(),
@@ -1219,7 +1299,7 @@ mod tests {
     async fn run_logs_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunLogs {
-                run_id: 1,
+                run: "1".into(),
                 follow: false,
             },
             Instant::now(),
@@ -1230,18 +1310,24 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Request::AttachRun must be dispatched via handle_attach")]
     async fn attach_run_via_handle_request_panics() {
-        let _ = handle_request(&Request::AttachRun { run_id: 1 }, Instant::now()).await;
+        let _ = handle_request(&Request::AttachRun { run: "1".into() }, Instant::now()).await;
     }
 
     #[tokio::test]
     #[should_panic(expected = "Request::RunStats must be dispatched via handle_stats")]
     async fn run_stats_via_handle_request_panics() {
-        let _ = handle_request(&Request::RunStats { run_id: 1 }, Instant::now()).await;
+        let _ = handle_request(&Request::RunStats { run: "1".into() }, Instant::now()).await;
     }
 
     #[tokio::test]
     async fn handle_request_inspect_run_for_unknown_run_returns_error() {
-        let resp = handle_request(&Request::InspectRun { run_id: 999_998 }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::InspectRun {
+                run: "999998".into(),
+            },
+            Instant::now(),
+        )
+        .await;
         match resp {
             Response::Error { message } => {
                 assert!(message.contains("no active run"), "got: {message}");
@@ -1255,7 +1341,13 @@ mod tests {
         let id = crate::run_registry::allocate_run_id();
         register_running(id);
 
-        let resp = handle_request(&Request::InspectRun { run_id: id }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::InspectRun {
+                run: id.to_string(),
+            },
+            Instant::now(),
+        )
+        .await;
 
         match resp {
             Response::RunInspect { details } => {
@@ -1293,7 +1385,7 @@ mod tests {
     async fn handle_request_stop_run_for_unknown_run_returns_error() {
         let resp = handle_request(
             &Request::StopRun {
-                run_id: 999_999,
+                run: "999999".into(),
                 timeout_secs: 1,
             },
             Instant::now(),
@@ -1454,7 +1546,6 @@ mod tests {
         crate::run_registry::cancel(id);
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test(start_paused = true)]
     async fn handle_request_stop_run_sends_term_through_the_session_channel() {
         use crate::vm::session_client::SessionInput;
@@ -1471,6 +1562,7 @@ mod tests {
                 task,
                 input_tx: Some(input_tx),
                 connector: None,
+                name: String::new(),
                 image: String::new(),
                 command: String::new(),
                 started: String::new(),
@@ -1491,7 +1583,7 @@ mod tests {
 
         let resp = handle_request(
             &Request::StopRun {
-                run_id: id,
+                run: id.to_string(),
                 timeout_secs: 10,
             },
             Instant::now(),
@@ -1503,34 +1595,9 @@ mod tests {
         crate::run_registry::cancel(id);
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn handle_request_stop_run_on_linux_reports_macos_only() {
-        let id = crate::run_registry::allocate_run_id();
-        register_running(id);
-
-        let resp = handle_request(
-            &Request::StopRun {
-                run_id: id,
-                timeout_secs: 1,
-            },
-            Instant::now(),
-        )
-        .await;
-
-        match resp {
-            Response::Error { message } => {
-                assert!(message.to_lowercase().contains("macos"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
-        }
-        crate::run_registry::cancel(id);
-    }
-
-    #[cfg(target_os = "macos")]
     fn exec_args(argv: Vec<String>, tty: bool, stdin: bool) -> lns_ipc::ExecImageArgs {
         lns_ipc::ExecImageArgs {
-            run_id: 42,
+            run: "42".into(),
             argv,
             env: Vec::new(),
             tty,
@@ -1539,14 +1606,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_rejects_empty_argv() {
         let result = validate_exec(&exec_args(Vec::new(), false, false));
         assert_eq!(result, Err("ExecImage.argv is empty".to_string()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_rejects_interactive_exec_and_names_the_run() {
         for (tty, stdin) in [(true, false), (false, true)] {
@@ -1557,18 +1622,16 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn validate_exec_accepts_a_non_interactive_command() {
         let result = validate_exec(&exec_args(vec!["echo".into(), "hi".into()], false, false));
         assert_eq!(result, Ok(()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_session_params_maps_fields_and_winsize() {
         let args = lns_ipc::ExecImageArgs {
-            run_id: 1,
+            run: "1".into(),
             argv: vec!["echo".into()],
             env: vec!["A=B".into()],
             tty: false,
@@ -1586,7 +1649,6 @@ mod tests {
         assert_eq!((ws.rows, ws.cols), (24, 80));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_session_params_leaves_winsize_unset_when_absent() {
         let params = build_session_params(exec_args(vec!["echo".into()], false, false));
@@ -1655,6 +1717,24 @@ mod tests {
         assert!(
             err["message"].as_str().unwrap().contains("boom"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn login_response_maps_ok_to_verified() {
+        assert_eq!(login_response(Ok(())), Response::RegistryLoginVerified);
+    }
+
+    #[test]
+    fn login_response_maps_err_to_an_error_carrying_the_reason() {
+        let resp = as_json(login_response(Err(anyhow::anyhow!("credentials rejected"))));
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("credentials rejected"),
+            "got: {resp}"
         );
     }
 
@@ -1739,6 +1819,24 @@ mod tests {
                 .contains("invalid registry reference"),
             "got: {resp}"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_request_registry_login_with_an_invalid_registry_errors_before_any_network() {
+        let resp = as_json(
+            handle_request(
+                &Request::RegistryLogin {
+                    registry: "bad host".into(),
+                    username: "u".into(),
+                    secret: "s".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(message.contains("invalid registry"), "got: {message}");
     }
 
     #[tokio::test]

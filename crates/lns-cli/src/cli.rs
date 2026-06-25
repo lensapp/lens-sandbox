@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use lns_ipc::{PortPublish, Protocol};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -27,574 +27,6 @@ pub struct Cli {
         help = "Log threshold: `warn` (default) shows warnings/errors; `info` adds progress lines; `debug` adds traces and the guest boot transcript; override with `LNS_LOG` or `RUST_LOG`."
     )]
     pub log_level: LogLevel,
-
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Subcommand)]
-pub enum Command {
-    #[command(about = "Run an OCI image in a microVM.")]
-    Run(RunArgs),
-    #[command(hide = true)]
-    Exec(ExecArgs),
-    #[command(hide = true)]
-    Kill(KillArgs),
-    #[command(hide = true)]
-    Ls,
-    #[command(about = "Manage the named volumes used with `lns run -v` (`docker volume`-style).")]
-    Volume(VolumeArgs),
-    #[command(
-        about = "Manage the cached OCI images that `lns run` boots from (`docker image`-style)."
-    )]
-    Image(ImageArgs),
-    #[command(
-        about = "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, prune."
-    )]
-    Sandbox(SandboxArgs),
-    #[command(about = "Verify the audit chain of a completed run.")]
-    Audit(AuditArgs),
-    #[command(about = "Manage the Lens Sandbox background service.")]
-    Service(ServiceArgs),
-    #[command(about = "Update `lns` and `lns-service` to the latest release.")]
-    Update(UpdateArgs),
-    #[command(about = "Edit network rules in a policy file.")]
-    Policy(PolicyArgs),
-    #[command(
-        about = "Push a file (typed artifact) or a cached image to an OCI registry reference."
-    )]
-    Push(PushArgs),
-    #[command(about = "Pull an artifact or image from an OCI registry reference.")]
-    Pull(PullArgs),
-    #[command(about = "Authenticate to an OCI registry and store the credential locally.")]
-    Login(LoginArgs),
-    #[command(about = "Remove a stored OCI registry credential.")]
-    Logout(LogoutArgs),
-    #[command(about = "Inspect stored OCI registry credentials.")]
-    Auth(AuthArgs),
-    #[command(about = "Manage the credential-integration catalog (connectable services).")]
-    Integration(IntegrationArgs),
-    #[command(
-        about = "Get and set persistent defaults, applied to `lns run` when the matching flag is absent."
-    )]
-    Config(ConfigArgs),
-}
-
-#[derive(clap::Args)]
-pub struct ConfigArgs {
-    #[command(subcommand)]
-    pub command: ConfigCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ConfigCommand {
-    #[command(
-        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
-    )]
-    Set(ConfigSetArgs),
-    #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
-    Get(ConfigKeyArgs),
-    #[command(about = "Remove a default.")]
-    Unset(ConfigKeyArgs),
-    #[command(about = "List every configured default.")]
-    List,
-}
-
-const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.env, run.volume, or run.publish.";
-
-#[derive(clap::Args)]
-pub struct ConfigSetArgs {
-    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
-    pub key: crate::config::ConfigKey,
-    #[arg(
-        required = true,
-        help = "Value(s) to store; each is validated like the matching `lns run` flag."
-    )]
-    pub values: Vec<String>,
-}
-
-#[derive(clap::Args)]
-pub struct ConfigKeyArgs {
-    #[arg(value_parser = crate::config::ConfigKey::parse, help = CONFIG_KEY_HELP)]
-    pub key: crate::config::ConfigKey,
-}
-
-#[derive(clap::Args)]
-pub struct VolumeArgs {
-    #[command(subcommand)]
-    pub command: VolumeCommand,
-}
-
-#[derive(Subcommand)]
-pub enum VolumeCommand {
-    #[command(about = "List named volumes with their on-disk size, age, and holder.")]
-    Ls,
-    #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
-    Create(VolumeNameArg),
-    #[command(about = "Show a volume's details as JSON.")]
-    Inspect(VolumeNameArg),
-    #[command(about = "Remove a named volume; refused while a run holds it.")]
-    Rm(VolumeNameArg),
-    #[command(about = "Remove every volume not attached to a running sandbox.")]
-    Prune(VolumePruneArgs),
-}
-
-#[derive(clap::Args)]
-pub struct VolumeNameArg {
-    #[arg(
-        value_parser = parse_volume_name,
-        help = "Volume name, as used with `lns run -v name:/path`."
-    )]
-    pub name: String,
-}
-
-#[derive(clap::Args)]
-pub struct VolumePruneArgs {
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = false,
-        help = "Skip the confirmation prompt."
-    )]
-    pub force: bool,
-}
-
-#[derive(clap::Args)]
-pub struct ImageArgs {
-    #[command(subcommand)]
-    pub command: ImageCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ImageCommand {
-    #[command(about = "Pull an image into the cache ahead of `lns run`, resolving its digest.")]
-    Pull(ImageRefArg),
-    #[command(about = "List cached images with their digest, size, age, and user.")]
-    Ls,
-    #[command(about = "Remove a cached image; refused while a run uses it.")]
-    Rm(ImageRefArg),
-    #[command(about = "Remove every cached image not used by a running sandbox.")]
-    Prune(ImagePruneArgs),
-}
-
-#[derive(clap::Args)]
-pub struct ImageRefArg {
-    #[arg(help = "Image reference, e.g. `alpine:3.20` or `alpine@sha256:…`.")]
-    pub image: String,
-}
-
-#[derive(clap::Args)]
-pub struct ImagePruneArgs {
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = false,
-        help = "Skip the confirmation prompt."
-    )]
-    pub force: bool,
-}
-
-fn parse_volume_name(s: &str) -> Result<String, String> {
-    lns_ipc::validate_volume_name(s)?;
-    Ok(s.to_string())
-}
-
-#[derive(clap::Args)]
-pub struct SandboxArgs {
-    #[command(subcommand)]
-    pub command: SandboxCommand,
-}
-
-#[derive(Subcommand)]
-pub enum SandboxCommand {
-    #[command(about = "List active runs (`docker ps`-style).")]
-    Ls,
-    #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
-    Exec(ExecArgs),
-    #[command(about = "Send a signal to a running run (`docker kill`-style).")]
-    Kill(KillArgs),
-    #[command(about = "Stop a run gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
-    Stop(SandboxStopArgs),
-    #[command(about = "Print a run's captured output; `-f` streams until the run exits.")]
-    Logs(SandboxLogsArgs),
-    #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
-    Attach(SandboxAttachArgs),
-    #[command(about = "Print a run's state and launch configuration as JSON.")]
-    Inspect(SandboxInspectArgs),
-    #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
-    Stats(SandboxStatsArgs),
-    #[command(
-        about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
-    )]
-    Rm(SandboxRmArgs),
-    #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
-    Prune,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxStopArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        short = 't',
-        long,
-        default_value_t = 10,
-        help = "Seconds to wait for a graceful exit before escalating to SIGKILL."
-    )]
-    pub timeout: u64,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxLogsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = false,
-        help = "Keep streaming new output until the run exits."
-    )]
-    pub follow: bool,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxAttachArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-
-    #[arg(
-        long,
-        default_value = "ctrl-p,ctrl-q",
-        value_parser = parse_detach_keys_arg,
-        help = "Detach chord; on match the CLI detaches and returns, leaving the run running (docker-attach style — no signal is sent)."
-    )]
-    pub detach_keys: DetachChord,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxInspectArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxStatsArgs {
-    #[arg(help = "Target run id surfaced by `lns ls`.")]
-    pub run_id: u32,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxRmArgs {
-    #[arg(help = "Target finished run id surfaced by `lns sandbox ls`.")]
-    pub run_id: u32,
-}
-
-#[derive(clap::Args)]
-pub struct IntegrationArgs {
-    #[command(subcommand)]
-    pub command: IntegrationCommand,
-}
-
-#[derive(Subcommand)]
-pub enum IntegrationCommand {
-    #[command(about = "Declare a credential integration in your machine-global catalog.")]
-    Add(IntegrationAddArgs),
-    #[command(about = "List the bundled and user-declared integrations.")]
-    List,
-    #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
-    Remove(IntegrationRemoveArgs),
-    #[command(
-        about = "Connect an integration to this directory's policy (oauth integrations sign in)."
-    )]
-    Connect(ConnectArgs),
-    #[command(about = "Disconnect an integration from this directory's policy.")]
-    Disconnect(DisconnectArgs),
-}
-
-#[derive(clap::Args)]
-pub struct IntegrationAddArgs {
-    #[arg(
-        help = "New integration id; must not collide with a bundled or existing user integration."
-    )]
-    pub id: String,
-    #[arg(long, help = "Environment variable the placeholder is seeded into.")]
-    pub env_var: String,
-    #[arg(
-        long = "inject",
-        required = true,
-        value_parser = parse_injection,
-        help = "Per-domain injection as KIND:DOMAIN (api_key_header needs KIND:DOMAIN:HEADER). Repeatable."
-    )]
-    pub inject: Vec<lns_policy::providers::InjectionDef>,
-    #[arg(
-        long = "route",
-        help = "A host pattern the integration needs reachable. Repeatable."
-    )]
-    pub route: Vec<String>,
-    #[arg(
-        long,
-        help = "Placeholder value; auto-generated (self-identifying) when omitted."
-    )]
-    pub placeholder: Option<String>,
-}
-
-#[derive(clap::Args)]
-pub struct IntegrationRemoveArgs {
-    #[arg(help = "User-declared integration id to remove.")]
-    pub id: String,
-}
-
-#[derive(clap::Args)]
-pub struct ConnectArgs {
-    #[arg(help = "Integration id to connect (from `lns integration list`).")]
-    pub id: String,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct DisconnectArgs {
-    #[arg(help = "Integration id to disconnect.")]
-    pub id: String,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
-    use lns_policy::providers::{InjectionDef, InjectionKind};
-    let mut parts = s.splitn(3, ':');
-    let kind_str = parts
-        .next()
-        .ok_or_else(|| format!("expected KIND:DOMAIN, got {s:?}"))?;
-    let domain = parts
-        .next()
-        .ok_or_else(|| format!("expected KIND:DOMAIN, got {s:?}"))?;
-    if domain.is_empty() {
-        return Err(format!("injection {s:?} is missing a domain"));
-    }
-    let header_segment = parts.next();
-    let kind = match kind_str {
-        "bearer_header" => InjectionKind::BearerHeader,
-        "uri_placeholder" => InjectionKind::UriPlaceholder,
-        "token_header" => InjectionKind::TokenHeader,
-        "basic_x_access_token" => InjectionKind::BasicXAccessToken,
-        "api_key_header" => InjectionKind::ApiKeyHeader,
-        "awsSigv4" | "aws_sigv4" => {
-            return Err(
-                "awsSigv4 carries real STS material and is not declarable from the CLI".to_string(),
-            );
-        }
-        other => {
-            return Err(format!(
-                "unknown injection kind {other:?}; use bearer_header, uri_placeholder, token_header, basic_x_access_token, or api_key_header"
-            ));
-        }
-    };
-    let header = match (kind, header_segment) {
-        (InjectionKind::ApiKeyHeader, Some(h)) if !h.is_empty() => Some(h.to_string()),
-        (InjectionKind::ApiKeyHeader, _) => {
-            return Err("api_key_header requires a header name (KIND:DOMAIN:HEADER)".to_string());
-        }
-        (_, Some(_)) => {
-            return Err(format!(
-                "kind {kind_str} does not take a header name; expected KIND:DOMAIN"
-            ));
-        }
-        (_, None) => None,
-    };
-    Ok(InjectionDef {
-        kind,
-        domain: domain.to_string(),
-        header,
-    })
-}
-
-#[derive(clap::Args)]
-pub struct PolicyArgs {
-    #[command(subcommand)]
-    pub command: PolicyCommand,
-}
-
-#[derive(Subcommand)]
-pub enum PolicyCommand {
-    #[command(about = "Add an allow rule for a destination pattern.")]
-    Allow(PolicyRuleArgs),
-    #[command(about = "Add a deny rule for a destination pattern.")]
-    Deny(PolicyRuleArgs),
-    #[command(about = "List the rules in the policy file.")]
-    List(PolicyScopeArgs),
-    #[command(about = "Remove the rule matching a destination pattern.")]
-    Remove(PolicyRemoveArgs),
-}
-
-#[derive(clap::Args)]
-pub struct PushArgs {
-    #[arg(
-        help = "A local file (pushed as a typed artifact) or a cached image reference (pushed as an image)."
-    )]
-    pub source: String,
-    #[arg(
-        help = "Target registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1."
-    )]
-    pub reference: String,
-    #[arg(
-        long,
-        help = "Artifact family (agent, policy, tool, …); inferred from the reference path when omitted."
-    )]
-    pub family: Option<String>,
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Pack a local file or directory into the artifact's OCI layer (for filesets and other content-bearing artifacts)."
-    )]
-    pub content: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct PullArgs {
-    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1.")]
-    pub reference: String,
-    #[arg(
-        short,
-        long,
-        help = "Write a pulled artifact here; defaults to stdout. Ignored for images (cached)."
-    )]
-    pub output: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct LoginArgs {
-    #[arg(help = "Registry host, e.g. registry.example.com or ghcr.io.")]
-    pub registry: String,
-    #[arg(
-        short,
-        long,
-        help = "Username for the registry (defaults to `any` for token auth)."
-    )]
-    pub username: Option<String>,
-    #[arg(
-        long,
-        help = "Read the token/password from stdin. Required — tokens are never accepted as a flag."
-    )]
-    pub password_stdin: bool,
-}
-
-#[derive(clap::Args)]
-pub struct LogoutArgs {
-    #[arg(help = "Registry host whose stored credential should be removed.")]
-    pub registry: String,
-}
-
-#[derive(clap::Args)]
-pub struct AuthArgs {
-    #[command(subcommand)]
-    pub command: AuthCommand,
-}
-
-#[derive(Subcommand)]
-pub enum AuthCommand {
-    #[command(about = "List registries you have stored credentials for (tokens are never shown).")]
-    List,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "lower")]
-pub enum TransportArg {
-    Direct,
-    Upstream,
-}
-
-#[derive(clap::Args)]
-pub struct PolicyRuleArgs {
-    #[arg(help = "Destination pattern: host, wildcard (*.example.com), CIDR, or host:port.")]
-    pub pattern: String,
-    #[arg(long, help = "Human-readable note stored alongside the rule.")]
-    pub description: Option<String>,
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = TransportArg::Direct,
-        help = "Transport for an allowed connection; ignored for deny rules."
-    )]
-    pub transport: TransportArg,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct PolicyScopeArgs {
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct PolicyRemoveArgs {
-    #[arg(help = "Destination pattern of the rule to remove.")]
-    pub pattern: String,
-    #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
-    )]
-    pub policy: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct UpdateArgs {
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Re-install even if the running version matches, e.g. when the binary is corrupt or its codesign was invalidated."
-    )]
-    pub force: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network."
-    )]
-    pub dry_run: bool,
-}
-
-#[derive(clap::Args)]
-pub struct ServiceArgs {
-    #[command(subcommand)]
-    pub command: ServiceCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ServiceCommand {
-    #[command(about = "Start the Lens Sandbox background service.")]
-    Start,
-    #[command(about = "Stop the Lens Sandbox background service.")]
-    Stop,
-    #[command(about = "Show status of the Lens Sandbox background service.")]
-    Status,
-    #[command(
-        about = "Register a per-user login agent and start the service now and on every login."
-    )]
-    Enable,
-    #[command(about = "Stop the service and unregister the per-user login agent.")]
-    Disable,
-}
-
-#[derive(clap::Args)]
-pub struct AuditArgs {
-    #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
-    pub run_id: String,
 }
 
 #[derive(clap::Args)]
@@ -603,6 +35,18 @@ pub struct RunArgs {
         help = "OCI image reference (e.g. alpine:3.20); omit for imageless mode, which requires a command after `--`."
     )]
     pub image: Option<String>,
+
+    #[arg(
+        long,
+        help = "Name the run, addressable in place of its id by every `lns sandbox` verb. Auto-generated (adjective_noun) when omitted; must not be all digits."
+    )]
+    pub name: Option<String>,
+
+    #[arg(
+        long,
+        help = "Registry to qualify a bare image reference (e.g. ghcr.io); falls back to the `run.registry` config default. A fully-qualified reference is used as-is."
+    )]
+    pub registry: Option<String>,
 
     #[arg(
         long,
@@ -642,16 +86,24 @@ pub struct RunArgs {
     #[arg(
         short = 'i',
         long = "interactive",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Keep stdin open (forward host stdin to the guest workload)."
+        default_missing_value = "true",
+        help = "Keep stdin open (forward host stdin to the guest workload). Pass `--interactive=false` (or `-i=false`) to disable."
     )]
     pub interactive: bool,
 
     #[arg(
         short = 't',
         long = "tty",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Allocate a PTY in the broker; pipe mode is selected automatically when stdin is not a TTY."
+        default_missing_value = "true",
+        help = "Allocate a PTY in the broker; pipe mode is selected automatically when stdin is not a TTY. Pass `--tty=false` (or `-t=false`) to disable."
     )]
     pub tty: bool,
 
@@ -708,10 +160,10 @@ pub struct RunArgs {
     #[arg(
         short = 'v',
         long = "volume",
-        value_parser = lns_ipc::VolumeMount::parse,
-        help = "Attach a named volume as `name:/path[:ro]`; its contents persist across runs (Docker -v style)."
+        value_parser = lns_ipc::MountSpec::parse,
+        help = "Mount into the workload (Docker -v style): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files)."
     )]
-    pub volumes: Vec<lns_ipc::VolumeMount>,
+    pub mounts: Vec<lns_ipc::MountSpec>,
 
     #[arg(
         long = "mount",
@@ -743,24 +195,49 @@ impl RunArgs {
     }
 }
 
+pub fn split_mounts(
+    mounts: &[lns_ipc::MountSpec],
+) -> (Vec<lns_ipc::VolumeMount>, Vec<lns_ipc::BindSpec>) {
+    let mut volumes = Vec::new();
+    let mut binds = Vec::new();
+    for mount in mounts {
+        match mount {
+            lns_ipc::MountSpec::Named(v) => volumes.push(v.clone()),
+            lns_ipc::MountSpec::Bind(b) => binds.push(b.clone()),
+        }
+    }
+    (volumes, binds)
+}
+
 #[derive(clap::Args)]
 pub struct ExecArgs {
-    #[arg(help = "Target run id surfaced by `lns ls` or `lns run -d`.")]
-    pub run_id: u32,
+    #[arg(
+        value_name = "RUN",
+        help = "Target run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
 
     #[arg(
         short = 'i',
         long = "interactive",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "`-i` — keep stdin open. Mirrors `docker exec -i`."
+        default_missing_value = "true",
+        help = "`-i` — keep stdin open. Mirrors `docker exec -i`. Pass `--interactive=false` (or `-i=false`) for a non-interactive exec."
     )]
     pub interactive: bool,
 
     #[arg(
         short = 't',
         long = "tty",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
         default_value_t = true,
-        help = "Allocate a PTY for the exec session."
+        default_missing_value = "true",
+        help = "Allocate a PTY for the exec session. Pass `--tty=false` (or `-t=false`) for a non-interactive exec."
     )]
     pub tty: bool,
 
@@ -781,8 +258,8 @@ pub struct ExecArgs {
 
 #[derive(clap::Args)]
 pub struct KillArgs {
-    #[arg(help = "Target run id.")]
-    pub run_id: u32,
+    #[arg(value_name = "RUN", help = "Target run id or name.")]
+    pub run: String,
 
     #[arg(
         long,
@@ -796,7 +273,7 @@ pub struct KillArgs {
 #[derive(Clone, Debug)]
 pub struct DetachChord(pub Vec<u8>);
 
-fn parse_detach_keys_arg(s: &str) -> Result<DetachChord, String> {
+pub(crate) fn parse_detach_keys_arg(s: &str) -> Result<DetachChord, String> {
     crate::chord::parse_detach_keys(s)
         .map(DetachChord)
         .map_err(|e| e.to_string())
@@ -895,9 +372,147 @@ fn parse_port(s: &str) -> Option<u16> {
     s.parse::<u16>().ok().filter(|&p| p != 0)
 }
 
+#[derive(clap::Args)]
+pub struct PushArgs {
+    #[arg(
+        help = "A local file (pushed as a typed artifact) or a cached image reference (pushed as an image)."
+    )]
+    pub source: String,
+    #[arg(
+        help = "Target registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1."
+    )]
+    pub reference: String,
+    #[arg(
+        long,
+        help = "Artifact family (agent, policy, tool, …); inferred from the reference path when omitted."
+    )]
+    pub family: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Pack a local file or directory into the artifact's OCI layer (for filesets and other content-bearing artifacts)."
+    )]
+    pub content: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct PullArgs {
+    #[arg(help = "Registry reference, e.g. registry.example.com/org/acme/agents/hermes:v1.")]
+    pub reference: String,
+    #[arg(
+        short,
+        long,
+        help = "Write a pulled artifact here; defaults to stdout. Ignored for images (cached)."
+    )]
+    pub output: Option<PathBuf>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct RunHarness {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    #[derive(Parser)]
+    struct ExecHarness {
+        #[command(flatten)]
+        args: ExecArgs,
+    }
+
+    fn parse_run(argv: &[&str]) -> Result<RunArgs, clap::Error> {
+        let mut full = vec!["run"];
+        full.extend_from_slice(argv);
+        RunHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    fn parse_exec(argv: &[&str]) -> Result<ExecArgs, clap::Error> {
+        let mut full = vec!["exec"];
+        full.extend_from_slice(argv);
+        ExecHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    #[test]
+    fn run_interactive_and_tty_default_to_true() {
+        let args = parse_run(&["alpine:3.20"]).expect("defaults parse");
+        assert!(args.interactive, "interactive should default to true");
+        assert!(args.tty, "tty should default to true");
+    }
+
+    #[test]
+    fn run_interactive_and_tty_accept_explicit_false() {
+        let args = parse_run(&["--interactive=false", "--tty=false", "alpine:3.20"])
+            .expect("explicit false should parse");
+        assert!(!args.interactive, "interactive should be false");
+        assert!(!args.tty, "tty should be false");
+    }
+
+    #[test]
+    fn run_short_flags_accept_explicit_false() {
+        let args =
+            parse_run(&["-i=false", "-t=false", "alpine:3.20"]).expect("short =false should parse");
+        assert!(!args.interactive);
+        assert!(!args.tty);
+    }
+
+    #[test]
+    fn run_interactive_and_tty_accept_explicit_true() {
+        let args = parse_run(&["--interactive=true", "--tty=true", "alpine:3.20"])
+            .expect("explicit true should parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+    }
+
+    #[test]
+    fn run_bare_flags_followed_by_positional_stay_true() {
+        // `-i` / `-t` with no value must use default_missing_value and NOT swallow
+        // the following positional image arg (require_equals guards this).
+        let args = parse_run(&["-i", "-t", "alpine:3.20"]).expect("bare flags parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+        assert_eq!(args.image.as_deref(), Some("alpine:3.20"));
+    }
+
+    #[test]
+    fn run_detach_still_works_with_default_flag_values() {
+        // -d conflicts_with_all [interactive, tty]; defaults must not trip the conflict.
+        let args = parse_run(&["-d", "alpine:3.20"]).expect("detach with defaults should parse");
+        assert!(args.detach);
+    }
+
+    #[test]
+    fn run_detach_conflicts_with_explicitly_provided_interactive() {
+        let err = parse_run(&["-d", "--interactive=true", "alpine:3.20"])
+            .err()
+            .expect("explicit -i with -d should conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn exec_interactive_and_tty_default_to_true() {
+        let args = parse_exec(&["demo", "--", "echo", "hi"]).expect("defaults parse");
+        assert!(args.interactive);
+        assert!(args.tty);
+    }
+
+    #[test]
+    fn exec_interactive_and_tty_accept_explicit_false() {
+        let args = parse_exec(&[
+            "--tty=false",
+            "--interactive=false",
+            "demo",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .expect("explicit false should parse");
+        assert!(!args.interactive, "interactive should be false");
+        assert!(!args.tty, "tty should be false");
+    }
 
     #[test]
     fn parse_detach_keys_arg_returns_chord_bytes_on_valid_input() {
@@ -909,90 +524,6 @@ mod tests {
     fn parse_detach_keys_arg_surfaces_parse_error_as_string() {
         let err = parse_detach_keys_arg("not-a-key").unwrap_err();
         assert!(!err.is_empty(), "expected non-empty error string");
-    }
-
-    #[test]
-    fn parse_injection_accepts_the_two_declarable_kinds() {
-        use lns_policy::providers::InjectionKind;
-        let bearer = parse_injection("bearer_header:api.acme.corp").unwrap();
-        assert_eq!(bearer.kind, InjectionKind::BearerHeader);
-        assert_eq!(bearer.domain, "api.acme.corp");
-        let uri = parse_injection("uri_placeholder:api.rocket.example").unwrap();
-        assert_eq!(uri.kind, InjectionKind::UriPlaceholder);
-    }
-
-    #[test]
-    fn parse_injection_rejects_awssigv4_with_a_clear_reason() {
-        let err = parse_injection("awsSigv4:*.amazonaws.com").unwrap_err();
-        assert!(err.contains("awsSigv4"), "got: {err}");
-        assert!(parse_injection("aws_sigv4:x").is_err());
-    }
-
-    #[test]
-    fn parse_injection_rejects_an_unknown_kind() {
-        let err = parse_injection("basic_auth:api.acme.corp").unwrap_err();
-        assert!(err.contains("unknown injection kind"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_injection_requires_a_kind_and_domain() {
-        assert!(
-            parse_injection("bearer_header")
-                .unwrap_err()
-                .contains("KIND:DOMAIN")
-        );
-        assert!(
-            parse_injection("bearer_header:")
-                .unwrap_err()
-                .contains("missing a domain")
-        );
-    }
-
-    #[test]
-    fn parse_injection_accepts_token_header() {
-        use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("token_header:api.example.com").unwrap();
-        assert_eq!(inj.kind, InjectionKind::TokenHeader);
-        assert_eq!(inj.domain, "api.example.com");
-        assert_eq!(inj.header, None);
-    }
-
-    #[test]
-    fn parse_injection_accepts_basic_x_access_token() {
-        use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("basic_x_access_token:example.com").unwrap();
-        assert_eq!(inj.kind, InjectionKind::BasicXAccessToken);
-        assert_eq!(inj.domain, "example.com");
-        assert_eq!(inj.header, None);
-    }
-
-    #[test]
-    fn parse_injection_accepts_api_key_header_with_header_name() {
-        use lns_policy::providers::InjectionKind;
-        let inj = parse_injection("api_key_header:api.example.test:x-api-key").unwrap();
-        assert_eq!(inj.kind, InjectionKind::ApiKeyHeader);
-        assert_eq!(inj.domain, "api.example.test");
-        assert_eq!(inj.header.as_deref(), Some("x-api-key"));
-    }
-
-    #[test]
-    fn parse_injection_rejects_api_key_header_without_a_header_name() {
-        let err = parse_injection("api_key_header:api.example.test").unwrap_err();
-        assert!(
-            err.contains("api_key_header") && err.contains("header name"),
-            "got: {err}"
-        );
-        let err = parse_injection("api_key_header:api.example.test:").unwrap_err();
-        assert!(
-            err.contains("api_key_header") && err.contains("header name"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_injection_rejects_a_header_segment_on_kinds_that_do_not_use_one() {
-        let err = parse_injection("bearer_header:api.acme.corp:x-api-key").unwrap_err();
-        assert!(err.contains("does not take a header name"), "got: {err}");
     }
 
     #[test]

@@ -2,10 +2,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use futures_util::future::BoxFuture;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-use super::traits::{Clock, DeviceCode, DeviceFlow, OauthConfig, PollOutcome, TokenSet};
+use super::traits::{
+    AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
+    OauthConfig, PkceConfig, PollOutcome, TokenSet,
+};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_INTERVAL: u64 = 5;
@@ -29,6 +32,7 @@ pub struct RealDeviceFlow;
 struct DeviceCodeResp {
     device_code: String,
     user_code: String,
+    #[serde(alias = "verification_url")]
     verification_uri: String,
     interval: Option<u64>,
     expires_in: Option<u64>,
@@ -72,6 +76,17 @@ fn parse_json<T: DeserializeOwned>(
         .with_context(|| format!("parsing response from {url} (HTTP {status})"))
 }
 
+/// Confidential device clients (e.g. Google) must send `client_secret` in the token exchange; public clients (e.g. GitHub) leave it empty and omit it.
+fn with_client_secret<'a>(
+    mut form: Vec<(&'a str, &'a str)>,
+    secret: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    if !secret.is_empty() {
+        form.push(("client_secret", secret));
+    }
+    form
+}
+
 impl DeviceFlow for RealDeviceFlow {
     fn request_device_code<'a>(
         &'a self,
@@ -110,11 +125,14 @@ impl DeviceFlow for RealDeviceFlow {
         Box::pin(async move {
             let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
-                &[
-                    ("client_id", cfg.client_id.as_str()),
-                    ("device_code", device_code),
-                    ("grant_type", DEVICE_CODE_GRANT),
-                ],
+                &with_client_secret(
+                    vec![
+                        ("client_id", cfg.client_id.as_str()),
+                        ("device_code", device_code),
+                        ("grant_type", DEVICE_CODE_GRANT),
+                    ],
+                    &cfg.client_secret,
+                ),
             )
             .await?;
             let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
@@ -146,11 +164,14 @@ impl DeviceFlow for RealDeviceFlow {
         Box::pin(async move {
             let (status, bytes) = post_form_bytes(
                 &cfg.token_endpoint,
-                &[
-                    ("client_id", cfg.client_id.as_str()),
-                    ("grant_type", "refresh_token"),
-                    ("refresh_token", refresh_token),
-                ],
+                &with_client_secret(
+                    vec![
+                        ("client_id", cfg.client_id.as_str()),
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh_token),
+                    ],
+                    &cfg.client_secret,
+                ),
             )
             .await?;
             let t: TokenResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
@@ -166,5 +187,164 @@ impl DeviceFlow for RealDeviceFlow {
                 ),
             }
         })
+    }
+}
+
+pub struct RealAuthCodeFlow;
+
+#[derive(Serialize)]
+struct ExchangeReq<'a> {
+    code: &'a str,
+    code_verifier: &'a str,
+    code_challenge_method: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ExchangeResp {
+    key: Option<String>,
+    error: Option<String>,
+}
+
+async fn post_json_bytes(
+    url: &str,
+    body: &impl Serialize,
+) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+    let json = serde_json::to_vec(body).context("serializing pkce exchange request")?;
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .body(json)
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading body from {url}"))?;
+    Ok((status, bytes.to_vec()))
+}
+
+impl AuthCodeFlow for RealAuthCodeFlow {
+    fn exchange_code<'a>(
+        &'a self,
+        cfg: &'a PkceConfig,
+        code: &'a str,
+        verifier: &'a str,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let (status, bytes) = post_json_bytes(
+                &cfg.token_endpoint,
+                &ExchangeReq {
+                    code,
+                    code_verifier: verifier,
+                    code_challenge_method: "S256",
+                },
+            )
+            .await?;
+            let r: ExchangeResp = parse_json(&cfg.token_endpoint, status, &bytes)?;
+            match r.key {
+                Some(key) if !key.is_empty() => Ok(key),
+                _ => bail!(
+                    "pkce code exchange at {} failed: {}",
+                    cfg.token_endpoint,
+                    r.error.as_deref().unwrap_or("no key in response")
+                ),
+            }
+        })
+    }
+}
+
+pub struct RealCallbackListener;
+
+struct RealCallbackHandle {
+    listener: tokio::net::TcpListener,
+    redirect_url: String,
+}
+
+impl CallbackListener for RealCallbackListener {
+    fn bind(&self) -> BoxFuture<'_, Result<Box<dyn CallbackHandle>>> {
+        Box::pin(async move {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .context("binding loopback pkce callback listener")?;
+            let port = listener
+                .local_addr()
+                .context("reading pkce callback listener address")?
+                .port();
+            let redirect_url = format!("http://localhost:{port}/callback");
+            Ok(Box::new(RealCallbackHandle {
+                listener,
+                redirect_url,
+            }) as Box<dyn CallbackHandle>)
+        })
+    }
+}
+
+impl CallbackHandle for RealCallbackHandle {
+    fn redirect_url(&self) -> &str {
+        &self.redirect_url
+    }
+
+    fn wait(self: Box<Self>) -> BoxFuture<'static, Result<CallbackParams>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        Box::pin(async move {
+            let (stream, _) = self
+                .listener
+                .accept()
+                .await
+                .context("accepting the pkce callback connection")?;
+            let (read_half, mut write_half) = stream.into_split();
+            let mut request_line = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut request_line)
+                .await
+                .context("reading the pkce callback request line")?;
+            let params = super::parse_callback_target(&request_line);
+            let body = "<html><body>Signed in. You can close this tab and return to your terminal.</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = write_half.write_all(response.as_bytes()).await;
+            let _ = write_half.flush().await;
+            params
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_confidential_client_appends_its_secret_to_the_token_form() {
+        let form = with_client_secret(vec![("client_id", "some-id")], "some-secret");
+        assert_eq!(
+            form,
+            vec![("client_id", "some-id"), ("client_secret", "some-secret")]
+        );
+    }
+
+    #[test]
+    fn a_public_client_omits_the_secret_from_the_token_form() {
+        let form = with_client_secret(vec![("client_id", "some-id")], "");
+        assert_eq!(form, vec![("client_id", "some-id")]);
+    }
+
+    #[test]
+    fn a_device_code_response_accepts_a_providers_nonstandard_verification_url_key() {
+        let body = r#"{"device_code":"some-device","user_code":"SOME-CODE","verification_url":"https://example.com/device"}"#;
+        let d: DeviceCodeResp = serde_json::from_str(body).unwrap();
+        assert_eq!(d.verification_uri, "https://example.com/device");
+    }
+
+    #[test]
+    fn a_device_code_response_accepts_the_rfc8628_verification_uri_key() {
+        let body = r#"{"device_code":"some-device","user_code":"SOME-CODE","verification_uri":"https://example.com/device"}"#;
+        let d: DeviceCodeResp = serde_json::from_str(body).unwrap();
+        assert_eq!(d.verification_uri, "https://example.com/device");
     }
 }

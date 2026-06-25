@@ -2,24 +2,68 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use lns_ipc::{PortPublish, VolumeMount};
+use clap::FromArgMatches;
+use lns_ipc::{MountSpec, PortPublish};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{ConfigCommand, ConfigSetArgs, RunArgs};
+use crate::cli::RunArgs;
+use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
+
+#[derive(clap::Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ConfigCommand {
+    #[command(
+        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
+    )]
+    Set(ConfigSetArgs),
+    #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
+    Get(ConfigKeyArgs),
+    #[command(about = "Remove a default.")]
+    Unset(ConfigKeyArgs),
+    #[command(about = "List every configured default.")]
+    List,
+}
+
+const CONFIG_KEY_HELP: &str =
+    "Config key: run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish.";
+
+#[derive(clap::Args)]
+pub struct ConfigSetArgs {
+    #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: ConfigKey,
+    #[arg(
+        required = true,
+        help = "Value(s) to store; each is validated like the matching `lns run` flag."
+    )]
+    pub values: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct ConfigKeyArgs {
+    #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: ConfigKey,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigKey {
     RunCpus,
     RunMem,
+    RunRegistry,
     RunEnv,
     RunVolume,
     RunPublish,
 }
 
 impl ConfigKey {
-    pub const ALL: [ConfigKey; 5] = [
+    pub const ALL: [ConfigKey; 6] = [
         ConfigKey::RunCpus,
         ConfigKey::RunMem,
+        ConfigKey::RunRegistry,
         ConfigKey::RunEnv,
         ConfigKey::RunVolume,
         ConfigKey::RunPublish,
@@ -29,11 +73,12 @@ impl ConfigKey {
         match s {
             "run.cpus" => Ok(ConfigKey::RunCpus),
             "run.mem" => Ok(ConfigKey::RunMem),
+            "run.registry" => Ok(ConfigKey::RunRegistry),
             "run.env" => Ok(ConfigKey::RunEnv),
             "run.volume" => Ok(ConfigKey::RunVolume),
             "run.publish" => Ok(ConfigKey::RunPublish),
             other => Err(format!(
-                "unknown config key {other:?}; expected run.cpus, run.mem, run.env, run.volume, or run.publish"
+                "unknown config key {other:?}; expected run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish"
             )),
         }
     }
@@ -42,6 +87,7 @@ impl ConfigKey {
         match self {
             ConfigKey::RunCpus => "run.cpus",
             ConfigKey::RunMem => "run.mem",
+            ConfigKey::RunRegistry => "run.registry",
             ConfigKey::RunEnv => "run.env",
             ConfigKey::RunVolume => "run.volume",
             ConfigKey::RunPublish => "run.publish",
@@ -63,6 +109,8 @@ pub struct RunSection {
     pub cpus: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,6 +165,29 @@ fn save_atomic(cfg: &ConfigFile, path: &Path) -> Result<()> {
     std::fs::rename(&tmp, path)
         .with_context(|| format!("installing config at {}", path.display()))?;
     Ok(())
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(subcommand::<ConfigArgs>("config").about(
+        "Get and set persistent defaults, applied to `lns run` when the matching flag is absent.",
+    ))
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "config",
+    augment,
+    run: run_command,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = ConfigArgs::from_arg_matches(matches)?;
+        let path = default_config_path()?;
+        let mut out = ctx.out;
+        run(&args.command, &path, &mut out)
+    })
 }
 
 pub fn run(cmd: &ConfigCommand, path: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -189,12 +260,17 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
     match key {
         ConfigKey::RunCpus => cfg.run.cpus = Some(parse_cpus(key, single(key, values)?)?),
         ConfigKey::RunMem => cfg.run.mem = Some(parse_mem(key, single(key, values)?)?),
+        ConfigKey::RunRegistry => {
+            let value = single(key, values)?;
+            lns_policy::registry_auth::validate_registry_host(value)
+                .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))?;
+            cfg.run.registry = Some(value.to_string());
+        }
         ConfigKey::RunEnv => {
             cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
         }
         ConfigKey::RunVolume => {
-            cfg.run.volume =
-                validated(key, values, |s| lns_ipc::VolumeMount::parse(s).map(|_| ()))?;
+            cfg.run.volume = validated(key, values, |s| lns_ipc::MountSpec::parse(s).map(|_| ()))?;
         }
         ConfigKey::RunPublish => {
             cfg.run.publish = validated(key, values, |s| {
@@ -248,6 +324,7 @@ fn values_of(cfg: &ConfigFile, key: ConfigKey) -> Vec<String> {
     match key {
         ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()).into_iter().collect(),
         ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()).into_iter().collect(),
+        ConfigKey::RunRegistry => cfg.run.registry.clone().into_iter().collect(),
         ConfigKey::RunEnv => cfg.run.env.clone(),
         ConfigKey::RunVolume => cfg.run.volume.clone(),
         ConfigKey::RunPublish => cfg.run.publish.clone(),
@@ -258,6 +335,7 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
     match key {
         ConfigKey::RunCpus => cfg.run.cpus = None,
         ConfigKey::RunMem => cfg.run.mem = None,
+        ConfigKey::RunRegistry => cfg.run.registry = None,
         ConfigKey::RunEnv => cfg.run.env.clear(),
         ConfigKey::RunVolume => cfg.run.volume.clear(),
         ConfigKey::RunPublish => cfg.run.publish.clear(),
@@ -268,8 +346,9 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
 pub struct RunDefaults {
     pub cpus: Option<u8>,
     pub mem: Option<usize>,
+    pub registry: Option<String>,
     pub env: Vec<String>,
-    pub volumes: Vec<VolumeMount>,
+    pub mounts: Vec<MountSpec>,
     pub publish: Vec<PortPublish>,
 }
 
@@ -278,17 +357,18 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
     Ok(RunDefaults {
         cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
         mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
+        registry: cfg.run.registry,
         env: parsed_defaults(
             ConfigKey::RunEnv,
             &cfg.run.env,
             path,
             crate::cli::parse_env_kv,
         )?,
-        volumes: parsed_defaults(
+        mounts: parsed_defaults(
             ConfigKey::RunVolume,
             &cfg.run.volume,
             path,
-            VolumeMount::parse,
+            MountSpec::parse,
         )?,
         publish: parsed_defaults(
             ConfigKey::RunPublish,
@@ -335,10 +415,34 @@ fn parsed_defaults<T>(
 pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.cpus = args.cpus.or(defaults.cpus);
     args.mem = args.mem.or(defaults.mem);
+    args.registry = args.registry.or(defaults.registry);
+    if let Some(image) = args.image.take() {
+        args.image = Some(resolve_default_registry(&image, args.registry.as_deref()));
+    }
     args.env = merged_env(defaults.env, args.env);
-    args.volumes = merged_volumes(defaults.volumes, args.volumes);
+    args.mounts = merged_mounts(defaults.mounts, args.mounts);
     args.publish = merged_publish(defaults.publish, args.publish);
     args
+}
+
+/// Qualifies a bare image reference with the configured default registry; a reference that already names a registry — or a docker.io default, which the parser already assumes — is left untouched so implicit `library/` namespacing is preserved.
+pub fn resolve_default_registry(image: &str, default_registry: Option<&str>) -> String {
+    let Some(registry) = default_registry else {
+        return image.to_string();
+    };
+    if lns_policy::registry_auth::canonical_registry(registry) == "docker.io"
+        || image_has_registry(image)
+    {
+        return image.to_string();
+    }
+    format!("{registry}/{image}")
+}
+
+fn image_has_registry(image: &str) -> bool {
+    match image.split_once('/') {
+        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+        None => false,
+    }
 }
 
 fn merged_env(defaults: Vec<String>, flags: Vec<String>) -> Vec<String> {
@@ -354,10 +458,10 @@ fn env_key(entry: &str) -> &str {
     entry.split_once('=').map_or(entry, |(key, _)| key)
 }
 
-fn merged_volumes(defaults: Vec<VolumeMount>, flags: Vec<VolumeMount>) -> Vec<VolumeMount> {
-    let mut merged: Vec<VolumeMount> = defaults
+fn merged_mounts(defaults: Vec<MountSpec>, flags: Vec<MountSpec>) -> Vec<MountSpec> {
+    let mut merged: Vec<MountSpec> = defaults
         .into_iter()
-        .filter(|d| !flags.iter().any(|f| f.target == d.target))
+        .filter(|d| !flags.iter().any(|f| f.target() == d.target()))
         .collect();
     merged.extend(flags);
     merged
@@ -379,7 +483,6 @@ fn merged_publish(defaults: Vec<PortPublish>, flags: Vec<PortPublish>) -> Vec<Po
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ConfigKeyArgs;
     use tempfile::TempDir;
 
     fn set_cmd(key: ConfigKey, values: &[&str]) -> ConfigCommand {
@@ -393,6 +496,30 @@ mod tests {
         let mut buf = Vec::new();
         let code = run(cmd, path, &mut buf).expect("command succeeds");
         (code, String::from_utf8(buf).unwrap())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn run_command_resolves_the_default_path_and_writes_a_stored_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let _scope = crate::test_env::EnvScope::set("LNS_CONFIG_PATH", &cfg);
+
+        let set = crate::command::build_cli()
+            .try_get_matches_from(["lns", "config", "set", "run.cpus", "4"])
+            .unwrap();
+        let (_, set_sub) = set.subcommand().unwrap();
+        let mut input: &[u8] = b"";
+        let mut out: Vec<u8> = Vec::new();
+        let ctx = RunCtx {
+            debug: false,
+            cwd: None,
+            input: &mut input,
+            out: &mut out,
+        };
+        assert_eq!(run_command(set_sub, ctx).await.unwrap(), 0);
+
+        assert_eq!(load(&cfg).unwrap().run.cpus, Some(4));
     }
 
     #[test]
@@ -513,9 +640,10 @@ mod tests {
     fn every_key_survives_a_set_get_list_unset_lifecycle() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let seeds: [(ConfigKey, &[&str]); 5] = [
+        let seeds: [(ConfigKey, &[&str]); 6] = [
             (ConfigKey::RunCpus, &["4"]),
             (ConfigKey::RunMem, &["2048"]),
+            (ConfigKey::RunRegistry, &["ghcr.io"]),
             (ConfigKey::RunEnv, &["TZ=UTC", "CI=1"]),
             (ConfigKey::RunVolume, &["cache:/var/cache:ro"]),
             (ConfigKey::RunPublish, &["8080:80"]),
@@ -528,6 +656,7 @@ mod tests {
         for needle in [
             "run.cpus = 4",
             "run.mem = 2048",
+            "run.registry = ghcr.io",
             "run.env = TZ=UTC",
             "run.env = CI=1",
             "run.volume = cache:/var/cache:ro",
@@ -597,6 +726,8 @@ mod tests {
     fn bare_run_args() -> RunArgs {
         RunArgs {
             image: Some("alpine".to_string()),
+            name: None,
+            registry: None,
             cpus: None,
             mem: None,
             policy: None,
@@ -610,7 +741,7 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            volumes: Vec::new(),
+            mounts: Vec::new(),
             cmd: Vec::new(),
             mount: Vec::new(),
             artifact_mounts: Vec::new(),
@@ -627,10 +758,24 @@ mod tests {
         )
         .unwrap();
         let defaults = load_run_defaults(&path).unwrap();
-        assert_eq!(defaults.volumes[0].target, "/var/cache");
-        assert!(defaults.volumes[0].read_only);
+        assert_eq!(
+            defaults.mounts,
+            vec![MountSpec::parse("cache:/var/cache:ro").unwrap()]
+        );
         assert_eq!(defaults.publish[0].host_port, 8080);
         assert_eq!(defaults.publish[0].container_port, 80);
+    }
+
+    #[test]
+    fn load_run_defaults_parses_a_host_bind_entry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "run:\n  volume:\n    - /srv/data:/data:ro\n").unwrap();
+        let defaults = load_run_defaults(&path).unwrap();
+        assert_eq!(
+            defaults.mounts,
+            vec![MountSpec::parse("/srv/data:/data:ro").unwrap()]
+        );
     }
 
     #[test]
@@ -726,20 +871,136 @@ mod tests {
     }
 
     #[test]
+    fn store_rejects_an_invalid_registry_host() {
+        let mut cfg = ConfigFile::default();
+        let err = store(
+            &mut cfg,
+            ConfigKey::RunRegistry,
+            &["https://ghcr.io".to_string()],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("run.registry"), "got: {msg}");
+        assert!(msg.contains("URL"), "got: {msg}");
+    }
+
+    #[test]
+    fn resolve_default_registry_leaves_an_image_untouched_without_a_default() {
+        assert_eq!(resolve_default_registry("alpine", None), "alpine");
+    }
+
+    #[test]
+    fn resolve_default_registry_does_not_prepend_a_docker_io_default() {
+        // docker.io is the parser's own default; prepending it would break the implicit `library/` namespacing.
+        for d in ["docker.io", "index.docker.io"] {
+            assert_eq!(resolve_default_registry("alpine", Some(d)), "alpine");
+        }
+    }
+
+    #[test]
+    fn resolve_default_registry_qualifies_a_bare_reference_with_a_non_docker_default() {
+        assert_eq!(
+            resolve_default_registry("alpine", Some("ghcr.io")),
+            "ghcr.io/alpine"
+        );
+        assert_eq!(
+            resolve_default_registry("alpine:3.20", Some("ghcr.io")),
+            "ghcr.io/alpine:3.20"
+        );
+        assert_eq!(
+            resolve_default_registry("org/app", Some("ghcr.io")),
+            "ghcr.io/org/app"
+        );
+    }
+
+    #[test]
+    fn resolve_default_registry_leaves_a_fully_qualified_reference_alone() {
+        for image in [
+            "myreg.io/app",
+            "localhost:5000/app",
+            "localhost/app",
+            "registry.example.test/team/app:1",
+        ] {
+            assert_eq!(resolve_default_registry(image, Some("ghcr.io")), image);
+        }
+    }
+
+    #[test]
+    fn apply_run_defaults_qualifies_a_bare_image_with_the_configured_registry() {
+        let resolved = apply_run_defaults(
+            bare_run_args(),
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("ghcr.io/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_prefers_the_registry_flag_over_the_configured_default() {
+        let mut args = bare_run_args();
+        args.registry = Some("quay.io".into());
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("quay.io/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_leaves_a_qualified_image_untouched() {
+        let mut args = bare_run_args();
+        args.image = Some("docker.io/library/alpine".into());
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image.as_deref(), Some("docker.io/library/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_keeps_an_imageless_run_imageless() {
+        let mut args = bare_run_args();
+        args.image = None;
+        let resolved = apply_run_defaults(
+            args,
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(resolved.image, None);
+    }
+
+    #[test]
     fn merged_env_keeps_configured_entries_first_and_flags_last() {
         let merged = merged_env(vec!["TZ=UTC".into(), "CI=1".into()], vec!["DEBUG=1".into()]);
         assert_eq!(merged, vec!["TZ=UTC", "CI=1", "DEBUG=1"]);
     }
 
     #[test]
-    fn merged_volumes_keeps_the_same_volume_mounted_at_two_different_targets() {
-        let mount = |spec: &str| VolumeMount::parse(spec).unwrap();
-        let merged = merged_volumes(vec![mount("cache:/a")], vec![mount("cache:/b")]);
+    fn merged_mounts_keeps_the_same_volume_mounted_at_two_different_targets() {
+        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
+        let merged = merged_mounts(vec![mount("cache:/a")], vec![mount("cache:/b")]);
         assert_eq!(
             merged.len(),
             2,
             "same name at distinct targets is not a conflict"
         );
+    }
+
+    #[test]
+    fn merged_mounts_lets_a_flag_override_the_configured_mount_at_the_same_target() {
+        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
+        let merged = merged_mounts(vec![mount("cache:/data")], vec![mount("/srv/data:/data")]);
+        assert_eq!(merged, vec![mount("/srv/data:/data")]);
     }
 
     #[test]

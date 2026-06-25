@@ -56,14 +56,37 @@ pub struct CredentialAuth {
     pub injections: Vec<InjectionDef>,
 }
 
-/// Device-flow (RFC 8628) configuration for an `oauth` integration: how to sign in, plus the same env/placeholder/injection wiring a credential carries for reaching the wire.
+/// Which interactive sign-in an `oauth` integration uses: the RFC 8628 device flow (default) or the browser-redirect authorization-code + PKCE flow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OauthFlow {
+    #[default]
+    Device,
+    Pkce,
+}
+
+impl OauthFlow {
+    fn is_device(&self) -> bool {
+        matches!(self, OauthFlow::Device)
+    }
+}
+
+/// Interactive sign-in configuration for an `oauth` integration: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce; `clientSecret` is set only for confidential device clients (e.g. Google) that require it in the token exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OauthAuth {
-    pub client_id: String,
+    #[serde(default, skip_serializing_if = "OauthFlow::is_device")]
+    pub flow: OauthFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
-    pub device_authorization_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
     pub token_endpoint: String,
     pub env_var: String,
     pub placeholder: String,
@@ -102,15 +125,32 @@ impl Integration {
         self.name.as_deref().unwrap_or(&self.id)
     }
 
-    /// Each authKind must carry its matching block — `credential:` for credential, `oauth:` for oauth.
+    /// Each authKind must carry its matching block, and an oauth block must carry the endpoint its `flow` needs.
     pub fn validate(&self) -> Result<(), String> {
         match self.auth_kind {
             AuthKind::Credential if self.credential.is_none() => Err(format!(
                 "integration {:?} declares authKind credential but has no `credential:` block",
                 self.id
             )),
-            AuthKind::Oauth if self.oauth.is_none() => Err(format!(
+            AuthKind::Oauth => self.validate_oauth(),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_oauth(&self) -> Result<(), String> {
+        let Some(oauth) = self.oauth.as_ref() else {
+            return Err(format!(
                 "integration {:?} declares authKind oauth but has no `oauth:` block",
+                self.id
+            ));
+        };
+        match oauth.flow {
+            OauthFlow::Device if oauth.device_authorization_endpoint.is_none() => Err(format!(
+                "integration {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
+                self.id
+            )),
+            OauthFlow::Pkce if oauth.authorization_endpoint.is_none() => Err(format!(
+                "integration {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
                 self.id
             )),
             _ => Ok(()),
@@ -251,9 +291,12 @@ mod tests {
 
     fn oauth_auth(env_var: &str, placeholder: &str, domain: &str) -> OauthAuth {
         OauthAuth {
-            client_id: "Iv1.example0000".into(),
+            flow: OauthFlow::Device,
+            client_id: Some("Iv1.example0000".into()),
+            client_secret: None,
             scopes: vec!["repo".into()],
-            device_authorization_endpoint: "https://example.com/login/device/code".into(),
+            device_authorization_endpoint: Some("https://example.com/login/device/code".into()),
+            authorization_endpoint: None,
             token_endpoint: "https://example.com/login/oauth/access_token".into(),
             env_var: env_var.into(),
             placeholder: placeholder.into(),
@@ -262,6 +305,41 @@ mod tests {
                 domain: domain.into(),
                 header: None,
             }],
+        }
+    }
+
+    fn pkce_oauth_auth(env_var: &str, placeholder: &str, domain: &str) -> OauthAuth {
+        OauthAuth {
+            flow: OauthFlow::Pkce,
+            client_id: None,
+            client_secret: None,
+            scopes: Vec::new(),
+            device_authorization_endpoint: None,
+            authorization_endpoint: Some("https://example.com/auth".into()),
+            token_endpoint: "https://example.com/api/v1/auth/keys".into(),
+            env_var: env_var.into(),
+            placeholder: placeholder.into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: domain.into(),
+                header: None,
+            }],
+        }
+    }
+
+    fn pkce_integration() -> Integration {
+        Integration {
+            id: "examplepkce".into(),
+            name: None,
+            auth_kind: AuthKind::Oauth,
+            routes: vec![route("api.examplepkce.com")],
+            credential: None,
+            oauth: Some(pkce_oauth_auth(
+                "EXAMPLEPKCE_TOKEN",
+                "examplepkce_LNSPLACEHOLDER0000",
+                "api.examplepkce.com",
+            )),
+            token_fallback: None,
         }
     }
 
@@ -392,6 +470,18 @@ mod tests {
     }
 
     #[test]
+    fn oauth_flow_serializes_in_snake_case() {
+        assert_eq!(
+            serde_yaml::to_string(&OauthFlow::Device).unwrap().trim(),
+            "device"
+        );
+        assert_eq!(
+            serde_yaml::to_string(&OauthFlow::Pkce).unwrap().trim(),
+            "pkce"
+        );
+    }
+
+    #[test]
     fn credential_integration_round_trips_with_a_named_credential_block() {
         let i = sample_integration();
         let yaml = serde_yaml::to_string(&i).unwrap();
@@ -416,6 +506,28 @@ mod tests {
         );
         let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_oauth_integration_round_trips_an_optional_client_secret() {
+        let mut i = oauth_integration();
+        i.oauth.as_mut().unwrap().client_secret = Some("some-client-secret".into());
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(
+            yaml.contains("clientSecret: some-client-secret"),
+            "got: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn an_oauth_integration_without_a_client_secret_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        assert!(
+            !yaml.contains("clientSecret"),
+            "a public-client oauth entry must not serialize an empty client secret: {yaml}"
+        );
     }
 
     #[test]
@@ -529,6 +641,60 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth_block_defaults_to_the_device_flow_and_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        assert!(
+            !yaml.contains("flow:"),
+            "the default device flow must not serialize: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.oauth.unwrap().flow, OauthFlow::Device);
+    }
+
+    #[test]
+    fn a_pkce_oauth_integration_round_trips_with_flow_and_an_authorization_endpoint_and_no_client_id()
+     {
+        let i = pkce_integration();
+        let yaml = serde_yaml::to_string(&i).unwrap();
+        assert!(yaml.contains("flow: pkce"), "got: {yaml}");
+        assert!(
+            yaml.contains("authorizationEndpoint: https://example.com/auth"),
+            "got: {yaml}"
+        );
+        assert!(
+            !yaml.contains("clientId:"),
+            "a pkce entry needs no client id: {yaml}"
+        );
+        assert!(
+            !yaml.contains("deviceAuthorizationEndpoint:"),
+            "a pkce entry has no device endpoint: {yaml}"
+        );
+        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, i);
+    }
+
+    #[test]
+    fn validate_accepts_a_pkce_oauth_integration_without_a_client_id() {
+        assert!(pkce_integration().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_pkce_oauth_integration_missing_its_authorization_endpoint() {
+        let mut i = pkce_integration();
+        i.oauth.as_mut().unwrap().authorization_endpoint = None;
+        let err = i.validate().unwrap_err();
+        assert!(err.contains("authorizationEndpoint"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_device_oauth_integration_missing_its_device_authorization_endpoint() {
+        let mut i = oauth_integration();
+        i.oauth.as_mut().unwrap().device_authorization_endpoint = None;
+        let err = i.validate().unwrap_err();
+        assert!(err.contains("deviceAuthorizationEndpoint"), "got: {err}");
+    }
+
+    #[test]
     fn catalog_round_trips_and_empty_integrations_is_the_default() {
         let empty: Catalog = serde_yaml::from_str("{}").unwrap();
         assert!(empty.integrations.is_empty());
@@ -592,6 +758,26 @@ mod tests {
             "OpenAI-compatible clients send Authorization: Bearer, got: {:?}",
             cred.injections
         );
+    }
+
+    #[test]
+    fn bundled_bedrock_injects_a_bearer_header_on_the_regional_runtime_and_control_planes() {
+        let bedrock = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "bedrock")
+            .expect("bedrock is bundled");
+        assert_eq!(bedrock.auth_kind, AuthKind::Credential);
+        let cred = bedrock.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "AWS_BEARER_TOKEN_BEDROCK");
+        for domain in ["bedrock-runtime.*.amazonaws.com", "bedrock.*.amazonaws.com"] {
+            assert!(
+                cred.injections
+                    .iter()
+                    .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == domain),
+                "the Bedrock API key rides as Authorization: Bearer to {domain}, got: {:?}",
+                cred.injections
+            );
+        }
     }
 
     #[test]
@@ -735,6 +921,81 @@ mod tests {
     }
 
     #[test]
+    fn bundled_catalog_ships_openrouter_as_a_pkce_integration() {
+        let or = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "openrouter")
+            .expect("openrouter is bundled");
+        assert_eq!(or.auth_kind, AuthKind::Oauth);
+        let oauth = or.oauth.as_ref().expect("oauth block present");
+        assert_eq!(
+            oauth.flow,
+            OauthFlow::Pkce,
+            "OpenRouter signs in by the browser-redirect PKCE flow"
+        );
+        assert_eq!(oauth.env_var, "OPENROUTER_API_KEY");
+        assert!(
+            oauth.client_id.is_none(),
+            "OpenRouter's PKCE flow takes no client id"
+        );
+        assert_eq!(
+            oauth.authorization_endpoint.as_deref(),
+            Some("https://openrouter.ai/auth")
+        );
+        assert_eq!(
+            oauth.token_endpoint,
+            "https://openrouter.ai/api/v1/auth/keys"
+        );
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "openrouter.ai"),
+            "OpenRouter keys are sent as Authorization: Bearer, got: {:?}",
+            oauth.injections
+        );
+    }
+
+    #[test]
+    fn bundled_google_signs_in_via_oauth_device_flow_with_a_client_secret_and_injects_a_bearer_header()
+     {
+        let google = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "google")
+            .expect("google is bundled");
+        assert_eq!(google.auth_kind, AuthKind::Oauth);
+        let oauth = google.oauth.as_ref().expect("oauth block present");
+        assert_eq!(oauth.flow, OauthFlow::Device);
+        assert_eq!(oauth.env_var, "GOOGLE_OAUTH_ACCESS_TOKEN");
+        assert_eq!(
+            oauth.device_authorization_endpoint.as_deref(),
+            Some("https://oauth2.googleapis.com/device/code")
+        );
+        assert_eq!(oauth.token_endpoint, "https://oauth2.googleapis.com/token");
+        assert!(
+            oauth.client_secret.is_some(),
+            "Google's device flow requires a client secret in the token exchange"
+        );
+        assert!(
+            oauth
+                .injections
+                .iter()
+                .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == "www.googleapis.com"),
+            "Google APIs take Authorization: Bearer, got: {:?}",
+            oauth.injections
+        );
+        assert!(
+            google
+                .token_fallback
+                .as_ref()
+                .and_then(|f| f.help.as_deref())
+                .is_some_and(|h| h.starts_with("https://")),
+            "an unconfigured build must let the user pivot to a pasted token, got: {:?}",
+            google.token_fallback
+        );
+    }
+
+    #[test]
     fn no_bundled_integration_commits_a_literal_oauth_client_id() {
         let raw = include_str!("integrations.yaml");
         for line in raw.lines() {
@@ -743,6 +1004,20 @@ mod tests {
                 assert!(
                     value.starts_with("\"${") && value.ends_with("}\""),
                     "clientId must be a build-time env reference, never a committed literal: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_bundled_integration_commits_a_literal_oauth_client_secret() {
+        let raw = include_str!("integrations.yaml");
+        for line in raw.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("clientSecret:") {
+                let value = rest.trim();
+                assert!(
+                    value.starts_with("\"${") && value.ends_with("}\""),
+                    "clientSecret must be a build-time env reference, never a committed literal: {line:?}"
                 );
             }
         }

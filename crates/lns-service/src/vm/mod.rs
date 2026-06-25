@@ -3,15 +3,17 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 mod cloud_hypervisor;
+mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
-#[cfg(target_os = "macos")]
 pub mod session_client;
+mod transport;
 #[cfg(target_os = "macos")]
 mod vz;
 
+pub use transport::{GuestTransport, VmStopGuard};
 #[cfg(target_os = "macos")]
-pub use vz::{VmStopGuard, VsockConnector};
+pub use vz::VsockConnector;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct VmSpec {
@@ -26,10 +28,11 @@ pub struct VmSpec {
     pub descriptor_sha256: Option<String>,
     pub upper_disk: PathBuf,
     pub volumes: Vec<VolumeAttachment>,
-    #[cfg(target_os = "macos")]
+    pub binds: Vec<BindAttachment>,
+    pub workload_uid: Option<u32>,
+    pub workload_gid: Option<u32>,
     pub vsock: Option<VsockChannel>,
-    #[cfg(target_os = "macos")]
-    pub connector_tx: Option<tokio::sync::oneshot::Sender<VsockConnector>>,
+    pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
     pub debug: bool,
@@ -41,6 +44,19 @@ pub struct VolumeAttachment {
     pub host_image: PathBuf,
     pub target: String,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindAttachment {
+    pub host_source: PathBuf,
+    pub target: String,
+    pub read_only: bool,
+    pub dropped_paths: Vec<String>,
+}
+
+/// The virtio-fs tag the host shares a bind under and the guest mounts it by; one per bind, distinct from the content share.
+pub fn bind_share_tag(index: usize) -> String {
+    format!("lns-bind-{index}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +98,6 @@ fn volume_disk_index(disks: &[VolumeDisk], host_image: &std::path::Path) -> usiz
         .expect("every attachment's image is present in volume_disks")
 }
 
-#[cfg(target_os = "macos")]
 pub struct VsockChannel {
     pub port: u32,
     pub fd_tx: tokio::sync::mpsc::UnboundedSender<std::os::fd::RawFd>,
@@ -168,6 +183,7 @@ impl ExecSpec {
 
 const DEFAULT_SANDBOX_USER: &str = "sandbox";
 const DEFAULT_SANDBOX_UID: u32 = 65534;
+const DEFAULT_SANDBOX_GID: u32 = 65534;
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
@@ -219,6 +235,15 @@ pub fn resolve_run_as(
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub fn host_known_workload_gid(run_as: &RunAs) -> Option<u32> {
+    (run_as.user == DEFAULT_SANDBOX_USER
+        && run_as.uid == Some(DEFAULT_SANDBOX_UID)
+        && run_as.group.is_none())
+    .then_some(DEFAULT_SANDBOX_GID)
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+#[allow(clippy::too_many_arguments)] // a flat list of independent cmdline inputs reads clearer than a one-shot params struct
 pub fn build_kernel_cmdline(
     exec: &ExecSpec,
     console: &str,
@@ -227,6 +252,7 @@ pub fn build_kernel_cmdline(
     descriptor_sha256: Option<&str>,
     debug: bool,
     volumes: &[VolumeAttachment],
+    binds: &[BindAttachment],
 ) -> String {
     let mut parts = vec![format!("console={console}"), "rw".to_string()];
     if !debug {
@@ -249,6 +275,15 @@ pub fn build_kernel_cmdline(
         parts.push(format!("volume.{i}.dev={dev}"));
         parts.push(format!("volume.{i}.target={}", v.target));
         parts.push(format!("volume.{i}.ro={}", u8::from(v.read_only)));
+    }
+    for (i, b) in binds.iter().enumerate() {
+        parts.push(format!("bind.{i}.tag={}", bind_share_tag(i)));
+        parts.push(format!("bind.{i}.target={}", b.target));
+        parts.push(format!("bind.{i}.ro={}", u8::from(b.read_only)));
+        parts.push(format!("bind.{i}.drops={}", b.dropped_paths.len()));
+        for (j, dropped) in b.dropped_paths.iter().enumerate() {
+            parts.push(format!("bind.{i}.drop.{j}={dropped}"));
+        }
     }
     for (k, v) in &exec.kernel_env {
         debug_assert!(
@@ -349,6 +384,7 @@ mod tests {
             None,
             /*debug*/ false,
             &[],
+            &[],
         );
         let toks: Vec<&str> = quiet.split_whitespace().collect();
         assert!(toks.contains(&"quiet"), "expected `quiet` at debug=false");
@@ -364,6 +400,7 @@ mod tests {
             "lns-content",
             None,
             /*debug*/ true,
+            &[],
             &[],
         );
         let toks: Vec<&str> = loud.split_whitespace().collect();
@@ -388,6 +425,7 @@ mod tests {
             None,
             false,
             &[],
+            &[],
         );
         let toks: Vec<&str> = with_pci.split_whitespace().collect();
         assert!(
@@ -402,6 +440,7 @@ mod tests {
             "lns-content",
             None,
             false,
+            &[],
             &[],
         );
         let toks: Vec<&str> = no_pci.split_whitespace().collect();
@@ -421,6 +460,7 @@ mod tests {
             "lns-content",
             Some("deadbeef"),
             false,
+            &[],
             &[],
         );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
@@ -461,10 +501,62 @@ mod tests {
     #[test]
     fn build_kernel_cmdline_no_volumes_emits_no_volume_keys() {
         let exec = ExecSpec::from_image_config(None, &["true".into()]);
-        let cmdline = build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[]);
+        let cmdline =
+            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &[]);
         assert!(
             !cmdline.contains("volume."),
             "no volume keys when none attached: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("bind."),
+            "no bind keys when none attached: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn bind_share_tag_is_distinct_per_index() {
+        assert_eq!(bind_share_tag(0), "lns-bind-0");
+        assert_eq!(bind_share_tag(1), "lns-bind-1");
+        assert_ne!(bind_share_tag(0), bind_share_tag(1));
+    }
+
+    #[test]
+    fn build_kernel_cmdline_emits_tag_target_ro_and_drops_per_bind() {
+        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let binds = [
+            BindAttachment {
+                host_source: "/Users/me/proj".into(),
+                target: "/work".into(),
+                read_only: false,
+                dropped_paths: vec![".env".into(), ".npmrc".into()],
+            },
+            BindAttachment {
+                host_source: "/Users/me/cfg".into(),
+                target: "/cfg".into(),
+                read_only: true,
+                dropped_paths: vec![],
+            },
+        ];
+        let cmdline =
+            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &binds);
+        let toks: Vec<&str> = cmdline.split_whitespace().collect();
+        for expected in [
+            "bind.0.tag=lns-bind-0",
+            "bind.0.target=/work",
+            "bind.0.ro=0",
+            "bind.0.drops=2",
+            "bind.0.drop.0=.env",
+            "bind.0.drop.1=.npmrc",
+            "bind.1.tag=lns-bind-1",
+            "bind.1.target=/cfg",
+            "bind.1.ro=1",
+            "bind.1.drops=0",
+        ] {
+            assert!(toks.contains(&expected), "missing {expected}: {toks:?}");
+        }
+        assert!(
+            toks.contains(&"content.tag=lns-content"),
+            "content share tag must be left untouched: {toks:?}"
         );
     }
 
@@ -483,8 +575,16 @@ mod tests {
                 read_only: true,
             },
         ];
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &volumes);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            &volumes,
+            &[],
+        );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
         for expected in [
             "volume.0.dev=/dev/vdc",
@@ -546,8 +646,16 @@ mod tests {
                 read_only: true,
             },
         ];
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &volumes);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            &volumes,
+            &[],
+        );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
         for expected in [
             "volume.0.dev=/dev/vdc",
@@ -592,6 +700,29 @@ mod tests {
             uid,
             group: None,
         }
+    }
+
+    #[test]
+    fn host_knows_the_workload_gid_only_for_the_default_sandbox() {
+        assert_eq!(
+            host_known_workload_gid(&run_as("sandbox", Some(65534))),
+            Some(65534),
+            "the default sandbox is nobody:nogroup, which the host pins"
+        );
+        assert_eq!(
+            host_known_workload_gid(&run_as("sandbox", Some(1000))),
+            None,
+            "a non-default uid's gid is resolved in-guest"
+        );
+        assert_eq!(
+            host_known_workload_gid(&RunAs {
+                user: "app".into(),
+                uid: Some(65534),
+                group: Some("staff".into()),
+            }),
+            None,
+            "an explicit group is resolved in-guest"
+        );
     }
 
     fn fake_session(url: &str, token: &str) -> crate::supervisor::SupervisorSession {
@@ -803,9 +934,10 @@ mod tests {
             descriptor_sha256: None,
             upper_disk: PathBuf::from("/dev/null"),
             volumes: vec![],
-            #[cfg(target_os = "macos")]
+            binds: vec![],
+            workload_uid: None,
+            workload_gid: None,
             vsock: None,
-            #[cfg(target_os = "macos")]
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

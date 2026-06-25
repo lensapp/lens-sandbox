@@ -2,8 +2,6 @@
 
 use crate::log;
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result};
 use lns_ipc::WireFrame;
@@ -15,7 +13,6 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 mod real;
-#[cfg(target_os = "macos")]
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 
@@ -67,28 +64,36 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
 pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
-    exit_code: Arc<AtomicI32>,
-) -> Result<()> {
+) -> Result<Option<i32>> {
     while let Some(frame) = read_one_frame(&mut reader).await? {
         match frame {
             ServerFrame::StdoutBytes(bytes) => {
                 if frame_tx.send(WireFrame::Stdout(bytes)).await.is_err() {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             ServerFrame::StderrBytes(bytes) => {
                 if frame_tx.send(WireFrame::Stderr(bytes)).await.is_err() {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             ServerFrame::ExitStatus(code) => {
                 log::debug!(code, "broker reported workload ExitStatus");
-                exit_code.store(code, Ordering::SeqCst);
-                return Ok(());
+                return Ok(Some(code));
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+pub(super) fn session_exit_code(outcome: Result<Option<i32>>) -> Result<i32> {
+    match outcome {
+        Ok(Some(code)) => Ok(code),
+        Ok(None) => Err(anyhow::anyhow!(
+            "broker session ended before the workload reported an exit status; the guest terminated unexpectedly (crash before exec, or teardown) — re-run with `--log-level debug` to capture the guest console"
+        )),
+        Err(e) => Err(e.context("reading broker session frames")),
+    }
 }
 
 #[cfg(test)]
@@ -98,10 +103,6 @@ mod tests {
 
     fn framed(frame: &ServerFrame) -> Vec<u8> {
         encode_frame(frame).unwrap()
-    }
-
-    fn exit_cell() -> Arc<AtomicI32> {
-        Arc::new(AtomicI32::new(137))
     }
 
     #[test]
@@ -168,47 +169,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_exit_code_passes_through_a_reported_status() {
+        assert_eq!(session_exit_code(Ok(Some(0))).unwrap(), 0);
+        assert_eq!(session_exit_code(Ok(Some(137))).unwrap(), 137);
+    }
+
+    #[test]
+    fn session_exit_code_errs_when_no_status_was_reported() {
+        let rendered = format!("{:#}", session_exit_code(Ok(None)).unwrap_err());
+        assert!(
+            rendered.contains("before the workload reported an exit status"),
+            "got {rendered}"
+        );
+        assert!(
+            rendered.contains("--log-level debug"),
+            "the message must point at the debug console: {rendered}"
+        );
+    }
+
+    #[test]
+    fn session_exit_code_wraps_a_reader_error_with_context() {
+        let rendered = format!(
+            "{:#}",
+            session_exit_code(Err(anyhow::anyhow!("frame decode blew up"))).unwrap_err()
+        );
+        assert!(
+            rendered.contains("reading broker session frames"),
+            "missing context: {rendered}"
+        );
+        assert!(
+            rendered.contains("frame decode blew up"),
+            "missing cause: {rendered}"
+        );
+    }
+
     #[tokio::test]
-    async fn forwards_stdout_stderr_and_captures_exit() {
+    async fn forwards_stdout_stderr_and_returns_exit_status() {
         let mut bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         bytes.extend(framed(&ServerFrame::StderrBytes(b"err".to_vec())));
         bytes.extend(framed(&ServerFrame::ExitStatus(42)));
         let (tx, mut rx) = mpsc::channel(8);
-        let exit = exit_cell();
-        read_server_frames(io::Cursor::new(bytes), tx, exit.clone())
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .unwrap();
         assert!(matches!(rx.recv().await, Some(WireFrame::Stdout(b)) if b == b"out"));
         assert!(matches!(rx.recv().await, Some(WireFrame::Stderr(b)) if b == b"err"));
-        assert_eq!(exit.load(Ordering::SeqCst), 42);
+        assert_eq!(
+            code,
+            Some(42),
+            "an explicit ExitStatus is reported as Some(code)"
+        );
     }
 
     #[tokio::test]
-    async fn loop_exits_cleanly_when_stream_closes_without_exit_status() {
+    async fn returns_none_when_stream_closes_without_exit_status() {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, _rx) = mpsc::channel(8);
-        read_server_frames(io::Cursor::new(bytes), tx, exit_cell())
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("EOF after a frame ends the loop cleanly");
+        assert_eq!(
+            code, None,
+            "EOF before any ExitStatus must be reported as None, not a fabricated code"
+        );
     }
 
     #[tokio::test]
-    async fn stops_when_stdout_receiver_is_gone() {
+    async fn stops_with_none_when_stdout_receiver_is_gone() {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        read_server_frames(io::Cursor::new(bytes), tx, exit_cell())
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("dropped stdout receiver ends the loop cleanly");
+        assert_eq!(code, None);
     }
 
     #[tokio::test]
-    async fn stops_when_stderr_receiver_is_gone() {
+    async fn stops_with_none_when_stderr_receiver_is_gone() {
         let bytes = framed(&ServerFrame::StderrBytes(b"err".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        read_server_frames(io::Cursor::new(bytes), tx, exit_cell())
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("dropped stderr receiver ends the loop cleanly");
+        assert_eq!(code, None);
     }
 }

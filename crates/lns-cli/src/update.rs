@@ -4,9 +4,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use lns_ipc::{Method, PlatformInfo};
 
-use crate::cli::UpdateArgs;
+use crate::command::{CommandSpec, subcommand};
 use crate::log;
 use crate::service::ServiceClient;
 
@@ -14,8 +15,41 @@ mod real;
 
 pub use real::run;
 
+#[derive(clap::Args)]
+pub struct UpdateArgs {
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Re-install even if the running version matches, e.g. when the binary is corrupt or its codesign was invalidated."
+    )]
+    pub force: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network."
+    )]
+    pub dry_run: bool,
+}
+
+pub fn augment(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<UpdateArgs>("update")
+            .about("Update `lns` and `lns-service` to the latest release."),
+    )
+}
+
+pub const SPEC: CommandSpec = CommandSpec {
+    name: "update",
+    augment,
+    run: real::run_command,
+    announces_update_check: false,
+    owns_terminal: false,
+};
+
 pub(in crate::update) const DEFAULT_CDN_BASE: &str = "https://get.lns.run";
 const MANIFEST_NAME: &str = "lns-latest.json";
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -261,6 +295,10 @@ fn http_client(running_version: &str, platform: &PlatformInfo) -> Result<reqwest
 }
 
 async fn http_get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    http_get_bytes_capped(client, url, MAX_DOWNLOAD_BYTES).await
+}
+
+async fn http_get_bytes_capped(client: &reqwest::Client, url: &str, max: u64) -> Result<Vec<u8>> {
     let resp = client
         .get(url)
         .send()
@@ -268,11 +306,52 @@ async fn http_get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> 
         .with_context(|| format!("downloading {url}"))?
         .error_for_status()
         .with_context(|| format!("HTTP error from {url}"))?;
-    let bytes = resp
-        .bytes()
-        .await
-        .with_context(|| format!("reading body from {url}"))?;
-    Ok(bytes.to_vec())
+    let mut buf = CappedBuffer::new(resp.content_length(), max, url)?;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        buf.push(chunk.map(|b| b.to_vec()), url)?;
+    }
+    Ok(buf.into_inner())
+}
+
+#[derive(Debug)]
+struct CappedBuffer {
+    buf: Vec<u8>,
+    max: u64,
+}
+
+impl CappedBuffer {
+    fn new(content_length: Option<u64>, max: u64, url: &str) -> Result<Self> {
+        if let Some(len) = content_length
+            && len > max
+        {
+            bail!("{url} declared {len} bytes, over the {max}-byte download cap");
+        }
+        Ok(Self {
+            buf: Vec::new(),
+            max,
+        })
+    }
+
+    fn push<E: std::fmt::Display>(
+        &mut self,
+        chunk: std::result::Result<Vec<u8>, E>,
+        url: &str,
+    ) -> Result<()> {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => bail!("reading body from {url}: {e}"),
+        };
+        if self.buf.len() as u64 + chunk.len() as u64 > self.max {
+            bail!("{url} body exceeded the {}-byte download cap", self.max);
+        }
+        self.buf.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
 }
 
 async fn stop_running_service(service: &impl ServiceClient) -> Result<()> {
@@ -1571,5 +1650,63 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("downloading"), "msg: {msg}");
         assert!(msg.contains(&url), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn http_get_bytes_rejects_a_body_whose_declared_length_is_over_the_cap() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).body("xxxxxxxxxx");
+            })
+            .await;
+        let url = format!("{}/blob", server.base_url());
+        let client = http_client("0.3.0", &darwin_arm()).unwrap();
+        let err = http_get_bytes_capped(&client, &url, 4).await.unwrap_err();
+        assert!(format!("{err:#}").contains("download cap"), "{err:#}");
+    }
+
+    #[test]
+    fn capped_buffer_rejects_an_oversized_declared_length() {
+        let err = CappedBuffer::new(Some(101), 100, "https://h/x").unwrap_err();
+        assert!(format!("{err:#}").contains("over the 100-byte download cap"));
+    }
+
+    #[test]
+    fn capped_buffer_accepts_within_cap_and_absent_length() {
+        assert!(CappedBuffer::new(None, 100, "https://h/x").is_ok());
+        assert!(CappedBuffer::new(Some(100), 100, "https://h/x").is_ok());
+    }
+
+    #[test]
+    fn capped_buffer_accumulates_chunks_in_order() {
+        let mut b = CappedBuffer::new(None, 10, "https://h/x").unwrap();
+        b.push(Ok::<_, String>(vec![1, 2, 3]), "https://h/x")
+            .unwrap();
+        b.push(Ok::<_, String>(vec![4, 5]), "https://h/x").unwrap();
+        assert_eq!(b.into_inner(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn capped_buffer_refuses_a_chunk_that_would_cross_the_cap() {
+        let mut b = CappedBuffer::new(None, 4, "https://h/x").unwrap();
+        b.push(Ok::<_, String>(vec![1, 2, 3]), "https://h/x")
+            .unwrap();
+        let err = b
+            .push(Ok::<_, String>(vec![4, 5]), "https://h/x")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("exceeded the 4-byte download cap"));
+    }
+
+    #[test]
+    fn capped_buffer_surfaces_a_transport_error_chunk() {
+        let mut b = CappedBuffer::new(None, 100, "https://h/x").unwrap();
+        let err = b
+            .push(Err::<Vec<u8>, _>("connection reset"), "https://h/x")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reading body from https://h/x"), "{msg}");
+        assert!(msg.contains("connection reset"), "{msg}");
     }
 }

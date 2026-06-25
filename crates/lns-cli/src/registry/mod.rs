@@ -2,13 +2,66 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::FromArgMatches;
 use lns_policy::artifact::{self, Family};
 
 use crate::cli::{PullArgs, PushArgs};
+use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 use crate::integration::LocalBoxFuture;
 
 mod real;
 pub use real::RealRegistryClient;
+
+pub fn augment_push(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<PushArgs>("push")
+            .about("Push a file (typed artifact) or a cached image to an OCI registry reference."),
+    )
+}
+
+pub const PUSH_SPEC: CommandSpec = CommandSpec {
+    name: "push",
+    augment: augment_push,
+    run: run_push,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = PushArgs::from_arg_matches(matches)?;
+        let cwd = ctx.cwd()?;
+        crate::service::require_running().await;
+        let client = RealRegistryClient::new(crate::service::socket_path()?);
+        let mut out = ctx.out;
+        push(&args, &cwd, &client, &mut out).await
+    })
+}
+
+pub fn augment_pull(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        subcommand::<PullArgs>("pull")
+            .about("Pull an artifact or image from an OCI registry reference."),
+    )
+}
+
+pub const PULL_SPEC: CommandSpec = CommandSpec {
+    name: "pull",
+    augment: augment_pull,
+    run: run_pull,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = PullArgs::from_arg_matches(matches)?;
+        crate::service::require_running().await;
+        let client = RealRegistryClient::new(crate::service::socket_path()?);
+        let mut out = ctx.out;
+        pull(&args, &client, &mut out).await
+    })
+}
 
 pub enum Pulled {
     Artifact {

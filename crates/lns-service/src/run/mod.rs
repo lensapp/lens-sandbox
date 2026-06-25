@@ -9,7 +9,18 @@ pub use orchestrator::handle;
 
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
-        Ok(code) => code,
+        Ok(code) => {
+            if code != 0 {
+                let _ = frame_tx
+                    .send(WireFrame::Json(Response::RunLog {
+                        level: lns_ipc::LogLevel::Warn,
+                        verb: None,
+                        message: format!("workload exited with code {code}"),
+                    }))
+                    .await;
+            }
+            code
+        }
         Err(e) => {
             let _ = frame_tx
                 .send(WireFrame::Json(Response::RunLog {
@@ -27,7 +38,6 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
     code
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn build_workload_argv(
     image_config: Option<&oci_client::config::ConfigFile>,
     override_cmd: &[String],
@@ -43,7 +53,6 @@ pub(super) fn build_workload_argv(
     vec!["/bin/sh".to_string(), "-c".to_string(), joined]
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn exec_env_strings(
     image_config: Option<&oci_client::config::ConfigFile>,
     override_cmd: &[String],
@@ -68,7 +77,6 @@ pub(super) fn exec_env_strings(
     )
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn vm_ended_before_connector(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> anyhow::Error {
@@ -79,7 +87,6 @@ pub(super) fn vm_ended_before_connector(
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn connector_never_arrived() -> anyhow::Error {
     anyhow::anyhow!("VM backend never produced a VsockConnector")
 }
@@ -106,11 +113,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_completion_forwards_nonzero_workload_exit() {
+    async fn emit_completion_nonzero_ok_warns_before_run_exit() {
         for code in [1_i32, 42, 130, 143] {
             let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
             let returned = emit_completion(&tx, Ok(code)).await;
             assert_eq!(returned, code, "return value should mirror input");
+            match rx.recv().await {
+                Some(WireFrame::Json(Response::RunLog {
+                    level: LogLevel::Warn,
+                    verb,
+                    message,
+                })) => {
+                    assert!(verb.is_none(), "the exit announcement carries no verb");
+                    assert!(
+                        message.contains("exited"),
+                        "announcement must say the workload exited: {message}"
+                    );
+                    assert!(
+                        message.contains(&code.to_string()),
+                        "announcement must name the exit code: {message}"
+                    );
+                }
+                other => panic!("expected a RunLog{{Warn}} announcement, got {other:?}"),
+            }
             match rx.recv().await {
                 Some(WireFrame::Json(Response::RunExit { code: c })) => {
                     assert_eq!(c, code, "frame must carry workload's exit code");
@@ -144,14 +169,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_supervised_returns_supervisor_wrapper() {
         let argv = build_workload_argv(None, &["echo".into(), "hi".into()], true);
         assert_eq!(argv, vec!["/.lens/bin/lns-supervisor".to_string()]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_unsupervised_imageless_wraps_in_sh_dash_c() {
         let argv = build_workload_argv(None, &["echo".into(), "hello world".into()], false);
@@ -161,7 +184,6 @@ mod tests {
         assert_eq!(argv[2], "echo 'hello world'");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_derives_agent_command_from_the_override_cmd() {
         let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[], None);
@@ -171,7 +193,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_preserves_whitespace_and_quotes() {
         let env = exec_env_strings(
@@ -197,7 +218,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_unsupervised_carries_user_env_without_supervisor_vars() {
         let env = exec_env_strings(
@@ -215,7 +235,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn build_workload_argv_unsupervised_with_image_uses_entrypoint_plus_override() {
         let cfg = oci_client::config::ConfigFile {
@@ -234,7 +253,6 @@ mod tests {
         assert_eq!(argv[2], "override");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_supervised_with_image_uses_image_entrypoint_and_cmd() {
         let cfg = oci_client::config::ConfigFile {
@@ -251,7 +269,6 @@ mod tests {
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn exec_env_strings_honors_image_env_and_lets_user_override_it() {
         let cfg = oci_client::config::ConfigFile {
@@ -278,7 +295,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn vm_ended_before_connector_reports_a_clean_vm_exit() {
         let err = vm_ended_before_connector(Ok(Ok(())));
@@ -288,7 +304,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn vm_ended_before_connector_wraps_a_boot_failure_with_context() {
         let err = vm_ended_before_connector(Ok(Err(anyhow::anyhow!("kernel ENOENT"))));
@@ -303,7 +318,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn vm_ended_before_connector_reports_a_panicked_boot_task() {
         let join_err = tokio::spawn(async { panic!("boom in boot") })
@@ -316,7 +330,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn connector_never_arrived_names_the_dropped_connector() {
         let err = connector_never_arrived();

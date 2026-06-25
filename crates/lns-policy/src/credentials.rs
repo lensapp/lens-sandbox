@@ -7,9 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::secret_file::atomic_write_0600;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CredentialEntry {
     HostDetect,
@@ -26,6 +24,25 @@ pub enum CredentialEntry {
 }
 
 pub type CredentialStateFile = HashMap<String, CredentialEntry>;
+
+impl std::fmt::Debug for CredentialEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialEntry::HostDetect => f.write_str("HostDetect"),
+            CredentialEntry::Stored { .. } => f
+                .debug_struct("Stored")
+                .field("value", &"<redacted>")
+                .finish(),
+            CredentialEntry::Deny => f.write_str("Deny"),
+            CredentialEntry::Oauth { expires_at, .. } => f
+                .debug_struct("Oauth")
+                .field("access_token", &"<redacted>")
+                .field("refresh_token", &"<redacted>")
+                .field("expires_at", expires_at)
+                .finish(),
+        }
+    }
+}
 
 pub trait CredentialStore: Send + Sync {
     fn load(&self) -> io::Result<CredentialStateFile>;
@@ -65,7 +82,7 @@ impl CredentialStore for JsonFileCredentialStore {
     fn save(&self, state: &CredentialStateFile) -> io::Result<()> {
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        atomic_write_0600(&self.path, json.as_bytes())
+        crate::secure_file::write_json_secret_atomic(&self.path, json.as_bytes())
     }
 }
 
@@ -92,6 +109,38 @@ mod tests {
         let entry = CredentialEntry::HostDetect;
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v, json!({"kind": "host-detect"}));
+    }
+
+    #[test]
+    fn debug_redacts_secret_values_for_every_variant() {
+        let stored = format!(
+            "{:?}",
+            CredentialEntry::Stored {
+                value: "sk-secret".into()
+            }
+        );
+        assert!(!stored.contains("sk-secret"), "{stored}");
+        assert!(stored.contains("redacted"), "{stored}");
+
+        let oauth = format!(
+            "{:?}",
+            CredentialEntry::Oauth {
+                access_token: "gho_secret".into(),
+                refresh_token: "ghr_secret".into(),
+                expires_at: 123,
+            }
+        );
+        assert!(
+            !oauth.contains("gho_secret") && !oauth.contains("ghr_secret"),
+            "{oauth}"
+        );
+        assert!(
+            oauth.contains("123"),
+            "a non-secret expiry stays visible: {oauth}"
+        );
+
+        assert_eq!(format!("{:?}", CredentialEntry::HostDetect), "HostDetect");
+        assert_eq!(format!("{:?}", CredentialEntry::Deny), "Deny");
     }
 
     #[test]
@@ -192,100 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn save_creates_parent_directory_when_missing() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let nested = dir.path().join("a/b/c/creds.json");
-        let store = JsonFileCredentialStore::new(nested.clone());
-        store.save(&sample_state()).unwrap();
-        assert!(nested.exists());
-    }
-
-    #[test]
-    fn save_uses_tmp_rename_pattern_leaving_no_stale_tmp() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), "tmp must be renamed away, not left in place");
-    }
-
-    #[test]
-    fn save_writes_file_with_mode_0600_so_real_credentials_are_not_world_readable() {
-        // Must be 0600 regardless of umask (default 022 would yield 0644, readable by other local users) since a stored entry holds a plaintext credential.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "got 0o{mode:o}, want 0o600");
-    }
-
-    #[test]
-    fn save_with_pre_existing_loose_perm_tmp_writes_credentials_at_mode_0600() {
-        // Before the fix: a leftover `creds.json.tmp` with default-umask 0o644 was reused by `create(true).truncate(true)` (which ignores `.mode()` on an existing file), so the rename produced a world-readable credentials file.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, b"stale leftover from a prior crash").unwrap();
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
-
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "stale tmp must not carry its 0o644 perms through the rename, got 0o{mode:o}"
-        );
-    }
-
-    #[test]
-    fn save_propagates_non_not_found_error_when_clearing_leftover_tmp() {
-        // If the tmp path is occupied by a directory (e.g. a stray `creds.json.tmp/` planted by another process), `fs::remove_file` returns a non-NotFound error and `save` must surface it rather than fall through and clobber.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        fs::create_dir(&tmp).unwrap();
-
-        let store = JsonFileCredentialStore::new(path.clone());
-        let err = store.save(&sample_state()).unwrap_err();
-
-        assert_ne!(
-            err.kind(),
-            io::ErrorKind::NotFound,
-            "must propagate a non-NotFound error, got {err:?}"
-        );
-        assert!(
-            !path.exists(),
-            "save must not produce the target file when the tmp clear failed"
-        );
-    }
-
-    #[test]
-    fn save_does_not_follow_a_symlink_planted_at_the_tmp_path() {
-        // Before the fix: open(tmp) followed a symlink and truncated/wrote the credential JSON into whatever the symlink pointed at (attacker_target).
-        let dir = tempfile::TempDir::new().unwrap();
-        let attacker_target = dir.path().join("attacker-target");
-        let attacker_contents = b"victim-data-must-survive";
-        fs::write(&attacker_target, attacker_contents).unwrap();
-        let path = dir.path().join("creds.json");
-        let tmp = path.with_extension("json.tmp");
-        std::os::unix::fs::symlink(&attacker_target, &tmp).unwrap();
-
-        let store = JsonFileCredentialStore::new(path);
-        let _ = store.save(&sample_state());
-
-        let after = fs::read(&attacker_target).unwrap();
-        assert_eq!(
-            after, attacker_contents,
-            "a symlink at the tmp path must not redirect the credential write"
-        );
-    }
-
-    #[test]
     fn save_overwrites_existing_file_atomically() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("creds.json");
@@ -332,16 +287,5 @@ mod tests {
             default_credentials_path(),
             PathBuf::from(".lns-credentials.json")
         );
-    }
-
-    #[test]
-    fn save_with_bare_filename_path_uses_cwd_without_panic() {
-        // Uses a tempdir rather than `set_current_dir`, which would race with sibling tests.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("creds.json");
-        let store = JsonFileCredentialStore::new(path.clone());
-        store.save(&sample_state()).unwrap();
-        store.save(&sample_state()).unwrap();
-        assert!(path.exists());
     }
 }

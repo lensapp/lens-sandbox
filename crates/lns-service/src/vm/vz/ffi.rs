@@ -60,17 +60,6 @@ pub struct VsockConnector {
 }
 
 impl VsockConnector {
-    #[cfg(test)]
-    pub(crate) fn new_for_testing() -> Self {
-        let (done_tx, _done_rx) = mpsc::channel();
-        Self {
-            queue: DispatchQueue::new("lns.vz.test", DispatchQueueAttr::SERIAL),
-            virtio_dev: VsockDevicePtr(std::ptr::null()),
-            vm: VmPtr(std::ptr::null()),
-            done_tx,
-        }
-    }
-
     pub fn request_stop(&self) {
         if self.vm.0.is_null() {
             return;
@@ -168,19 +157,17 @@ impl super::ConnectOnce for VsockConnector {
     }
 }
 
-pub struct VmStopGuard {
-    connector: std::sync::Arc<VsockConnector>,
-}
-
-impl VmStopGuard {
-    pub fn new(connector: std::sync::Arc<VsockConnector>) -> Self {
-        Self { connector }
+impl crate::vm::GuestTransport for VsockConnector {
+    fn connect(
+        &self,
+        port: u32,
+        timeout: Duration,
+    ) -> futures_util::future::BoxFuture<'_, Result<std::os::fd::RawFd>> {
+        Box::pin(self.connect(port, timeout))
     }
-}
 
-impl Drop for VmStopGuard {
-    fn drop(&mut self) {
-        self.connector.request_stop();
+    fn request_stop(&self) {
+        self.request_stop();
     }
 }
 
@@ -205,6 +192,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
         spec.descriptor_sha256.as_deref(),
         spec.debug,
         &spec.volumes,
+        &spec.binds,
     );
 
     let queue = DispatchQueue::new("lns.vz", DispatchQueueAttr::SERIAL);
@@ -219,6 +207,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
     let composefs_descriptor = spec.composefs_descriptor.clone();
     let upper_disk = spec.upper_disk.clone();
     let volumes = spec.volumes.clone();
+    let binds = spec.binds.clone();
     let vsock = spec.vsock;
     let connector_tx = spec.connector_tx;
     let console_fd = spec.console_fd;
@@ -236,6 +225,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             composefs_descriptor: &composefs_descriptor,
             upper_disk: &upper_disk,
             volumes: &volumes,
+            binds: &binds,
             vsock: vsock.as_ref(),
             console_fd,
             cmdline: &cmdline,
@@ -274,6 +264,7 @@ struct BuildInputs<'a> {
     composefs_descriptor: &'a Path,
     upper_disk: &'a Path,
     volumes: &'a [crate::vm::VolumeAttachment],
+    binds: &'a [crate::vm::BindAttachment],
     vsock: Option<&'a crate::vm::VsockChannel>,
     console_fd: std::os::fd::RawFd,
     cmdline: &'a str,
@@ -286,7 +277,9 @@ fn build_and_start(
     queue: &DispatchQueue,
     done_tx: mpsc::Sender<Result<()>>,
     start_tx: mpsc::SyncSender<Result<()>>,
-    connector_tx: Option<tokio::sync::oneshot::Sender<VsockConnector>>,
+    connector_tx: Option<
+        tokio::sync::oneshot::Sender<std::sync::Arc<dyn crate::vm::GuestTransport>>,
+    >,
     queue_for_connector: DispatchRetained<DispatchQueue>,
 ) -> Result<()> {
     // SAFETY: all Vz/Obj-C objects retained by `mem::forget` or kept alive via Retained<_>.
@@ -362,7 +355,7 @@ fn build_and_start(
                 vm: VmPtr(vm_ptr),
                 done_tx: connector_done_tx,
             };
-            let _ = tx.send(connector);
+            let _ = tx.send(std::sync::Arc::new(connector));
         }
 
         Ok(())
@@ -444,8 +437,38 @@ unsafe fn build_config(
             &NSString::from_str(inputs.content_tag),
         );
         fs_dev.setShare(Some(&*single_share));
+        let mut share_devs: Vec<Retained<VZDirectorySharingDeviceConfiguration>> =
+            vec![Retained::cast_unchecked(fs_dev)];
+        for (i, bind) in inputs.binds.iter().enumerate() {
+            if !bind.host_source.exists() {
+                bail!(
+                    "host bind source does not exist: {}",
+                    bind.host_source.display()
+                );
+            }
+            let bind_url = NSURL::fileURLWithPath_isDirectory(
+                &NSString::from_str(&bind.host_source.to_string_lossy()),
+                true,
+            );
+            let bind_shared = VZSharedDirectory::initWithURL_readOnly(
+                VZSharedDirectory::alloc(),
+                &bind_url,
+                bind.read_only,
+            );
+            let bind_single: Retained<VZDirectoryShare> =
+                Retained::cast_unchecked(VZSingleDirectoryShare::initWithDirectory(
+                    VZSingleDirectoryShare::alloc(),
+                    &bind_shared,
+                ));
+            let bind_dev = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                VZVirtioFileSystemDeviceConfiguration::alloc(),
+                &NSString::from_str(&crate::vm::bind_share_tag(i)),
+            );
+            bind_dev.setShare(Some(&*bind_single));
+            share_devs.push(Retained::cast_unchecked(bind_dev));
+        }
         let dirs: Retained<NSArray<VZDirectorySharingDeviceConfiguration>> =
-            NSArray::from_retained_slice(&[Retained::cast_unchecked(fs_dev)]);
+            NSArray::from_retained_slice(&share_devs);
         config.setDirectorySharingDevices(&dirs);
 
         // Vz preserves array order in setStorageDevices; upper_disk must be first (→ /dev/vda) and composefs_descriptor second (→ /dev/vdb) to match the cmdline keys.
