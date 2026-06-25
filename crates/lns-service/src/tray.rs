@@ -187,15 +187,13 @@ struct TrayApp {
     window_state: Arc<WindowState>,
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
-    last_visible: bool,
+    placement: ViewportPlacement,
     /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
     credential_inputs: HashMap<String, String>,
     /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
     /// Per-network-card "remember this decision" toggle, keyed by request id; true persists the choice as an always-rule.
     remember: HashMap<String, bool>,
-    /// The viewport inner height last applied; grows to fit a revealed token field and shrinks back when none is open.
-    current_height: f32,
 }
 
 /// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
@@ -203,6 +201,12 @@ struct TrayApp {
 pub struct TokenDraft {
     revealed: bool,
     value: String,
+}
+
+impl TokenDraft {
+    pub fn is_revealed(&self) -> bool {
+        self.revealed
+    }
 }
 
 impl TrayApp {
@@ -230,17 +234,41 @@ impl TrayApp {
             window_state,
             #[cfg(target_os = "macos")]
             _tray,
-            last_visible: false,
+            placement: ViewportPlacement::new(),
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
-            current_height: WINDOW_HEIGHT,
         })
     }
+}
 
-    fn sync_viewport_visibility(&mut self, ctx: &egui::Context) {
-        let order = self.window_state.snapshot().order;
+/// Drives the approval viewport's show/hide and programmatic resize from the current stack, so the production tray and the `approval_preview` harness exercise the identical window lifecycle.
+pub struct ViewportPlacement {
+    last_visible: bool,
+    current_height: f32,
+    pending_hide: bool,
+}
+
+impl Default for ViewportPlacement {
+    fn default() -> Self {
+        Self {
+            last_visible: false,
+            current_height: WINDOW_HEIGHT,
+            pending_hide: false,
+        }
+    }
+}
+
+impl ViewportPlacement {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn sync_visibility(&mut self, ctx: &egui::Context, order: &[StackItem], revealed: usize) {
         let should_show = !order.is_empty();
+        if should_show {
+            self.pending_hide = false;
+        }
 
         match visibility_transition(should_show, self.last_visible) {
             VisibilityTransition::Show => {
@@ -250,10 +278,10 @@ impl TrayApp {
                     return;
                 };
                 // A seed height keeps the reveal frame (which skips ui()) close to size; ui() then snaps the window to its measured content so no estimate slop shows as bottom padding.
-                let revealed = self.token_drafts.values().filter(|d| d.revealed).count();
                 let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
-                let seed = target_height(&order, revealed, monitor_height);
+                let seed = target_height(order, revealed, monitor_height);
                 join_all_spaces();
+                set_window_shadows(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                     WINDOW_WIDTH,
@@ -267,10 +295,17 @@ impl TrayApp {
                 self.current_height = seed;
                 self.last_visible = true;
             }
+            VisibilityTransition::Hide if !self.pending_hide => {
+                // The window must stay up one more frame to composite its now-empty content, or macOS strands the last card-shaped shadow as a ghost after the orderOut.
+                self.pending_hide = true;
+                ctx.request_repaint();
+            }
             VisibilityTransition::Hide => {
+                set_window_shadows(false);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
                 self.last_visible = false;
+                self.pending_hide = false;
             }
             // Resizing while visible is driven by ui()'s content measurement, not an estimate.
             VisibilityTransition::Unchanged => {}
@@ -278,7 +313,7 @@ impl TrayApp {
     }
 
     /// Snaps the viewport to `target` using measured content size, not the window-bounded `min_rect`, so a card taller than the current window grows it instead of being clipped.
-    fn fit_height_to_content(&mut self, ctx: &egui::Context, target: f32) {
+    pub fn fit_height(&mut self, ctx: &egui::Context, target: f32) {
         if (self.current_height - target).abs() > 0.5 {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 WINDOW_WIDTH,
@@ -299,7 +334,13 @@ impl eframe::App for TrayApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.sync_viewport_visibility(ctx);
+        let order = self.window_state.snapshot().order;
+        let revealed = self
+            .token_drafts
+            .values()
+            .filter(|d| d.is_revealed())
+            .count();
+        self.placement.sync_visibility(ctx, &order, revealed);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -319,7 +360,7 @@ impl eframe::App for TrayApp {
             cap,
         );
         let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
-        self.fit_height_to_content(ui.ctx(), target);
+        self.placement.fit_height(ui.ctx(), target);
 
         match action {
             Some(CardAction::CloseAll) => {
@@ -1726,7 +1767,7 @@ fn visibility_transition(should_show: bool, last_visible: bool) -> VisibilityTra
 }
 
 #[cfg(target_os = "macos")]
-fn install_activation_policy(opts: &mut eframe::NativeOptions) {
+pub fn install_activation_policy(opts: &mut eframe::NativeOptions) {
     use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
     opts.event_loop_builder = Some(Box::new(|builder| {
         builder.with_activation_policy(ActivationPolicy::Accessory);
@@ -1734,7 +1775,7 @@ fn install_activation_policy(opts: &mut eframe::NativeOptions) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
+pub fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
 
 /// Lets the always-on-top approval window appear on whichever macOS Space is active — including a full-screen app's Space — instead of staying pinned to the desktop it was created on.
 #[cfg(target_os = "macos")]
@@ -1756,7 +1797,7 @@ fn join_all_spaces() {
 #[cfg(not(target_os = "macos"))]
 fn join_all_spaces() {}
 
-/// macOS recomputes a transparent window's shadow only on resize, so without per-frame invalidation a scrolled card's shadow freezes at its old position.
+/// A transparent window's shadow recomputes only on resize, never on a same-size repaint, so a scrolled card needs explicit per-frame invalidation or its shadow freezes at the old position.
 #[cfg(target_os = "macos")]
 pub fn refresh_window_shadows() {
     use objc2::MainThreadMarker;
@@ -1769,6 +1810,23 @@ pub fn refresh_window_shadows() {
         window.invalidateShadow();
     }
 }
+
+/// Belt to the deferred hide: dropping the shadow before `orderOut` backstops the rare frame where the emptied content hasn't composited in time, so the card-shaped shadow can't outlive the window; re-enabled on the next show.
+#[cfg(target_os = "macos")]
+fn set_window_shadows(enabled: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        window.setHasShadow(enabled);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_shadows(_enabled: bool) {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn refresh_window_shadows() {}
