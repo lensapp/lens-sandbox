@@ -22,11 +22,11 @@ on:
   workflow_dispatch:
     inputs:
       lns_tag:
-        description: 'lns bundle tag to (re)build, e.g. lns-v0.13.0'
+        description: 'lns tag to (re)build, e.g. lns-v0.13.0'
         required: false
         type: string
       lns_version:
-        description: 'lns bundle version, e.g. 0.13.0'
+        description: 'lns version, e.g. 0.13.0'
         required: false
         type: string
       lns_install_tag:
@@ -34,7 +34,7 @@ on:
         required: false
         type: string
       force_build_lns:
-        description: 'Build + publish lns bundle release binaries (and lns-latest.json) even if release-please did not cut a release in this run'
+        description: 'Build + publish lns release binaries (and lns-latest.json) even if release-please did not cut a release in this run'
         type: boolean
         default: false
       force_deploy_install:
