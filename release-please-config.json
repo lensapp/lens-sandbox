@@ -11,7 +11,7 @@
     },
     {
       "type": "linked-versions",
-      "groupName": "lns-bundle",
+      "groupName": "lns",
       "components": ["lns", "lns-cli", "lns-service", "e2e-tests"]
     }
   ],
