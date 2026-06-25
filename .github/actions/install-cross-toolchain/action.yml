@@ -9,12 +9,10 @@ description: >-
   sound here because it only emits relocatable objects whose libc references
   (malloc/memcpy/…) are ABI-identical on aarch64; rust-lld does the final link
   against the Rust musl target's own sysroot, so those symbols resolve against
-  musl, not glibc. macOS fetches the same prebuilt aarch64-musl cross-gcc the
-  messense Homebrew tap wraps, but straight from its GitHub release and
-  sha-pinned, so it doesn't depend on Homebrew's third-party-tap trust gate
-  (lensapp/lens-sandbox#92). We avoid taiki-e/setup-cross-toolchain-action
-  because it also sets CARGO_BUILD_TARGET, redirecting the host build of
-  lns-cli/lns-service to the cross target.
+  musl, not glibc. macOS downloads a prebuilt aarch64-musl cross-gcc,
+  sha-pinned. We avoid taiki-e/setup-cross-toolchain-action because it also
+  sets CARGO_BUILD_TARGET, redirecting the host build of lns-cli/lns-service
+  to the cross target.
 
 runs:
   using: composite
@@ -29,13 +27,10 @@ runs:
         sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc /usr/local/bin/aarch64-linux-musl-gcc
         sudo ln -sf /usr/bin/aarch64-linux-gnu-ar  /usr/local/bin/aarch64-linux-musl-ar
 
-    - name: Install aarch64-linux-musl cross toolchain (macOS, sha-pinned, no Homebrew tap)
+    - name: Install aarch64-linux-musl cross toolchain (macOS)
       if: runner.os == 'macOS'
       shell: bash
       env:
-        # The same prebuilt toolchain the messense Homebrew tap wraps, fetched
-        # straight from its GitHub release so we don't trip Homebrew's
-        # third-party-tap trust gate (see lensapp/lens-sandbox#92).
         TOOLCHAIN_VERSION: "15.2.0"
         SHA_AARCH64_DARWIN: "f7e081c0e0d0a0f7d4a769872b6471e91457ab982c7a9b201971ef4cb23e4694"
         SHA_X86_64_DARWIN: "7351afd573d38c9e034d5ab126233deb69aea6d187207624dbd3048ff1b087ea"
