@@ -81,7 +81,7 @@ pub(crate) async fn launch<S: Spawner>(
         {
             Ok(child) => virtiofsd.push(child),
             Err(e) => {
-                kill_all(&mut virtiofsd);
+                kill_and_reap_all(&mut virtiofsd).await;
                 return Err(e);
             }
         }
@@ -98,7 +98,8 @@ pub(crate) async fn launch<S: Spawner>(
         .context("spawning cloud-hypervisor")?;
     if let Err(e) = wait_for_socket(&layout.vsock, timeouts.cloud_hypervisor).await {
         let _ = cloud_hypervisor.start_kill();
-        kill_all(&mut virtiofsd);
+        let _ = cloud_hypervisor.wait().await;
+        kill_and_reap_all(&mut virtiofsd).await;
         return Err(e.context("cloud-hypervisor did not expose its vsock socket"));
     }
 
@@ -155,14 +156,16 @@ async fn spawn_virtiofsd<S: Spawner>(
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
+        let _ = child.wait().await;
         return Err(e.context("virtiofsd did not expose its socket"));
     }
     Ok(child)
 }
 
-fn kill_all<C: Child>(children: &mut [C]) {
+async fn kill_and_reap_all<C: Child>(children: &mut [C]) {
     for child in children {
         let _ = child.start_kill();
+        let _ = child.wait().await;
     }
 }
 
@@ -194,10 +197,12 @@ mod tests {
 
     struct FakeChild {
         killed: Arc<AtomicBool>,
+        waited: Arc<AtomicBool>,
     }
 
     impl Child for FakeChild {
         async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            self.waited.store(true, Ordering::SeqCst);
             Ok(ExitStatus::from_raw(0))
         }
         fn start_kill(&mut self) -> std::io::Result<()> {
@@ -211,6 +216,7 @@ mod tests {
         program: String,
         args: Vec<String>,
         killed: Arc<AtomicBool>,
+        waited: Arc<AtomicBool>,
     }
 
     struct FakeSpawner {
@@ -260,12 +266,14 @@ mod tests {
                 std::fs::write(&socket, b"").unwrap();
             }
             let killed = Arc::new(AtomicBool::new(false));
+            let waited = Arc::new(AtomicBool::new(false));
             self.spawned.lock().unwrap().push(Spawned {
                 program: program.file_name().unwrap().to_string_lossy().into_owned(),
                 args: args.to_vec(),
                 killed: killed.clone(),
+                waited: waited.clone(),
             });
-            Ok(FakeChild { killed })
+            Ok(FakeChild { killed, waited })
         }
     }
 
@@ -378,6 +386,10 @@ mod tests {
             recs[0].killed.load(Ordering::SeqCst),
             "virtiofsd must be killed on socket timeout"
         );
+        assert!(
+            recs[0].waited.load(Ordering::SeqCst),
+            "virtiofsd must be reaped after kill"
+        );
     }
 
     #[tokio::test]
@@ -404,6 +416,13 @@ mod tests {
                 .iter()
                 .all(|r| r.killed.load(Ordering::SeqCst)),
             "both cloud-hypervisor and virtiofsd must be cleaned up"
+        );
+        assert!(
+            spawner
+                .records()
+                .iter()
+                .all(|r| r.waited.load(Ordering::SeqCst)),
+            "both cloud-hypervisor and virtiofsd must be reaped after kill"
         );
     }
 
@@ -542,6 +561,10 @@ mod tests {
             recs.iter().all(|r| r.killed.load(Ordering::SeqCst)),
             "both the content and the bind virtiofsd are torn down"
         );
+        assert!(
+            recs.iter().all(|r| r.waited.load(Ordering::SeqCst)),
+            "both the content and the bind virtiofsd are reaped after kill"
+        );
     }
 
     #[tokio::test]
@@ -569,6 +592,10 @@ mod tests {
         assert!(
             recs[0].killed.load(Ordering::SeqCst),
             "the content virtiofsd is torn down when a later bind fails"
+        );
+        assert!(
+            recs[0].waited.load(Ordering::SeqCst),
+            "the content virtiofsd is reaped after kill when a later bind fails"
         );
     }
 }
