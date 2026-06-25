@@ -805,16 +805,12 @@ mod tests {
         let specs = materialize_mounts_with(&fake, &empty_store(), &[model_mount()])
             .await
             .unwrap();
+        use crate::runtime_layer::RuntimeSource;
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].guest_path, "/etc/agent/model");
-        assert!(
-            matches!(
-                &specs[0].source,
-                crate::runtime_layer::RuntimeSource::Bytes(_)
-            ),
-            "expected model spec bytes"
-        );
-        if let crate::runtime_layer::RuntimeSource::Bytes(b) = &specs[0].source {
+        let is_bytes = matches!(&specs[0].source, RuntimeSource::Bytes(_));
+        assert!(is_bytes, "expected model spec bytes");
+        if let RuntimeSource::Bytes(b) = &specs[0].source {
             let written: serde_json::Value = serde_json::from_slice(b).unwrap();
             assert_eq!(
                 written,
