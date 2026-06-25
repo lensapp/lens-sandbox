@@ -212,6 +212,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::RunStats must be dispatched via handle_stats, not handle_request"
             )
         }
+        Request::CommitRun { .. } => {
+            unreachable!(
+                "Request::CommitRun must be dispatched via handle_commit, not handle_request"
+            )
+        }
         Request::PushArtifact {
             reference,
             artifact_type,

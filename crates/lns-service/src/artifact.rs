@@ -146,7 +146,7 @@ async fn push_image_with<R: ArtifactRegistry>(
         .await
 }
 
-fn registry_for(reference: &str) -> RealRegistry {
+pub(crate) fn registry_for(reference: &str) -> RealRegistry {
     let target = reference
         .parse::<Reference>()
         .ok()
@@ -158,7 +158,7 @@ fn registry_for(reference: &str) -> RealRegistry {
     RealRegistry::with_protocol(protocol)
 }
 
-fn store() -> JsonFileRegistryAuthStore {
+pub(crate) fn store() -> JsonFileRegistryAuthStore {
     JsonFileRegistryAuthStore::new(default_registry_auth_path())
 }
 
@@ -337,6 +337,170 @@ pub async fn materialize_mounts(
     materialize_mounts_with(&registry_for(&mounts[0].reference), &store(), mounts).await
 }
 
+/// Runs a command inside the live guest and returns its stdout; the production impl wraps the vsock session capture, fakes drive the unit tests.
+pub(crate) trait GuestCapture: Send + Sync {
+    fn capture(
+        &self,
+        argv: Vec<String>,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
+}
+
+/// Picks the single application-layer mount to commit; `selector` matches by reference or guest path and is required to disambiguate when a run has more than one.
+pub(crate) fn select_commit_mount<'a>(
+    mounts: &'a [lns_ipc::ArtifactMount],
+    selector: Option<&str>,
+) -> Result<&'a lns_ipc::ArtifactMount> {
+    let app: Vec<&lns_ipc::ArtifactMount> = mounts
+        .iter()
+        .filter(|m| {
+            Family::infer_from_reference(&m.reference)
+                .map(Family::is_application_layer)
+                .unwrap_or(false)
+        })
+        .collect();
+    if let Some(sel) = selector {
+        return app
+            .into_iter()
+            .find(|m| m.reference == sel || m.path == sel)
+            .ok_or_else(|| anyhow::anyhow!("no application-layer mount matching {sel:?}"));
+    }
+    match app.as_slice() {
+        [] => anyhow::bail!("this run has no application-layer mounts to commit"),
+        [one] => Ok(one),
+        many => {
+            let refs: Vec<&str> = many.iter().map(|m| m.reference.as_str()).collect();
+            anyhow::bail!(
+                "this run has several application-layer mounts; pass --mount to choose one of: {}",
+                refs.join(", ")
+            )
+        }
+    }
+}
+
+/// The relative file entries a layer set ships — used to re-capture exactly the artifact's own files (not the agent's runtime writes under the same path).
+fn list_layer_entries(layers: &[Vec<u8>]) -> Result<Vec<String>> {
+    use std::io::Read;
+    let mut entries = Vec::new();
+    for layer in layers {
+        let reader: Box<dyn Read> = if layer.starts_with(&[0x1f, 0x8b]) {
+            Box::new(flate2::read::GzDecoder::new(&layer[..]))
+        } else {
+            Box::new(&layer[..])
+        };
+        let mut archive = tar::Archive::new(reader);
+        for entry in archive.entries().context("reading source layer tar")? {
+            let entry = entry.context("reading source layer entry")?;
+            if !entry.header().entry_type().is_file() {
+                continue;
+            }
+            let rel = safe_rel_path(&entry.path().context("source layer entry path")?)?;
+            if !rel.is_empty() {
+                entries.push(rel);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+/// Single-quotes a value for safe interpolation into the `sh -c` capture command.
+fn shquote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+async fn capture_layer<C: GuestCapture>(
+    capture: &C,
+    path: &str,
+    entries: &[String],
+) -> Result<Vec<u8>> {
+    use base64::Engine;
+    let joined = entries
+        .iter()
+        .map(|e| shquote(e))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cmd = format!("tar -C {} -czf - {joined} | base64 -w0", shquote(path));
+    let b64 = capture.capture(vec!["sh".into(), "-c".into(), cmd]).await?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("decoding the captured layer")
+}
+
+/// Folds a committed `spec` (the raw `/etc/agent/model` bytes) back into the source artifact's envelope, inverting the boot-time spec unwrap.
+fn fold_spec_into_envelope(config_blob: &[u8], spec_bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(config_blob).context("parsing the source model envelope")?;
+    let spec: serde_json::Value =
+        serde_json::from_slice(spec_bytes).context("parsing the committed model spec")?;
+    let obj = envelope
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("model envelope is not a JSON object"))?;
+    obj.insert("spec".to_string(), spec);
+    serde_json::to_vec(&envelope).context("serializing the updated model envelope")
+}
+
+/// Captures a sandbox mount's current content and pushes it back as an updated artifact: layer-based families (fileset/tool/knowledge) re-tar their original files into a fresh layer; model re-reads its mounted spec into the envelope.
+pub(crate) async fn commit_mount_with<R: ArtifactRegistry, C: GuestCapture>(
+    client: &R,
+    store: &dyn RegistryAuthStore,
+    capture: &C,
+    mount: &lns_ipc::ArtifactMount,
+    to: Option<&str>,
+) -> Result<(String, String)> {
+    use base64::Engine;
+    let family = Family::infer_from_reference(&mount.reference)
+        .ok_or_else(|| anyhow::anyhow!("cannot infer a family from {}", mount.reference))?;
+    let target = to.unwrap_or(&mount.reference);
+    let (source, source_auth) = resolve(&mount.reference, store)?;
+    let head = client.pull_head(&source, &source_auth).await?;
+    let artifact_type = head
+        .artifact_type
+        .clone()
+        .unwrap_or_else(|| head.config_media_type.clone());
+    let (target_ref, target_auth) = resolve(target, store)?;
+
+    let digest = if matches!(family, Family::Model) {
+        let b64 = capture
+            .capture(vec![
+                "sh".into(),
+                "-c".into(),
+                format!("base64 -w0 {}", shquote(&mount.path)),
+            ])
+            .await?;
+        let spec = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .context("decoding the captured model config")?;
+        let blob = fold_spec_into_envelope(&head.config_blob, &spec)?;
+        client
+            .push_artifact(
+                &target_ref,
+                &artifact_type,
+                &Family::Model.config_media_type(),
+                &blob,
+                &[],
+                &target_auth,
+            )
+            .await?
+    } else {
+        let layers = client.pull_artifact_layers(&source, &source_auth).await?;
+        let entries = list_layer_entries(&layers)?;
+        if entries.is_empty() {
+            anyhow::bail!("{} ships no files to commit", mount.reference);
+        }
+        let layer = capture_layer(capture, &mount.path, &entries).await?;
+        client
+            .push_artifact(
+                &target_ref,
+                &artifact_type,
+                &family.config_media_type(),
+                &head.config_blob,
+                &[layer],
+                &target_auth,
+            )
+            .await?
+    };
+    Ok((target.to_string(), digest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +518,7 @@ mod tests {
         layers_fail: bool,
         seen_auth: Mutex<Option<RegistryAuth>>,
         pushed_layers: Mutex<Vec<Vec<u8>>>,
+        pushed_config: Mutex<Option<Vec<u8>>>,
         image_pulled: Mutex<Option<String>>,
         image_pushed: Mutex<Option<(String, String)>>,
     }
@@ -364,12 +529,13 @@ mod tests {
             _reference: &Reference,
             _artifact_type: &str,
             _config_media_type: &str,
-            _config_blob: &[u8],
+            config_blob: &[u8],
             layers: &[Vec<u8>],
             auth: &RegistryAuth,
         ) -> Result<String> {
             *self.seen_auth.lock().unwrap() = Some(auth.clone());
             *self.pushed_layers.lock().unwrap() = layers.to_vec();
+            *self.pushed_config.lock().unwrap() = Some(config_blob.to_vec());
             if self.fail {
                 anyhow::bail!("registry refused the push");
             }
@@ -1132,5 +1298,251 @@ mod tests {
             format!("{err:#}").contains("invalid registry reference"),
             "got: {err:#}"
         );
+    }
+
+    use base64::Engine as _;
+
+    #[derive(Default)]
+    struct FakeCapture {
+        out: String,
+        argv: Mutex<Option<Vec<String>>>,
+    }
+
+    impl GuestCapture for FakeCapture {
+        async fn capture(&self, argv: Vec<String>) -> Result<String> {
+            *self.argv.lock().unwrap() = Some(argv);
+            Ok(self.out.clone())
+        }
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    const FILESET_CMT: &str = "application/vnd.lens.fileset.config.v1+json";
+    const FILESET_REF: &str = "registry.example.test/org/acme/filesets/cfg:v1";
+
+    fn fileset_mount() -> lns_ipc::ArtifactMount {
+        lns_ipc::ArtifactMount {
+            reference: FILESET_REF.into(),
+            path: "/opt/data".into(),
+            read_only: false,
+        }
+    }
+
+    fn gz_tar_one(name: &str, body: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut b = tar::Builder::new(&mut gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_path(name).unwrap();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append(&h, body).unwrap();
+            b.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn select_commit_mount_picks_the_lone_application_layer_mount() {
+        let mounts = vec![fileset_mount()];
+        assert_eq!(
+            select_commit_mount(&mounts, None).unwrap().reference,
+            FILESET_REF
+        );
+    }
+
+    #[test]
+    fn select_commit_mount_matches_a_selector_by_ref_or_path() {
+        let mounts = vec![fileset_mount(), model_mount()];
+        assert_eq!(
+            select_commit_mount(&mounts, Some(MODEL_REF))
+                .unwrap()
+                .reference,
+            MODEL_REF
+        );
+        assert_eq!(
+            select_commit_mount(&mounts, Some("/opt/data"))
+                .unwrap()
+                .reference,
+            FILESET_REF
+        );
+        let err = select_commit_mount(&mounts, Some("nope")).unwrap_err();
+        assert!(format!("{err:#}").contains("no application-layer mount"));
+    }
+
+    #[test]
+    fn select_commit_mount_errors_on_none_or_ambiguous() {
+        let none = select_commit_mount(&[], None).unwrap_err();
+        assert!(format!("{none:#}").contains("no application-layer mounts"));
+        let many = vec![fileset_mount(), model_mount()];
+        let err = select_commit_mount(&many, None).unwrap_err();
+        assert!(format!("{err:#}").contains("pass --mount"), "got: {err:#}");
+    }
+
+    #[test]
+    fn list_layer_entries_collects_files_and_skips_dirs() {
+        let layer = gz_tar_one("config.yaml", b"x: 1\n");
+        assert_eq!(list_layer_entries(&[layer]).unwrap(), vec!["config.yaml"]);
+    }
+
+    #[test]
+    fn fold_spec_into_envelope_replaces_the_spec() {
+        let envelope = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Model","metadata":{"name":"m"},"spec":{"provider":"old","model":"m1"}}"#;
+        let out = fold_spec_into_envelope(envelope, br#"{"provider":"new","model":"m2"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["spec"]["provider"], "new");
+        assert_eq!(v["metadata"]["name"], "m");
+    }
+
+    #[test]
+    fn fold_spec_into_envelope_rejects_bad_json() {
+        assert!(fold_spec_into_envelope(b"not json", b"{}").is_err());
+        assert!(fold_spec_into_envelope(b"{}", b"not json").is_err());
+        assert!(fold_spec_into_envelope(b"[]", b"{}").is_err());
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_repacks_a_fileset_layer_and_pushes_to_the_source_ref() {
+        let fake = FakeRegistry {
+            digest: "sha256:new".into(),
+            head: Some(head(
+                FILESET_CMT,
+                Some("application/vnd.lens.fileset.v1+json"),
+            )),
+            layers: vec![gz_tar_one("config.yaml", b"old\n")],
+            ..Default::default()
+        };
+        let capture = FakeCapture {
+            out: b64(b"new-layer-gz"),
+            ..Default::default()
+        };
+        let (reference, digest) =
+            commit_mount_with(&fake, &empty_store(), &capture, &fileset_mount(), None)
+                .await
+                .unwrap();
+        assert_eq!(reference, FILESET_REF);
+        assert_eq!(digest, "sha256:new");
+        assert_eq!(fake.pushed_layers.lock().unwrap()[0], b"new-layer-gz");
+        // the capture tars the original entry under the mount path
+        let argv = capture.argv.lock().unwrap().clone().unwrap();
+        assert!(argv[2].contains("tar -C '/opt/data'") && argv[2].contains("'config.yaml'"));
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_honors_a_to_override() {
+        let fake = FakeRegistry {
+            digest: "sha256:new".into(),
+            head: Some(head(FILESET_CMT, None)),
+            layers: vec![gz_tar_one("config.yaml", b"old\n")],
+            ..Default::default()
+        };
+        let capture = FakeCapture {
+            out: b64(b"layer"),
+            ..Default::default()
+        };
+        let (reference, _) = commit_mount_with(
+            &fake,
+            &empty_store(),
+            &capture,
+            &fileset_mount(),
+            Some("registry.example.test/org/acme/filesets/cfg:v2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reference, "registry.example.test/org/acme/filesets/cfg:v2");
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_bails_when_the_source_layer_has_no_files() {
+        let fake = FakeRegistry {
+            head: Some(head(FILESET_CMT, None)),
+            layers: vec![],
+            ..Default::default()
+        };
+        let capture = FakeCapture::default();
+        let err = commit_mount_with(&fake, &empty_store(), &capture, &fileset_mount(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("ships no files"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_folds_a_model_spec_and_pushes_no_layer() {
+        let fake = FakeRegistry {
+            digest: "sha256:m".into(),
+            head: Some(ManifestHead {
+                config_media_type: MODEL_CMT.into(),
+                artifact_type: Some("application/vnd.lens.model.v1+json".into()),
+                config_blob: br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Model","metadata":{"name":"m"},"spec":{"provider":"old"}}"#.to_vec(),
+                digest: "sha256:src".into(),
+            }),
+            ..Default::default()
+        };
+        let capture = FakeCapture {
+            out: b64(br#"{"provider":"new","model":"m2"}"#),
+            ..Default::default()
+        };
+        let (reference, digest) =
+            commit_mount_with(&fake, &empty_store(), &capture, &model_mount(), None)
+                .await
+                .unwrap();
+        assert_eq!(reference, MODEL_REF);
+        assert_eq!(digest, "sha256:m");
+        assert!(fake.pushed_layers.lock().unwrap().is_empty());
+        let pushed = fake.pushed_config.lock().unwrap().clone().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&pushed).unwrap();
+        assert_eq!(v["spec"]["provider"], "new");
+        let argv = capture.argv.lock().unwrap().clone().unwrap();
+        assert!(argv[2].contains("base64 -w0 '/etc/agent/model'"));
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_surfaces_a_bad_base64_capture() {
+        let fake = FakeRegistry {
+            head: Some(head(FILESET_CMT, None)),
+            layers: vec![gz_tar_one("config.yaml", b"old\n")],
+            ..Default::default()
+        };
+        let capture = FakeCapture {
+            out: "not~valid~base64".into(),
+            ..Default::default()
+        };
+        let err = commit_mount_with(&fake, &empty_store(), &capture, &fileset_mount(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("captured layer"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_mount_with_rejects_a_reference_without_a_family() {
+        let fake = FakeRegistry::default();
+        let capture = FakeCapture::default();
+        let mount = lns_ipc::ArtifactMount {
+            reference: "registry.example.test/nofamily:v1".into(),
+            path: "/x".into(),
+            read_only: false,
+        };
+        let err = commit_mount_with(&fake, &empty_store(), &capture, &mount, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("infer a family"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn shquote_escapes_embedded_single_quotes() {
+        assert_eq!(shquote("a'b"), "'a'\\''b'");
     }
 }

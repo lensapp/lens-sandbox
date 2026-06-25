@@ -43,6 +43,10 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Rename a run (`docker rename`-style); the new name resolves immediately.")]
     Rename(SandboxRenameArgs),
+    #[command(
+        about = "Capture a modified application-layer mount from a running run and push it back to the registry (`docker commit`-style)."
+    )]
+    Commit(SandboxCommitArgs),
     #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
     Prune,
 }
@@ -114,6 +118,25 @@ pub struct SandboxStatsArgs {
         help = "Target run id or name surfaced by `lns sandbox ls`."
     )]
     pub run: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxCommitArgs {
+    #[arg(
+        value_name = "RUN",
+        help = "Target running run id or name surfaced by `lns sandbox ls`."
+    )]
+    pub run: String,
+    #[arg(
+        long,
+        help = "Select which mounted artifact to commit, by its reference or guest path (required when the run has more than one application-layer mount)."
+    )]
+    pub mount: Option<String>,
+    #[arg(
+        long = "to",
+        help = "Push to this registry reference instead of the mount's own source ref (e.g. a new tag)."
+    )]
+    pub to: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -190,6 +213,7 @@ where
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
         SandboxCommand::Rename(args) => rename(svc, args, out).await,
+        SandboxCommand::Commit(args) => commit(svc, args, out).await,
         SandboxCommand::Prune => prune(svc, out).await,
     }
 }
@@ -421,6 +445,28 @@ async fn stats<W: std::io::Write>(
     match response {
         Response::RunStats { stats } => {
             render_stats(&stats, out)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn commit<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxCommitArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::CommitRun {
+            run: args.run.clone(),
+            mount: args.mount.clone(),
+            to: args.to.clone(),
+        })
+        .await?;
+    match response {
+        Response::Committed { reference, digest } => {
+            writeln!(out, "Committed {digest} to {reference}")?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -743,6 +789,52 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("macOS-only"));
+    }
+
+    fn commit_args() -> SandboxCommitArgs {
+        SandboxCommitArgs {
+            run: "brave_kowalevski".into(),
+            mount: Some("org/acme/filesets/cfg:v1".into()),
+            to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_forwards_the_request_and_reports_the_pushed_ref() {
+        let svc = CannedService::new(Response::Committed {
+            reference: "registry.example.test/org/acme/filesets/cfg:v1".into(),
+            digest: "sha256:abc".into(),
+        });
+        let mut out = Vec::new();
+        assert_eq!(commit(&svc, &commit_args(), &mut out).await.unwrap(), 0);
+        assert_eq!(
+            *svc.requests.lock().unwrap(),
+            vec![Request::CommitRun {
+                run: "brave_kowalevski".into(),
+                mount: Some("org/acme/filesets/cfg:v1".into()),
+                to: None,
+            }]
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Committed sha256:abc to") && s.contains("filesets/cfg:v1"));
+    }
+
+    #[tokio::test]
+    async fn commit_surfaces_a_daemon_error() {
+        let svc = CannedService::new(Response::Error {
+            message: "run must be running to commit".into(),
+        });
+        let mut out = Vec::new();
+        let err = commit(&svc, &commit_args(), &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("must be running"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_an_unrelated_response_variant() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = commit(&svc, &commit_args(), &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]

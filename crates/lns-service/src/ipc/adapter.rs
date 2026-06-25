@@ -152,6 +152,7 @@ async fn handle_connection(
         Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
+        Request::CommitRun { run, mount, to } => handle_commit(stream, run, mount, to).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
@@ -180,6 +181,72 @@ async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()>
     let frame = encode_frame(&response)?;
     stream.write_all(&frame).await?;
     Ok(())
+}
+
+struct ConnectorCapture<'a> {
+    connector: &'a dyn crate::vm::GuestTransport,
+}
+
+impl crate::artifact::GuestCapture for ConnectorCapture<'_> {
+    async fn capture(&self, argv: Vec<String>) -> anyhow::Result<String> {
+        crate::vm::session_client::capture_session_output(self.connector, argv).await
+    }
+}
+
+async fn handle_commit(
+    mut stream: UnixStream,
+    run: String,
+    mount: Option<String>,
+    to: Option<String>,
+) -> anyhow::Result<()> {
+    let response = commit_response(run, mount, to).await;
+    let frame = encode_frame(&response)?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn commit_response(run: String, mount: Option<String>, to: Option<String>) -> Response {
+    let run_id = match crate::run_registry::resolve(&run) {
+        Ok(id) => id,
+        Err(message) => return Response::Error { message },
+    };
+    let Some(connector) = crate::run_registry::connector(run_id) else {
+        return Response::Error {
+            message: format!("run {run} must be running to commit"),
+        };
+    };
+    let Some(details) = crate::run_registry::inspect(run_id) else {
+        return Response::Error {
+            message: format!("no active run with id {run_id}"),
+        };
+    };
+    let mounts = details.config.artifact_mounts;
+    let selected = match crate::artifact::select_commit_mount(&mounts, mount.as_deref()) {
+        Ok(m) => m.clone(),
+        Err(e) => {
+            return Response::Error {
+                message: format!("{e:#}"),
+            };
+        }
+    };
+    let capture = ConnectorCapture {
+        connector: connector.as_ref(),
+    };
+    let client = crate::artifact::registry_for(&selected.reference);
+    match crate::artifact::commit_mount_with(
+        &client,
+        &crate::artifact::store(),
+        &capture,
+        &selected,
+        to.as_deref(),
+    )
+    .await
+    {
+        Ok((reference, digest)) => Response::Committed { reference, digest },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
 }
 
 async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyhow::Result<()> {

@@ -58,6 +58,13 @@ pub enum Request {
         run: String,
         new_name: String,
     },
+    CommitRun {
+        run: String,
+        #[serde(default)]
+        mount: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+    },
     PruneRuns,
     BeginIntegrationSignIn {
         id: String,
@@ -211,6 +218,10 @@ pub enum Response {
         digest: String,
     },
     PulledImage {
+        digest: String,
+    },
+    Committed {
+        reference: String,
         digest: String,
     },
 }
@@ -843,6 +854,11 @@ mod tests {
             Request::Pull {
                 reference: "registry.example.test/org/acme/policies/pii:v1".into(),
             },
+            Request::CommitRun {
+                run: "brave_kowalevski".into(),
+                mount: Some("org/acme/filesets/cfg:v1".into()),
+                to: Some("registry.example.test/org/acme/filesets/cfg:v2".into()),
+            },
         ];
         for req in reqs {
             let frame = crate::encode_frame(&req).unwrap();
@@ -860,6 +876,10 @@ mod tests {
             },
             Response::PulledImage {
                 digest: "sha256:def".into(),
+            },
+            Response::Committed {
+                reference: "registry.example.test/org/acme/filesets/cfg:v2".into(),
+                digest: "sha256:abc".into(),
             },
         ];
         for resp in resps {
