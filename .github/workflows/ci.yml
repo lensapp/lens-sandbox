@@ -61,6 +61,7 @@ jobs:
               - 'crates/lns-cli/scripts/**'
               - '.github/workflows/release-please.yml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/install-cross-toolchain/**'
               - 'scripts/lns-install/**'
               - 'scripts/lns-cli.sh'
             static-nft:
