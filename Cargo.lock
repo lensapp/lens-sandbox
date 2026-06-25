@@ -3049,7 +3049,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lens-sandbox-core"
 version = "0.1.0"
-source = "git+https://github.com/lensapp/lens-sandbox-core?rev=ab9f09ffa744cdc8d79d28d96f5434163b423659#ab9f09ffa744cdc8d79d28d96f5434163b423659"
+source = "git+https://github.com/lensapp/lens-sandbox-core?rev=34d52cfd105c35d339cdecaf6c06495674b8acf8#34d52cfd105c35d339cdecaf6c06495674b8acf8"
 dependencies = [
  "async-trait",
  "aws-credential-types",
