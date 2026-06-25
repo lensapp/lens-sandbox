@@ -9,21 +9,33 @@ same way a sandboxed `gh` asks for its token).
 ## How it works
 
 A `PreToolUse` hook on the `Bash` tool inspects each command. If it's code-execution worth
-isolating, the hook rewrites it to run inside a per-project microVM:
+isolating, the hook rewrites it to run inside a microVM:
 
 ```
 python app.py
    │  PreToolUse hook (lns-cc hook)
    ▼
 lns-cc exec python --b64 <base64("python app.py")>
-   │  ensures a detached box, then …
+   │  ephemeral backend (default), then …
    ▼
-lns sandbox exec cc-python-<sha8(cwd)> -- bash -lc 'python app.py'
+lns run --name cc-python-<sha8(cwd)> -v <cwd>:<cwd> -w <cwd> python:3.12 -- bash -lc 'python app.py'
 ```
 
 The whole command runs in the guest against the project directory (bind-mounted at its real
 absolute path), so `cd`, pipes, and compound commands all work. Read-only host inspection
 (`ls`, `cat`, `git status`, …) is never intercepted.
+
+### Backends
+
+- **Ephemeral (default):** one `lns run` per command, stdin from `/dev/null`. Output is passed
+  through a filter that strips the guest supervisor's tracing and `[agent]` markers — a workaround
+  for [lensapp/lens-sandbox#94](https://github.com/lensapp/lens-sandbox/issues/94), which forces
+  PTY mode (merging that noise onto stdout) because `-i`/`-t` can't be disabled.
+- **Persistent (`LNS_CC_BACKEND=persistent`):** one long-lived box per `(cwd, runtime)`, exec'd
+  into per command — faster after first boot, warm dependency caches, clean output with no filter.
+  **Blocked until #94 lands** (non-interactive `lns sandbox exec` is currently rejected).
+
+When #94 is fixed, persistent becomes the default and the stdout filter is removed.
 
 The division of consent: Claude Code's permission decides *whether code may run*; lns's policy
 decides *what that code may reach* (network hosts, credentials).
@@ -68,5 +80,8 @@ missing or the service is down.
 
 ## Status
 
-Early development. P0 (scaffold + passthrough hook + doctor) is in place; classification,
-the sandbox exec wrapper, and configuration are landing incrementally.
+Early development. Working today: the PreToolUse hook classifies Tier-A code execution and runs it
+in an ephemeral microVM with clean, exit-code-faithful output (verified end-to-end). Still to come:
+user configuration (scope, runtime→image map, extra mounts, `env_forward`, bypass), the
+`/lns-sandbox` command, and the switch to the persistent backend once
+[lensapp/lens-sandbox#94](https://github.com/lensapp/lens-sandbox/issues/94) lands.

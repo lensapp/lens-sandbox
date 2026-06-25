@@ -3,10 +3,13 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 
+mod backend;
 mod boxmgr;
 mod classify;
 mod hook;
 mod rewrite;
+
+use backend::Backend;
 
 #[derive(Parser)]
 #[command(
@@ -76,12 +79,21 @@ fn run_exec(args: &ExecArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match boxmgr::run_in_box(&boxmgr::RealLns, &args.runtime, image, &cwd, &command) {
+    match select_backend().run_in_sandbox(&args.runtime, image, &cwd, &command) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
             eprintln!("lns-cc: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn select_backend() -> Box<dyn Backend> {
+    // Ephemeral (per-command `lns run`) is the default until lensapp/lens-sandbox#94 lets the
+    // persistent box reuse a clean non-interactive `lns sandbox exec`.
+    match std::env::var("LNS_CC_BACKEND").ok().as_deref() {
+        Some("persistent") => Box::new(boxmgr::PersistentBackend::new(boxmgr::RealLns)),
+        _ => Box::new(backend::EphemeralBackend::new(backend::RealEphemeral)),
     }
 }
 

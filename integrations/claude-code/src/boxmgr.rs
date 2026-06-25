@@ -1,5 +1,7 @@
 use std::process::{Command, Stdio};
 
+use crate::backend::{box_name, shell_argv, Backend};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxState {
     Running,
@@ -22,10 +24,6 @@ pub trait LnsRunner {
     fn exec(&self, name: &str, argv: &[String]) -> Result<i32, String>;
 }
 
-pub fn box_name(runtime_key: &str, cwd: &str) -> String {
-    format!("cc-{runtime_key}-{}", short_hash(cwd))
-}
-
 pub fn box_spec(runtime_key: &str, image: &str, cwd: &str) -> BoxSpec {
     BoxSpec {
         name: box_name(runtime_key, cwd),
@@ -46,26 +44,31 @@ pub fn ensure_box<R: LnsRunner>(runner: &R, spec: &BoxSpec) -> Result<(), String
     }
 }
 
-pub fn run_in_box<R: LnsRunner>(
-    runner: &R,
-    runtime_key: &str,
-    image: &str,
-    cwd: &str,
-    command: &str,
-) -> Result<i32, String> {
-    let spec = box_spec(runtime_key, image, cwd);
-    ensure_box(runner, &spec)?;
-    let argv = vec!["bash".to_string(), "-lc".to_string(), command.to_string()];
-    runner.exec(&spec.name, &argv)
+/// Persistent backend: one long-lived box per (cwd, runtime), exec'd into per command. Blocked until
+/// lensapp/lens-sandbox#94 makes non-interactive `lns sandbox exec` reachable; selected via
+/// `LNS_CC_BACKEND=persistent`.
+pub struct PersistentBackend<R: LnsRunner> {
+    runner: R,
 }
 
-fn short_hash(input: &str) -> String {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in input.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
+impl<R: LnsRunner> PersistentBackend<R> {
+    pub fn new(runner: R) -> Self {
+        Self { runner }
     }
-    format!("{hash:08x}")
+}
+
+impl<R: LnsRunner> Backend for PersistentBackend<R> {
+    fn run_in_sandbox(
+        &self,
+        runtime_key: &str,
+        image: &str,
+        cwd: &str,
+        command: &str,
+    ) -> Result<i32, String> {
+        let spec = box_spec(runtime_key, image, cwd);
+        ensure_box(&self.runner, &spec)?;
+        self.runner.exec(&spec.name, &shell_argv(command))
+    }
 }
 
 pub struct RealLns;
@@ -127,10 +130,21 @@ impl LnsRunner for RealLns {
     }
 
     fn exec(&self, name: &str, argv: &[String]) -> Result<i32, String> {
+        // `--tty false --interactive false` is the non-interactive form unlocked by
+        // lensapp/lens-sandbox#94; today's CLI rejects it, so this path needs that fix to run.
         let status = Command::new("lns")
-            .args(["sandbox", "exec", "-i", name, "--"])
+            .args([
+                "sandbox",
+                "exec",
+                "--tty",
+                "false",
+                "--interactive",
+                "false",
+                name,
+                "--",
+            ])
             .args(argv)
-            .stdin(Stdio::inherit())
+            .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -182,16 +196,9 @@ mod tests {
     }
 
     #[test]
-    fn box_name_is_deterministic_and_runtime_scoped() {
-        assert_eq!(box_name("python", "/a"), box_name("python", "/a"));
-        assert_ne!(box_name("python", "/a"), box_name("python", "/b"));
-        assert_ne!(box_name("python", "/a"), box_name("node", "/a"));
-        assert!(box_name("python", "/a").starts_with("cc-python-"));
-    }
-
-    #[test]
     fn box_spec_mounts_cwd_at_its_real_path() {
         let spec = box_spec("python", "python:3.12", "/Users/me/proj");
+        assert_eq!(spec.name, box_name("python", "/Users/me/proj"));
         assert_eq!(spec.mount, "/Users/me/proj:/Users/me/proj");
         assert_eq!(spec.workdir, "/Users/me/proj");
         assert_eq!(spec.image, "python:3.12");
@@ -213,9 +220,8 @@ mod tests {
         let runner = FakeRunner::new(Ok(BoxState::NotFound));
         let spec = box_spec("node", "node:22", "/p");
         ensure_box(&runner, &spec).unwrap();
-        let calls = runner.calls.borrow().clone();
         assert_eq!(
-            calls,
+            runner.calls.borrow().clone(),
             vec![
                 format!("inspect:{}", spec.name),
                 format!("boot:{}", spec.name)
@@ -228,9 +234,8 @@ mod tests {
         let runner = FakeRunner::new(Ok(BoxState::Stopped));
         let spec = box_spec("ruby", "ruby:3.3", "/p");
         ensure_box(&runner, &spec).unwrap();
-        let calls = runner.calls.borrow().clone();
         assert_eq!(
-            calls,
+            runner.calls.borrow().clone(),
             vec![
                 format!("inspect:{}", spec.name),
                 format!("remove:{}", spec.name),
@@ -248,24 +253,31 @@ mod tests {
     }
 
     #[test]
-    fn run_in_box_execs_command_under_login_shell_and_returns_code() {
+    fn persistent_backend_ensures_then_execs_under_login_shell() {
         let mut runner = FakeRunner::new(Ok(BoxState::Running));
         runner.exec_code = 7;
-        let code = run_in_box(&runner, "python", "python:3.12", "/p", "python app.py").unwrap();
+        let backend = PersistentBackend::new(runner);
+        let code = backend
+            .run_in_sandbox("python", "python:3.12", "/p", "python app.py")
+            .unwrap();
         assert_eq!(code, 7);
         let name = box_name("python", "/p");
-        assert!(runner
+        assert!(backend
+            .runner
             .calls
             .borrow()
             .contains(&format!("exec:{name}:bash -lc python app.py")));
     }
 
     #[test]
-    fn run_in_box_surfaces_ensure_failure_without_exec() {
-        let runner = FakeRunner::new(Err("boom".to_string()));
-        let err = run_in_box(&runner, "python", "python:3.12", "/p", "python app.py").unwrap_err();
+    fn persistent_backend_surfaces_ensure_failure_without_exec() {
+        let backend = PersistentBackend::new(FakeRunner::new(Err("boom".to_string())));
+        let err = backend
+            .run_in_sandbox("python", "python:3.12", "/p", "python app.py")
+            .unwrap_err();
         assert_eq!(err, "boom");
-        assert!(runner
+        assert!(backend
+            .runner
             .calls
             .borrow()
             .iter()
