@@ -85,7 +85,7 @@ pub enum CredentialInjection {
 }
 
 impl CredentialInjection {
-    pub fn domain(&self) -> &str {
+    pub(crate) fn domain(&self) -> &str {
         match self {
             Self::Header { domain, .. } => domain,
             Self::UriPlaceholder { domain, .. } => domain,
