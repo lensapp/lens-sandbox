@@ -418,7 +418,11 @@ async fn capture_layer<C: GuestCapture>(
         .map(|e| shquote(e))
         .collect::<Vec<_>>()
         .join(" ");
-    let cmd = format!("tar -C {} -czf - {joined} | base64 -w0", shquote(path));
+    // --mode=a+rX forces captured files world-readable (and dirs traversable): the agent may have written the file 0600, but on re-mount it lands root-owned in the composefs base, so a non-root sandbox user must still be able to read it.
+    let cmd = format!(
+        "tar -C {} --mode=a+rX -czf - {joined} | base64 -w0",
+        shquote(path)
+    );
     let b64 = capture.capture(vec!["sh".into(), "-c".into(), cmd]).await?;
     base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
@@ -1430,6 +1434,11 @@ mod tests {
         // the capture tars the original entry under the mount path
         let argv = capture.argv.lock().unwrap().clone().unwrap();
         assert!(argv[2].contains("tar -C '/opt/data'") && argv[2].contains("'config.yaml'"));
+        assert!(
+            argv[2].contains("--mode=a+rX"),
+            "captured files must be forced readable: {}",
+            argv[2]
+        );
     }
 
     #[tokio::test]
