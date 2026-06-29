@@ -1,7 +1,8 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
-use lns_ipc::LedgerRecord;
+use lns_ipc::{LedgerEvent, LedgerRecord};
 use serde_json::{Map, Value};
 
 use crate::oauth::Clock;
@@ -34,15 +35,98 @@ fn record_to_object(record: &LedgerRecord) -> Map<String, Value> {
         .expect("a LedgerRecord serializes to a JSON object")
 }
 
+pub trait LedgerSink: Send + Sync {
+    fn append(&self, record: &LedgerRecord) -> Result<()>;
+}
+
+pub struct FileLedgerSink;
+
+impl LedgerSink for FileLedgerSink {
+    fn append(&self, record: &LedgerRecord) -> Result<()> {
+        append_ledger_record(record)
+    }
+}
+
+/// Stamps a run's identity and the current time onto each event before persisting it; a write failure is logged, never propagated, so recording history can't break the run it describes.
+pub trait LedgerRecorder: Send + Sync {
+    fn record(&self, event: LedgerEvent);
+}
+
+pub struct RunLedgerRecorder {
+    run: u32,
+    microvm: String,
+    clock: Arc<dyn Clock>,
+    sink: Arc<dyn LedgerSink>,
+}
+
+impl RunLedgerRecorder {
+    pub fn new(run: u32, microvm: String, clock: Arc<dyn Clock>) -> Self {
+        Self::with_sink(run, microvm, clock, Arc::new(FileLedgerSink))
+    }
+
+    pub fn with_sink(
+        run: u32,
+        microvm: String,
+        clock: Arc<dyn Clock>,
+        sink: Arc<dyn LedgerSink>,
+    ) -> Self {
+        Self {
+            run,
+            microvm,
+            clock,
+            sink,
+        }
+    }
+}
+
+impl LedgerRecorder for RunLedgerRecorder {
+    fn record(&self, event: LedgerEvent) {
+        let record = LedgerRecord {
+            ts: now_rfc3339(&*self.clock),
+            run: self.run,
+            microvm: self.microvm.clone(),
+            event,
+        };
+        if let Err(e) = self.sink.append(&record) {
+            crate::log::warn!("could not record connection-ledger event: {e:#}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_ipc::{AuthKind, LedgerEvent};
+    use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 
     struct FakeClock(u64);
     impl Clock for FakeClock {
         fn now_unix(&self) -> u64 {
             self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingSink {
+        records: std::sync::Mutex<Vec<LedgerRecord>>,
+        fail: bool,
+    }
+    impl LedgerSink for CapturingSink {
+        fn append(&self, record: &LedgerRecord) -> Result<()> {
+            self.records.lock().unwrap().push(record.clone());
+            if self.fail {
+                anyhow::bail!("disk full");
+            }
+            Ok(())
+        }
+    }
+
+    fn network_approval() -> LedgerEvent {
+        LedgerEvent::Approval {
+            kind: ApprovalKind::Network,
+            target: "api.foo.com:443".into(),
+            decision: Decision::AllowAlways,
+            reason: None,
+            integration: None,
         }
     }
 
@@ -105,5 +189,57 @@ mod tests {
         append_ledger_record(&sample(7)).unwrap();
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
         assert!(content.contains("\"run\":7"), "{content}");
+    }
+
+    #[test]
+    fn recorder_stamps_run_microvm_and_clock_onto_each_event() {
+        let sink = Arc::new(CapturingSink::default());
+        let recorder = RunLedgerRecorder::with_sink(
+            49,
+            "calm-finch".into(),
+            Arc::new(FakeClock(0)),
+            sink.clone(),
+        );
+        recorder.record(network_approval());
+        let records = sink.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].run, 49);
+        assert_eq!(records[0].microvm, "calm-finch");
+        assert_eq!(records[0].ts, "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn a_failing_sink_is_swallowed_so_recording_never_breaks_the_run() {
+        let sink = Arc::new(CapturingSink {
+            fail: true,
+            ..Default::default()
+        });
+        let recorder =
+            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        recorder.record(network_approval());
+        assert_eq!(
+            sink.records.lock().unwrap().len(),
+            1,
+            "the append was attempted; its failure must not propagate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_file_recorder_persists_under_data_root() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
+        let recorder = RunLedgerRecorder::new(7, "vm".into(), Arc::new(FakeClock(1_735_689_600)));
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Network,
+            target: "x".into(),
+            decision: Decision::DenyOnce,
+            reason: Some("policy-ambiguous".into()),
+            integration: None,
+        });
+        let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
+        assert!(content.contains("\"run\":7"), "{content}");
+        assert!(content.contains("deny_once"), "{content}");
     }
 }
