@@ -559,7 +559,7 @@ pub(super) async fn start(
     )
     .await?;
 
-    // Back-reference (Weak so it never outlives the run) so accepting a network offer drives the credential subsystem's connect.
+    // Weak so the connector back-reference never outlives the run.
     session.set_connector(Arc::new(CredentialConnector {
         credential_session: Arc::downgrade(&credential_session),
     }));
