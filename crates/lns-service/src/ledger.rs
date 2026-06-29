@@ -12,6 +12,9 @@ pub fn now_rfc3339(clock: &dyn Clock) -> String {
 }
 
 pub fn append_ledger_record(record: &LedgerRecord) -> Result<()> {
+    // The machine-global ledger is written by every concurrent run; serialize so the hash chain can't interleave.
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITE_LOCK.lock().expect("ledger write lock poisoned");
     let path = lns_ipc::connection_ledger()?;
     let anchor_path = lns_ipc::connection_ledger_anchor()?;
     append_ledger_record_at(&path, &anchor_path, record)
@@ -87,9 +90,20 @@ impl LedgerRecorder for RunLedgerRecorder {
             microvm: self.microvm.clone(),
             event,
         };
-        if let Err(e) = self.sink.append(&record) {
-            crate::log::warn!("could not record connection-ledger event: {e:#}");
+        let sink = self.sink.clone();
+        // The append fsyncs the global ledger; keep it off the run's async worker when a runtime is live.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || warn_on_record_failure(sink.append(&record)));
+            }
+            Err(_) => warn_on_record_failure(sink.append(&record)),
         }
+    }
+}
+
+fn warn_on_record_failure(result: Result<()>) {
+    if let Err(e) = result {
+        crate::log::warn!("could not record connection-ledger event: {e:#}");
     }
 }
 
@@ -116,6 +130,19 @@ mod tests {
             if self.fail {
                 anyhow::bail!("disk full");
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct SignalingSink {
+        appended: tokio::sync::Notify,
+        count: std::sync::Mutex<usize>,
+    }
+    impl LedgerSink for SignalingSink {
+        fn append(&self, _record: &LedgerRecord) -> Result<()> {
+            *self.count.lock().unwrap() += 1;
+            self.appended.notify_one();
             Ok(())
         }
     }
@@ -241,5 +268,51 @@ mod tests {
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
         assert!(content.contains("\"run\":7"), "{content}");
         assert!(content.contains("deny_once"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn record_offloads_the_blocking_append_when_a_runtime_is_live() {
+        let sink = Arc::new(SignalingSink::default());
+        let recorder =
+            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        recorder.record(network_approval());
+        sink.appended.notified().await;
+        assert_eq!(*sink.count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn concurrent_runs_appending_produce_one_unbroken_chain() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
+        let threads: u32 = 8;
+        let per_thread: u32 = 25;
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                scope.spawn(move || {
+                    for i in 0..per_thread {
+                        append_ledger_record(&sample(t * per_thread + i)).unwrap();
+                    }
+                });
+            }
+        });
+
+        let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), (threads * per_thread) as usize);
+        let mut expected_prev = lns_ipc::GENESIS_PREV_HASH.to_string();
+        for line in &lines {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                parsed["prev_hash"].as_str().unwrap(),
+                expected_prev,
+                "a concurrent append broke the chain order"
+            );
+            expected_prev = lns_ipc::line_hash(line.as_bytes());
+        }
+        let anchor =
+            crate::audit::read_anchor(&lns_ipc::connection_ledger_anchor().unwrap()).unwrap();
+        assert_eq!(anchor.line_count, (threads * per_thread) as u64);
     }
 }
