@@ -271,15 +271,26 @@ pub fn cancel(run_id: u32) -> bool {
     true
 }
 
-pub fn request_detach(run_id: u32) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachOutcome {
+    Detached,
+    NotAttached,
+    NotFound,
+}
+
+pub fn request_detach(run_id: u32) -> DetachOutcome {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     let Some(handle) = g.as_ref().and_then(|m| m.get(&run_id)) else {
-        return false;
+        return DetachOutcome::NotFound;
     };
     let Some(tx) = handle.detach_tx.lock().expect("detach_tx poisoned").take() else {
-        return false;
+        return DetachOutcome::NotAttached;
     };
-    tx.send(()).is_ok()
+    if tx.send(()).is_ok() {
+        DetachOutcome::Detached
+    } else {
+        DetachOutcome::NotAttached
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,9 +596,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_detach_unknown_run_returns_false() {
+    async fn request_detach_unknown_run_reports_not_found() {
         let id = allocate_run_id() + 2_000_000;
-        assert!(!request_detach(id));
+        assert_eq!(request_detach(id), DetachOutcome::NotFound);
     }
 
     #[tokio::test]
@@ -598,11 +609,29 @@ mod tests {
         handle.detach_tx = Mutex::new(Some(detach_tx));
         register(id, handle);
 
-        assert!(request_detach(id));
+        assert_eq!(request_detach(id), DetachOutcome::Detached);
         assert!(detach_rx.await.is_ok(), "detach signal must be delivered");
-        assert!(
-            !request_detach(id),
-            "second detach of the same id must be a no-op"
+        assert_eq!(
+            request_detach(id),
+            DetachOutcome::NotAttached,
+            "a registered run whose detach signal was already consumed is not attached, not absent",
+        );
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn request_detach_reports_not_attached_when_the_pump_has_gone() {
+        let id = allocate_run_id();
+        let (mut handle, _cancel_rx) = make_handle();
+        let (detach_tx, detach_rx) = oneshot::channel::<()>();
+        drop(detach_rx);
+        handle.detach_tx = Mutex::new(Some(detach_tx));
+        register(id, handle);
+
+        assert_eq!(
+            request_detach(id),
+            DetachOutcome::NotAttached,
+            "a run whose pump already returned can no longer be detached",
         );
         deregister(id);
     }

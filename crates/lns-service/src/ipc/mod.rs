@@ -123,15 +123,15 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }
         }
-        Request::RunDetach { run_id } => {
-            if crate::run_registry::request_detach(*run_id) {
-                Response::DetachAccepted
-            } else {
-                Response::Error {
-                    message: format!("no active run with id {run_id}"),
-                }
-            }
-        }
+        Request::RunDetach { run_id } => match crate::run_registry::request_detach(*run_id) {
+            crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
+            crate::run_registry::DetachOutcome::NotAttached => Response::Error {
+                message: format!("run {run_id} is not attached"),
+            },
+            crate::run_registry::DetachOutcome::NotFound => Response::Error {
+                message: format!("no active run with id {run_id}"),
+            },
+        },
         Request::RunStdin { run_id, bytes } => {
             forward_session_input(*run_id, session_input_from_stdin(bytes.clone()), "RunStdin")
                 .await
@@ -1257,10 +1257,13 @@ mod tests {
         );
 
         let resp = handle_request(&Request::RunDetach { run_id }, Instant::now()).await;
-        assert!(
-            matches!(resp, Response::Error { .. }),
-            "a second detach is a no-op once the signal is consumed",
-        );
+        match resp {
+            Response::Error { message } => assert!(
+                message.contains("is not attached"),
+                "a second detach of a still-registered run is not-attached, not absent: {message}",
+            ),
+            other => unreachable!("expected Error on a second detach, got {other:?}"),
+        }
         let _ = crate::run_registry::cancel(run_id);
     }
 
