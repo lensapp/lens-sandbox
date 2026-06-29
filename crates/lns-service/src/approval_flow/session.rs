@@ -636,22 +636,16 @@ pub(crate) mod tests {
             DecisionOutcome::Resolved
         );
         let events = recorder.events.lock().unwrap();
-        match only_approval(&events) {
+        assert_eq!(
+            *only_approval(&events),
             LedgerEvent::Approval {
-                kind,
-                target,
-                decision,
-                reason,
-                integration,
-            } => {
-                assert_eq!(*kind, ApprovalKind::Network);
-                assert_eq!(target, "api.foo.com");
-                assert_eq!(*decision, LedgerDecision::AllowAlways);
-                assert_eq!(reason.as_deref(), Some("policy-ambiguous"));
-                assert!(integration.is_none());
+                kind: ApprovalKind::Network,
+                target: "api.foo.com".into(),
+                decision: LedgerDecision::AllowAlways,
+                reason: Some("policy-ambiguous".into()),
+                integration: None,
             }
-            other => panic!("expected an approval event, got {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -664,15 +658,16 @@ pub(crate) mod tests {
         session.submit_pending(req, Instant::now());
         session.record_decision("r1", Decision::DenyOnce);
         let events = recorder.events.lock().unwrap();
-        match only_approval(&events) {
+        assert_eq!(
+            *only_approval(&events),
             LedgerEvent::Approval {
-                reason, decision, ..
-            } => {
-                assert!(reason.is_none());
-                assert_eq!(*decision, LedgerDecision::DenyOnce);
+                kind: ApprovalKind::Network,
+                target: "api.foo.com".into(),
+                decision: LedgerDecision::DenyOnce,
+                reason: None,
+                integration: None,
             }
-            other => panic!("expected an approval event, got {other:?}"),
-        }
+        );
     }
 
     #[test]
