@@ -779,12 +779,20 @@ async fn send_one_shot(socket: &Path, request: &Request) -> Result<()> {
     let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("connecting to {} for one-shot", socket.display()))?;
+    write_and_await_ack(&mut stream, request).await
+}
+
+async fn write_and_await_ack<S>(stream: &mut S, request: &Request) -> Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let frame = encode_frame(request).context("encoding one-shot request")?;
     stream
         .write_all(&frame)
         .await
         .context("writing one-shot request")?;
-    let _ = read_frame_bytes_async(&mut stream).await;
+    // Awaiting the reply is load-bearing for RunDetach: it blocks until the service has fired detach_tx, so the CLI never closes the run stream first and trips WriteFailed → CancelAndDeregister.
+    let _ = read_frame_bytes_async(stream).await;
     Ok(())
 }
 
@@ -1795,6 +1803,34 @@ mod tests {
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_and_await_ack_blocks_until_the_service_responds() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let mut ack = std::pin::pin!(write_and_await_ack(
+            &mut client,
+            &Request::RunDetach { run_id: 7 },
+        ));
+
+        assert!(
+            timeout(Duration::from_millis(50), &mut ack).await.is_err(),
+            "the detach round-trip must not complete before the service acknowledges — \
+             a fire-and-forget RunDetach would let the CLI close the run stream first and \
+             reintroduce terminate-on-detach",
+        );
+
+        let req = read_frame_bytes_async(&mut server)
+            .await
+            .expect("server reads the request");
+        let decoded: Request = decode_frame(&mut &req[..]).expect("decode request");
+        assert_eq!(decoded, Request::RunDetach { run_id: 7 });
+
+        let frame = encode_frame(&Response::DetachAccepted).expect("encode ack");
+        server.write_all(&frame).await.expect("server writes ack");
+
+        ack.await
+            .expect("the round-trip completes once the service acknowledges");
     }
 
     #[test]
