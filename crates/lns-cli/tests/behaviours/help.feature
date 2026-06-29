@@ -35,9 +35,10 @@ Feature: users discover the CLI surface
     And the output contains "--mem"
     And the output contains "--policy"
 
-  Scenario: lns audit --help describes the audit chain check
+  Scenario: lns audit --help lists the audit subcommands
     When I run "lns audit --help"
     Then the exit code is 0
     And the output contains "Usage: lns audit"
     And the output contains "RUN_ID"
-    And the output contains "audit chain"
+    And the output contains "verify"
+    And the output contains "connections"

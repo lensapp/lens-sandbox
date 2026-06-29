@@ -15,11 +15,10 @@ Feature: clap rejects bad input with exit code 2
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
 
-  Scenario: lns audit with no run-id reports the missing arg
-    When I run "lns audit"
+  Scenario: lns audit log rejects a non-numeric --run filter
+    When I run "lns audit log --run notanumber"
     Then the exit code is 2
-    And the output contains "<RUN_ID>"
-    And the output contains "required arguments were not provided"
+    And the output contains "invalid value"
 
   Scenario: lns run -v with a non-absolute target is rejected before any service round-trip
     When I run "lns run -v data:notabsolute alpine"
