@@ -404,6 +404,26 @@ mod tests {
     }
 
     #[test]
+    fn a_tampered_middle_line_breaks_the_chain_at_the_next_line() {
+        let d = tempfile::TempDir::new().unwrap();
+        let path = d.path().join("audit.jsonl");
+        let mut c = AuditChain::new();
+        let mut payload = String::new();
+        for seq in 1..=3 {
+            let line = format!(r#"{{"type":"audit_event","seq":{seq}}}"#);
+            let aug = c.augment(&line).unwrap();
+            payload.push_str(std::str::from_utf8(&aug).unwrap());
+            payload.push('\n');
+        }
+        let tampered = payload.replacen("\"seq\":2", "\"seq\":99", 1);
+        assert_ne!(tampered, payload);
+        std::fs::write(&path, tampered).unwrap();
+        let (at_line, reason) = expect_broken(verify_chain(&path).unwrap());
+        assert_eq!(at_line, 3);
+        assert!(reason.contains("prev_hash mismatch"));
+    }
+
+    #[test]
     fn an_explicit_anchor_path_lets_the_ledger_be_verified_against_its_own_anchor() {
         let d = tempfile::TempDir::new().unwrap();
         let ledger = d.path().join("ledger.jsonl");
