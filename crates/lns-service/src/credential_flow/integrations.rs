@@ -215,6 +215,8 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
+                userinfo_endpoint: None,
+                account_field: None,
                 flow: OauthFlow::Device,
                 client_id: Some(format!("Iv1.{id}")),
                 client_secret: None,
@@ -248,6 +250,8 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
+                userinfo_endpoint: None,
+                account_field: None,
                 flow: OauthFlow::Pkce,
                 client_id: None,
                 client_secret: None,

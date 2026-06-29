@@ -434,6 +434,7 @@ async fn start_credential_subsystem(
             Arc::new(crate::oauth::RealDeviceFlow),
             Arc::new(crate::oauth::RealClock),
         )
+        .with_userinfo_fetcher(Arc::new(crate::oauth::RealUserInfoFetcher))
         .with_pkce(
             oauth.pkce_configs,
             Arc::new(crate::oauth::RealAuthCodeFlow),
@@ -493,8 +494,7 @@ pub(super) async fn start(
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
     let window_state = window::get().context(
-        "approval window state was not installed at boot; \
-         tray::run_tray must run before any policy-bearing run starts",
+        "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts",
     )?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
     let notifier = Arc::new(WindowNotifier::new(
@@ -1143,6 +1143,8 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
+                userinfo_endpoint: None,
+                account_field: None,
                 flow: lns_policy::integrations::OauthFlow::Device,
                 client_id: Some("Iv1.x".into()),
                 client_secret: None,
@@ -1412,6 +1414,8 @@ mod tests {
         {
             Box::pin(async move {
                 Ok(crate::oauth::PollOutcome::Token(crate::oauth::TokenSet {
+                    scopes: Vec::new(),
+                    account: None,
                     access_token: "some-access".into(),
                     refresh_token: "some-refresh".into(),
                     expires_in: std::time::Duration::from_secs(3600),
@@ -1446,6 +1450,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1513,6 +1519,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1589,6 +1597,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1645,6 +1655,8 @@ mod tests {
         // connect_oauth requests-then-polls and never refreshes, so the routing-test fake's refresh arm is exercised directly.
         use crate::oauth::DeviceFlow;
         let cfg = crate::oauth::OauthConfig {
+            userinfo_endpoint: None,
+            account_field: None,
             client_id: "x".into(),
             client_secret: String::new(),
             scopes: vec![],

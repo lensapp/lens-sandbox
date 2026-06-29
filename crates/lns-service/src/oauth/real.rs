@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::traits::{
     AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
-    OauthConfig, PkceConfig, PollOutcome, TokenSet,
+    OauthConfig, PkceConfig, PollOutcome, TokenSet, UserInfoFetcher,
 };
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -23,6 +23,31 @@ impl Clock for RealClock {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+}
+
+pub struct RealUserInfoFetcher;
+
+impl UserInfoFetcher for RealUserInfoFetcher {
+    fn fetch<'a>(&'a self, url: &'a str, access_token: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let resp = reqwest::Client::new()
+                .get(url)
+                .header("accept", "application/json")
+                .header("user-agent", "lns")
+                .bearer_auth(access_token)
+                .timeout(HTTP_TIMEOUT)
+                .send()
+                .await
+                .with_context(|| format!("GET {url}"))?
+                .error_for_status()
+                .with_context(|| format!("userinfo HTTP error from {url}"))?;
+            let bytes = resp
+                .bytes()
+                .await
+                .with_context(|| format!("reading userinfo body from {url}"))?;
+            Ok(bytes.to_vec())
+        })
     }
 }
 
@@ -43,7 +68,16 @@ struct TokenResp {
     access_token: Option<String>,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
+    scope: Option<String>,
     error: Option<String>,
+}
+
+fn granted_scopes(scope: Option<&str>) -> Vec<String> {
+    scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// reqwest here is built without the `json` feature, so bodies are read as bytes and parsed with serde_json (the crate-wide pattern).
@@ -141,6 +175,8 @@ impl DeviceFlow for RealDeviceFlow {
                     access_token,
                     refresh_token: t.refresh_token.unwrap_or_default(),
                     expires_in: Duration::from_secs(t.expires_in.unwrap_or(DEFAULT_EXPIRES_IN)),
+                    scopes: granted_scopes(t.scope.as_deref()),
+                    account: None,
                 }));
             }
             match t.error.as_deref() {
@@ -180,6 +216,8 @@ impl DeviceFlow for RealDeviceFlow {
                     access_token,
                     refresh_token: t.refresh_token.unwrap_or_else(|| refresh_token.to_string()),
                     expires_in: Duration::from_secs(t.expires_in.unwrap_or(DEFAULT_EXPIRES_IN)),
+                    scopes: granted_scopes(t.scope.as_deref()),
+                    account: None,
                 }),
                 None => bail!(
                     "refresh failed: {}",

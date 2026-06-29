@@ -481,6 +481,8 @@ mod tests {
                 ),
                 authorization_endpoint: None,
                 token_endpoint: "https://api.somesaas.com/login/oauth/access_token".into(),
+                userinfo_endpoint: None,
+                account_field: None,
                 env_var: "SOMESAAS_TOKEN".into(),
                 placeholder: "lns-somesaas-placeholder".into(),
                 injections: vec![InjectionDef {
