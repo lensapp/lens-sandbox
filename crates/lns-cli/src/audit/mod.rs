@@ -206,13 +206,6 @@ pub(super) fn auth_word(auth: AuthKind) -> &'static str {
 mod tests {
     use super::*;
 
-    fn expect_ok(outcome: verify::VerifyOutcome) -> usize {
-        let verify::VerifyOutcome::Ok { line_count } = outcome else {
-            panic!("expected Ok, got {outcome:?}")
-        };
-        line_count
-    }
-
     fn report(outcome: verify::VerifyOutcome, allow_missing_anchor: bool) -> i32 {
         report_outcome(outcome, allow_missing_anchor, &mut Vec::new()).unwrap()
     }
@@ -387,6 +380,20 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
+    async fn the_show_subcommand_renders_a_run_timeline() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_run_chain(home.path(), "424242");
+        let _env = home_env(home.path());
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit", "show", "424242"], &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(out).unwrap().contains("volume_attached"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
     async fn verify_with_a_run_id_checks_that_runs_chain() {
         let home = tempfile::TempDir::new().unwrap();
         write_run_chain(home.path(), "424242");
@@ -461,10 +468,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("show, verify, log, connections"));
-    }
-
-    #[test]
-    fn expect_ok_extracts_the_line_count() {
-        assert_eq!(expect_ok(verify::VerifyOutcome::Ok { line_count: 5 }), 5);
     }
 }

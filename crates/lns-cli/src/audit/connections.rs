@@ -390,4 +390,20 @@ mod tests {
         assert!(detail.contains("linear  (-)"));
         assert!(detail.contains("runs       #7"));
     }
+
+    #[test]
+    fn a_network_approval_without_an_integration_is_not_a_connection() {
+        let records = vec![rec(
+            9,
+            "2026-06-29T00:00:00Z",
+            LedgerEvent::Approval {
+                kind: lns_ipc::ApprovalKind::Network,
+                target: "api.foo.com:443".into(),
+                decision: lns_ipc::Decision::AllowAlways,
+                reason: None,
+                integration: None,
+            },
+        )];
+        assert_eq!(summary_of(&records).trim(), "No connections recorded.");
+    }
 }
