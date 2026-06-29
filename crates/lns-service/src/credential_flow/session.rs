@@ -12,7 +12,7 @@ use crate::approval_flow::protocol::{
 use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 use crate::ledger::LedgerRecorder;
-use lns_ipc::{AuthKind, LedgerEvent};
+use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::integrations::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -393,6 +393,15 @@ impl CredentialSession {
         };
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
+        match &request {
+            CredentialDecisionRequest::Allow(_) => {
+                self.record_credential_approval(&credential_id, Decision::Allow)
+            }
+            CredentialDecisionRequest::Deny => {
+                self.record_credential_approval(&credential_id, Decision::Deny)
+            }
+            CredentialDecisionRequest::Timeout => {}
+        }
         // Accepting an un-connected catalog integration connects it live (routes) before the value is armed, so the held request sees both.
         let connect_now = matches!(request, CredentialDecisionRequest::Allow(_))
             && self.connectable.contains(&credential_id);
@@ -425,6 +434,14 @@ impl CredentialSession {
         let connected = self.run_signin_connect(&credential_id).await;
         self.notifier
             .connect_finished(&self.display_name_for(&credential_id));
+        self.record_credential_approval(
+            &credential_id,
+            if connected {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            },
+        );
         if connected {
             for request_id in &request_ids {
                 self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
@@ -662,6 +679,19 @@ impl CredentialSession {
         }
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
         (self.policy_emitter)(&snapshot);
+    }
+
+    fn record_credential_approval(&self, credential_id: &str, decision: Decision) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Credential,
+            target: credential_id.to_string(),
+            decision,
+            reason: None,
+            integration: Some(credential_id.to_string()),
+        });
     }
 
     fn record_credential_event(&self, credential_id: &str, entry: &CredentialEntry) {
@@ -1036,6 +1066,57 @@ mod tests {
                 expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
             }
         );
+    }
+
+    #[test]
+    fn a_credential_allow_records_a_credential_approval() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-provider".into(),
+                decision: Decision::Allow,
+                reason: None,
+                integration: Some("some-provider".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_credential_deny_records_a_credential_approval() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-provider".into(),
+                decision: Decision::Deny,
+                reason: None,
+                integration: Some("some-provider".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_credential_timeout_records_nothing() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Timeout);
+        assert!(recorder.events.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2107,6 +2188,49 @@ mod tests {
         assert_eq!(
             decision_frame(&mut rx).decision,
             CredentialDecisionKind::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_success_records_a_credential_allow() {
+        let (s, _n, _store, _rx, _c) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *events.last().expect("an approval after the connection"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-oauth".into(),
+                decision: Decision::Allow,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_denied_records_a_credential_deny() {
+        let (s, _n, _store, _rx, _c) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-oauth".into(),
+                decision: Decision::Deny,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
         );
     }
 

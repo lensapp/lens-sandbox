@@ -256,6 +256,22 @@ impl ApprovalSession {
         });
     }
 
+    fn record_offer_decision(&self, integration_id: &str, decision: Decision) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        let Some(decision) = Self::ledger_decision(decision) else {
+            return;
+        };
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Integration,
+            target: integration_id.to_string(),
+            decision,
+            reason: None,
+            integration: Some(integration_id.to_string()),
+        });
+    }
+
     fn ledger_decision(decision: Decision) -> Option<LedgerDecision> {
         match decision {
             Decision::AllowAlways => Some(LedgerDecision::AllowAlways),
@@ -315,6 +331,7 @@ impl ApprovalSession {
         } else {
             Decision::DenyOnce
         };
+        self.record_offer_decision(&offer.integration_id, decision);
         for request_id in self.drain_offer_requests(&offer.integration_id) {
             self.send_decision_frame(&request_id, decision);
         }
@@ -1476,6 +1493,58 @@ pub(crate) mod tests {
         s.connect_offer("r1").await;
 
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_integration_offer_records_an_integration_allow() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Integration,
+                target: "some-oauth".into(),
+                decision: LedgerDecision::AllowOnce,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_integration_connect_records_an_integration_deny() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Integration,
+                target: "some-oauth".into(),
+                decision: LedgerDecision::DenyOnce,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
     }
 
     #[tokio::test]
