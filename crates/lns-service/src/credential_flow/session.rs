@@ -413,7 +413,6 @@ impl CredentialSession {
             }
             CredentialDecisionRequest::Timeout => {}
         }
-        // Accepting an un-connected catalog integration connects it live (routes) before the value is armed, so the held request sees both.
         let connect_now = matches!(request, CredentialDecisionRequest::Allow(_))
             && self.connectable.contains(&credential_id);
         if let Some(entry) = persistent_entry(request) {
