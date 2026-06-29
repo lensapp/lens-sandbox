@@ -91,7 +91,6 @@ impl LedgerRecorder for RunLedgerRecorder {
             event,
         };
         let sink = self.sink.clone();
-        // The append fsyncs the global ledger; keep it off the run's async worker when a runtime is live.
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn_blocking(move || warn_on_record_failure(sink.append(&record)));
