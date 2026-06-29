@@ -143,7 +143,6 @@ impl ApprovalSession {
         let _ = self.connector.set(connector);
     }
 
-    /// Installs the connection-ledger recorder once at boot so network decisions are recorded to the durable history; idempotent, the first wins.
     pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
         let _ = self.ledger.set(recorder);
     }
