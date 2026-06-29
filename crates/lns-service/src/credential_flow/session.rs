@@ -695,6 +695,7 @@ impl CredentialSession {
             } if !access_token.is_empty() => Some(LedgerEvent::Connection {
                 integration: credential_id.to_string(),
                 auth: AuthKind::Oauth,
+                // No account handle exists at arm time; a userinfo lookup will populate it once that lands.
                 account: None,
                 scopes: self.scopes_for(credential_id),
                 expires: Some(crate::time_fmt::rfc3339_from_unix(*expires_at)),
