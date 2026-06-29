@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod initramfs;
 pub mod ipc;
 pub mod kernel;
+pub mod ledger;
 pub mod log;
 pub mod oauth;
 pub mod oci_layer_cache;
