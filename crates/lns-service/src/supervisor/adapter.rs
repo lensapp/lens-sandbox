@@ -465,6 +465,7 @@ async fn start_credential_subsystem(
 
 pub(super) async fn start(
     run_id: u32,
+    run_name: String,
     policy_path: &Path,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
@@ -562,6 +563,12 @@ pub(super) async fn start(
     session.set_connector(Arc::new(CredentialConnector {
         credential_session: Arc::downgrade(&credential_session),
     }));
+
+    let recorder: Arc<dyn crate::ledger::LedgerRecorder> = Arc::new(
+        crate::ledger::RunLedgerRecorder::new(run_id, run_name, Arc::new(crate::oauth::RealClock)),
+    );
+    session.set_ledger_recorder(recorder.clone());
+    credential_session.set_ledger_recorder(recorder);
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(run_id, session, credential_session, frame_rx, user_env)?;

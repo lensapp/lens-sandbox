@@ -73,6 +73,9 @@ async fn orchestrate(
         let (session, initrd) = tokio::try_join!(
             supervisor::SupervisorSession::start_if_policy(
                 run_id,
+                crate::run_registry::inspect(run_id)
+                    .map(|d| d.summary.name)
+                    .unwrap_or_else(|| run_id.to_string()),
                 policy.as_deref().map(Path::new),
                 guest_tools.root.clone(),
                 args.env.clone(),

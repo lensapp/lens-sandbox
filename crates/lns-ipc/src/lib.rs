@@ -14,7 +14,7 @@ pub use codec::{
     decode_wire_frame_from_payload, decode_wire_frame_sync, encode_frame, encode_raw_frame,
     encode_wire_frame, read_frame_bytes_async,
 };
-pub use ledger::{ApprovalKind, AuthKind, Decision, LedgerEvent, LedgerRecord};
+pub use ledger::{ApprovalKind, AuthKind, Decision, LedgerEvent, LedgerRecord, fingerprint};
 pub use paths::{
     CachePathError, audit_anchor_for_run, audit_log_for_run, cache_root, connection_ledger,
     connection_ledger_anchor, data_root,

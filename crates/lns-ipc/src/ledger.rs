@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// A short, non-reversible identifier for a secret value — lets the ledger say "the same key was used in run #41 and #49" without ever recording the value.
+pub fn fingerprint(value: &str) -> String {
+    crate::hex_encode(&Sha256::digest(value.as_bytes()))[..12].to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -181,6 +187,19 @@ mod tests {
         for d in [Decision::DenyOnce, Decision::DenyAlways, Decision::Deny] {
             assert!(!d.is_allow(), "{d:?} should not be an allow");
         }
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_short_and_never_the_value() {
+        let secret = "sk-super-secret-value";
+        let fp = fingerprint(secret);
+        assert_eq!(fp, fingerprint(secret), "same value → same fingerprint");
+        assert_eq!(fp.len(), 12);
+        assert!(
+            !secret.contains(&fp),
+            "the fingerprint must not leak the value"
+        );
+        assert_ne!(fingerprint("key-a"), fingerprint("key-b"));
     }
 
     #[test]

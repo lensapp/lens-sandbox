@@ -1,7 +1,7 @@
 //! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -11,6 +11,8 @@ use crate::approval_flow::protocol::{
 };
 use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
+use crate::ledger::LedgerRecorder;
+use lns_ipc::{AuthKind, LedgerEvent};
 use lns_policy::integrations::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -132,6 +134,7 @@ pub struct CredentialSession {
     open_browser: BrowserOpener,
     pkce_challenge_gen: ChallengeGen,
     pkce_timeout: Duration,
+    ledger: OnceLock<Arc<dyn LedgerRecorder>>,
 }
 
 impl CredentialSession {
@@ -176,7 +179,12 @@ impl CredentialSession {
             open_browser: Box::new(|_| {}),
             pkce_challenge_gen: Box::new(crate::oauth::PkceChallenge::generate),
             pkce_timeout: PKCE_SIGN_IN_TIMEOUT,
+            ledger: OnceLock::new(),
         }
+    }
+
+    pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
+        let _ = self.ledger.set(recorder);
     }
 
     /// Wires the device-flow engine and per-integration oauth configs so an accepted oauth prompt can run an interactive sign-in.
@@ -641,6 +649,7 @@ impl CredentialSession {
     }
 
     fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) {
+        self.record_credential_event(&credential_id, &entry);
         let snapshot = {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.insert(credential_id, entry);
@@ -653,6 +662,52 @@ impl CredentialSession {
         }
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
         (self.policy_emitter)(&snapshot);
+    }
+
+    fn record_credential_event(&self, credential_id: &str, entry: &CredentialEntry) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        if let Some(event) = self.credential_event(credential_id, entry) {
+            recorder.record(event);
+        }
+    }
+
+    fn credential_event(
+        &self,
+        credential_id: &str,
+        entry: &CredentialEntry,
+    ) -> Option<LedgerEvent> {
+        match entry {
+            CredentialEntry::Stored { value } if !value.is_empty() => {
+                let (_, domains, _) = self.provider_disclosure(credential_id);
+                Some(LedgerEvent::CredentialUse {
+                    integration: credential_id.to_string(),
+                    auth: AuthKind::Apikey,
+                    fp: Some(lns_ipc::fingerprint(value)),
+                    dest: domains,
+                })
+            }
+            CredentialEntry::Oauth {
+                access_token,
+                expires_at,
+                ..
+            } if !access_token.is_empty() => Some(LedgerEvent::Connection {
+                integration: credential_id.to_string(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: self.scopes_for(credential_id),
+                expires: Some(crate::time_fmt::rfc3339_from_unix(*expires_at)),
+            }),
+            _ => None,
+        }
+    }
+
+    fn scopes_for(&self, credential_id: &str) -> Vec<String> {
+        self.oauth_configs
+            .get(credential_id)
+            .map(|cfg| cfg.scopes.clone())
+            .unwrap_or_default()
     }
 
     /// Expired prompts emit a `Timeout` decision so the MITM fails every held request closed (S12).
@@ -741,6 +796,7 @@ fn injection_targets_host(inj: &CredentialInjection, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::session::tests::CapturingRecorder;
     use std::io;
     use std::sync::Mutex as StdMutex;
 
@@ -880,6 +936,106 @@ mod tests {
         let v = serde_json::to_value(rx.try_recv().expect("expected a frame")).unwrap();
         assert_eq!(v["type"], "credential_decision", "got {v}");
         serde_json::from_value(v).expect("CredentialDecision must round-trip through JSON")
+    }
+
+    #[test]
+    fn arming_a_stored_value_records_a_credential_use_with_a_fingerprint() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "open-router".into(),
+            CredentialEntry::Stored {
+                value: "sk-secret".into(),
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::CredentialUse {
+                integration: "open-router".into(),
+                auth: AuthKind::Apikey,
+                fp: Some(lns_ipc::fingerprint("sk-secret")),
+                dest: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn arming_an_oauth_token_records_a_connection_with_its_expiry() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 0,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec![],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(0)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_denied_credential_records_nothing() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry("some-provider".into(), CredentialEntry::Deny);
+        assert!(recorder.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_oauth_connection_carries_the_integrations_configured_scopes() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let configs = HashMap::from([(
+            "some-oauth".to_string(),
+            crate::oauth::OauthConfig {
+                client_id: "Iv1.test".into(),
+                client_secret: String::new(),
+                scopes: vec!["repo".into(), "read:org".into()],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let s = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier,
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_oauth(configs, FakeFlow::polling(vec![]), Arc::new(FixedClock(0)));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 1_735_689_600,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec!["repo".into(), "read:org".into()],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
+            }
+        );
     }
 
     #[test]

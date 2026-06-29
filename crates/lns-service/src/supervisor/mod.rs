@@ -72,6 +72,7 @@ pub struct SupervisorSession {
 impl SupervisorSession {
     pub async fn start_if_policy(
         run_id: u32,
+        run_name: String,
         policy: Option<&Path>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
@@ -79,7 +80,7 @@ impl SupervisorSession {
         let Some(policy_path) = policy else {
             return Ok(None);
         };
-        adapter::start(run_id, policy_path, guest_tools_root, user_env)
+        adapter::start(run_id, run_name, policy_path, guest_tools_root, user_env)
             .await
             .map(Some)
     }
@@ -277,9 +278,15 @@ mod tests {
 
     #[tokio::test]
     async fn start_if_policy_returns_none_when_no_policy() {
-        let result = SupervisorSession::start_if_policy(42, None, PathBuf::from("/tmp"), vec![])
-            .await
-            .unwrap();
+        let result = SupervisorSession::start_if_policy(
+            42,
+            "vm-42".into(),
+            None,
+            PathBuf::from("/tmp"),
+            vec![],
+        )
+        .await
+        .unwrap();
         assert!(
             result.is_none(),
             "no policy → unsupervised, no relay spun up"
@@ -523,6 +530,7 @@ mod tests {
 
         let result = SupervisorSession::start_if_policy(
             999_999,
+            "calm-finch".into(),
             Some(&policy_path),
             d.path().to_path_buf(),
             vec![],
