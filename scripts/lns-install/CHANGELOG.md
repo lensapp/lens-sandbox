@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.5.0...lns-install-v0.6.0) (2026-06-29)
+
+
+### Features
+
+* **vm:** resolve cloud-hypervisor/virtiofsd from PATH on Linux ([8dd4795](https://github.com/lensapp/lens-sandbox/commit/8dd479516c643700d96e4e4bda51fa98f17a2671))
+
 ## [0.5.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.4.0...lns-install-v0.5.0) (2026-06-05)
 
 
