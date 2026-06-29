@@ -21,6 +21,7 @@ static ACTIVE: Mutex<Option<HashMap<u32, RunHandle>>> = Mutex::new(None);
 
 pub struct RunHandle {
     pub cancel_tx: oneshot::Sender<i32>,
+    pub detach_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub task: JoinHandle<()>,
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
     pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
@@ -270,6 +271,17 @@ pub fn cancel(run_id: u32) -> bool {
     true
 }
 
+pub fn request_detach(run_id: u32) -> bool {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    let Some(handle) = g.as_ref().and_then(|m| m.get(&run_id)) else {
+        return false;
+    };
+    let Some(tx) = handle.detach_tx.lock().expect("detach_tx poisoned").take() else {
+        return false;
+    };
+    tx.send(()).is_ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveOutcome {
     Removed,
@@ -330,6 +342,7 @@ mod tests {
         (
             RunHandle {
                 cancel_tx,
+                detach_tx: Mutex::new(None),
                 task,
                 input_tx: None,
                 connector: None,
@@ -569,6 +582,29 @@ mod tests {
 
         assert!(cancel(id));
         assert!(!cancel(id), "second cancel of the same id must be a no-op");
+    }
+
+    #[tokio::test]
+    async fn request_detach_unknown_run_returns_false() {
+        let id = allocate_run_id() + 2_000_000;
+        assert!(!request_detach(id));
+    }
+
+    #[tokio::test]
+    async fn request_detach_fires_the_detach_signal_once() {
+        let id = allocate_run_id();
+        let (mut handle, _cancel_rx) = make_handle();
+        let (detach_tx, detach_rx) = oneshot::channel::<()>();
+        handle.detach_tx = Mutex::new(Some(detach_tx));
+        register(id, handle);
+
+        assert!(request_detach(id));
+        assert!(detach_rx.await.is_ok(), "detach signal must be delivered");
+        assert!(
+            !request_detach(id),
+            "second detach of the same id must be a no-op"
+        );
+        deregister(id);
     }
 
     #[tokio::test]

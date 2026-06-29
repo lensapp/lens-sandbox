@@ -424,6 +424,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
+    let (detach_tx, detach_rx) = oneshot::channel::<()>();
 
     let run_id = crate::run_registry::allocate_run_id();
     let detached = args.detached;
@@ -457,6 +458,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         requested_name,
         crate::run_registry::RunHandle {
             cancel_tx,
+            detach_tx: std::sync::Mutex::new(Some(detach_tx)),
             task: run_task,
             input_tx: Some(input_tx),
             connector: None,
@@ -493,7 +495,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         return Err(e);
     }
 
-    let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx).await?;
+    let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx, detach_rx).await?;
     match post_pump_action(&outcome, detached) {
         PostPumpAction::Retain => {
             crate::run_registry::mark_exited_from_log(run_id);
@@ -598,8 +600,10 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     drop(frame_tx);
 
     let (_dead_cancel_tx, dead_cancel_rx) = oneshot::channel::<i32>();
+    let (_dead_detach_tx, dead_detach_rx) = oneshot::channel::<()>();
 
-    let outcome = pump_responses(&mut stream, &mut frame_rx, dead_cancel_rx).await?;
+    let outcome =
+        pump_responses(&mut stream, &mut frame_rx, dead_cancel_rx, dead_detach_rx).await?;
     if let PumpOutcome::WriteFailed(e) = &outcome {
         log::debug!(error = %e, "exec stream write failed; tearing session down");
     }

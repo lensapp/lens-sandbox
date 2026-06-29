@@ -28,6 +28,9 @@ pub enum Request {
         run_id: u32,
         signal: SignalKind,
     },
+    RunDetach {
+        run_id: u32,
+    },
     ExecImage(ExecImageArgs),
     Kill {
         run: String,
@@ -120,6 +123,7 @@ pub enum Response {
         code: i32,
     },
     CancelAccepted,
+    DetachAccepted,
     Acknowledged,
     RunList {
         runs: Vec<RunSummary>,
@@ -968,6 +972,22 @@ mod tests {
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn run_detach_request_survives_a_round_trip() {
+        let req = Request::RunDetach { run_id: 7 };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn detach_accepted_response_survives_a_round_trip() {
+        let resp = Response::DetachAccepted;
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

@@ -220,6 +220,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         run_id,
         tty,
         detach_chord,
+        DetachBehaviour::DetachRun,
         quiet,
     )
     .await
@@ -269,7 +270,16 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     };
     crate::log::debug!(run_id = run_id, "exec session opened");
 
-    drive_attached_session(stream, Some(socket), run_id, tty, detach_chord, args.quiet).await
+    drive_attached_session(
+        stream,
+        Some(socket),
+        run_id,
+        tty,
+        detach_chord,
+        DetachBehaviour::SignalAndDrain,
+        args.quiet,
+    )
+    .await
 }
 
 pub async fn kill(args: KillArgs) -> Result<()> {
@@ -315,6 +325,7 @@ pub async fn ls() -> Result<()> {
 pub enum DetachBehaviour {
     SignalAndDrain,
     LeaveRunning,
+    DetachRun,
 }
 
 pub(crate) async fn drive_attached_session<S>(
@@ -323,6 +334,7 @@ pub(crate) async fn drive_attached_session<S>(
     run_id: u32,
     tty: bool,
     detach_chord: Vec<u8>,
+    detach: DetachBehaviour,
     quiet: bool,
 ) -> Result<i32>
 where
@@ -337,7 +349,7 @@ where
         tty,
         std::io::stdout().is_terminal(),
         detach_chord,
-        DetachBehaviour::SignalAndDrain,
+        detach,
         &mut stdout,
         &mut stderr,
         quiet,
@@ -519,7 +531,7 @@ where
         DetachBehaviour::SignalAndDrain => {
             drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte, quiet).await
         }
-        DetachBehaviour::LeaveRunning => 0,
+        DetachBehaviour::LeaveRunning | DetachBehaviour::DetachRun => 0,
     }
 }
 
@@ -727,11 +739,13 @@ fn plan_feed(
         }
         FeedAction::Trigger => {
             let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
-            if matches!(detach, DetachBehaviour::SignalAndDrain) {
-                requests.push(Request::RunSignal {
+            match detach {
+                DetachBehaviour::SignalAndDrain => requests.push(Request::RunSignal {
                     run_id,
                     signal: SignalKind::Hup,
-                });
+                }),
+                DetachBehaviour::DetachRun => requests.push(Request::RunDetach { run_id }),
+                DetachBehaviour::LeaveRunning => {}
             }
             (requests, PumpControl::Detach)
         }
@@ -918,9 +932,17 @@ mod tests {
             let frame = encode_frame(&Response::RunExit { code: 7 }).expect("encode RunExit");
             server.write_all(&frame).await.expect("write RunExit");
         });
-        let code = drive_attached_session(client, None, 42, false, Vec::new(), false)
-            .await
-            .expect("drive_attached_session");
+        let code = drive_attached_session(
+            client,
+            None,
+            42,
+            false,
+            Vec::new(),
+            DetachBehaviour::SignalAndDrain,
+            false,
+        )
+        .await
+        .expect("drive_attached_session");
         assert_eq!(code, 7);
     }
 
@@ -1179,9 +1201,17 @@ mod tests {
             let exit = encode_frame(&Response::RunExit { code: 0 }).expect("encode RunExit");
             server.write_all(&exit).await.expect("write RunExit");
         });
-        let code = drive_attached_session(client, None, 42, false, Vec::new(), false)
-            .await
-            .expect("a stray progress frame must not kill an attached session");
+        let code = drive_attached_session(
+            client,
+            None,
+            42,
+            false,
+            Vec::new(),
+            DetachBehaviour::SignalAndDrain,
+            false,
+        )
+        .await
+        .expect("a stray progress frame must not kill an attached session");
         assert_eq!(code, 0);
     }
 
@@ -1195,9 +1225,17 @@ mod tests {
             .expect("encode Error");
             server.write_all(&frame).await.expect("write Error");
         });
-        let err = drive_attached_session(client, None, 42, false, Vec::new(), false)
-            .await
-            .expect_err("daemon Error must surface as anyhow::Error");
+        let err = drive_attached_session(
+            client,
+            None,
+            42,
+            false,
+            Vec::new(),
+            DetachBehaviour::SignalAndDrain,
+            false,
+        )
+        .await
+        .expect_err("daemon Error must surface as anyhow::Error");
         assert!(
             format!("{err:#}").contains("policy file is unreadable"),
             "error context lost"
@@ -1445,6 +1483,33 @@ mod tests {
             decode_wire_frame_from_bytes(&bytes).expect("decode"),
             WireFrame::Json(Response::RunExit { code: 9 })
         ));
+    }
+
+    #[tokio::test]
+    async fn exit_code_after_detach_detach_run_returns_zero_without_draining() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let exit = encode_frame(&Response::RunExit { code: 9 }).expect("encode exit");
+        server.write_all(&exit).await.expect("write exit");
+
+        let mut captured = Vec::<u8>::new();
+        let mut status = Vec::<u8>::new();
+        let mut last = None;
+        let code = exit_code_after_detach(
+            DetachBehaviour::DetachRun,
+            false,
+            &mut client,
+            &mut captured,
+            &mut status,
+            &mut last,
+            false,
+        )
+        .await;
+
+        assert_eq!(code, 0, "detaching a run returns 0 at once");
+        assert!(
+            captured.is_empty(),
+            "DetachRun must leave the run running, not drain its output"
+        );
     }
 
     #[tokio::test]
@@ -1703,6 +1768,30 @@ mod tests {
                 bytes: vec![b'p']
             }],
             "a docker-style detach flushes pending input but never signals the workload"
+        );
+        assert!(matches!(control, PumpControl::Detach));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_trigger_sends_run_detach_without_signalling_for_run() {
+        let mut pending = vec![b'p'];
+        let (requests, control) = plan_feed(
+            FeedAction::Trigger,
+            9,
+            &mut pending,
+            DetachBehaviour::DetachRun,
+        );
+        assert_eq!(
+            requests,
+            vec![
+                Request::RunStdin {
+                    run_id: 9,
+                    bytes: vec![b'p']
+                },
+                Request::RunDetach { run_id: 9 },
+            ],
+            "detaching a run flushes pending input then asks the service to keep it running — no SIGHUP",
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());

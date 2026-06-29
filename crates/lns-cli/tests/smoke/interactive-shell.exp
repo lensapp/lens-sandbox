@@ -1,7 +1,7 @@
 #!/usr/bin/expect -f
 # Smoke test for `lns run -it` interactive shell behaviors.
 #
-# Locks in three user-facing contracts that any change touching the
+# Locks in four user-facing contracts that any change touching the
 # interactive-shell transport (stdio pumps, chord detector, lns-init
 # PTY plumbing, future session broker) must preserve:
 #
@@ -9,13 +9,12 @@
 #      `hi` on its own line.
 #   2. Ctrl+C inside the shell does NOT detach. The guest kernel's
 #      TTY line discipline echoes `^C` and the shell reprompts.
-#   3. The Docker-style chord (`Ctrl+P` `Ctrl+Q`) exits cleanly.
-#      `lns` reports the workload's real exit code — which for
-#      `sh` killed by SIGHUP is 129 (128 + SIGHUP). Earlier
-#      revisions hardcoded 0 from `emit_completion`'s Ok path
-#      regardless of the workload's real exit; that masked the
-#      bug fixed in `fix(lns-service): forward workload exit code
-#      to CLI instead of always reporting 0`.
+#   3. The Docker-style chord (`Ctrl+P` `Ctrl+Q`) detaches: `lns`
+#      returns 0 and the run keeps executing in the background. No
+#      SIGHUP is sent to the workload (an earlier revision sent
+#      SIGHUP and reported 129 — terminate-and-exit, not detach).
+#   4. The detached run is still listed by `lns sandbox ls` and
+#      `lns sandbox attach` re-joins its shell.
 #
 # Run with `expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`
 # from the workspace root. Requires `/usr/bin/expect` (pre-installed
@@ -35,7 +34,7 @@ if {![file executable $wrapper]} {
     exit 1
 }
 
-spawn $wrapper run alpine:latest -- sh
+spawn $wrapper run --name detach-smoke alpine:latest -- sh
 
 # --- (1) shell comes up and echoes a command ------------------------------
 
@@ -82,13 +81,13 @@ expect {
     "~ # "
 }
 
-# --- (3) Ctrl+P Ctrl+Q must exit cleanly ---------------------------------
+# --- (3) Ctrl+P Ctrl+Q detaches, leaving the run running -----------------
 
 send "\x10\x11"
 set timeout 30
 expect {
     timeout {
-        puts "\nFAIL: chord did not exit within 30s — guest shell froze (most likely SIGHUP wasn't delivered)"
+        puts "\nFAIL: chord did not detach within 30s — the CLI kept relaying or the guest froze"
         exit 1
     }
     eof
@@ -100,15 +99,51 @@ if {$os_error_flag != 0} {
     puts "\nFAIL: OS error after chord, errno $value"
     exit 1
 }
-# Chord → broker delivers SIGHUP to the workload's foreground
-# process group → `sh` exits with `128 + 1 = 129`. Any other code
-# would mean either the chord didn't fire (workload ended for some
-# other reason) or the exit-code propagation regressed back to
-# always-0.
-if {$value != 129} {
-    puts "\nFAIL: expected exit 129 (128 + SIGHUP) after chord, got $value"
+# Docker-style detach: the chord makes the CLI return 0 and leaves the
+# run executing in the background. No SIGHUP is sent to the workload —
+# a regression to terminate-and-exit would surface here as 129.
+if {$value != 0} {
+    puts "\nFAIL: expected exit 0 after docker-style detach, got $value"
     exit 1
 }
 
-puts "\nPASS: interactive shell behaviors all green (chord-exit 129 confirmed)"
+# --- (4) the detached run is still listed and re-attachable --------------
+
+set timeout 15
+spawn $wrapper sandbox ls
+expect {
+    timeout {
+        puts "\nFAIL: `lns sandbox ls` did not list the detached run as running"
+        exit 1
+    }
+    -re "detach-smoke.*(?i)running"
+}
+catch wait
+
+spawn $wrapper sandbox attach detach-smoke
+expect {
+    timeout {
+        puts "\nFAIL: `lns sandbox attach` did not re-join the detached run's shell"
+        exit 1
+    }
+    "~ # "
+}
+send "echo rejoined\r"
+expect {
+    timeout {
+        puts "\nFAIL: re-attached shell produced no output"
+        exit 1
+    }
+    -re "\nrejoined\r"
+}
+# Detach again (still no signal), then tear the run down explicitly.
+send "\x10\x11"
+expect eof
+catch wait
+
+spawn $wrapper sandbox kill detach-smoke
+expect eof
+catch wait
+
+puts "\nPASS: interactive shell behaviors all green (docker-style detach + re-attach confirmed)"
 exit 0

@@ -15,6 +15,7 @@ pub fn fresh_handle(
     let task = tokio::spawn(async {});
     lns_service::run_registry::RunHandle {
         cancel_tx,
+        detach_tx: std::sync::Mutex::new(None),
         task,
         input_tx: None,
         connector: None,
