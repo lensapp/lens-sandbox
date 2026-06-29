@@ -61,8 +61,13 @@ pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Resul
     let reference: Reference = format!("{registry}/{LOGIN_PROBE_REPOSITORY}")
         .parse()
         .with_context(|| format!("invalid registry {registry:?}"))?;
+    let protocol = super::registry_protocol(
+        std::env::var("LNS_REGISTRY_PLAIN_HTTP").ok().as_deref(),
+        Some(registry),
+    );
     let client = oci_client::Client::new(ClientConfig {
         platform_resolver: Some(Box::new(linux_platform_resolver)),
+        protocol,
         ..Default::default()
     });
     let auth = RegistryAuth::Basic(username.to_string(), secret.to_string());
