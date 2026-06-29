@@ -29,6 +29,14 @@ pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
     Ok(cache_root()?.join("runs").join(run_id).join("audit.anchor"))
 }
 
+pub fn connection_ledger() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("ledger.jsonl"))
+}
+
+pub fn connection_ledger_anchor() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("ledger.anchor"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +84,24 @@ mod tests {
             root.is_absolute(),
             "data_root must be absolute, got: {root:?}"
         );
+    }
+
+    #[test]
+    fn connection_ledger_lives_under_data_root_not_cache_root() {
+        let data = data_root().expect("data dir resolves in test env");
+        let ledger = connection_ledger().expect("connection_ledger");
+        assert_eq!(ledger, data.join("ledger.jsonl"));
+        assert!(
+            !ledger.starts_with(cache_root().expect("cache dir resolves in test env")),
+            "the ledger must outlive ephemeral run dirs, so it cannot live under cache_root: {ledger:?}"
+        );
+    }
+
+    #[test]
+    fn connection_ledger_anchor_is_a_sibling_of_the_ledger() {
+        let ledger = connection_ledger().expect("connection_ledger");
+        let anchor = connection_ledger_anchor().expect("connection_ledger_anchor");
+        assert_eq!(anchor.parent(), ledger.parent());
+        assert!(anchor.ends_with("ledger.anchor"));
     }
 }

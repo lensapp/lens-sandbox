@@ -107,7 +107,11 @@ fn check_line(line: &str, idx: usize, expected_prev: &str) -> Option<VerifyOutco
 }
 
 pub fn verify_chain(path: &Path) -> Result<VerifyOutcome> {
-    verify_chain_against_anchor(path, read_anchor_state(&anchor_path_for(path)))
+    verify_chain_with_anchor(path, &anchor_path_for(path))
+}
+
+pub fn verify_chain_with_anchor(path: &Path, anchor_path: &Path) -> Result<VerifyOutcome> {
+    verify_chain_against_anchor(path, read_anchor_state(anchor_path))
 }
 
 fn verify_chain_against_anchor(path: &Path, anchor: AnchorState) -> Result<VerifyOutcome> {
@@ -397,6 +401,19 @@ mod tests {
         let anchor = write_chain_to(&path, &[r#"{"type":"audit_event","seq":1}"#]);
         let walk = walk_chain(&path).unwrap().unwrap();
         assert!(check_anchor(&walk, &anchor).is_none());
+    }
+
+    #[test]
+    fn an_explicit_anchor_path_lets_the_ledger_be_verified_against_its_own_anchor() {
+        let d = tempfile::TempDir::new().unwrap();
+        let ledger = d.path().join("ledger.jsonl");
+        let anchor = write_chain_to(&ledger, &[r#"{"type":"audit_event","seq":1}"#]);
+        let anchor_path = d.path().join("ledger.anchor");
+        std::fs::write(&anchor_path, anchor.to_line()).unwrap();
+        assert_eq!(
+            expect_ok(verify_chain_with_anchor(&ledger, &anchor_path).unwrap()),
+            1
+        );
     }
 
     #[test]
