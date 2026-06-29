@@ -11,6 +11,7 @@ pub use adapter::run_server;
 pub(super) enum PumpOutcome {
     ExitFrame,
     ChannelClosed,
+    Detached,
     WriteFailed(String),
 }
 
@@ -24,6 +25,7 @@ pub(super) enum PostPumpAction {
 pub(super) fn post_pump_action(outcome: &PumpOutcome, detached: bool) -> PostPumpAction {
     match outcome {
         PumpOutcome::ExitFrame | PumpOutcome::ChannelClosed => PostPumpAction::Retain,
+        PumpOutcome::Detached => PostPumpAction::BackgroundDrain,
         PumpOutcome::WriteFailed(_) if detached => PostPumpAction::BackgroundDrain,
         PumpOutcome::WriteFailed(_) => PostPumpAction::CancelAndDeregister,
     }
@@ -37,11 +39,13 @@ async fn pump_responses<W>(
     stream: &mut W,
     frame_rx: &mut mpsc::Receiver<WireFrame>,
     cancel_rx: oneshot::Receiver<i32>,
+    detach_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<PumpOutcome>
 where
     W: AsyncWriteExt + Unpin,
 {
     let mut cancel_rx = Some(cancel_rx);
+    let mut detach_rx = Some(detach_rx);
     loop {
         tokio::select! {
             biased;
@@ -59,6 +63,17 @@ where
                     return Ok(PumpOutcome::WriteFailed(e.to_string()));
                 }
                 return Ok(PumpOutcome::ExitFrame);
+            }
+            detach = async {
+                match detach_rx.as_mut() {
+                    Some(rx) => rx.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                detach_rx = None;
+                if detach.is_ok() {
+                    return Ok(PumpOutcome::Detached);
+                }
             }
             maybe = frame_rx.recv() => {
                 let Some(wire) = maybe else {
@@ -102,6 +117,15 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(*run_id) {
                 Response::CancelAccepted
+            } else {
+                Response::Error {
+                    message: format!("no active run with id {run_id}"),
+                }
+            }
+        }
+        Request::RunDetach { run_id } => {
+            if crate::run_registry::request_detach(*run_id) {
+                Response::DetachAccepted
             } else {
                 Response::Error {
                     message: format!("no active run with id {run_id}"),
@@ -555,11 +579,16 @@ mod tests {
         oneshot::channel()
     }
 
+    fn never_detach() -> (oneshot::Sender<()>, oneshot::Receiver<()>) {
+        oneshot::channel()
+    }
+
     #[tokio::test]
     async fn pump_preserves_frame_order_and_exits_on_run_exit() {
         let mut sink: Vec<u8> = Vec::new();
         let (tx, mut rx) = mpsc::channel::<WireFrame>(8);
         let (_cancel_tx, cancel_rx) = never_cancel();
+        let (_detach_tx, detach_rx) = never_detach();
 
         tx.send(WireFrame::Stdout(b"hello".to_vec())).await.unwrap();
         tx.send(WireFrame::Json(Response::RunLog {
@@ -575,7 +604,9 @@ mod tests {
         tx.send(WireFrame::Stdout(b"never".to_vec())).await.unwrap();
         drop(tx);
 
-        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx).await.unwrap();
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
         assert_eq!(outcome, PumpOutcome::ExitFrame);
 
         let decoded = decode_wire_frames_from(&sink);
@@ -596,10 +627,13 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let (tx, mut rx) = mpsc::channel::<WireFrame>(8);
         let (_cancel_tx, cancel_rx) = never_cancel();
+        let (_detach_tx, detach_rx) = never_detach();
         tx.send(WireFrame::Stdout(b"x".to_vec())).await.unwrap();
         drop(tx);
 
-        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx).await.unwrap();
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
         assert_eq!(outcome, PumpOutcome::ChannelClosed);
     }
 
@@ -610,11 +644,14 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<WireFrame>(8);
         let (_cancel_tx, cancel_rx) = never_cancel();
+        let (_detach_tx, detach_rx) = never_detach();
         tx.send(WireFrame::Stdout(vec![0; 1024])).await.unwrap();
         drop(tx);
 
         let mut w = write_side;
-        let outcome = pump_responses(&mut w, &mut rx, cancel_rx).await.unwrap();
+        let outcome = pump_responses(&mut w, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
         assert!(
             matches!(outcome, PumpOutcome::WriteFailed(_)),
             "expected WriteFailed, got {outcome:?}",
@@ -626,13 +663,16 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let (tx, mut rx) = mpsc::channel::<WireFrame>(1);
         let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
+        let (_detach_tx, detach_rx) = never_detach();
 
         tx.send(WireFrame::Stdout(b"buffered".to_vec()))
             .await
             .unwrap();
         cancel_tx.send(130).unwrap();
 
-        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx).await.unwrap();
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
         assert_eq!(outcome, PumpOutcome::ExitFrame);
 
         let decoded = decode_wire_frames_from(&sink);
@@ -648,6 +688,7 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
         let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
+        let (_detach_tx, detach_rx) = never_detach();
 
         drop(cancel_tx);
 
@@ -657,7 +698,9 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx).await.unwrap();
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
         assert_eq!(outcome, PumpOutcome::ExitFrame);
 
         let decoded = decode_wire_frames_from(&sink);
@@ -666,6 +709,62 @@ mod tests {
             decoded[1],
             WireFrame::Json(Response::RunExit { code: 0 })
         ));
+    }
+
+    #[tokio::test]
+    async fn pump_returns_detached_when_the_detach_signal_fires() {
+        let mut sink: Vec<u8> = Vec::new();
+        let (_tx, mut rx) = mpsc::channel::<WireFrame>(8);
+        let (_cancel_tx, cancel_rx) = never_cancel();
+        let (detach_tx, detach_rx) = never_detach();
+
+        detach_tx.send(()).unwrap();
+
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PumpOutcome::Detached,
+            "a deliberate detach must hand the run off, not cancel it",
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_continues_after_detach_sender_drop_without_firing() {
+        let mut sink: Vec<u8> = Vec::new();
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(4);
+        let (_cancel_tx, cancel_rx) = never_cancel();
+        let (detach_tx, detach_rx) = never_detach();
+
+        drop(detach_tx);
+
+        tx.send(WireFrame::Json(Response::RunExit { code: 0 }))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PumpOutcome::ExitFrame,
+            "a dropped detach sender must not be mistaken for a detach",
+        );
+    }
+
+    #[test]
+    fn post_pump_action_detach_signal_drains_in_background_regardless_of_detached() {
+        assert_eq!(
+            post_pump_action(&PumpOutcome::Detached, false),
+            PostPumpAction::BackgroundDrain,
+            "a deliberate detach of an attached run must leave it running, not cancel it",
+        );
+        assert_eq!(
+            post_pump_action(&PumpOutcome::Detached, true),
+            PostPumpAction::BackgroundDrain,
+        );
     }
 
     #[test]
@@ -723,6 +822,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_request_detach_unknown_run_returns_error() {
+        let resp = handle_request(&Request::RunDetach { run_id: u32::MAX }, Instant::now()).await;
+        match resp {
+            Response::Error { message } => assert!(message.contains("no active run")),
+            other => unreachable!("expected Error for a missing run, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn forward_session_input_awaits_back_pressure_instead_of_dropping() {
         use crate::vm::session_client::SessionInput;
         use tokio::sync::mpsc;
@@ -740,6 +848,7 @@ mod tests {
             id,
             crate::run_registry::RunHandle {
                 cancel_tx,
+                detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: Some(input_tx),
                 connector: None,
@@ -1098,6 +1207,7 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
             cancel_tx,
+            detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: None,
             connector: None,
@@ -1116,6 +1226,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_request_detach_registered_run_accepts_and_fires_the_signal() {
+        use std::sync::Mutex;
+        use tokio::sync::oneshot;
+        let run_id = u32::MAX - 23;
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let (detach_tx, detach_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async {});
+        let handle = crate::run_registry::RunHandle {
+            cancel_tx,
+            detach_tx: Mutex::new(Some(detach_tx)),
+            task,
+            input_tx: None,
+            connector: None,
+            name: String::new(),
+            image: "detach-test".into(),
+            command: "".into(),
+            started: "1970-01-01T00:00:00Z".into(),
+            status: Mutex::new(lns_ipc::RunStatus::Running),
+            logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            config: lns_ipc::RunConfig::default(),
+        };
+        crate::run_registry::register(run_id, handle);
+
+        let resp = handle_request(&Request::RunDetach { run_id }, Instant::now()).await;
+        assert!(matches!(resp, Response::DetachAccepted));
+        assert!(
+            detach_rx.await.is_ok(),
+            "the run's pump must be told to hand off, not cancel",
+        );
+
+        let resp = handle_request(&Request::RunDetach { run_id }, Instant::now()).await;
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "a second detach is a no-op once the signal is consumed",
+        );
+        let _ = crate::run_registry::cancel(run_id);
+    }
+
+    #[tokio::test]
     async fn forward_session_input_errors_when_input_channel_is_closed() {
         use std::sync::Mutex;
         use tokio::sync::{mpsc, oneshot};
@@ -1126,6 +1275,7 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
             cancel_tx,
+            detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: Some(input_tx),
             connector: None,
@@ -1195,8 +1345,9 @@ mod tests {
         let mut sink = FailingWriter;
         let (_tx, mut rx) = mpsc::channel::<WireFrame>(1);
         let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (_detach_tx, detach_rx) = never_detach();
         cancel_tx.send(130).expect("cancel send");
-        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx)
+        let outcome = pump_responses(&mut sink, &mut rx, cancel_rx, detach_rx)
             .await
             .expect("pump returned Result");
         assert!(
@@ -1212,6 +1363,7 @@ mod tests {
             run_id,
             crate::run_registry::RunHandle {
                 cancel_tx,
+                detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: None,
                 connector: None,
@@ -1510,6 +1662,7 @@ mod tests {
             id,
             crate::run_registry::RunHandle {
                 cancel_tx,
+                detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: Some(input_tx),
                 connector: None,

@@ -120,7 +120,7 @@ pub struct RunArgs {
         long,
         default_value = "ctrl-p,ctrl-q",
         value_parser = parse_detach_keys_arg,
-        help = "Comma-separated detach chord (single chars or `ctrl-X`); on match the CLI sends SIGHUP to the workload's foreground pgrp and reports its exit code. To leave a run running, start it with `-d` and re-join with `lns sandbox attach`."
+        help = "Comma-separated detach chord (single chars or `ctrl-X`); on match the CLI returns 0 and leaves the run executing in the background — re-join it with `lns sandbox attach`. No signal is sent to the workload."
     )]
     pub detach_keys: DetachChord,
 

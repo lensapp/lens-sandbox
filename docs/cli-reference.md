@@ -39,7 +39,7 @@ run, which requires a `COMMAND` after `--`.
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
 | `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
-| `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Comma-separated detach chord (single chars or `ctrl-X`).                |
+| `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns sandbox attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
 | `--sandbox-user <NAME>`      | `sandbox`        | Username the workload runs as inside the guest.                         |
 | `--sandbox-uid <UID>`        | `65534`          | UID the workload runs as inside the guest.                              |
 | `-- <COMMAND...>`            |                  | Override the entrypoint and command. Everything after `--`.             |

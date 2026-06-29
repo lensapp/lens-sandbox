@@ -276,16 +276,21 @@ A detached run is reachable later via the
 
 ### Detaching from an attached run
 
-While attached, the detach chord (default `ctrl-p,ctrl-q`) sends `SIGHUP` to the
-workload and returns its exit code; the run does not keep running once you leave.
-To start something you can step away from and re-join, use `-d` and
-[`lns sandbox attach`](#attaching). Change the chord with `--detach-keys`:
+While attached, the detach chord (default `ctrl-p,ctrl-q`) is a docker-style
+detach: `lns` returns `0` and the run keeps executing in the background — no
+signal is sent to the workload. Re-join it any time with
+[`lns sandbox attach`](#attaching), and detach again with the same chord. Change
+the chord with `--detach-keys`:
 
 ```bash
 lns run --detach-keys ctrl-x,ctrl-x ghcr.io/acme/agent
 ```
 
 The value is a comma-separated chord of single characters or `ctrl-X` tokens.
+
+A deliberate detach is distinct from the `lns` process dying unexpectedly: if the
+CLI is killed (or its connection drops) without the chord, the attached run is
+cancelled. Use the chord — or start the run with `-d` — to step away safely.
 
 ## `lns sandbox` — managing runs you've started
 
