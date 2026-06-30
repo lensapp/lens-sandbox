@@ -2348,17 +2348,17 @@ mod tests {
         s.set_ledger_recorder(recorder.clone());
         s.submit_pending(pending("c1", "some-oauth"), Instant::now());
         s.connect_oauth("c1").await;
-        let account = recorder
+        let accounts: Vec<_> = recorder
             .events
             .lock()
             .unwrap()
             .iter()
-            .find_map(|e| match e {
+            .filter_map(|e| match e {
                 LedgerEvent::Connection { account, .. } => Some(account.clone()),
                 _ => None,
             })
-            .expect("a connection event");
-        assert_eq!(account, Some("@hchen".to_string()));
+            .collect();
+        assert_eq!(accounts, vec![Some("@hchen".to_string())]);
     }
 
     #[tokio::test]

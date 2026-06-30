@@ -256,17 +256,18 @@ impl ApprovalSession {
         });
     }
 
-    fn record_offer_decision(&self, integration_id: &str, decision: Decision) {
+    fn record_offer_decision(&self, integration_id: &str, connected: bool) {
         let Some(recorder) = self.ledger.get() else {
-            return;
-        };
-        let Some(decision) = Self::ledger_decision(decision) else {
             return;
         };
         recorder.record(LedgerEvent::Approval {
             kind: ApprovalKind::Integration,
             target: integration_id.to_string(),
-            decision,
+            decision: if connected {
+                LedgerDecision::AllowOnce
+            } else {
+                LedgerDecision::DenyOnce
+            },
             reason: None,
             integration: Some(integration_id.to_string()),
         });
@@ -331,7 +332,7 @@ impl ApprovalSession {
         } else {
             Decision::DenyOnce
         };
-        self.record_offer_decision(&offer.integration_id, decision);
+        self.record_offer_decision(&offer.integration_id, connected);
         for request_id in self.drain_offer_requests(&offer.integration_id) {
             self.send_decision_frame(&request_id, decision);
         }
