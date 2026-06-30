@@ -63,6 +63,17 @@ event count, warns that truncation and rollback cannot be checked, and exits
 non-zero; pass `--allow-missing-anchor` to accept that degraded check with exit
 `0`. A missing log is reported distinctly from an empty one.
 
+## Inspecting checks integrity too
+
+`lns audit <run-id>` shows a run's timeline, and `lns audit log` / `lns audit
+connections` read the global connection ledger (the approvals, sign-ins, and
+credential uses recorded across runs). These read commands check the chain against
+its anchor as they read and print an inline warning if it has been altered,
+truncated, or can't be verified — so a compromised log surfaces even when you only
+meant to look at it. They still print what is there; the warning marks it as
+untrustworthy. Reach for `verify` when you want that check as an explicit pass with
+an exit code — for a script, or a deliberate audit.
+
 ## Where logs live
 
 Audit logs and their anchors are kept per run under the service's cache directory:

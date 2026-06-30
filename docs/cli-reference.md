@@ -150,16 +150,34 @@ as hidden aliases; the `lns sandbox` forms are the documented ones.
 
 ## `lns audit`
 
-Verify the audit chain of a run.
+Inspect and verify audit logs and the global connection ledger.
 
 ```bash
-lns audit <RUN_ID> [--allow-missing-anchor]
+lns audit <run-id>             # show a run's audit timeline
+lns audit show <run-id> [--json]
+lns audit verify [<run-id>] [--allow-missing-anchor]
+lns audit log [--integration <id>] [--run <id>] [--kind <kind>] [--json]
+lns audit connections [<integration>]
 ```
 
-`RUN_ID` is the identifier surfaced by `lns run` as `✓ started run #<id>`. Exits `0`
-on an intact chain, non-zero if tampering is detected, or if the anchor that guards
-against truncation is missing, corrupt, or unreadable. `--allow-missing-anchor`
-accepts a missing anchor (chain-only check) with exit `0`. See [Audit](audit.md).
+`<run-id>` is the identifier surfaced by `lns run` as `✓ started run #<id>`. A bare
+`lns audit <run-id>` is shorthand for `lns audit show`.
+
+Every read command (`show`, `log`, `connections`) checks the relevant hash chain
+against its anchor and prints an inline warning if the log has been altered,
+truncated, or cannot be verified — you don't have to run `verify` to find out. It
+still prints what is there; the warning marks it as untrustworthy.
+
+`verify` is the explicit integrity check with a meaningful exit code: `0` on an
+intact chain, non-zero if tampering or truncation is detected, or if the anchor
+that guards against truncation is missing, corrupt, or unreadable. With no run id
+it verifies the global connection ledger. `--allow-missing-anchor` accepts a
+missing anchor (chain-only check) with exit `0`.
+
+`log` filters the connection-ledger timeline by `--integration`, `--run`, or
+`--kind` (`approval`, `connection`, `credential-use`), and `--json` emits raw
+JSONL. `connections` summarizes connections grouped by integration; pass an
+integration id to drill into one. See [Audit](audit.md).
 
 ## `lns service`
 
