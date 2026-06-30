@@ -60,7 +60,7 @@ pub const KILL_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_ls(app: clap::Command) -> clap::Command {
-    app.subcommand(clap::Command::new("ls").hide(true))
+    app.subcommand(clap::Command::new("ls").visible_alias("list").hide(true))
 }
 
 pub const LS_SPEC: CommandSpec = CommandSpec {
