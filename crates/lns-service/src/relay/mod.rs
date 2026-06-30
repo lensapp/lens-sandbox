@@ -193,7 +193,7 @@ fn stamp_guest_audit_event(
     Some(obj)
 }
 
-#[allow(clippy::too_many_arguments)] // a flat inbound-frame seam over the audit-write context keeps it host-testable
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     msg: Message,
     session: &Arc<ApprovalSession>,
