@@ -1,93 +1,8 @@
-use std::io::Write;
+use lns_ipc::{ApprovalKind, Decision, LedgerEvent};
 
-use anyhow::{Context, Result};
-use lns_ipc::{ApprovalKind, Decision, LedgerEvent, LedgerRecord};
+use super::auth_word;
 
-use super::store;
-use super::table::render_table;
-use super::{LogArgs, auth_word, friendly_when};
-
-pub fn run(args: &LogArgs, out: &mut dyn Write) -> Result<i32> {
-    let path = lns_ipc::connection_ledger()?;
-    super::warn_if_compromised(&path, &lns_ipc::connection_ledger_anchor()?);
-    run_with_records(args, store::stream_ledger(&path)?, out)
-}
-
-fn run_with_records(
-    args: &LogArgs,
-    records: impl Iterator<Item = Result<LedgerRecord>>,
-    out: &mut dyn Write,
-) -> Result<i32> {
-    if args.json {
-        emit_json(args, records, out)?;
-    } else {
-        render(args, records, out)?;
-    }
-    Ok(0)
-}
-
-fn matches_filter(record: &LedgerRecord, args: &LogArgs) -> bool {
-    if let Some(run) = &args.run
-        && &record.run != run
-    {
-        return false;
-    }
-    if let Some(integration) = &args.integration
-        && record.event.integration() != Some(integration.as_str())
-    {
-        return false;
-    }
-    if let Some(kind) = args.kind
-        && record.event.name() != kind.event_name()
-    {
-        return false;
-    }
-    true
-}
-
-fn render(
-    args: &LogArgs,
-    records: impl Iterator<Item = Result<LedgerRecord>>,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for record in records {
-        let record = record?;
-        if !matches_filter(&record, args) {
-            continue;
-        }
-        rows.push(vec![
-            friendly_when(&record.ts),
-            lns_ipc::short_run_id(&record.run).to_string(),
-            record.event.name().to_string(),
-            detail(&record.event),
-        ]);
-    }
-    if rows.is_empty() {
-        writeln!(out, "No ledger events.")?;
-        return Ok(());
-    }
-    render_table(out, &["WHEN", "RUN", "KIND", "DETAIL"], &rows)?;
-    Ok(())
-}
-
-fn emit_json(
-    args: &LogArgs,
-    records: impl Iterator<Item = Result<LedgerRecord>>,
-    out: &mut dyn Write,
-) -> Result<()> {
-    for record in records {
-        let record = record?;
-        if !matches_filter(&record, args) {
-            continue;
-        }
-        let line = serde_json::to_string(&record).context("serializing ledger record")?;
-        writeln!(out, "{line}")?;
-    }
-    Ok(())
-}
-
-fn detail(event: &LedgerEvent) -> String {
+pub(super) fn detail(event: &LedgerEvent) -> String {
     match event {
         LedgerEvent::Approval {
             kind,
@@ -157,159 +72,50 @@ fn approval_kind_word(kind: ApprovalKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::KindArg;
     use lns_ipc::AuthKind;
 
-    fn rec(run: &str, event: LedgerEvent) -> LedgerRecord {
-        LedgerRecord {
-            ts: "2026-06-29T14:02:11Z".into(),
-            run: run.to_string(),
-            microvm: "calm-finch".into(),
-            event,
-        }
-    }
-
-    fn approval() -> LedgerEvent {
-        LedgerEvent::Approval {
+    #[test]
+    fn an_approval_with_a_reason_brackets_it() {
+        let event = LedgerEvent::Approval {
             kind: ApprovalKind::Network,
             target: "api.foo.com:443".into(),
             decision: Decision::AllowAlways,
             reason: Some("policy-ambiguous".into()),
             integration: None,
-        }
+        };
+        assert_eq!(
+            detail(&event),
+            "network allow-always api.foo.com:443  [policy-ambiguous]"
+        );
     }
 
-    fn connection() -> LedgerEvent {
-        LedgerEvent::Connection {
+    #[test]
+    fn a_connection_renders_auth_account_and_scopes() {
+        let event = LedgerEvent::Connection {
             integration: "some-oauth".into(),
             auth: AuthKind::Oauth,
             account: Some("@hchen".into()),
             scopes: vec!["repo".into(), "read:org".into()],
             expires: Some("2026-07-29T00:00:00Z".into()),
-        }
+        };
+        assert_eq!(
+            detail(&event),
+            "connect some-oauth (oauth) @hchen [repo, read:org]"
+        );
     }
 
-    fn credential_use() -> LedgerEvent {
-        LedgerEvent::CredentialUse {
+    #[test]
+    fn a_credential_use_renders_the_fingerprint_and_dests() {
+        let event = LedgerEvent::CredentialUse {
             integration: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some("9c2f1a3d".into()),
             dest: vec!["api.some-provider.example".into()],
-        }
-    }
-
-    fn no_filter() -> LogArgs {
-        LogArgs {
-            integration: None,
-            run: None,
-            kind: None,
-            json: false,
-        }
-    }
-
-    fn render_to_string(args: &LogArgs, records: &[LedgerRecord]) -> String {
-        let mut buf = Vec::new();
-        run_with_records(args, records.iter().cloned().map(anyhow::Ok), &mut buf).unwrap();
-        String::from_utf8(buf).unwrap()
-    }
-
-    #[test]
-    fn an_empty_ledger_says_so() {
-        let text = render_to_string(&no_filter(), &[]);
-        assert_eq!(text.trim(), "No ledger events.");
-    }
-
-    #[test]
-    fn the_timeline_renders_a_row_per_event_with_details() {
-        let records = vec![
-            rec("1a2b3c4d0000000000000000000000aa", connection()),
-            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
-            rec("5e6f7a8b0000000000000000000000bb", approval()),
-        ];
-        let text = render_to_string(&no_filter(), &records);
-        assert!(text.contains("WHEN"));
-        assert!(text.contains("2026-06-29 14:02:11"));
-        assert!(text.contains("connect some-oauth (oauth) @hchen [repo, read:org]"));
-        assert!(text.contains("use some-provider fp 9c2f1a3d → api.some-provider.example"));
-        assert!(text.contains("network allow-always api.foo.com:443  [policy-ambiguous]"));
-    }
-
-    #[test]
-    fn the_run_filter_keeps_only_matching_runs() {
-        let records = vec![
-            rec("1a2b3c4d0000000000000000000000aa", connection()),
-            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
-        ];
-        let args = LogArgs {
-            run: Some("5e6f7a8b0000000000000000000000bb".into()),
-            ..no_filter()
         };
-        let text = render_to_string(&args, &records);
-        assert!(text.contains("some-provider"));
-        assert!(!text.contains("some-oauth"));
-    }
-
-    #[test]
-    fn the_integration_filter_keeps_only_matching_integrations() {
-        let records = vec![
-            rec("1a2b3c4d0000000000000000000000aa", connection()),
-            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
-        ];
-        let args = LogArgs {
-            integration: Some("some-oauth".into()),
-            ..no_filter()
-        };
-        let text = render_to_string(&args, &records);
-        assert!(text.contains("some-oauth"));
-        assert!(!text.contains("some-provider"));
-    }
-
-    #[test]
-    fn the_kind_filter_keeps_only_matching_event_kinds() {
-        let records = vec![
-            rec("5e6f7a8b0000000000000000000000bb", approval()),
-            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
-        ];
-        let args = LogArgs {
-            kind: Some(KindArg::CredentialUse),
-            ..no_filter()
-        };
-        let text = render_to_string(&args, &records);
-        assert!(text.contains("some-provider"));
-        assert!(!text.contains("api.foo.com"));
-    }
-
-    #[test]
-    fn json_output_emits_one_record_per_line() {
-        let records = vec![rec("5e6f7a8b0000000000000000000000bb", credential_use())];
-        let args = LogArgs {
-            json: true,
-            ..no_filter()
-        };
-        let text = render_to_string(&args, &records);
-        let parsed: LedgerRecord = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(parsed, records[0]);
-    }
-
-    #[test]
-    fn json_output_skips_records_that_do_not_match_the_filter() {
-        let records = vec![
-            rec("1a2b3c4d0000000000000000000000aa", connection()),
-            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
-        ];
-        let args = LogArgs {
-            run: Some("5e6f7a8b0000000000000000000000bb".into()),
-            json: true,
-            ..no_filter()
-        };
-        let text = render_to_string(&args, &records);
         assert_eq!(
-            text.lines().filter(|l| !l.trim().is_empty()).count(),
-            1,
-            "only the run-49 record should be emitted as json"
+            detail(&event),
+            "use some-provider fp 9c2f1a3d → api.some-provider.example"
         );
-        assert!(text.contains("some-provider"));
-        assert!(!text.contains("some-oauth"));
     }
 
     #[test]

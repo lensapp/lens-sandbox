@@ -17,8 +17,8 @@ rolled back to an earlier, still-valid prefix) — a shorter chain is still
 internally consistent. To close that gap, the background service keeps a separate,
 service-owned anchor file (`audit.anchor`, created `0600` next to `audit.jsonl`)
 that records the latest head hash and event count and is fsync'd on every append.
-`lns audit` compares the log against the anchor: a log that is shorter than, or
-diverges from, the anchored head and count is reported as truncated, not verified.
+`lns audit` compares the log against the anchor as it reads: a log that is shorter
+than, or diverges from, the anchored head and count is flagged as truncated.
 
 This makes the log **integrity evidence, not authenticity**: it detects accidental
 or after-the-fact corruption, truncation, and rollback. It is not a cryptographic
@@ -27,52 +27,40 @@ and the anchor together, so a same-uid attacker who holds the anchor file is out
 scope here. Binding the log to a key the workload can't reach (an HMAC chain, or an
 anchor mirrored to external append-only storage) is tracked as follow-up.
 
-## Verifying a run
+## Reading the log checks integrity
 
-Use the run id that `lns run` prints (`✓ started run #<id>`, also shown by
-`lns ls`):
+`lns audit` shows one chronological timeline of every event across all sandboxes —
+egress and mounts from each run's log, plus the approvals, sign-ins, and credential
+uses recorded across runs in the durable connection ledger. `lns audit <sandbox>`
+scopes it to one run (by run id, name, or unique id prefix). See the
+[CLI reference](cli-reference.md) for filters.
 
-```bash
-lns audit 7
-```
+Integrity is verified **as the log is read** — there is no separate verify step. As
+`lns audit` reads each chain it compares it against its anchor, and if anything is
+wrong it prints an inline `audit integrity:` warning and still lists what's there,
+so a compromised log surfaces even when you only meant to look:
 
-On an intact chain it reports the number of events and exits `0`:
+- an edited or reordered line — the chain breaks from that point on:
 
-```text
-Verified 128 audit events
-```
+  ```text
+  audit integrity: chain broken at line 42 (<reason>) — entries shown may have been altered
+  ```
 
-If a line has been edited or reordered, it reports the first broken line and exits
-non-zero:
+- a log shorter than, or diverged from, its anchor (a truncated tail, or a rollback
+  to an earlier prefix):
 
-```text
-audit chain TAMPERED at line 42: <reason>
-```
+  ```text
+  audit integrity: log truncated or rolled back (<reason>) — entries may be missing
+  ```
 
-If the log is shorter than, or diverges from, the anchor (a truncated tail or a
-rollback to an earlier prefix), it reports the mismatch and exits non-zero:
+- no anchor beside the log, so truncation and rollback can't be checked at all:
 
-```text
-audit chain TRUNCATED: <reason>
-```
+  ```text
+  audit integrity: no anchor beside the log — truncation or rollback cannot be detected
+  ```
 
-The anchor is what makes truncation and rollback detectable, so `lns audit` does
-not treat its absence as success. If the anchor is present but corrupt or
-unreadable, it exits non-zero. If no anchor is found beside the log, it prints the
-event count, warns that truncation and rollback cannot be checked, and exits
-non-zero; pass `--allow-missing-anchor` to accept that degraded check with exit
-`0`. A missing log is reported distinctly from an empty one.
-
-## Inspecting checks integrity too
-
-`lns audit <run-id>` shows a run's timeline, and `lns audit log` / `lns audit
-connections` read the global connection ledger (the approvals, sign-ins, and
-credential uses recorded across runs). These read commands check the chain against
-its anchor as they read and print an inline warning if it has been altered,
-truncated, or can't be verified — so a compromised log surfaces even when you only
-meant to look at it. They still print what is there; the warning marks it as
-untrustworthy. Reach for `verify` when you want that check as an explicit pass with
-an exit code — for a script, or a deliberate audit.
+The warning marks the entries untrustworthy; the events are still printed so you can
+see what the log claims.
 
 ## Where logs live
 

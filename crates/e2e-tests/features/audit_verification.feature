@@ -1,16 +1,15 @@
-Feature: lns audit inspects and verifies audit logs and the connection ledger
-  `lns audit <run-id>` shows a run's audit timeline and `lns audit verify
-  <run-id>` confirms its chain hasn't been tampered with. `lns audit log`
-  and `lns audit connections` read the global connection ledger, and `lns
-  audit verify` (no run id) checks it. An intact chain verifies cleanly; a
-  missing log or a broken chain exits non-zero with a diagnostic.
+Feature: lns audit shows one unified timeline across all sandboxes
+  `lns audit` merges every per-run audit log and the durable connection
+  ledger into one chronological timeline; `lns audit <sandbox>` scopes it
+  to a single run. Reading a tampered chain still lists events but warns
+  about integrity.
 
-  Scenario: a bare run id shows the run's audit timeline
+  Scenario: a bare sandbox id scopes the timeline to that run
     Given a clean lns cache home
     And a run "smoke" with a valid audit chain
     When I run "lns audit smoke"
     Then the exit code is 0
-    And the output contains "audit_event"
+    And the output contains "WHEN"
 
   Scenario: a guest egress event reads like the approval prompt
     Given a clean lns cache home
@@ -22,62 +21,38 @@ Feature: lns audit inspects and verifies audit logs and the connection ledger
     And the output contains "allowed once"
     And the output does not contain "audit_event"
 
-  Scenario: an intact chain verifies cleanly
+  Scenario: an unknown sandbox reports no events without erroring
     Given a clean lns cache home
-    And a run "smoke" with a valid audit chain
-    When I run "lns audit verify smoke"
+    When I run "lns audit nonexistent"
     Then the exit code is 0
-    And the output contains "Verified"
+    And the output contains "No audit events for sandbox nonexistent."
 
-  Scenario: verifying a missing run surfaces a clear error
-    Given a clean lns cache home
-    When I run "lns audit verify nonexistent"
-    Then the exit code is non-zero
-    And the output contains "audit log"
-
-  Scenario: a tampered chain is detected and named
+  Scenario: reading a tampered run chain still lists events but warns about integrity
     Given a clean lns cache home
     And a run "tamper" with a tampered audit chain
-    When I run "lns audit verify tamper"
-    Then the exit code is non-zero
-    And the output contains "TAMPERED"
-    And the output contains "prev_hash"
+    When I run "lns audit tamper"
+    Then the exit code is 0
+    And the output contains "integrity"
 
   Scenario: stdout closing mid-write does not panic
     Given a clean lns cache home
     And a run "pipeable" with a valid audit chain
-    When I run "lns audit verify pipeable" with stdout closed
+    When I run "lns audit pipeable" with stdout closed
     Then the exit code is non-zero
     And the output does not contain "panicked"
 
-  Scenario: the connection ledger timeline lists recorded events
+  Scenario: the unified timeline lists ledger connection events
     Given a clean lns cache home
     And a connection ledger with sample events
-    When I run "lns audit log"
+    When I run "lns audit"
     Then the exit code is 0
     And the output contains "some-oauth"
     And the output contains "some-provider"
-
-  Scenario: connections are summarized by integration
-    Given a clean lns cache home
-    And a connection ledger with sample events
-    When I run "lns audit connections"
-    Then the exit code is 0
-    And the output contains "some-oauth"
-    And the output contains "@some-user"
-    And the output contains "some-provider"
-
-  Scenario: the connection ledger verifies cleanly
-    Given a clean lns cache home
-    And a connection ledger with sample events
-    When I run "lns audit verify"
-    Then the exit code is 0
-    And the output contains "Verified"
 
   Scenario: reading a tampered ledger still lists events but warns about integrity
     Given a clean lns cache home
     And a connection ledger with a tampered event
-    When I run "lns audit log"
+    When I run "lns audit"
     Then the exit code is 0
     And the output contains "integrity"
     And the output contains "some-oauth"

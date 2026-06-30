@@ -1,14 +1,12 @@
-mod connections;
 mod events;
 mod show;
 mod store;
 mod table;
+mod timeline;
 pub mod verify;
 
-use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Result, bail};
 use clap::FromArgMatches;
 use lns_ipc::AuthKind;
 
@@ -16,88 +14,49 @@ use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 use crate::log;
 
 #[derive(clap::Args)]
-#[command(args_conflicts_with_subcommands = true)]
 pub struct AuditArgs {
-    #[command(subcommand)]
-    pub command: Option<AuditCommand>,
-    #[arg(help = "Run id to show; shorthand for `lns audit show <id>`.")]
-    pub run_id: Option<String>,
-}
-
-#[derive(clap::Subcommand)]
-pub enum AuditCommand {
-    #[command(about = "Show a run's audit timeline.")]
-    Show(ShowArgs),
-    #[command(about = "Verify the hash chain of a run's audit log, or the global ledger.")]
-    Verify(VerifyArgs),
-    #[command(about = "Show the global connection/approval ledger timeline.")]
-    Log(LogArgs),
-    #[command(about = "Summarize connections grouped by integration.")]
-    Connections(ConnectionsArgs),
-}
-
-#[derive(clap::Args)]
-pub struct ShowArgs {
-    #[arg(help = "Run identifier surfaced by `lns run` as `✓ started run #<id>`.")]
-    pub run_id: String,
     #[arg(
-        long,
-        help = "Emit the raw JSONL log instead of the rendered timeline."
+        help = "Sandbox to scope to: a run id, a run name, or a unique run-id prefix. Omit for every sandbox."
     )]
-    pub json: bool,
-}
-
-#[derive(clap::Args)]
-pub struct VerifyArgs {
-    #[arg(help = "Run id to verify; omit to verify the global connection ledger.")]
-    pub run_id: Option<String>,
-    #[arg(
-        long,
-        help = "Treat a missing anchor as non-fatal. Without it, an absent anchor exits non-zero because truncation and rollback cannot be detected."
-    )]
-    pub allow_missing_anchor: bool,
-}
-
-#[derive(clap::Args)]
-pub struct LogArgs {
+    pub sandbox: Option<String>,
     #[arg(long, help = "Only show events for this integration.")]
     pub integration: Option<String>,
-    #[arg(long, help = "Only show events for this run id.")]
-    pub run: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
-    #[arg(long, help = "Emit raw JSONL instead of the rendered timeline.")]
+    #[arg(long, help = "Emit one raw JSON event per line instead of the table.")]
     pub json: bool,
-}
-
-#[derive(clap::Args)]
-pub struct ConnectionsArgs {
-    #[arg(help = "Integration to drill into; omit for the summary across all.")]
-    pub integration: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum KindArg {
+    Egress,
+    Env,
+    Volume,
+    Bind,
     Approval,
     Connection,
-    CredentialUse,
+    Credential,
 }
 
 impl KindArg {
-    pub(super) fn event_name(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
+            KindArg::Egress => "egress",
+            KindArg::Env => "env",
+            KindArg::Volume => "volume",
+            KindArg::Bind => "bind",
             KindArg::Approval => "approval",
             KindArg::Connection => "connection",
-            KindArg::CredentialUse => "credential_use",
+            KindArg::Credential => "credential",
         }
     }
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(
-        subcommand::<AuditArgs>("audit").about("Inspect audit logs and the connection ledger."),
-    )
+    app.subcommand(subcommand::<AuditArgs>("audit").about(
+        "Show one chronological timeline of every audit event across all sandboxes, or scope it to one.",
+    ))
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
@@ -111,85 +70,8 @@ pub const SPEC: CommandSpec = CommandSpec {
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = AuditArgs::from_arg_matches(matches)?;
-        dispatch(args, ctx.out)
+        timeline::run(&args, ctx.out)
     })
-}
-
-fn dispatch(args: AuditArgs, out: &mut dyn Write) -> Result<i32> {
-    match args.command {
-        Some(AuditCommand::Show(args)) => show::run(&args, out),
-        Some(AuditCommand::Verify(args)) => run_verify(&args, out),
-        Some(AuditCommand::Log(args)) => events::run(&args, out),
-        Some(AuditCommand::Connections(args)) => connections::run(&args, out),
-        None => match args.run_id {
-            Some(run_id) => show::run(
-                &ShowArgs {
-                    run_id,
-                    json: false,
-                },
-                out,
-            ),
-            None => bail!("specify a run id, or a subcommand: show, verify, log, connections"),
-        },
-    }
-}
-
-fn run_verify(args: &VerifyArgs, out: &mut dyn Write) -> Result<i32> {
-    let (path, anchor) = match &args.run_id {
-        Some(run_id) => (
-            lns_ipc::audit_log_for_run(run_id)?,
-            lns_ipc::audit_anchor_for_run(run_id)?,
-        ),
-        None => (
-            lns_ipc::connection_ledger()?,
-            lns_ipc::connection_ledger_anchor()?,
-        ),
-    };
-    log::info!("Verifying", "hash chain at {}", path.display());
-    let outcome = verify::verify_chain_with_anchor(&path, &anchor)?;
-    report_outcome(outcome, args.allow_missing_anchor, out)
-}
-
-fn report_outcome(
-    outcome: verify::VerifyOutcome,
-    allow_missing_anchor: bool,
-    out: &mut dyn Write,
-) -> Result<i32> {
-    Ok(match outcome {
-        verify::VerifyOutcome::Ok { line_count } => {
-            writeln!(out, "Verified {line_count} audit events")?;
-            0
-        }
-        verify::VerifyOutcome::NoAnchor { line_count } => {
-            report_no_anchor(line_count, allow_missing_anchor, out)?
-        }
-        verify::VerifyOutcome::AnchorUnreadable { line_count, reason } => {
-            log::error!(
-                "audit anchor present but unreadable ({reason}) — truncation or rollback cannot be verified for {line_count} events"
-            );
-            1
-        }
-        verify::VerifyOutcome::Broken { at_line, reason } => {
-            log::error!("audit chain TAMPERED at line {at_line}: {reason}");
-            1
-        }
-        verify::VerifyOutcome::Truncated { reason } => {
-            log::error!("audit chain TRUNCATED: {reason}");
-            1
-        }
-    })
-}
-
-fn report_no_anchor(
-    line_count: usize,
-    allow_missing_anchor: bool,
-    out: &mut dyn Write,
-) -> Result<i32> {
-    writeln!(out, "Verified {line_count} audit events")?;
-    log::warn!(
-        "no anchor beside the log — chain integrity was checked, but truncation or rollback cannot be detected"
-    );
-    Ok(if allow_missing_anchor { 0 } else { 1 })
 }
 
 pub(super) fn warn_if_compromised(path: &Path, anchor: &Path) {
@@ -233,10 +115,7 @@ pub(super) fn auth_word(auth: AuthKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn report(outcome: verify::VerifyOutcome, allow_missing_anchor: bool) -> i32 {
-        report_outcome(outcome, allow_missing_anchor, &mut Vec::new()).unwrap()
-    }
+    use anyhow::Result;
 
     fn write_run_chain(home: &std::path::Path, run_id: &str) {
         for cache in ["Library/Caches", ".cache"] {
@@ -245,8 +124,8 @@ mod tests {
             let mut chain = lns_ipc::AuditChain::new();
             let mut payload = String::new();
             for line in [
-                r#"{"type":"volume_attached","name":"data","target":"/data"}"#,
-                r#"{"event":"run_env"}"#,
+                r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"data","target":"/data"}"#,
+                r#"{"ts":"2026-06-29T13:00:01Z","event":"run_env","env":{"FOO":"bar"}}"#,
             ] {
                 let aug = chain.augment(line).unwrap();
                 payload.push_str(std::str::from_utf8(&aug).unwrap());
@@ -315,64 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn report_outcome_clean_chain_returns_zero_and_prints_the_count() {
-        let mut out = Vec::new();
-        let code =
-            report_outcome(verify::VerifyOutcome::Ok { line_count: 3 }, false, &mut out).unwrap();
-        assert_eq!(code, 0);
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("Verified 3 audit events")
-        );
-    }
-
-    #[test]
-    fn report_outcome_tampered_and_truncated_and_unreadable_return_one() {
-        assert_eq!(
-            report(
-                verify::VerifyOutcome::Broken {
-                    at_line: 7,
-                    reason: "prev_hash mismatch".into(),
-                },
-                false,
-            ),
-            1
-        );
-        assert_eq!(
-            report(
-                verify::VerifyOutcome::Truncated {
-                    reason: "tail truncated".into(),
-                },
-                false,
-            ),
-            1
-        );
-        assert_eq!(
-            report(
-                verify::VerifyOutcome::AnchorUnreadable {
-                    line_count: 2,
-                    reason: "corrupt".into(),
-                },
-                true,
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn report_outcome_missing_anchor_fails_by_default_but_is_tolerated_when_allowed() {
-        assert_eq!(
-            report(verify::VerifyOutcome::NoAnchor { line_count: 2 }, false),
-            1
-        );
-        assert_eq!(
-            report(verify::VerifyOutcome::NoAnchor { line_count: 2 }, true),
-            0
-        );
-    }
-
-    #[test]
     fn friendly_when_strips_the_zulu_marker_and_spaces_the_date() {
         assert_eq!(friendly_when("2026-06-29T14:02:11Z"), "2026-06-29 14:02:11");
         assert_eq!(friendly_when(""), "");
@@ -385,10 +206,14 @@ mod tests {
     }
 
     #[test]
-    fn kind_arg_names_match_the_ledger_event_names() {
-        assert_eq!(KindArg::Approval.event_name(), "approval");
-        assert_eq!(KindArg::Connection.event_name(), "connection");
-        assert_eq!(KindArg::CredentialUse.event_name(), "credential_use");
+    fn kind_arg_labels_match_the_event_kind_names() {
+        assert_eq!(KindArg::Egress.label(), "egress");
+        assert_eq!(KindArg::Env.label(), "env");
+        assert_eq!(KindArg::Volume.label(), "volume");
+        assert_eq!(KindArg::Bind.label(), "bind");
+        assert_eq!(KindArg::Approval.label(), "approval");
+        assert_eq!(KindArg::Connection.label(), "connection");
+        assert_eq!(KindArg::Credential.label(), "credential");
     }
 
     #[test]
@@ -430,9 +255,50 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn a_bare_run_id_is_shorthand_for_show() {
+    async fn the_bare_timeline_merges_run_and_ledger_events() {
         let home = tempfile::TempDir::new().unwrap();
         write_run_chain(home.path(), "424242");
+        write_ledger(home.path());
+        let _env = home_env(home.path());
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit"], &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("WHEN") && text.contains("DETAIL"), "{text}");
+        assert!(text.contains("data → /data"), "{text}");
+        assert!(text.contains("injected: FOO"), "{text}");
+        assert!(
+            text.contains("connect some-oauth (oauth) @hchen [repo]"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_json_flag_emits_one_raw_event_per_line() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_ledger(home.path());
+        let _env = home_env(home.path());
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit", "--json"], &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        let line = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .expect("a json line");
+        let v: serde_json::Value = serde_json::from_str(line).expect("each line is a json object");
+        assert_eq!(v["event"], "connection", "got: {text}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_bare_sandbox_id_scopes_the_timeline_to_that_run() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_run_chain(home.path(), "424242");
+        write_ledger(home.path());
         let _env = home_env(home.path());
         let mut out = Vec::new();
         let code = dispatch_argv(&["lns", "audit", "424242"], &mut out)
@@ -441,97 +307,35 @@ mod tests {
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("data → /data"), "got: {text}");
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn the_show_subcommand_renders_a_run_timeline() {
-        let home = tempfile::TempDir::new().unwrap();
-        write_run_chain(home.path(), "424242");
-        let _env = home_env(home.path());
-        let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "show", "424242"], &mut out)
-            .await
-            .unwrap();
-        assert_eq!(code, 0);
-        assert!(String::from_utf8(out).unwrap().contains("data → /data"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn verify_with_a_run_id_checks_that_runs_chain() {
-        let home = tempfile::TempDir::new().unwrap();
-        write_run_chain(home.path(), "424242");
-        let _env = home_env(home.path());
-        let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "verify", "424242"], &mut out)
-            .await
-            .unwrap();
-        assert_eq!(code, 0);
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("Verified 2 audit events")
+            !text.contains("some-oauth"),
+            "scoped out the ledger: {text}"
         );
     }
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn verify_without_a_run_id_checks_the_global_ledger() {
+    async fn an_unknown_sandbox_reports_no_events_without_erroring() {
         let home = tempfile::TempDir::new().unwrap();
-        write_ledger(home.path());
+        write_run_chain(home.path(), "424242");
         let _env = home_env(home.path());
         let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "verify"], &mut out)
-            .await
-            .unwrap();
-        assert_eq!(code, 0);
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("Verified 1 audit events")
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn log_renders_the_global_ledger_timeline() {
-        let home = tempfile::TempDir::new().unwrap();
-        write_ledger(home.path());
-        let _env = home_env(home.path());
-        let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "log"], &mut out)
+        let code = dispatch_argv(&["lns", "audit", "nope"], &mut out)
             .await
             .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("some-oauth"), "got: {text}");
+        assert_eq!(text.trim(), "No audit events for sandbox nope.");
     }
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn connections_summarizes_the_global_ledger() {
+    async fn an_empty_world_reports_no_events() {
         let home = tempfile::TempDir::new().unwrap();
-        write_ledger(home.path());
         let _env = home_env(home.path());
         let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "connections"], &mut out)
-            .await
-            .unwrap();
+        let code = dispatch_argv(&["lns", "audit"], &mut out).await.unwrap();
         assert_eq!(code, 0);
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("@hchen"), "got: {text}");
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn a_bare_audit_with_no_target_explains_the_choices() {
-        let home = tempfile::TempDir::new().unwrap();
-        let _env = home_env(home.path());
-        let mut out = Vec::new();
-        let err = dispatch_argv(&["lns", "audit"], &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("show, verify, log, connections"));
+        assert_eq!(String::from_utf8(out).unwrap().trim(), "No audit events.");
     }
 }

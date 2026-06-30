@@ -35,10 +35,11 @@ Feature: users discover the CLI surface
     And the output contains "--mem"
     And the output contains "--policy"
 
-  Scenario: lns audit --help lists the audit subcommands
+  Scenario: lns audit --help describes the unified timeline
     When I run "lns audit --help"
     Then the exit code is 0
     And the output contains "Usage: lns audit"
-    And the output contains "RUN_ID"
-    And the output contains "verify"
-    And the output contains "connections"
+    And the output contains "SANDBOX"
+    And the output contains "--integration"
+    And the output contains "--kind"
+    And the output contains "--json"

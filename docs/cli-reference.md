@@ -150,34 +150,33 @@ as hidden aliases; the `lns sandbox` forms are the documented ones.
 
 ## `lns audit`
 
-Inspect and verify audit logs and the global connection ledger.
+Show one chronological timeline of every audit event across all sandboxes — or scope it to one.
 
 ```bash
-lns audit <run-id>             # show a run's audit timeline
-lns audit show <run-id> [--json]
-lns audit verify [<run-id>] [--allow-missing-anchor]
-lns audit log [--integration <id>] [--run <id>] [--kind <kind>] [--json]
-lns audit connections [<integration>]
+lns audit                                   # every event, every sandbox, newest first
+lns audit <sandbox>                         # scope to one sandbox: run id, name, or unique id prefix
+lns audit [--integration <id>] [--kind <kind>] [--json]
 ```
 
-`<run-id>` is the identifier surfaced by `lns run` as `✓ started run #<id>`. A bare
-`lns audit <run-id>` is shorthand for `lns audit show`.
+`lns audit` merges two sources into a single newest-first timeline: the per-run audit
+logs (egress, injected env, volume/bind mounts) and the durable connection ledger
+(`approval`, `connection`, and `credential` events recorded across runs). `<sandbox>`
+narrows it to one run — resolved as a run id, the run's name (e.g. `calm-finch`), or a
+unique id prefix; an unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 
-Every read command (`show`, `log`, `connections`) checks the relevant hash chain
-against its anchor and prints an inline warning if the log has been altered,
-truncated, or cannot be verified — you don't have to run `verify` to find out. It
-still prints what is there; the warning marks it as untrustworthy.
+Filters compose:
 
-`verify` is the explicit integrity check with a meaningful exit code: `0` on an
-intact chain, non-zero if tampering or truncation is detected, or if the anchor
-that guards against truncation is missing, corrupt, or unreadable. With no run id
-it verifies the global connection ledger. `--allow-missing-anchor` accepts a
-missing anchor (chain-only check) with exit `0`.
+- `--integration <id>` — only events for one integration. Discover the ids with
+  `lns integration list`; they also appear in the `DETAIL` column. Per-run egress/mount
+  events carry no integration, so this narrows the stream to ledger events.
+- `--kind <kind>` — one of `egress`, `env`, `volume`, `bind`, `approval`, `connection`,
+  `credential`.
+- `--json` — one raw JSON event per line instead of the table.
 
-`log` filters the connection-ledger timeline by `--integration`, `--run`, or
-`--kind` (`approval`, `connection`, `credential-use`), and `--json` emits raw
-JSONL. `connections` summarizes connections grouped by integration; pass an
-integration id to drill into one. See [Audit](audit.md).
+Integrity is checked automatically as the log is read: if a hash chain has been altered,
+truncated, or can't be verified against its anchor, `lns audit` prints an inline
+`audit integrity:` warning and still lists what's there — the warning marks it
+untrustworthy. There is no separate verify step. See [Audit](audit.md).
 
 ## `lns service`
 

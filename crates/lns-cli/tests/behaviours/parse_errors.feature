@@ -34,3 +34,9 @@ Feature: clap rejects bad input with exit code 2
     When I run "lns config set run.cpus"
     Then the exit code is 2
     And the output contains "required arguments were not provided"
+
+  Scenario: lns audit --kind rejects an unknown event kind
+    When I run "lns audit --kind bogus"
+    Then the exit code is 2
+    And the output contains "invalid value"
+    And the output contains "--kind"

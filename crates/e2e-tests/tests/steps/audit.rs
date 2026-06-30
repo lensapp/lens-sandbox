@@ -74,7 +74,7 @@ fn tampered_connection_ledger(world: &mut E2eWorld) {
         payload.push('\n');
     }
     let anchor = chain.anchor().expect("a non-empty chain anchors its head");
-    let tampered = payload.replacen("\"run\":41", "\"run\":42", 1);
+    let tampered = payload.replacen("41aaaaaa", "42aaaaaa", 1);
     fs::write(dir.join("ledger.jsonl"), tampered).expect("write ledger.jsonl");
     fs::write(dir.join("ledger.anchor"), anchor.to_line()).expect("write ledger.anchor");
 }
