@@ -123,7 +123,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }
         }
-        Request::RunDetach { run_id } => match crate::run_registry::request_detach(*run_id) {
+        Request::RunDetach { run_id } => match crate::run_registry::request_detach(run_id) {
             crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
             crate::run_registry::DetachOutcome::NotAttached => Response::Error {
                 message: format!("run {run_id} is not attached"),
@@ -242,7 +242,11 @@ async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
         Ok(id) => id,
         Err(message) => return Response::Error { message },
     };
-    let Some(status) = crate::run_registry::status(&id) else {
+    kill_resolved(&id, signal).await
+}
+
+async fn kill_resolved(id: &str, signal: lns_ipc::SignalKind) -> Response {
+    let Some(status) = crate::run_registry::status(id) else {
         return Response::Error {
             message: format!("no active run with id {id}"),
         };
@@ -250,7 +254,7 @@ async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
     if matches!(status, lns_ipc::RunStatus::Exited { .. }) {
         return Response::Acknowledged;
     }
-    forward_session_input(&id, session_input_from_signal(signal), "Kill").await
+    forward_session_input(id, session_input_from_signal(signal), "Kill").await
 }
 
 async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
@@ -269,15 +273,19 @@ async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
 
 fn inspect_run_request(run: &str) -> Response {
     match crate::run_registry::resolve(run) {
-        Ok(id) => match crate::run_registry::inspect(&id) {
-            Some(details) => Response::RunInspect {
-                details: Box::new(details),
-            },
-            None => Response::Error {
-                message: format!("no active run with id {id}"),
-            },
-        },
+        Ok(id) => inspect_resolved(&id),
         Err(message) => Response::Error { message },
+    }
+}
+
+fn inspect_resolved(id: &str) -> Response {
+    match crate::run_registry::inspect(id) {
+        Some(details) => Response::RunInspect {
+            details: Box::new(details),
+        },
+        None => Response::Error {
+            message: format!("no active run with id {id}"),
+        },
     }
 }
 
@@ -828,7 +836,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_detach_unknown_run_returns_error() {
-        let resp = handle_request(&Request::RunDetach { run_id: u32::MAX }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::RunDetach {
+                run_id: "ffffffffffffffffffffffffffffffff".to_string(),
+            },
+            Instant::now(),
+        )
+        .await;
         match resp {
             Response::Error { message } => assert!(message.contains("no active run")),
             other => unreachable!("expected Error for a missing run, got {other:?}"),
@@ -1240,7 +1254,7 @@ mod tests {
     async fn handle_request_detach_registered_run_accepts_and_fires_the_signal() {
         use std::sync::Mutex;
         use tokio::sync::oneshot;
-        let run_id = u32::MAX - 23;
+        let run_id = "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7".to_string();
         let (cancel_tx, _cancel_rx) = oneshot::channel();
         let (detach_tx, detach_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async {});
@@ -1258,16 +1272,28 @@ mod tests {
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
         };
-        crate::run_registry::register(run_id, handle);
+        crate::run_registry::register(run_id.clone(), handle);
 
-        let resp = handle_request(&Request::RunDetach { run_id }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::RunDetach {
+                run_id: run_id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
         assert!(matches!(resp, Response::DetachAccepted));
         assert!(
             detach_rx.await.is_ok(),
             "the run's pump must be told to hand off, not cancel",
         );
 
-        let resp = handle_request(&Request::RunDetach { run_id }, Instant::now()).await;
+        let resp = handle_request(
+            &Request::RunDetach {
+                run_id: run_id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
         match resp {
             Response::Error { message } => assert!(
                 message.contains("is not attached"),
@@ -1275,7 +1301,7 @@ mod tests {
             ),
             other => unreachable!("expected Error on a second detach, got {other:?}"),
         }
-        let _ = crate::run_registry::cancel(run_id);
+        let _ = crate::run_registry::cancel(&run_id);
     }
 
     #[tokio::test]
@@ -1519,29 +1545,49 @@ mod tests {
 
     #[tokio::test]
     async fn stop_run_with_reports_no_active_run_when_the_id_vanished_after_resolution() {
+        let (_sent, sender) = recording_sender("ffffffffffffffffffffffffffffffff", None);
         let resp = stop_run_with(
             "ffffffffffffffffffffffffffffffff",
             std::time::Duration::from_secs(1),
             KILL_GRACE,
-            |_| async { Response::Acknowledged },
+            sender,
         )
         .await;
-        match resp {
-            Response::Error { message } => {
-                assert!(message.contains("no active run with id"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
-        }
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no active run with id")),
+            "got {resp:?}"
+        );
     }
 
     #[test]
     fn remove_resolved_run_reports_no_run_when_the_id_vanished_after_resolution() {
-        match remove_resolved_run("ffffffffffffffffffffffffffffffff") {
-            Response::Error { message } => {
-                assert!(message.contains("no run with id"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
-        }
+        let resp = remove_resolved_run("ffffffffffffffffffffffffffffffff");
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no run with id")),
+            "got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_resolved_reports_no_active_run_when_the_id_vanished_after_resolution() {
+        let resp = kill_resolved(
+            "ffffffffffffffffffffffffffffffff",
+            lns_ipc::SignalKind::Term,
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no active run with id")),
+            "got {resp:?}"
+        );
+    }
+
+    #[test]
+    fn inspect_resolved_reports_no_active_run_when_the_id_vanished_after_resolution() {
+        let resp = inspect_resolved("ffffffffffffffffffffffffffffffff");
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no active run with id")),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]

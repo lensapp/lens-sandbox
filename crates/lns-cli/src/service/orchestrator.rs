@@ -1807,7 +1807,7 @@ mod tests {
         let mut pending = vec![b'p'];
         let (requests, control) = plan_feed(
             FeedAction::Trigger,
-            9,
+            "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
             &mut pending,
             DetachBehaviour::DetachRun,
         );
@@ -1815,10 +1815,12 @@ mod tests {
             requests,
             vec![
                 Request::RunStdin {
-                    run_id: 9,
+                    run_id: "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string(),
                     bytes: vec![b'p']
                 },
-                Request::RunDetach { run_id: 9 },
+                Request::RunDetach {
+                    run_id: "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string(),
+                },
             ],
             "detaching a run flushes pending input then asks the service to keep it running — no SIGHUP",
         );
@@ -1829,10 +1831,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn write_and_await_ack_blocks_until_the_service_responds() {
         let (mut client, mut server) = tokio::io::duplex(4096);
-        let mut ack = std::pin::pin!(write_and_await_ack(
-            &mut client,
-            &Request::RunDetach { run_id: 7 },
-        ));
+        let detach = Request::RunDetach {
+            run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+        };
+        let mut ack = std::pin::pin!(write_and_await_ack(&mut client, &detach));
 
         assert!(
             timeout(Duration::from_millis(50), &mut ack).await.is_err(),
@@ -1845,7 +1847,12 @@ mod tests {
             .await
             .expect("server reads the request");
         let decoded: Request = decode_frame(&mut &req[..]).expect("decode request");
-        assert_eq!(decoded, Request::RunDetach { run_id: 7 });
+        assert_eq!(
+            decoded,
+            Request::RunDetach {
+                run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+            }
+        );
 
         let frame = encode_frame(&Response::DetachAccepted).expect("encode ack");
         server.write_all(&frame).await.expect("server writes ack");

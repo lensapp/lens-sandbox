@@ -283,9 +283,9 @@ pub enum DetachOutcome {
     NotFound,
 }
 
-pub fn request_detach(run_id: u32) -> DetachOutcome {
+pub fn request_detach(run_id: &str) -> DetachOutcome {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
-    let Some(handle) = g.as_ref().and_then(|m| m.get(&run_id)) else {
+    let Some(handle) = g.as_ref().and_then(|m| m.get(run_id)) else {
         return DetachOutcome::NotFound;
     };
     let Some(tx) = handle.detach_tx.lock().expect("detach_tx poisoned").take() else {
@@ -638,8 +638,8 @@ mod tests {
 
     #[tokio::test]
     async fn request_detach_unknown_run_reports_not_found() {
-        let id = allocate_run_id() + 2_000_000;
-        assert_eq!(request_detach(id), DetachOutcome::NotFound);
+        let id = "ffffffffffffffffffffffffffffffff".to_string();
+        assert_eq!(request_detach(&id), DetachOutcome::NotFound);
     }
 
     #[tokio::test]
@@ -648,16 +648,16 @@ mod tests {
         let (mut handle, _cancel_rx) = make_handle();
         let (detach_tx, detach_rx) = oneshot::channel::<()>();
         handle.detach_tx = Mutex::new(Some(detach_tx));
-        register(id, handle);
+        register(id.clone(), handle);
 
-        assert_eq!(request_detach(id), DetachOutcome::Detached);
+        assert_eq!(request_detach(&id), DetachOutcome::Detached);
         assert!(detach_rx.await.is_ok(), "detach signal must be delivered");
         assert_eq!(
-            request_detach(id),
+            request_detach(&id),
             DetachOutcome::NotAttached,
             "a registered run whose detach signal was already consumed is not attached, not absent",
         );
-        deregister(id);
+        deregister(&id);
     }
 
     #[tokio::test]
@@ -667,14 +667,14 @@ mod tests {
         let (detach_tx, detach_rx) = oneshot::channel::<()>();
         drop(detach_rx);
         handle.detach_tx = Mutex::new(Some(detach_tx));
-        register(id, handle);
+        register(id.clone(), handle);
 
         assert_eq!(
-            request_detach(id),
+            request_detach(&id),
             DetachOutcome::NotAttached,
             "a run whose pump already returned can no longer be detached",
         );
-        deregister(id);
+        deregister(&id);
     }
 
     #[tokio::test]
