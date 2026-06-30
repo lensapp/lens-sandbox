@@ -192,7 +192,6 @@ fn report_no_anchor(
     Ok(if allow_missing_anchor { 0 } else { 1 })
 }
 
-/// Verifies a log against its anchor on the read paths and warns when it can't be trusted, so a tampered or truncated log surfaces inline instead of only under `lns audit verify`.
 pub(super) fn warn_if_compromised(path: &Path, anchor: &Path) {
     if let Ok(outcome) = verify::verify_chain_with_anchor(path, anchor)
         && let Some(advisory) = integrity_advisory(&outcome)
