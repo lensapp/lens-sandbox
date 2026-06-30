@@ -36,8 +36,3 @@ bin/
 # `cargo llvm-cov report`. Both are transient build artifacts.
 *.profraw
 *.profdata
-
-# Per-developer agent tooling and code-review scratch (not shipped with the repo)
-.agents/
-.codex/
-.code-reviews/
