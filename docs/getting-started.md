@@ -24,6 +24,10 @@ credential-shaped placeholders, the same "policy you run into, not write."
 macOS on Apple Silicon and Linux (x86_64 / aarch64) are supported. Windows support
 is on the roadmap and not yet available.
 
+The Linux binaries require **glibc 2.35 or newer** — Ubuntu 22.04 LTS and newer,
+Debian 12 and newer, Fedora 36 and newer, and current rolling releases (Arch,
+openSUSE Tumbleweed) all qualify. Check yours with `ldd --version`.
+
 ## Install
 
 ```bash
