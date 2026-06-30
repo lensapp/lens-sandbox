@@ -256,10 +256,11 @@ mod tests {
 
     #[test]
     fn an_event_lacking_event_and_type_falls_back_to_a_generic_label() {
-        let (_d, path) = write_log(&[r#"{"foo":1,"prev_hash":"00"}"#]);
+        let (_d, path) = write_log(&[r#"{"note":"hi","count":1,"prev_hash":"00"}"#]);
         let text = show_json_false("49", &path).unwrap();
         assert!(text.contains("event"));
-        assert!(text.contains("foo=1"));
+        assert!(text.contains("note=hi"));
+        assert!(text.contains("count=1"));
     }
 
     #[test]
