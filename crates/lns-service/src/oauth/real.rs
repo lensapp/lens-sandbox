@@ -75,7 +75,8 @@ struct TokenResp {
 fn granted_scopes(scope: Option<&str>) -> Vec<String> {
     scope
         .unwrap_or_default()
-        .split_whitespace()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
 }
@@ -384,5 +385,14 @@ mod tests {
         let body = r#"{"device_code":"some-device","user_code":"SOME-CODE","verification_uri":"https://example.com/device"}"#;
         let d: DeviceCodeResp = serde_json::from_str(body).unwrap();
         assert_eq!(d.verification_uri, "https://example.com/device");
+    }
+
+    #[test]
+    fn granted_scopes_splits_on_commas_and_whitespace_and_drops_empties() {
+        assert_eq!(granted_scopes(Some("repo read:org")), ["repo", "read:org"]);
+        assert_eq!(granted_scopes(Some("repo,read:org")), ["repo", "read:org"]);
+        assert_eq!(granted_scopes(Some("repo, read:org")), ["repo", "read:org"]);
+        assert!(granted_scopes(None).is_empty());
+        assert!(granted_scopes(Some("")).is_empty());
     }
 }
