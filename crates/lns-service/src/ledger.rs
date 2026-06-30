@@ -106,7 +106,6 @@ impl LedgerRecorder for RunLedgerRecorder {
 }
 
 impl Drop for RunLedgerRecorder {
-    /// Closing the channel then joining the writer flushes the run's queued events, so a single FIFO writer keeps them in record order and none are lost on teardown.
     fn drop(&mut self) {
         self.tx.take();
         if let Some(writer) = self.writer.take() {
