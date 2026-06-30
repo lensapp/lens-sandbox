@@ -177,12 +177,15 @@ async fn handle_connection(
             .map(|p| p.env_var().to_string())
             .collect()
     };
+    let mut writer = super::AuditWriter {
+        chain: &mut chain,
+        log: &mut audit_file,
+        anchor: &mut anchor_sink,
+    };
     super::write_run_env_event(
         &user_env,
         &extra_managed,
-        &mut chain,
-        &mut audit_file,
-        &mut anchor_sink,
+        &mut writer,
         &crate::oauth::RealClock,
     )
     .await?;
@@ -193,9 +196,7 @@ async fn handle_connection(
         &session,
         &credential_session,
         &mut frame_rx,
-        &mut chain,
-        &mut audit_file,
-        &mut anchor_sink,
+        &mut writer,
         shutdown,
         &budget,
     )
@@ -219,9 +220,7 @@ async fn serve(
     session: &Arc<ApprovalSession>,
     credential_session: &Arc<CredentialSession>,
     frame_rx: &mut mpsc::UnboundedReceiver<HostFrame>,
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut tokio::fs::File,
-    anchor_sink: &mut crate::audit::FileAnchorSink,
+    writer: &mut super::AuditWriter<'_, tokio::fs::File, crate::audit::FileAnchorSink>,
     mut shutdown: oneshot::Receiver<()>,
     budget: &AuditBudget,
 ) -> Result<()> {
@@ -249,9 +248,7 @@ async fn serve(
                     msg,
                     session,
                     credential_session,
-                    chain,
-                    audit_file,
-                    anchor_sink,
+                    writer,
                     budget,
                     &crate::oauth::RealClock,
                 )

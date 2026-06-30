@@ -126,18 +126,22 @@ pub(super) fn current_credentials(session: &CredentialSession) -> Vec<Credential
     expand_credentials_for_wire_with_custom(&session.current_state(), session.custom_providers())
 }
 
+pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
+    pub(super) chain: &'a mut lns_ipc::AuditChain,
+    pub(super) log: &'a mut L,
+    pub(super) anchor: &'a mut S,
+}
+
 async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     bytes: &[u8],
-    chain: &lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
 ) -> Result<()> {
     let mut line = Vec::with_capacity(bytes.len() + 1);
     line.extend_from_slice(bytes);
     line.push(b'\n');
-    audit_file.append_synced(&line).await?;
-    if let Some(anchor) = chain.anchor() {
-        anchor_sink.write(&anchor)?;
+    writer.log.append_synced(&line).await?;
+    if let Some(anchor) = writer.chain.anchor() {
+        writer.anchor.write(&anchor)?;
     }
     Ok(())
 }
@@ -157,16 +161,14 @@ fn augment_with_ts(
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
     extra_managed: &[String],
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
     clock: &dyn crate::oauth::Clock,
 ) -> Result<()> {
     let Some(obj) = crate::workload_env::injected_env_audit(user_env, extra_managed) else {
         return Ok(());
     };
-    let bytes = augment_with_ts(chain, obj, clock);
-    write_chain_line(&bytes, chain, audit_file, anchor_sink).await
+    let bytes = augment_with_ts(writer.chain, obj, clock);
+    write_chain_line(&bytes, writer).await
 }
 
 const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
@@ -193,14 +195,11 @@ fn stamp_guest_audit_event(
     Some(obj)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     msg: Message,
     session: &Arc<ApprovalSession>,
     credential_session: &Arc<CredentialSession>,
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
     budget: &AuditBudget,
     clock: &dyn crate::oauth::Clock,
 ) -> Result<bool> {
@@ -226,8 +225,8 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 );
                 return Ok(false);
             }
-            let bytes = augment_with_ts(chain, stamped, clock);
-            write_chain_line(&bytes, chain, audit_file, anchor_sink).await?;
+            let bytes = augment_with_ts(writer.chain, stamped, clock);
+            write_chain_line(&bytes, writer).await?;
         }
         Some("request_pending") => {
             if let Ok(GuestFrame::RequestPending(req)) =
@@ -658,9 +657,11 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -706,9 +707,11 @@ mod tests {
             ),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -746,9 +749,11 @@ mod tests {
             ),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -775,9 +780,11 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","event":"net_connect","host":"x"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -805,9 +812,11 @@ mod tests {
         write_run_env_event(
             &["CLAUDE_CODE_USE_BEDROCK=1".into()],
             &[],
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &CLOCK,
         )
         .await
@@ -834,9 +843,18 @@ mod tests {
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
-        write_run_env_event(&[], &[], &mut chain, &mut log, &mut anchor, &CLOCK)
-            .await
-            .expect("write_run_env_event");
+        write_run_env_event(
+            &[],
+            &[],
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
+            &CLOCK,
+        )
+        .await
+        .expect("write_run_env_event");
         assert!(log.bytes.is_empty(), "no injected env → no audit line");
         assert!(
             anchor.anchors.is_empty(),
@@ -887,9 +905,11 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session,
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &exhausted_budget,
             &CLOCK,
         )
@@ -937,9 +957,11 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -963,9 +985,11 @@ mod tests {
             Message::Close(None),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -989,9 +1013,11 @@ mod tests {
             Message::Text(r#"{"type":"something_else"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -1017,9 +1043,11 @@ mod tests {
                 msg,
                 &session,
                 &credential_session_with_dummy_sink(),
-                &mut chain,
-                &mut log,
-                &mut anchor,
+                &mut AuditWriter {
+                    chain: &mut chain,
+                    log: &mut log,
+                    anchor: &mut anchor,
+                },
                 &AuditBudget::with_defaults(),
                 &CLOCK,
             )
@@ -1041,9 +1069,11 @@ mod tests {
             Message::Text(r#"this is not json but "type":"audit_event" appears"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -1079,9 +1109,11 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -1111,9 +1143,11 @@ mod tests {
             Message::Text(r#"{"type":"watch","payload":{}}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &AuditBudget::with_defaults(),
             &CLOCK,
         )
@@ -1239,9 +1273,11 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+            },
             &budget,
             &CLOCK,
         )
