@@ -21,7 +21,10 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
-    #[command(about = "List active runs (`docker ps`-style).")]
+    #[command(
+        visible_alias = "list",
+        about = "List active runs (`docker ps`-style)."
+    )]
     Ls,
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
     Exec(ExecArgs),
