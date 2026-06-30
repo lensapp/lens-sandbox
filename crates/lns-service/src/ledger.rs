@@ -15,7 +15,9 @@ pub fn now_rfc3339(clock: &dyn Clock) -> String {
 pub fn append_ledger_record(record: &LedgerRecord) -> Result<()> {
     // The machine-global ledger is written by every concurrent run; serialize so the hash chain can't interleave.
     static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = WRITE_LOCK.lock().expect("ledger write lock poisoned");
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = lns_ipc::connection_ledger()?;
     let anchor_path = lns_ipc::connection_ledger_anchor()?;
     append_ledger_record_at(&path, &anchor_path, record)
@@ -109,6 +111,19 @@ impl Drop for RunLedgerRecorder {
     fn drop(&mut self) {
         self.tx.take();
         if let Some(writer) = self.writer.take() {
+            flush_writer(writer);
+        }
+    }
+}
+
+fn flush_writer(writer: std::thread::JoinHandle<()>) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| {
+                let _ = writer.join();
+            });
+        }
+        _ => {
             let _ = writer.join();
         }
     }
@@ -274,6 +289,20 @@ mod tests {
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
         assert!(content.contains("\"run\":7"), "{content}");
         assert!(content.contains("deny_once"), "{content}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_inside_a_multi_thread_runtime_drains_via_block_in_place() {
+        let sink = Arc::new(CapturingSink::default());
+        let recorder =
+            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        recorder.record(network_approval());
+        drop(recorder);
+        assert_eq!(
+            sink.records.lock().unwrap().len(),
+            1,
+            "drop must flush the writer even when it lands on a runtime worker"
+        );
     }
 
     #[test]
