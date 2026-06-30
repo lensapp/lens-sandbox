@@ -129,14 +129,19 @@ jobs:
             os: darwin
             arch: aarch64
             runner: macos-latest
+          # Pinned to 22.04 (glibc 2.35) to set the Linux release glibc floor:
+          # the host binaries are dynamic-glibc (lns-service links GTK for the
+          # tray, so static-musl is out), making the runner's glibc the floor.
+          # The "Enforce glibc baseline" step fails the build if it creeps above
+          # 2.35 — don't move these to ubuntu-latest.
           - target: aarch64-unknown-linux-gnu
             os: linux
             arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
           - target: x86_64-unknown-linux-gnu
             os: linux
             arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     environment: release
@@ -213,6 +218,30 @@ jobs:
 
       - name: Build lns-service
         run: cargo build --release --locked --target ${{ matrix.target }} -p lns-service
+
+      - name: Enforce glibc baseline (Linux only)
+        if: matrix.os == 'linux'
+        env:
+          GLIBC_FLOOR: "2.35"
+        run: |
+          set -euo pipefail
+          check() {
+            local bin="$1" max
+            max=$(objdump -T "$bin" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+              | sed 's/GLIBC_//' | sort -V | tail -1)
+            if [ -z "$max" ]; then
+              echo "::error::$bin exposes no GLIBC_ version symbols; cannot verify the floor"
+              exit 1
+            fi
+            if [ "$(printf '%s\n%s\n' "$max" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$bin requires glibc $max, above the $GLIBC_FLOOR baseline — would not run on the oldest supported LTS"
+              exit 1
+            fi
+            echo "$bin: max required glibc $max (floor $GLIBC_FLOOR) — OK"
+          }
+          check "target/${{ matrix.target }}/release/lns"
+          check "target/${{ matrix.target }}/release/lns-service"
 
       - name: Codesign with virtualization entitlement (macOS only)
         if: matrix.os == 'darwin'
