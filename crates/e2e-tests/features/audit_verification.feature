@@ -1,8 +1,9 @@
-Feature: lns audit inspects and verifies a run's audit log
-  `lns audit <run-id>` shows a run's audit timeline; `lns audit verify
-  <run-id>` confirms the chain hasn't been tampered with. An intact
-  chain verifies cleanly; a missing log or a broken chain exits
-  non-zero with a diagnostic.
+Feature: lns audit inspects and verifies audit logs and the connection ledger
+  `lns audit <run-id>` shows a run's audit timeline and `lns audit verify
+  <run-id>` confirms its chain hasn't been tampered with. `lns audit log`
+  and `lns audit connections` read the global connection ledger, and `lns
+  audit verify` (no run id) checks it. An intact chain verifies cleanly; a
+  missing log or a broken chain exits non-zero with a diagnostic.
 
   Scenario: a bare run id shows the run's audit timeline
     Given a clean lns cache home
@@ -38,3 +39,27 @@ Feature: lns audit inspects and verifies a run's audit log
     When I run "lns audit verify pipeable" with stdout closed
     Then the exit code is non-zero
     And the output does not contain "panicked"
+
+  Scenario: the connection ledger timeline lists recorded events
+    Given a clean lns cache home
+    And a connection ledger with sample events
+    When I run "lns audit log"
+    Then the exit code is 0
+    And the output contains "some-oauth"
+    And the output contains "some-provider"
+
+  Scenario: connections are summarized by integration
+    Given a clean lns cache home
+    And a connection ledger with sample events
+    When I run "lns audit connections"
+    Then the exit code is 0
+    And the output contains "some-oauth"
+    And the output contains "@some-user"
+    And the output contains "some-provider"
+
+  Scenario: the connection ledger verifies cleanly
+    Given a clean lns cache home
+    And a connection ledger with sample events
+    When I run "lns audit verify"
+    Then the exit code is 0
+    And the output contains "Verified"

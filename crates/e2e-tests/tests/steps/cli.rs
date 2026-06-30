@@ -38,6 +38,7 @@ fn i_run(world: &mut E2eWorld, cmd_line: String) {
         envs.push(("HOME", home.path().into()));
         envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
         envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
+        envs.push(("XDG_DATA_HOME", home.path().join(".local/share").into()));
     }
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
