@@ -35,25 +35,25 @@ Feature: sandbox lifecycle verbs reach the service end to end
     Given the Lens Sandbox service is running
     When I run sandbox command "stop 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no active run with id 4242"
+    And the output contains "no such run: 4242"
 
   Scenario: inspecting an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "inspect 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no active run with id 4242"
+    And the output contains "no such run: 4242"
 
   Scenario: requesting logs of an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "logs 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no active run with id 4242"
+    And the output contains "no such run: 4242"
 
   Scenario: attaching to an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "attach 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no active run with id 4242"
+    And the output contains "no such run: 4242"
 
   Scenario: requesting stats of an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
@@ -65,7 +65,7 @@ Feature: sandbox lifecycle verbs reach the service end to end
     Given the Lens Sandbox service is running
     When I run sandbox command "rm 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no run with id 4242"
+    And the output contains "no such run: 4242"
 
   Scenario: pruning with no finished runs succeeds end to end
     Given the Lens Sandbox service is running
