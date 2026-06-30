@@ -10,8 +10,7 @@ use super::{ConnectionsArgs, auth_word, friendly_when};
 
 pub fn run(args: &ConnectionsArgs, out: &mut dyn Write) -> Result<i32> {
     let path = lns_ipc::connection_ledger()?;
-    let records = store::read_ledger(&path)?;
-    run_with_records(args, &records, out)
+    run_with_records(args, store::stream_ledger(&path)?, out)
 }
 
 #[derive(Default)]
@@ -36,10 +35,10 @@ struct KeyUse {
 
 fn run_with_records(
     args: &ConnectionsArgs,
-    records: &[LedgerRecord],
+    records: impl Iterator<Item = Result<LedgerRecord>>,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let connections = aggregate(records);
+    let connections = aggregate(records)?;
     match &args.integration {
         Some(integration) => render_detail(integration, connections.get(integration), out)?,
         None => render_summary(&connections, out)?,
@@ -47,9 +46,12 @@ fn run_with_records(
     Ok(0)
 }
 
-fn aggregate(records: &[LedgerRecord]) -> BTreeMap<String, Conn> {
+fn aggregate(
+    records: impl Iterator<Item = Result<LedgerRecord>>,
+) -> Result<BTreeMap<String, Conn>> {
     let mut map: BTreeMap<String, Conn> = BTreeMap::new();
     for record in records {
+        let record = record?;
         let Some(integration) = record.event.integration() else {
             continue;
         };
@@ -58,9 +60,9 @@ fn aggregate(records: &[LedgerRecord]) -> BTreeMap<String, Conn> {
         if record.ts > conn.last_used {
             conn.last_used = record.ts.clone();
         }
-        absorb(conn, record);
+        absorb(conn, &record);
     }
-    map
+    Ok(map)
 }
 
 fn absorb(conn: &mut Conn, record: &LedgerRecord) {
@@ -139,11 +141,8 @@ fn render_detail(integration: &str, conn: Option<&Conn>, out: &mut dyn Write) ->
         writeln!(out, "No connections recorded for {integration}.")?;
         return Ok(());
     };
-    writeln!(
-        out,
-        "{integration}  ({})",
-        conn.auth.map(auth_word).unwrap_or("-")
-    )?;
+    let auth = conn.auth.map(auth_word).unwrap_or("-");
+    writeln!(out, "{integration}  ({auth})")?;
     if let Some(account) = &conn.account {
         writeln!(out, "  account    {account}")?;
     }
@@ -255,7 +254,12 @@ mod tests {
 
     fn summary_of(records: &[LedgerRecord]) -> String {
         let mut buf = Vec::new();
-        run_with_records(&ConnectionsArgs { integration: None }, records, &mut buf).unwrap();
+        run_with_records(
+            &ConnectionsArgs { integration: None },
+            records.iter().cloned().map(anyhow::Ok),
+            &mut buf,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -265,7 +269,7 @@ mod tests {
             &ConnectionsArgs {
                 integration: Some(integration.into()),
             },
-            records,
+            records.iter().cloned().map(anyhow::Ok),
             &mut buf,
         )
         .unwrap();

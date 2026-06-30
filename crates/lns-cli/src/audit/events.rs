@@ -9,16 +9,18 @@ use super::{LogArgs, auth_word, friendly_when};
 
 pub fn run(args: &LogArgs, out: &mut dyn Write) -> Result<i32> {
     let path = lns_ipc::connection_ledger()?;
-    let records = store::read_ledger(&path)?;
-    run_with_records(args, &records, out)
+    run_with_records(args, store::stream_ledger(&path)?, out)
 }
 
-fn run_with_records(args: &LogArgs, records: &[LedgerRecord], out: &mut dyn Write) -> Result<i32> {
-    let selected: Vec<&LedgerRecord> = records.iter().filter(|r| matches_filter(r, args)).collect();
+fn run_with_records(
+    args: &LogArgs,
+    records: impl Iterator<Item = Result<LedgerRecord>>,
+    out: &mut dyn Write,
+) -> Result<i32> {
     if args.json {
-        emit_json(&selected, out)?;
+        emit_json(args, records, out)?;
     } else {
-        render(&selected, out)?;
+        render(args, records, out)?;
     }
     Ok(0)
 }
@@ -42,29 +44,43 @@ fn matches_filter(record: &LedgerRecord, args: &LogArgs) -> bool {
     true
 }
 
-fn render(records: &[&LedgerRecord], out: &mut dyn Write) -> Result<()> {
-    if records.is_empty() {
+fn render(
+    args: &LogArgs,
+    records: impl Iterator<Item = Result<LedgerRecord>>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for record in records {
+        let record = record?;
+        if !matches_filter(&record, args) {
+            continue;
+        }
+        rows.push(vec![
+            friendly_when(&record.ts),
+            format!("#{}", record.run),
+            record.event.name().to_string(),
+            detail(&record.event),
+        ]);
+    }
+    if rows.is_empty() {
         writeln!(out, "No ledger events.")?;
         return Ok(());
     }
-    let rows: Vec<Vec<String>> = records
-        .iter()
-        .map(|r| {
-            vec![
-                friendly_when(&r.ts),
-                format!("#{}", r.run),
-                r.event.name().to_string(),
-                detail(&r.event),
-            ]
-        })
-        .collect();
     render_table(out, &["WHEN", "RUN", "KIND", "DETAIL"], &rows)?;
     Ok(())
 }
 
-fn emit_json(records: &[&LedgerRecord], out: &mut dyn Write) -> Result<()> {
+fn emit_json(
+    args: &LogArgs,
+    records: impl Iterator<Item = Result<LedgerRecord>>,
+    out: &mut dyn Write,
+) -> Result<()> {
     for record in records {
-        let line = serde_json::to_string(record).context("serializing ledger record")?;
+        let record = record?;
+        if !matches_filter(&record, args) {
+            continue;
+        }
+        let line = serde_json::to_string(&record).context("serializing ledger record")?;
         writeln!(out, "{line}")?;
     }
     Ok(())
@@ -189,7 +205,7 @@ mod tests {
 
     fn render_to_string(args: &LogArgs, records: &[LedgerRecord]) -> String {
         let mut buf = Vec::new();
-        run_with_records(args, records, &mut buf).unwrap();
+        run_with_records(args, records.iter().cloned().map(anyhow::Ok), &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -260,6 +276,24 @@ mod tests {
         let text = render_to_string(&args, &records);
         let parsed: LedgerRecord = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(parsed, records[0]);
+    }
+
+    #[test]
+    fn json_output_skips_records_that_do_not_match_the_filter() {
+        let records = vec![rec(41, connection()), rec(49, credential_use())];
+        let args = LogArgs {
+            run: Some(49),
+            json: true,
+            ..no_filter()
+        };
+        let text = render_to_string(&args, &records);
+        assert_eq!(
+            text.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "only the run-49 record should be emitted as json"
+        );
+        assert!(text.contains("some-provider"));
+        assert!(!text.contains("some-oauth"));
     }
 
     #[test]

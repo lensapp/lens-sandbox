@@ -1,30 +1,56 @@
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Lines};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lns_ipc::LedgerRecord;
 
-pub fn read_ledger(path: &Path) -> Result<Vec<LedgerRecord>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(e).with_context(|| format!("reading ledger {}", path.display()));
-        }
+/// Streams the ledger one record per line so callers fold or filter without holding the whole file in memory; a missing ledger streams as empty.
+pub fn stream_ledger(path: &Path) -> Result<LedgerStream> {
+    let lines = match File::open(path) {
+        Ok(file) => Some(BufReader::new(file).lines()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("reading ledger {}", path.display())),
     };
-    parse_ledger(&text, path)
+    Ok(LedgerStream {
+        lines,
+        path: path.to_path_buf(),
+        line_no: 0,
+    })
 }
 
-pub fn parse_ledger(text: &str, path: &Path) -> Result<Vec<LedgerRecord>> {
-    let mut records = Vec::new();
-    for (idx, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+#[derive(Debug)]
+pub struct LedgerStream {
+    lines: Option<Lines<BufReader<File>>>,
+    path: PathBuf,
+    line_no: usize,
+}
+
+impl Iterator for LedgerStream {
+    type Item = Result<LedgerRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let lines = self.lines.as_mut()?;
+        loop {
+            let line = match lines.next()? {
+                Ok(line) => line,
+                Err(e) => {
+                    let path = self.path.display();
+                    return Some(Err(e).with_context(|| format!("reading ledger {path}")));
+                }
+            };
+            self.line_no += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let line_no = self.line_no;
+            let path = self.path.display();
+            return Some(
+                serde_json::from_str(&line)
+                    .with_context(|| format!("parsing ledger line {line_no} of {path}")),
+            );
         }
-        let record: LedgerRecord = serde_json::from_str(line)
-            .with_context(|| format!("parsing ledger line {} of {}", idx + 1, path.display()))?;
-        records.push(record);
     }
-    Ok(records)
 }
 
 #[cfg(test)]
@@ -47,9 +73,13 @@ mod tests {
         serde_json::to_string(&record).unwrap()
     }
 
+    fn collect(path: &Path) -> Result<Vec<LedgerRecord>> {
+        stream_ledger(path)?.collect()
+    }
+
     #[test]
-    fn a_missing_ledger_reads_as_no_events_not_an_error() {
-        let records = read_ledger(Path::new("/nope/never/ledger.jsonl")).unwrap();
+    fn a_missing_ledger_streams_as_no_events_not_an_error() {
+        let records = collect(Path::new("/nope/never/ledger.jsonl")).unwrap();
         assert!(records.is_empty());
     }
 
@@ -59,7 +89,7 @@ mod tests {
         let path = dir.path().join("ledger.jsonl");
         let body = format!("{}\n\n{}\n", sample_line(), sample_line());
         std::fs::write(&path, body).unwrap();
-        let records = read_ledger(&path).unwrap();
+        let records = collect(&path).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].run, 49);
     }
@@ -69,14 +99,26 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("ledger.jsonl");
         std::fs::write(&path, format!("{}\nnot-json\n", sample_line())).unwrap();
-        let err = read_ledger(&path).unwrap_err();
+        let err = collect(&path).unwrap_err();
         assert!(format!("{err:#}").contains("line 2"), "got: {err:#}");
     }
 
     #[test]
-    fn an_unreadable_path_surfaces_a_reading_error() {
+    fn a_read_failure_mid_stream_surfaces_a_reading_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let err = read_ledger(dir.path()).unwrap_err();
+        let err = collect(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading ledger"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_unopenable_path_surfaces_a_reading_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let not_a_dir = dir.path().join("file");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        let err = stream_ledger(&not_a_dir.join("child")).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading ledger"),
             "got: {err:#}"
