@@ -5,12 +5,19 @@ pub fn render_table(
     headers: &[&str],
     rows: &[Vec<String>],
 ) -> std::io::Result<()> {
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    let columns = rows
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
+        .max(headers.len());
+    let mut widths = vec![0usize; columns];
+    for (i, header) in headers.iter().enumerate() {
+        widths[i] = header.len();
+    }
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
+            widths[i] = widths[i].max(cell.len());
         }
     }
     let header_cells: Vec<String> = headers.iter().map(|h| (*h).to_string()).collect();
@@ -73,5 +80,11 @@ mod tests {
     fn a_short_row_does_not_panic_on_missing_trailing_cells() {
         let text = rendered(&["A", "B", "C"], &[vec!["only-one".into()]]);
         assert!(text.contains("only-one"));
+    }
+
+    #[test]
+    fn a_column_beyond_the_headers_is_still_sized_from_the_rows() {
+        let text = rendered(&["A"], &[vec!["x".into(), "longer".into()]]);
+        assert_eq!(text, "A\nx  longer\n");
     }
 }
