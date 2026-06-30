@@ -125,8 +125,11 @@ fn detail(event: &LedgerEvent) -> String {
             dest,
             ..
         } => {
-            let key = fp.as_deref().map(|f| format!("fp {f}")).unwrap_or_default();
-            format!("use {integration} {key} → {}", dest.join(", "))
+            let key = fp
+                .as_deref()
+                .map(|f| format!(" fp {f}"))
+                .unwrap_or_default();
+            format!("use {integration}{key} → {}", dest.join(", "))
         }
     }
 }
@@ -333,6 +336,14 @@ mod tests {
             fp: None,
             dest: vec![],
         };
-        assert!(detail(&event).starts_with("use some-provider"));
+        let rendered = detail(&event);
+        assert!(
+            rendered.starts_with("use some-provider →"),
+            "got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("  "),
+            "a missing fingerprint must not leave a double space: {rendered}"
+        );
     }
 }
