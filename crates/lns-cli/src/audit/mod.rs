@@ -440,7 +440,7 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("volume_attached"), "got: {text}");
+        assert!(text.contains("data → /data"), "got: {text}");
     }
 
     #[tokio::test]
@@ -454,7 +454,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 0);
-        assert!(String::from_utf8(out).unwrap().contains("volume_attached"));
+        assert!(String::from_utf8(out).unwrap().contains("data → /data"));
     }
 
     #[tokio::test]

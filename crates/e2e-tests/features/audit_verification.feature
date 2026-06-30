@@ -12,6 +12,16 @@ Feature: lns audit inspects and verifies audit logs and the connection ledger
     Then the exit code is 0
     And the output contains "audit_event"
 
+  Scenario: a guest egress event reads like the approval prompt
+    Given a clean lns cache home
+    And a run "egress" with a guest egress event
+    When I run "lns audit egress"
+    Then the exit code is 0
+    And the output contains "egress"
+    And the output contains "GET api.example.test:443"
+    And the output contains "allowed once"
+    And the output does not contain "audit_event"
+
   Scenario: an intact chain verifies cleanly
     Given a clean lns cache home
     And a run "smoke" with a valid audit chain

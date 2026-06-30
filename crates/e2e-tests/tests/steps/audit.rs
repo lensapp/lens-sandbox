@@ -28,6 +28,20 @@ fn tampered_chain(world: &mut E2eWorld, run_id: String) {
     fs::write(run_dir.join("audit.jsonl"), TAMPERED_AUDIT_CHAIN).expect("write audit.jsonl");
 }
 
+#[given(regex = r#"^a run "([^"]+)" with a guest egress event$"#)]
+fn guest_egress(world: &mut E2eWorld, run_id: String) {
+    let run_dir = run_dir(world, &run_id);
+    let mut chain = lns_ipc::AuditChain::new();
+    let event = r#"{"ts":"2026-06-29T14:02:00Z","type":"audit_event","origin":"guest-proxy","action":"GET http://api.example.test:443/","metadata":{"reason":"user-allowed-once"},"result":"success","status_code":200}"#;
+    let augmented = chain.augment(event).expect("augment egress event");
+    let mut payload = String::new();
+    payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));
+    payload.push('\n');
+    fs::write(run_dir.join("audit.jsonl"), payload).expect("write audit.jsonl");
+    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    fs::write(run_dir.join("audit.anchor"), anchor.to_line()).expect("write audit.anchor");
+}
+
 #[given("a connection ledger with sample events")]
 fn connection_ledger(world: &mut E2eWorld) {
     let dir = ledger_dir(world);
