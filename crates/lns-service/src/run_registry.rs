@@ -159,13 +159,10 @@ fn rename_in(
             lns_ipc::short_run_id(&holder)
         ));
     }
-    match map.get_mut(&target) {
-        Some(h) => {
-            h.name = new_name.to_string();
-            Ok(())
-        }
-        None => Err(format!("no such run: {handle}")),
-    }
+    map.get_mut(&target)
+        .expect("resolve_in only returns ids present in the map")
+        .name = new_name.to_string();
+    Ok(())
 }
 
 pub fn deregister(run_id: &str) {
