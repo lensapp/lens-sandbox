@@ -27,8 +27,8 @@ fn run_with_records(
 }
 
 fn matches_filter(record: &LedgerRecord, args: &LogArgs) -> bool {
-    if let Some(run) = args.run
-        && record.run != run
+    if let Some(run) = &args.run
+        && &record.run != run
     {
         return false;
     }
@@ -58,7 +58,7 @@ fn render(
         }
         rows.push(vec![
             friendly_when(&record.ts),
-            format!("#{}", record.run),
+            lns_ipc::short_run_id(&record.run).to_string(),
             record.event.name().to_string(),
             detail(&record.event),
         ]);
@@ -160,10 +160,10 @@ mod tests {
     use crate::audit::KindArg;
     use lns_ipc::AuthKind;
 
-    fn rec(run: u32, event: LedgerEvent) -> LedgerRecord {
+    fn rec(run: &str, event: LedgerEvent) -> LedgerRecord {
         LedgerRecord {
             ts: "2026-06-29T14:02:11Z".into(),
-            run,
+            run: run.to_string(),
             microvm: "calm-finch".into(),
             event,
         }
@@ -222,9 +222,9 @@ mod tests {
     #[test]
     fn the_timeline_renders_a_row_per_event_with_details() {
         let records = vec![
-            rec(41, connection()),
-            rec(49, credential_use()),
-            rec(49, approval()),
+            rec("1a2b3c4d0000000000000000000000aa", connection()),
+            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
+            rec("5e6f7a8b0000000000000000000000bb", approval()),
         ];
         let text = render_to_string(&no_filter(), &records);
         assert!(text.contains("WHEN"));
@@ -236,9 +236,12 @@ mod tests {
 
     #[test]
     fn the_run_filter_keeps_only_matching_runs() {
-        let records = vec![rec(41, connection()), rec(49, credential_use())];
+        let records = vec![
+            rec("1a2b3c4d0000000000000000000000aa", connection()),
+            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
+        ];
         let args = LogArgs {
-            run: Some(49),
+            run: Some("5e6f7a8b0000000000000000000000bb".into()),
             ..no_filter()
         };
         let text = render_to_string(&args, &records);
@@ -248,7 +251,10 @@ mod tests {
 
     #[test]
     fn the_integration_filter_keeps_only_matching_integrations() {
-        let records = vec![rec(41, connection()), rec(49, credential_use())];
+        let records = vec![
+            rec("1a2b3c4d0000000000000000000000aa", connection()),
+            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
+        ];
         let args = LogArgs {
             integration: Some("some-oauth".into()),
             ..no_filter()
@@ -260,7 +266,10 @@ mod tests {
 
     #[test]
     fn the_kind_filter_keeps_only_matching_event_kinds() {
-        let records = vec![rec(49, approval()), rec(49, credential_use())];
+        let records = vec![
+            rec("5e6f7a8b0000000000000000000000bb", approval()),
+            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
+        ];
         let args = LogArgs {
             kind: Some(KindArg::CredentialUse),
             ..no_filter()
@@ -272,7 +281,7 @@ mod tests {
 
     #[test]
     fn json_output_emits_one_record_per_line() {
-        let records = vec![rec(49, credential_use())];
+        let records = vec![rec("5e6f7a8b0000000000000000000000bb", credential_use())];
         let args = LogArgs {
             json: true,
             ..no_filter()
@@ -284,9 +293,12 @@ mod tests {
 
     #[test]
     fn json_output_skips_records_that_do_not_match_the_filter() {
-        let records = vec![rec(41, connection()), rec(49, credential_use())];
+        let records = vec![
+            rec("1a2b3c4d0000000000000000000000aa", connection()),
+            rec("5e6f7a8b0000000000000000000000bb", credential_use()),
+        ];
         let args = LogArgs {
-            run: Some(49),
+            run: Some("5e6f7a8b0000000000000000000000bb".into()),
             json: true,
             ..no_filter()
         };

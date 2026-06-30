@@ -22,14 +22,14 @@ struct Conn {
     expires: Option<String>,
     dests: BTreeSet<String>,
     fingerprints: BTreeSet<String>,
-    runs: BTreeSet<u32>,
+    runs: BTreeSet<String>,
     last_used: String,
     key_uses: BTreeMap<String, KeyUse>,
 }
 
 #[derive(Default)]
 struct KeyUse {
-    runs: BTreeSet<u32>,
+    runs: BTreeSet<String>,
     first: String,
     last: String,
 }
@@ -57,7 +57,7 @@ fn aggregate(
             continue;
         };
         let conn = map.entry(integration.to_string()).or_default();
-        conn.runs.insert(record.run);
+        conn.runs.insert(record.run.clone());
         if record.ts > conn.last_used {
             conn.last_used = record.ts.clone();
         }
@@ -95,7 +95,7 @@ fn absorb(conn: &mut Conn, record: &LedgerRecord) {
 }
 
 fn record_key_use(use_: &mut KeyUse, record: &LedgerRecord) {
-    use_.runs.insert(record.run);
+    use_.runs.insert(record.run.clone());
     if use_.first.is_empty() || record.ts < use_.first {
         use_.first = record.ts.clone();
     }
@@ -214,9 +214,9 @@ fn scope_summary(conn: &Conn) -> String {
         .join(", ")
 }
 
-fn format_runs(runs: &BTreeSet<u32>) -> String {
+fn format_runs(runs: &BTreeSet<String>) -> String {
     runs.iter()
-        .map(|r| format!("#{r}"))
+        .map(|r| lns_ipc::short_run_id(r).to_string())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -225,10 +225,10 @@ fn format_runs(runs: &BTreeSet<u32>) -> String {
 mod tests {
     use super::*;
 
-    fn rec(run: u32, ts: &str, event: LedgerEvent) -> LedgerRecord {
+    fn rec(run: &str, ts: &str, event: LedgerEvent) -> LedgerRecord {
         LedgerRecord {
             ts: ts.into(),
-            run,
+            run: run.to_string(),
             microvm: format!("vm-{run}"),
             event,
         }
@@ -285,10 +285,18 @@ mod tests {
     #[test]
     fn the_summary_groups_oauth_and_apikey_integrations() {
         let records = vec![
-            rec(41, "2026-06-28T10:14:00Z", oauth_conn(true)),
-            rec(49, "2026-06-29T14:02:00Z", oauth_conn(true)),
             rec(
-                49,
+                "41aaaaaa000000000000000000000000",
+                "2026-06-28T10:14:00Z",
+                oauth_conn(true),
+            ),
+            rec(
+                "49bbbbbb000000000000000000000000",
+                "2026-06-29T14:02:00Z",
+                oauth_conn(true),
+            ),
+            rec(
+                "49bbbbbb000000000000000000000000",
                 "2026-06-29T14:05:00Z",
                 apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
@@ -298,7 +306,7 @@ mod tests {
         assert!(text.contains("oauth"));
         assert!(text.contains("@hchen"));
         assert!(text.contains("repo, read:org"));
-        assert!(text.contains("#41, #49"));
+        assert!(text.contains("41aaaaaa0000, 49bbbbbb0000"));
         assert!(text.contains("some-provider"));
         assert!(text.contains("apikey"));
         assert!(text.contains("fp 9c2f1a3d"));
@@ -309,12 +317,12 @@ mod tests {
     fn multiple_keys_collapse_to_a_count_in_the_summary() {
         let records = vec![
             rec(
-                41,
+                "41aaaaaa000000000000000000000000",
                 "2026-06-20T00:00:00Z",
                 apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
-                52,
+                "52cccccc000000000000000000000000",
                 "2026-06-29T00:00:00Z",
                 apikey_use("3e8b07aa", "api.some-provider.example"),
             ),
@@ -325,38 +333,42 @@ mod tests {
 
     #[test]
     fn the_oauth_drill_in_shows_account_scopes_and_expiry() {
-        let records = vec![rec(49, "2026-06-29T14:02:00Z", oauth_conn(true))];
+        let records = vec![rec(
+            "49bbbbbb000000000000000000000000",
+            "2026-06-29T14:02:00Z",
+            oauth_conn(true),
+        )];
         let text = detail_of("some-oauth", &records);
         assert!(text.contains("some-oauth  (oauth)"));
         assert!(text.contains("account    @hchen"));
         assert!(text.contains("scopes     repo, read:org"));
         assert!(text.contains("expires    2026-07-29 00:00:00"));
-        assert!(text.contains("runs       #49"));
+        assert!(text.contains("runs       49bbbbbb0000"));
     }
 
     #[test]
     fn the_apikey_drill_in_distinguishes_rotated_keys_per_run() {
         let records = vec![
             rec(
-                41,
+                "41aaaaaa000000000000000000000000",
                 "2026-06-20T00:00:00Z",
                 apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
-                49,
+                "49bbbbbb000000000000000000000000",
                 "2026-06-29T00:00:00Z",
                 apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
-                52,
+                "52cccccc000000000000000000000000",
                 "2026-06-29T12:00:00Z",
                 apikey_use("3e8b07aa", "api.some-provider.example"),
             ),
         ];
         let text = detail_of("some-provider", &records);
         assert!(text.contains("keys used"));
-        assert!(text.contains("fp 9c2f1a3d   runs #41, #49"));
-        assert!(text.contains("fp 3e8b07aa   runs #52"));
+        assert!(text.contains("fp 9c2f1a3d   runs 41aaaaaa0000, 49bbbbbb0000"));
+        assert!(text.contains("fp 3e8b07aa   runs 52cccccc0000"));
         assert!(text.contains("injected   api.some-provider.example"));
     }
 
@@ -369,8 +381,16 @@ mod tests {
     #[test]
     fn an_account_arriving_after_a_blank_connection_is_retained() {
         let records = vec![
-            rec(40, "2026-06-19T00:00:00Z", oauth_conn(false)),
-            rec(41, "2026-06-20T00:00:00Z", oauth_conn(true)),
+            rec(
+                "40dddddd000000000000000000000000",
+                "2026-06-19T00:00:00Z",
+                oauth_conn(false),
+            ),
+            rec(
+                "41aaaaaa000000000000000000000000",
+                "2026-06-20T00:00:00Z",
+                oauth_conn(true),
+            ),
         ];
         let text = detail_of("some-oauth", &records);
         assert!(text.contains("account    @hchen"));
@@ -379,7 +399,7 @@ mod tests {
     #[test]
     fn an_approval_only_integration_appears_with_a_dash_identity() {
         let records = vec![rec(
-            7,
+            "07eeeeee000000000000000000000000",
             "2026-06-19T00:00:00Z",
             LedgerEvent::Approval {
                 kind: lns_ipc::ApprovalKind::Integration,
@@ -393,13 +413,13 @@ mod tests {
         assert!(summary.contains("some-oauth"));
         let detail = detail_of("some-oauth", &records);
         assert!(detail.contains("some-oauth  (-)"));
-        assert!(detail.contains("runs       #7"));
+        assert!(detail.contains("runs       07eeeeee0000"));
     }
 
     #[test]
     fn a_network_approval_without_an_integration_is_not_a_connection() {
         let records = vec![rec(
-            9,
+            "09ffffff000000000000000000000000",
             "2026-06-29T00:00:00Z",
             LedgerEvent::Approval {
                 kind: lns_ipc::ApprovalKind::Network,

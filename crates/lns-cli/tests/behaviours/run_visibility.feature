@@ -47,7 +47,7 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Then `✓ booted microVM   (Xs)` is printed
     When the session is ready
     Then `✓ session ready` is printed
-    And finally `✓ started run #N` is printed before the attached session takes over
+    And finally `✓ started run 2a2a2a2a2a2a` is printed before the attached session takes over
 
   Scenario: Layer downloads show a live in-place progress bar on a terminal
     Given the image is not in the local cache
@@ -80,12 +80,12 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     When the run starts
     Then the summary block is printed
     And the phase lines stream as usual
-    Then `run #N` is printed on its own line (the existing scripting contract)
+    Then `run 2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a` is printed on its own line (the existing scripting contract)
     And the process exits 0 without attaching
 
   Scenario: The pre-start phase stream is distinct from in-run logs
     Given a run is starting
-    Then phase lines (`✓ …`, `✗ …`) lead up to `✓ started run #N`
+    Then phase lines (`✓ …`, `✗ …`) lead up to `✓ started run 2a2a2a2a2a2a`
     And `RunLog` frames from the workload are rendered exactly as they are today
     And the attached session takes over the terminal cleanly with no leftover phase output
 

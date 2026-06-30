@@ -55,7 +55,7 @@ Feature: managing running sandboxes from the CLI
     Given the service will answer Acknowledged
     When the user runs sandbox command "kill 3 --signal KILL"
     Then the exit code is 0
-    And the output contains "killed run #3"
+    And the output contains "killed run 3"
     And the service received a Kill request for run 3 with signal KILL
 
   Scenario: sandbox kill rejects an unknown signal name
@@ -68,7 +68,7 @@ Feature: managing running sandboxes from the CLI
     Given the service will answer RunStopped without force
     When the user runs sandbox command "stop 3"
     Then the exit code is 0
-    And the output contains "stopped run #3"
+    And the output contains "stopped run 3"
     And the service received a StopRun request for run 3 with timeout 10
 
   Scenario: a custom stop timeout is forwarded to the service
@@ -80,7 +80,7 @@ Feature: managing running sandboxes from the CLI
     Given the service will answer RunStopped with force
     When the user runs sandbox command "stop 3"
     Then the exit code is 0
-    And the output contains "killed run #3"
+    And the output contains "killed run 3"
 
   Scenario: stopping an unknown run fails with the daemon's reason
     Given the service will answer an error "no active run with id 99"
@@ -153,7 +153,7 @@ Feature: managing running sandboxes from the CLI
     Given the service will answer Acknowledged
     When the user runs sandbox command "rm 3"
     Then the exit code is 0
-    And the output contains "removed run #3"
+    And the output contains "removed run 3"
     And the service received a RemoveRun request for run 3
 
   Scenario: rm of a still-running run fails with the daemon's reason
@@ -166,8 +166,8 @@ Feature: managing running sandboxes from the CLI
     Given the service will answer RunsPruned for runs 4 and 7
     When the user runs sandbox command "prune"
     Then the exit code is 0
-    And the output contains "removed run #4"
-    And the output contains "removed run #7"
+    And the output contains "removed run 000000040000"
+    And the output contains "removed run 000000070000"
     And the service received a PruneRuns request
 
   Scenario: prune reports when there is nothing to remove

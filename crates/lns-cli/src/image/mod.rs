@@ -216,7 +216,7 @@ fn render_image_table<W: Write>(out: &mut W, rows: &[ImageInfo]) -> std::io::Res
                 short_digest(&i.digest),
                 format_size(i.size_bytes),
                 crate::service::friendly_started(&i.pulled),
-                in_use_str(i.in_use_by),
+                in_use_str(i.in_use_by.as_deref()),
             )
         })
         .collect();
@@ -249,9 +249,9 @@ fn short_digest(digest: &str) -> String {
     hex.chars().take(12).collect()
 }
 
-fn in_use_str(holder: Option<u32>) -> String {
+fn in_use_str(holder: Option<&str>) -> String {
     match holder {
-        Some(run_id) => format!("run #{run_id}"),
+        Some(run_id) => format!("run {}", lns_ipc::short_run_id(run_id)),
         None => "-".to_string(),
     }
 }
@@ -439,7 +439,7 @@ mod tests {
     async fn ls_renders_a_row_with_short_digest_and_holder() {
         let svc = CannedService::with([Some(Response::ImageList {
             images: vec![ImageInfo {
-                in_use_by: Some(7),
+                in_use_by: Some("1a2b3c4d0000000000000000000000aa".to_string()),
                 ..image("registry.example.test/some-image:1.0")
             }],
         })]);
@@ -451,7 +451,7 @@ mod tests {
         assert!(out.contains(&"a".repeat(12)), "got: {out}");
         assert!(!out.contains(&"a".repeat(64)), "got: {out}");
         assert!(out.contains("3 MiB"), "got: {out}");
-        assert!(out.contains("run #7"), "got: {out}");
+        assert!(out.contains("run 1a2b3c4d0000"), "got: {out}");
     }
 
     #[tokio::test]
@@ -547,7 +547,10 @@ mod tests {
 
     #[test]
     fn in_use_str_names_the_holder_or_dashes() {
-        assert_eq!(in_use_str(Some(7)), "run #7");
+        assert_eq!(
+            in_use_str(Some("1a2b3c4d0000000000000000000000aa")),
+            "run 1a2b3c4d0000"
+        );
         assert_eq!(in_use_str(None), "-");
     }
 

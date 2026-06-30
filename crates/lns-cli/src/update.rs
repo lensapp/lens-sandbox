@@ -896,7 +896,7 @@ mod tests {
         fn status(&self) -> crate::service::client::BoxFuture<'_, Option<lns_ipc::StatusInfo>> {
             unreachable!("update flow does not call status()")
         }
-        fn cancel_run(&self, _run_id: u32) -> crate::service::client::BoxFuture<'_, ()> {
+        fn cancel_run(&self, _run_id: String) -> crate::service::client::BoxFuture<'_, ()> {
             unreachable!("update flow does not call cancel_run()")
         }
     }
@@ -916,7 +916,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "update flow does not call cancel_run()")]
     fn fake_service_ctl_cancel_run_is_a_regression_tripwire() {
-        drop(FakeServiceCtl::default().cancel_run(0));
+        drop(FakeServiceCtl::default().cancel_run("aa01".to_string()));
     }
 
     fn args_default() -> UpdateArgs {

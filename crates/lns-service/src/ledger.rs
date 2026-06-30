@@ -59,7 +59,7 @@ pub trait LedgerRecorder: Send + Sync {
 }
 
 pub struct RunLedgerRecorder {
-    run: u32,
+    run: String,
     microvm: String,
     clock: Arc<dyn Clock>,
     tx: Option<mpsc::UnboundedSender<LedgerRecord>>,
@@ -67,12 +67,12 @@ pub struct RunLedgerRecorder {
 }
 
 impl RunLedgerRecorder {
-    pub fn new(run: u32, microvm: String, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(run: String, microvm: String, clock: Arc<dyn Clock>) -> Self {
         Self::with_sink(run, microvm, clock, Arc::new(FileLedgerSink))
     }
 
     pub fn with_sink(
-        run: u32,
+        run: String,
         microvm: String,
         clock: Arc<dyn Clock>,
         sink: Arc<dyn LedgerSink>,
@@ -97,7 +97,7 @@ impl LedgerRecorder for RunLedgerRecorder {
     fn record(&self, event: LedgerEvent) {
         let record = LedgerRecord {
             ts: now_rfc3339(&*self.clock),
-            run: self.run,
+            run: self.run.clone(),
             microvm: self.microvm.clone(),
             event,
         };
@@ -172,10 +172,10 @@ mod tests {
         }
     }
 
-    fn sample(run: u32) -> LedgerRecord {
+    fn sample(run: &str) -> LedgerRecord {
         LedgerRecord {
             ts: "2026-06-29T14:02:11Z".into(),
-            run,
+            run: run.to_string(),
             microvm: "calm-finch".into(),
             event: LedgerEvent::Connection {
                 integration: "some-oauth".into(),
@@ -197,7 +197,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("ledger.jsonl");
         let anchor_path = d.path().join("ledger.anchor");
-        append_ledger_record_at(&path, &anchor_path, &sample(49)).unwrap();
+        append_ledger_record_at(&path, &anchor_path, &sample("aa49")).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -209,7 +209,7 @@ mod tests {
             "first line must be genesis: {content}"
         );
         let back: LedgerRecord = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(back, sample(49));
+        assert_eq!(back, sample("aa49"));
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 1);
     }
@@ -219,8 +219,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("ledger.jsonl");
         let anchor_path = d.path().join("ledger.anchor");
-        append_ledger_record_at(&path, &anchor_path, &sample(1)).unwrap();
-        append_ledger_record_at(&path, &anchor_path, &sample(2)).unwrap();
+        append_ledger_record_at(&path, &anchor_path, &sample("aa01")).unwrap();
+        append_ledger_record_at(&path, &anchor_path, &sample("aa02")).unwrap();
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 2);
     }
@@ -231,16 +231,16 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
-        append_ledger_record(&sample(7)).unwrap();
+        append_ledger_record(&sample("aa07")).unwrap();
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
-        assert!(content.contains("\"run\":7"), "{content}");
+        assert!(content.contains("\"run\":\"aa07\""), "{content}");
     }
 
     #[test]
     fn recorder_stamps_run_microvm_and_clock_onto_each_event() {
         let sink = Arc::new(CapturingSink::default());
         let recorder = RunLedgerRecorder::with_sink(
-            49,
+            "aa49".into(),
             "calm-finch".into(),
             Arc::new(FakeClock(0)),
             sink.clone(),
@@ -249,7 +249,7 @@ mod tests {
         drop(recorder);
         let records = sink.records.lock().unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].run, 49);
+        assert_eq!(records[0].run, "aa49");
         assert_eq!(records[0].microvm, "calm-finch");
         assert_eq!(records[0].ts, "1970-01-01T00:00:00Z");
     }
@@ -260,8 +260,12 @@ mod tests {
             fail: true,
             ..Default::default()
         });
-        let recorder =
-            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        let recorder = RunLedgerRecorder::with_sink(
+            "aa01".into(),
+            "vm".into(),
+            Arc::new(FakeClock(0)),
+            sink.clone(),
+        );
         recorder.record(network_approval());
         drop(recorder);
         assert_eq!(
@@ -277,7 +281,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
-        let recorder = RunLedgerRecorder::new(7, "vm".into(), Arc::new(FakeClock(1_735_689_600)));
+        let recorder = RunLedgerRecorder::new(
+            "aa07".into(),
+            "vm".into(),
+            Arc::new(FakeClock(1_735_689_600)),
+        );
         recorder.record(LedgerEvent::Approval {
             kind: ApprovalKind::Network,
             target: "x".into(),
@@ -287,15 +295,19 @@ mod tests {
         });
         drop(recorder);
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
-        assert!(content.contains("\"run\":7"), "{content}");
+        assert!(content.contains("\"run\":\"aa07\""), "{content}");
         assert!(content.contains("deny_once"), "{content}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_inside_a_multi_thread_runtime_drains_via_block_in_place() {
         let sink = Arc::new(CapturingSink::default());
-        let recorder =
-            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        let recorder = RunLedgerRecorder::with_sink(
+            "aa01".into(),
+            "vm".into(),
+            Arc::new(FakeClock(0)),
+            sink.clone(),
+        );
         recorder.record(network_approval());
         drop(recorder);
         assert_eq!(
@@ -328,8 +340,12 @@ mod tests {
         }
 
         let sink = Arc::new(SlowFirstSink::default());
-        let recorder =
-            RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
+        let recorder = RunLedgerRecorder::with_sink(
+            "aa01".into(),
+            "vm".into(),
+            Arc::new(FakeClock(0)),
+            sink.clone(),
+        );
         for target in ["a", "b", "c", "d", "e"] {
             recorder.record(LedgerEvent::Approval {
                 kind: ApprovalKind::Network,
@@ -359,7 +375,8 @@ mod tests {
             for t in 0..threads {
                 scope.spawn(move || {
                     for i in 0..per_thread {
-                        append_ledger_record(&sample(t * per_thread + i)).unwrap();
+                        append_ledger_record(&sample(&format!("{:032x}", t * per_thread + i)))
+                            .unwrap();
                     }
                 });
             }

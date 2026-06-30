@@ -84,7 +84,7 @@ pub struct ImageRig {
     pub caches: CacheFake,
     pub images_root: PathBuf,
     pub active: Vec<lns_ipc::RunSummary>,
-    pub holder_run_id: Option<u32>,
+    pub holder_run_id: Option<String>,
     next_run_id: u32,
     seeded: HashMap<String, Vec<(String, u64)>>,
     pub last_list: Option<Vec<lns_ipc::ImageInfo>>,
@@ -157,9 +157,9 @@ impl ImageRig {
     }
 
     pub fn hold(&mut self, reference: &str) {
-        let run_id = self.next_run_id;
+        let run_id = format!("{:032x}", self.next_run_id);
         self.next_run_id += 1;
-        self.holder_run_id = Some(run_id);
+        self.holder_run_id = Some(run_id.clone());
         self.active.push(lns_ipc::RunSummary {
             id: run_id,
             name: String::new(),

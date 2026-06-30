@@ -21,6 +21,10 @@ pub fn data_root() -> Result<PathBuf, CachePathError> {
         .ok_or(CachePathError::NoDataDir)
 }
 
+pub fn short_run_id(id: &str) -> &str {
+    &id[..id.len().min(12)]
+}
+
 pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
     Ok(cache_root()?.join("runs").join(run_id).join("audit.jsonl"))
 }
@@ -40,6 +44,16 @@ pub fn connection_ledger_anchor() -> Result<PathBuf, CachePathError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_run_id_truncates_to_twelve_chars_and_passes_shorter_ids_through() {
+        assert_eq!(
+            short_run_id("1a2b3c4d0000000000000000000000aa"),
+            "1a2b3c4d0000"
+        );
+        assert_eq!(short_run_id("abc"), "abc");
+        assert_eq!(short_run_id(""), "");
+    }
 
     #[test]
     fn audit_log_path_appends_runs_runid_filename_under_cache_root() {

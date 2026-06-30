@@ -50,10 +50,10 @@ pub struct BehaviourWorld {
     pub image: Option<ImageRig>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
-    pub lifecycle_run: Option<u32>,
+    pub lifecycle_run: Option<String>,
 
     /// Run id registered by a naming scenario, addressable later by name or id.
-    pub naming_run: Option<u32>,
+    pub naming_run: Option<String>,
     /// Name a naming scenario last assigned or observed.
     pub naming_name: Option<String>,
     /// First auto-generated name captured when comparing auto-name uniqueness.

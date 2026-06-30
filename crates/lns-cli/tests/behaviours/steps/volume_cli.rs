@@ -12,7 +12,11 @@ use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};
 const FIXTURE_CREATED: &str = "2026-06-01T12:00:00Z";
 const FIXTURE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Option<u32>) -> VolumeInfo {
+fn hexid(n: u32) -> String {
+    format!("{n:08x}{}", "0".repeat(24))
+}
+
+fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Option<String>) -> VolumeInfo {
     VolumeInfo {
         name: name.to_string(),
         size_bytes: FIXTURE_SIZE_BYTES,
@@ -95,7 +99,7 @@ fn reports_held_volume(world: &mut BehaviourWorld, name: String, disk: u64, run:
     world
         .volume
         .volumes
-        .push(fixture_volume(&name, disk, Some(run)));
+        .push(fixture_volume(&name, disk, Some(hexid(run))));
 }
 
 #[given(expr = "the service reports an idle volume {string} using {int} bytes on disk")]

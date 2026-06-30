@@ -71,7 +71,7 @@ pub struct SupervisorSession {
 
 impl SupervisorSession {
     pub async fn start_if_policy(
-        run_id: u32,
+        run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
         guest_tools_root: PathBuf,
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn start_if_policy_returns_none_when_no_policy() {
         let result = SupervisorSession::start_if_policy(
-            42,
+            "aa42".to_string(),
             "vm-42".into(),
             None,
             PathBuf::from("/tmp"),
@@ -535,7 +535,7 @@ mod tests {
         .expect("policy");
 
         let result = SupervisorSession::start_if_policy(
-            999_999,
+            "deadbeef00000000000000000000aa99".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
             d.path().to_path_buf(),

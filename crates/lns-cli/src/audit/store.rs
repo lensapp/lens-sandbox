@@ -61,7 +61,7 @@ mod tests {
     fn sample_line() -> String {
         let record = LedgerRecord {
             ts: "2026-06-29T14:05:30Z".into(),
-            run: 49,
+            run: "5e6f7a8b0000000000000000000000bb".into(),
             microvm: "calm-finch".into(),
             event: LedgerEvent::CredentialUse {
                 integration: "some-provider".into(),
@@ -91,7 +91,7 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let records = collect(&path).unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].run, 49);
+        assert_eq!(records[0].run, "5e6f7a8b0000000000000000000000bb");
     }
 
     #[test]

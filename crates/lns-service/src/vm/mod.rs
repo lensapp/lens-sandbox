@@ -17,7 +17,7 @@ pub use vz::VsockConnector;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct VmSpec {
-    pub run_id: u32,
+    pub run_id: String,
     pub cpus: u8,
     pub memory_mib: usize,
     pub kernel: PathBuf,
@@ -923,7 +923,7 @@ mod tests {
 
     fn dummy_vmspec() -> VmSpec {
         VmSpec {
-            run_id: 1,
+            run_id: "aa01".to_string(),
             cpus: 1,
             memory_mib: 256,
             kernel: PathBuf::from("/dev/null"),

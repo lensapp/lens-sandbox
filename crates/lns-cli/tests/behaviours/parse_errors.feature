@@ -15,11 +15,6 @@ Feature: clap rejects bad input with exit code 2
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
 
-  Scenario: lns audit log rejects a non-numeric --run filter
-    When I run "lns audit log --run notanumber"
-    Then the exit code is 2
-    And the output contains "invalid value"
-
   Scenario: lns run -v with a non-absolute target is rejected before any service round-trip
     When I run "lns run -v data:notabsolute alpine"
     Then the exit code is 2

@@ -10,7 +10,7 @@ Feature: naming runs — the service owns names and resolution
     Given a fresh service handler
     When a run is registered without a name
     Then the run is assigned a non-empty name
-    And the assigned name is not all digits
+    And the assigned name is not all hex
 
   Scenario: a run registered with a name keeps that name
     Given a fresh service handler
@@ -47,11 +47,11 @@ Feature: naming runs — the service owns names and resolution
     Then the response is Acknowledged
     And a run can then be registered with the name "reviewer"
 
-  Scenario: an all-digit name is rejected
+  Scenario: an all-hex name is rejected
     Given a fresh service handler
     When a run is registered with the name "7"
     Then registration is refused
-    And the refusal explains a name must not be all digits
+    And the refusal explains a name must not be all hex
 
   Scenario: a name with an illegal character is rejected
     Given a fresh service handler
@@ -72,7 +72,7 @@ Feature: naming runs — the service owns names and resolution
     Then the response is Error
     And the error message contains "already in use"
 
-  Scenario: rename to an all-digit name is refused
+  Scenario: rename to an all-hex name is refused
     Given a registered run named "reviewer"
     When a RenameRun request renames "reviewer" to "7"
     Then the response is Error

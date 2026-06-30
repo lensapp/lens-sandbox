@@ -48,8 +48,8 @@ fn connection_ledger(world: &mut E2eWorld) {
     let mut chain = lns_ipc::AuditChain::new();
     let mut payload = String::new();
     for event in [
-        r#"{"ts":"2026-06-29T14:02:11Z","run":41,"microvm":"calm-finch","event":"connection","integration":"some-oauth","auth":"oauth","account":"@some-user","scopes":["repo","read:org"]}"#,
-        r#"{"ts":"2026-06-29T14:05:30Z","run":49,"microvm":"calm-finch","event":"credential_use","integration":"some-provider","auth":"apikey","fp":"9c2f1a3d","dest":["api.some-provider.example"]}"#,
+        r#"{"ts":"2026-06-29T14:02:11Z","run":"41aaaaaa000000000000000000000000","microvm":"calm-finch","event":"connection","integration":"some-oauth","auth":"oauth","account":"@some-user","scopes":["repo","read:org"]}"#,
+        r#"{"ts":"2026-06-29T14:05:30Z","run":"49bbbbbb000000000000000000000000","microvm":"calm-finch","event":"credential_use","integration":"some-provider","auth":"apikey","fp":"9c2f1a3d","dest":["api.some-provider.example"]}"#,
     ] {
         let augmented = chain.augment(event).expect("augment ledger record");
         payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));
@@ -66,8 +66,8 @@ fn tampered_connection_ledger(world: &mut E2eWorld) {
     let mut chain = lns_ipc::AuditChain::new();
     let mut payload = String::new();
     for event in [
-        r#"{"ts":"2026-06-29T14:02:11Z","run":41,"microvm":"calm-finch","event":"connection","integration":"some-oauth","auth":"oauth","account":"@some-user","scopes":["repo","read:org"]}"#,
-        r#"{"ts":"2026-06-29T14:05:30Z","run":49,"microvm":"calm-finch","event":"credential_use","integration":"some-provider","auth":"apikey","fp":"9c2f1a3d","dest":["api.some-provider.example"]}"#,
+        r#"{"ts":"2026-06-29T14:02:11Z","run":"41aaaaaa000000000000000000000000","microvm":"calm-finch","event":"connection","integration":"some-oauth","auth":"oauth","account":"@some-user","scopes":["repo","read:org"]}"#,
+        r#"{"ts":"2026-06-29T14:05:30Z","run":"49bbbbbb000000000000000000000000","microvm":"calm-finch","event":"credential_use","integration":"some-provider","auth":"apikey","fp":"9c2f1a3d","dest":["api.some-provider.example"]}"#,
     ] {
         let augmented = chain.augment(event).expect("augment ledger record");
         payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));

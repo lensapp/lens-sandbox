@@ -207,10 +207,10 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         return Ok(code);
     }
 
-    render_started_run(run_id, &mut std::io::stderr(), quiet).ok();
+    render_started_run(&run_id, &mut std::io::stderr(), quiet).ok();
 
     if detached {
-        println!("run #{run_id}");
+        println!("{run_id}");
         return Ok(0);
     }
 
@@ -268,7 +268,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         Response::Error { message } => anyhow::bail!("daemon error: {message}"),
         other => anyhow::bail!("expected RunStarted, got {other:?}"),
     };
-    crate::log::debug!(run_id = run_id, "exec session opened");
+    crate::log::debug!(run_id = %run_id, "exec session opened");
 
     drive_attached_session(
         stream,
@@ -331,7 +331,7 @@ pub enum DetachBehaviour {
 pub(crate) async fn drive_attached_session<S>(
     stream: S,
     aux_socket: Option<PathBuf>,
-    run_id: u32,
+    run_id: String,
     tty: bool,
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
@@ -361,7 +361,7 @@ where
 pub async fn drive_attached_session_with_writers<S, O, E>(
     mut stream: S,
     aux_socket: Option<PathBuf>,
-    run_id: u32,
+    run_id: String,
     tty: bool,
     stdout_is_terminal: bool,
     detach_chord: Vec<u8>,
@@ -386,13 +386,15 @@ where
     let (cancel_task, winsize_task, stdin_task) = match aux_socket {
         Some(socket) => {
             let cancel_client = real_client()?;
+            let cancel_run_id = run_id.clone();
             let cancel = tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
-                cancel_client.cancel_run(run_id).await;
+                cancel_client.cancel_run(cancel_run_id).await;
             });
+            let winsize_run_id = run_id.clone();
             let winsize = tty.then(|| {
                 let s = socket.clone();
-                tokio::spawn(async move { run_winsize_forwarder(s, run_id).await })
+                tokio::spawn(async move { run_winsize_forwarder(s, winsize_run_id).await })
             });
             let pump_chord = detach_chord;
             let pump_early_exit = early_exit_tx.clone();
@@ -613,7 +615,7 @@ where
 
 async fn run_stdin_pump(
     socket: PathBuf,
-    run_id: u32,
+    run_id: String,
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
 ) -> Result<bool> {
@@ -629,7 +631,7 @@ async fn run_stdin_pump(
                         let _ = send_one_shot(
                             &socket,
                             &Request::RunStdin {
-                                run_id,
+                                run_id: run_id.clone(),
                                 bytes: held,
                             },
                         )
@@ -647,7 +649,7 @@ async fn run_stdin_pump(
         let chunk = &buf[..n];
         match detector.as_mut() {
             Some(d) => {
-                if !pump_with_detector(&socket, run_id, chunk, d, detach).await? {
+                if !pump_with_detector(&socket, &run_id, chunk, d, detach).await? {
                     return Ok(true);
                 }
             }
@@ -655,7 +657,7 @@ async fn run_stdin_pump(
                 send_one_shot(
                     &socket,
                     &Request::RunStdin {
-                        run_id,
+                        run_id: run_id.clone(),
                         bytes: chunk.to_vec(),
                     },
                 )
@@ -667,7 +669,7 @@ async fn run_stdin_pump(
 
 async fn pump_with_detector(
     socket: &Path,
-    run_id: u32,
+    run_id: &str,
     bytes: &[u8],
     detector: &mut DetachChordDetector,
     detach: DetachBehaviour,
@@ -693,12 +695,12 @@ enum PumpControl {
     Detach,
 }
 
-fn drain_pending(run_id: u32, pending: &mut Vec<u8>) -> Option<Request> {
+fn drain_pending(run_id: &str, pending: &mut Vec<u8>) -> Option<Request> {
     if pending.is_empty() {
         None
     } else {
         Some(Request::RunStdin {
-            run_id,
+            run_id: run_id.to_string(),
             bytes: std::mem::take(pending),
         })
     }
@@ -706,7 +708,7 @@ fn drain_pending(run_id: u32, pending: &mut Vec<u8>) -> Option<Request> {
 
 fn plan_feed(
     action: FeedAction,
-    run_id: u32,
+    run_id: &str,
     pending: &mut Vec<u8>,
     detach: DetachBehaviour,
 ) -> (Vec<Request>, PumpControl) {
@@ -722,7 +724,7 @@ fn plan_feed(
         FeedAction::Flush(held) => {
             let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
             requests.push(Request::RunStdin {
-                run_id,
+                run_id: run_id.to_string(),
                 bytes: held,
             });
             (requests, PumpControl::Continue)
@@ -732,7 +734,7 @@ fn plan_feed(
             let mut combined = held;
             combined.push(current);
             requests.push(Request::RunStdin {
-                run_id,
+                run_id: run_id.to_string(),
                 bytes: combined,
             });
             (requests, PumpControl::Continue)
@@ -741,10 +743,12 @@ fn plan_feed(
             let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
             match detach {
                 DetachBehaviour::SignalAndDrain => requests.push(Request::RunSignal {
-                    run_id,
+                    run_id: run_id.to_string(),
                     signal: SignalKind::Hup,
                 }),
-                DetachBehaviour::DetachRun => requests.push(Request::RunDetach { run_id }),
+                DetachBehaviour::DetachRun => requests.push(Request::RunDetach {
+                    run_id: run_id.to_string(),
+                }),
                 DetachBehaviour::LeaveRunning => {}
             }
             (requests, PumpControl::Detach)
@@ -752,7 +756,7 @@ fn plan_feed(
     }
 }
 
-async fn run_winsize_forwarder(socket: PathBuf, run_id: u32) -> Result<()> {
+async fn run_winsize_forwarder(socket: PathBuf, run_id: String) -> Result<()> {
     use tokio::signal::unix::{SignalKind as TokioSig, signal};
     let mut sigwinch = match signal(TokioSig::window_change()) {
         Ok(s) => s,
@@ -765,9 +769,16 @@ async fn run_winsize_forwarder(socket: PathBuf, run_id: u32) -> Result<()> {
         let Some((rows, cols)) = crate::raw_mode::host_winsize() else {
             continue;
         };
-        if send_one_shot(&socket, &Request::RunResize { run_id, rows, cols })
-            .await
-            .is_err()
+        if send_one_shot(
+            &socket,
+            &Request::RunResize {
+                run_id: run_id.clone(),
+                rows,
+                cols,
+            },
+        )
+        .await
+        .is_err()
         {
             return Ok(());
         }
@@ -907,14 +918,14 @@ pub fn render_status_line(
 }
 
 pub fn render_started_run(
-    run_id: u32,
+    run_id: &str,
     writer: &mut impl std::io::Write,
     quiet: bool,
 ) -> std::io::Result<()> {
     render_status_line(
         LogLevel::Info,
         Some("Started"),
-        &format!("run #{run_id}"),
+        &format!("run {}", lns_ipc::short_run_id(run_id)),
         writer,
         quiet,
     )
@@ -943,7 +954,7 @@ mod tests {
         let code = drive_attached_session(
             client,
             None,
-            42,
+            "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a".to_string(),
             false,
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
@@ -1212,7 +1223,7 @@ mod tests {
         let code = drive_attached_session(
             client,
             None,
-            42,
+            "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a".to_string(),
             false,
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
@@ -1236,7 +1247,7 @@ mod tests {
         let err = drive_attached_session(
             client,
             None,
-            42,
+            "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a".to_string(),
             false,
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
@@ -1253,9 +1264,16 @@ mod tests {
     #[test]
     fn render_status_line_renders_started_run_in_check_cadence_not_right_aligned() {
         let mut buf = Vec::<u8>::new();
-        render_status_line(LogLevel::Info, Some("Started"), "run #42", &mut buf, false).unwrap();
+        render_status_line(
+            LogLevel::Info,
+            Some("Started"),
+            "run 2a2a2a2a2a2a",
+            &mut buf,
+            false,
+        )
+        .unwrap();
         let s = String::from_utf8(buf).unwrap();
-        assert_eq!(s, "✓ started run #42\n");
+        assert_eq!(s, "✓ started run 2a2a2a2a2a2a\n");
         assert!(
             !s.contains("     Started"),
             "right-aligned padding leaked: {s:?}"
@@ -1265,8 +1283,11 @@ mod tests {
     #[test]
     fn render_started_run_routes_run_id_through_the_check_renderer() {
         let mut buf = Vec::<u8>::new();
-        render_started_run(7, &mut buf, false).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "✓ started run #7\n");
+        render_started_run("07eeeeee000000000000000000000000", &mut buf, false).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "✓ started run 07eeeeee0000\n"
+        );
     }
 
     #[test]
@@ -1441,7 +1462,7 @@ mod tests {
         let code = drive_attached_session_with_writers(
             client,
             None,
-            1,
+            "1".to_string(),
             false,
             true,
             Vec::new(),
@@ -1561,7 +1582,7 @@ mod tests {
         let code = drive_attached_session_with_writers(
             client,
             None,
-            1,
+            "1".to_string(),
             false,
             true,
             Vec::new(),
@@ -1591,7 +1612,7 @@ mod tests {
         let code = drive_attached_session_with_writers(
             client,
             None,
-            1,
+            "1".to_string(),
             false,
             false,
             Vec::new(),
@@ -1623,7 +1644,7 @@ mod tests {
         let code = drive_attached_session_with_writers(
             client,
             None,
-            1,
+            "1".to_string(),
             false,
             true,
             Vec::new(),
@@ -1651,7 +1672,7 @@ mod tests {
         let mut pending = Vec::new();
         let (requests, control) = plan_feed(
             FeedAction::Forward(b'a'),
-            1,
+            "1",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
@@ -1665,14 +1686,14 @@ mod tests {
         let mut pending = vec![b'x', b'y'];
         let (requests, _) = plan_feed(
             FeedAction::Hold,
-            7,
+            "7",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
         assert_eq!(
             requests,
             vec![Request::RunStdin {
-                run_id: 7,
+                run_id: "7".to_string(),
                 bytes: vec![b'x', b'y']
             }]
         );
@@ -1684,7 +1705,7 @@ mod tests {
         let mut pending = Vec::new();
         let (requests, _) = plan_feed(
             FeedAction::Hold,
-            7,
+            "7",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
@@ -1696,7 +1717,7 @@ mod tests {
         let mut pending = vec![b'p'];
         let (requests, _) = plan_feed(
             FeedAction::Flush(vec![b'h']),
-            3,
+            "3",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
@@ -1704,11 +1725,11 @@ mod tests {
             requests,
             vec![
                 Request::RunStdin {
-                    run_id: 3,
+                    run_id: "3".to_string(),
                     bytes: vec![b'p']
                 },
                 Request::RunStdin {
-                    run_id: 3,
+                    run_id: "3".to_string(),
                     bytes: vec![b'h']
                 },
             ]
@@ -1721,14 +1742,14 @@ mod tests {
         let mut pending = Vec::new();
         let (requests, _) = plan_feed(
             FeedAction::FlushAndForward(vec![b'h'], b'c'),
-            3,
+            "3",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
         assert_eq!(
             requests,
             vec![Request::RunStdin {
-                run_id: 3,
+                run_id: "3".to_string(),
                 bytes: vec![b'h', b'c']
             }]
         );
@@ -1739,7 +1760,7 @@ mod tests {
         let mut pending = vec![b'p'];
         let (requests, control) = plan_feed(
             FeedAction::Trigger,
-            9,
+            "9",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
         );
@@ -1747,11 +1768,11 @@ mod tests {
             requests,
             vec![
                 Request::RunStdin {
-                    run_id: 9,
+                    run_id: "9".to_string(),
                     bytes: vec![b'p']
                 },
                 Request::RunSignal {
-                    run_id: 9,
+                    run_id: "9".to_string(),
                     signal: SignalKind::Hup
                 },
             ]
@@ -1765,14 +1786,14 @@ mod tests {
         let mut pending = vec![b'p'];
         let (requests, control) = plan_feed(
             FeedAction::Trigger,
-            9,
+            "9",
             &mut pending,
             DetachBehaviour::LeaveRunning,
         );
         assert_eq!(
             requests,
             vec![Request::RunStdin {
-                run_id: 9,
+                run_id: "9".to_string(),
                 bytes: vec![b'p']
             }],
             "a docker-style detach flushes pending input but never signals the workload"
@@ -1879,7 +1900,7 @@ mod tests {
     #[test]
     fn render_started_run_quiet_suppresses_output() {
         let mut buf = Vec::<u8>::new();
-        render_started_run(7, &mut buf, true).unwrap();
+        render_started_run("07eeeeee000000000000000000000000", &mut buf, true).unwrap();
         assert!(buf.is_empty(), "quiet must suppress the started-run line");
     }
 

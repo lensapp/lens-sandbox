@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 
 use crate::oauth::Clock;
 
-pub fn audit_path(run_id: u32) -> Result<PathBuf> {
-    Ok(lns_ipc::audit_log_for_run(&run_id.to_string())?)
+pub fn audit_path(run_id: &str) -> Result<PathBuf> {
+    Ok(lns_ipc::audit_log_for_run(run_id)?)
 }
 
 pub fn anchor_path_for(audit_path: &Path) -> PathBuf {
@@ -218,7 +218,7 @@ pub fn record_volume_attached_at(
 }
 
 pub fn record_volume_attached(
-    run_id: u32,
+    run_id: &str,
     name: &str,
     target: &str,
     clock: &dyn Clock,
@@ -265,7 +265,7 @@ pub fn record_bind_attached_at(
 }
 
 pub fn record_bind_attached(
-    run_id: u32,
+    run_id: &str,
     source: &str,
     target: &str,
     exposed_secrets: &[String],
@@ -380,8 +380,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_bind_attached(123, "/Users/me/proj", "/work", &[], &[], &CLOCK).unwrap();
-        let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
+        record_bind_attached("aa123", "/Users/me/proj", "/work", &[], &[], &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(
             content.contains("\"source\":\"/Users/me/proj\""),
             "{content}"
@@ -413,8 +413,8 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn audit_path_lands_under_the_run_directory() {
-        let p = audit_path(99).unwrap();
-        assert!(p.ends_with("runs/99/audit.jsonl"), "got {}", p.display());
+        let p = audit_path("aa99").unwrap();
+        assert!(p.ends_with("runs/aa99/audit.jsonl"), "got {}", p.display());
     }
 
     #[test]
@@ -423,8 +423,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_volume_attached(123, "prism-data", "/data", &CLOCK).unwrap();
-        let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
+        record_volume_attached("aa123", "prism-data", "/data", &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(content.contains("\"name\":\"prism-data\""), "{content}");
         assert!(content.contains("\"target\":\"/data\""), "{content}");
     }

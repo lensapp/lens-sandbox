@@ -63,11 +63,15 @@ impl SandboxService for FakeSandboxService {
     }
 }
 
+fn hexid(n: u32) -> String {
+    format!("{n:08x}{}", "0".repeat(24))
+}
+
 fn details_with(image: &str, config: RunConfig) -> Response {
     Response::RunInspect {
         details: Box::new(RunDetails {
             summary: RunSummary {
-                id: 3,
+                id: hexid(3),
                 name: "reviewer".into(),
                 image: image.to_string(),
                 command: "some-command".into(),
@@ -107,7 +111,7 @@ fn canned_acknowledged(w: &mut BehaviourWorld) {
 #[given(regex = r"^the service will answer RunsPruned for runs (\d+) and (\d+)$")]
 fn canned_pruned(w: &mut BehaviourWorld, first: u32, second: u32) {
     w.sandbox.response = Some(Response::RunsPruned {
-        removed: vec![first, second],
+        removed: vec![hexid(first), hexid(second)],
     });
 }
 
@@ -143,7 +147,7 @@ fn then_prune_request(w: &mut BehaviourWorld) -> Result<(), String> {
 fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
     w.sandbox.response = Some(Response::RunList {
         runs: vec![RunSummary {
-            id: run_id,
+            id: hexid(run_id),
             name: String::new(),
             image,
             command: "some-command".into(),
@@ -237,7 +241,10 @@ fn canned_stats(w: &mut BehaviourWorld, _run_id: u32, permille: u32, used: u64, 
 #[given(regex = r#"^the run (\d+) stream carries stdout "([^"]*)" then ends$"#)]
 fn stream_then_ends(w: &mut BehaviourWorld, run_id: u32, text: String) {
     w.sandbox.frames = vec![
-        encode_frame(&Response::RunStarted { run_id }).unwrap(),
+        encode_frame(&Response::RunStarted {
+            run_id: hexid(run_id),
+        })
+        .unwrap(),
         encode_wire_frame(&WireFrame::Stdout(text.into_bytes())).unwrap(),
         encode_frame(&Response::Acknowledged).unwrap(),
     ];
@@ -246,7 +253,10 @@ fn stream_then_ends(w: &mut BehaviourWorld, run_id: u32, text: String) {
 #[given(regex = r#"^the run (\d+) stream carries stdout "([^"]*)" then exits with code (\d+)$"#)]
 fn stream_then_exits(w: &mut BehaviourWorld, run_id: u32, text: String, code: i32) {
     w.sandbox.frames = vec![
-        encode_frame(&Response::RunStarted { run_id }).unwrap(),
+        encode_frame(&Response::RunStarted {
+            run_id: hexid(run_id),
+        })
+        .unwrap(),
         encode_wire_frame(&WireFrame::Stdout(text.into_bytes())).unwrap(),
         encode_frame(&Response::RunExit { code }).unwrap(),
     ];
@@ -356,7 +366,7 @@ fn then_workload_stdout(w: &mut BehaviourWorld, needle: String) -> Result<(), St
 fn canned_named_run_listing(w: &mut BehaviourWorld, run_id: u32, name: String, image: String) {
     w.sandbox.response = Some(Response::RunList {
         runs: vec![RunSummary {
-            id: run_id,
+            id: hexid(run_id),
             name,
             image,
             command: "some-command".into(),

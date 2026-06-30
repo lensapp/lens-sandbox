@@ -7,14 +7,14 @@ use lns_service::run_registry;
 
 fn clear_name(name: &str) {
     if let Ok(id) = run_registry::resolve(name) {
-        run_registry::deregister(id);
+        run_registry::deregister(&id);
     }
 }
 
 fn do_register(world: &mut BehaviourWorld, requested: Option<String>) {
     let id = run_registry::allocate_run_id();
     match run_registry::register_named(
-        id,
+        id.clone(),
         requested,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     ) {
@@ -47,7 +47,7 @@ async fn given_registered_named(world: &mut BehaviourWorld, name: String) {
 async fn given_registered_named_exited(world: &mut BehaviourWorld, name: String) {
     clear_name(&name);
     do_register(world, Some(name));
-    if let Some(id) = world.naming_run {
+    if let Some(id) = &world.naming_run {
         run_registry::set_exit_code(id, 0);
     }
 }
@@ -66,11 +66,14 @@ fn then_non_empty_name(world: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
-#[then("the assigned name is not all digits")]
-fn then_not_all_digits(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the assigned name is not all hex")]
+fn then_not_all_hex(world: &mut BehaviourWorld) -> Result<(), String> {
     let name = world.naming_name.as_deref().ok_or("no name assigned")?;
-    if name.bytes().all(|b| b.is_ascii_digit()) {
-        Err(format!("name {name:?} is all digits"))
+    if name
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        Err(format!("name {name:?} is all lowercase hex"))
     } else {
         Ok(())
     }
@@ -105,13 +108,13 @@ fn then_refusal_contains(world: &mut BehaviourWorld, needle: String) -> Result<(
     }
 }
 
-#[then("the refusal explains a name must not be all digits")]
-fn then_refusal_all_digits(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the refusal explains a name must not be all hex")]
+fn then_refusal_all_hex(world: &mut BehaviourWorld) -> Result<(), String> {
     let err = world.naming_error.as_deref().ok_or("no refusal captured")?;
-    if err.contains("all digits") {
+    if err.contains("all lowercase hex") {
         Ok(())
     } else {
-        Err(format!("expected an all-digits explanation, got {err:?}"))
+        Err(format!("expected an all-hex explanation, got {err:?}"))
     }
 }
 
@@ -145,11 +148,14 @@ async fn stop_by_handle(world: &mut BehaviourWorld, run: String) {
 
 #[when("a StopRun request for that run's numeric id arrives")]
 async fn stop_by_numeric_id(world: &mut BehaviourWorld) {
-    let id = world.naming_run.expect("a run must be registered first");
+    let id = world
+        .naming_run
+        .clone()
+        .expect("a run must be registered first");
     world.response = Some(
         run_one_shot(
             &Request::StopRun {
-                run: id.to_string(),
+                run: id,
                 timeout_secs: 1,
             },
             world.started_at(),
@@ -168,7 +174,7 @@ fn then_can_register_name(world: &mut BehaviourWorld, name: String) -> Result<()
     let _ = world;
     let id = run_registry::allocate_run_id();
     let result = run_registry::register_named(
-        id,
+        id.clone(),
         Some(name.clone()),
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     );
@@ -177,7 +183,7 @@ fn then_can_register_name(world: &mut BehaviourWorld, name: String) -> Result<()
         Ok(other) => Err(format!("registered under {other:?}, expected {name:?}")),
         Err(e) => Err(format!("expected reuse to succeed, got {e:?}")),
     };
-    run_registry::deregister(id);
+    run_registry::deregister(&id);
     outcome
 }
 

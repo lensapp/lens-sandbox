@@ -63,7 +63,7 @@ pub struct LogArgs {
     #[arg(long, help = "Only show events for this integration.")]
     pub integration: Option<String>,
     #[arg(long, help = "Only show events for this run id.")]
-    pub run: Option<u32>,
+    pub run: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
     #[arg(long, help = "Emit raw JSONL instead of the rendered timeline.")]
@@ -264,7 +264,7 @@ mod tests {
     fn write_ledger(home: &std::path::Path) {
         let record = lns_ipc::LedgerRecord {
             ts: "2026-06-29T14:02:11Z".into(),
-            run: 49,
+            run: "5e6f7a8b0000000000000000000000bb".into(),
             microvm: "calm-finch".into(),
             event: lns_ipc::LedgerEvent::Connection {
                 integration: "some-oauth".into(),

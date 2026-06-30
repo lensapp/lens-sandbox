@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// A short, non-reversible identifier for a secret value — lets the ledger say "the same key was used in run #41 and #49" without ever recording the value.
+/// A short, non-reversible identifier for a secret value — lets the ledger say "the same key was used across two runs" without ever recording the value.
 pub fn fingerprint(value: &str) -> String {
     crate::hex_encode(&Sha256::digest(value.as_bytes()))[..12].to_string()
 }
@@ -94,7 +94,7 @@ impl LedgerEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerRecord {
     pub ts: String,
-    pub run: u32,
+    pub run: String,
     pub microvm: String,
     #[serde(flatten)]
     pub event: LedgerEvent,
@@ -108,7 +108,7 @@ mod tests {
     fn round_trip(event: LedgerEvent) -> LedgerRecord {
         let record = LedgerRecord {
             ts: "2026-06-29T14:02:11Z".into(),
-            run: 49,
+            run: "5e6f7a8b0000000000000000000000bb".into(),
             microvm: "calm-finch".into(),
             event,
         };
@@ -160,7 +160,7 @@ mod tests {
     fn a_chain_augmented_line_still_deserializes_into_a_record() {
         let record = LedgerRecord {
             ts: "2026-06-29T14:05:30Z".into(),
-            run: 49,
+            run: "5e6f7a8b0000000000000000000000bb".into(),
             microvm: "calm-finch".into(),
             event: LedgerEvent::CredentialUse {
                 integration: "some-provider".into(),

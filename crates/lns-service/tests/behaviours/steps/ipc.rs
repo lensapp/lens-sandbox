@@ -36,7 +36,15 @@ async fn when_unknown(world: &mut BehaviourWorld, method: String) {
 
 #[when(regex = r#"^a CancelRun request for run (\d+) arrives$"#)]
 async fn when_cancel_run(world: &mut BehaviourWorld, run_id: u32) {
-    world.response = Some(run_one_shot(&Request::CancelRun { run_id }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::CancelRun {
+                run_id: run_id.to_string(),
+            },
+            world.started_at(),
+        )
+        .await,
+    );
 }
 
 #[then("the response is Pong")]

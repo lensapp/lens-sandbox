@@ -13,23 +13,23 @@ pub enum Request {
     },
     RunImage(RunImageArgs),
     CancelRun {
-        run_id: u32,
+        run_id: String,
     },
     RunStdin {
-        run_id: u32,
+        run_id: String,
         bytes: Vec<u8>,
     },
     RunResize {
-        run_id: u32,
+        run_id: String,
         rows: u16,
         cols: u16,
     },
     RunSignal {
-        run_id: u32,
+        run_id: String,
         signal: SignalKind,
     },
     RunDetach {
-        run_id: u32,
+        run_id: String,
     },
     ExecImage(ExecImageArgs),
     Kill {
@@ -112,7 +112,7 @@ pub enum Response {
         message: String,
     },
     RunStarted {
-        run_id: u32,
+        run_id: String,
     },
     RunLog {
         level: LogLevel,
@@ -138,7 +138,7 @@ pub enum Response {
         stats: RunStatsInfo,
     },
     RunsPruned {
-        removed: Vec<u32>,
+        removed: Vec<String>,
     },
     OauthVerification {
         verification_uri: String,
@@ -199,7 +199,7 @@ pub struct VolumeInfo {
     pub size_bytes: u64,
     pub disk_bytes: u64,
     pub created: String,
-    pub in_use_by: Option<u32>,
+    pub in_use_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,12 +215,12 @@ pub struct ImageInfo {
     pub size_bytes: u64,
     pub layers: u32,
     pub pulled: String,
-    pub in_use_by: Option<u32>,
+    pub in_use_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
-    pub id: u32,
+    pub id: String,
     pub name: String,
     pub image: String,
     pub command: String,
@@ -410,9 +410,12 @@ pub fn validate_run_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("invalid run name: must not be empty".to_string());
     }
-    if name.bytes().all(|b| b.is_ascii_digit()) {
+    if name
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(format!(
-            "invalid run name {name:?}: a name must not be all digits (those address a run by id)"
+            "invalid run name {name:?}: a name must not be all lowercase hex (those address a run by id)"
         ));
     }
     match name.chars().find(|c| !name_char_allowed(*c)) {
@@ -700,7 +703,7 @@ mod tests {
             size_bytes: 10 * 1024 * 1024 * 1024,
             disk_bytes: 32 * 1024 * 1024,
             created: "2026-06-10T12:00:00Z".into(),
-            in_use_by: Some(7),
+            in_use_by: Some("1a2b3c4d0000000000000000000000aa".into()),
         };
         for resp in [
             Response::VolumeList {
@@ -863,7 +866,7 @@ mod tests {
         let resp = Response::RunInspect {
             details: Box::new(RunDetails {
                 summary: RunSummary {
-                    id: 3,
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
                     name: "reviewer".into(),
                     image: "some-image:1".into(),
                     command: "echo hi".into(),
@@ -957,7 +960,10 @@ mod tests {
         assert_eq!(decoded, req);
 
         let resp = Response::RunsPruned {
-            removed: vec![4, 7],
+            removed: vec![
+                "1a2b3c4d0000000000000000000000aa".into(),
+                "5e6f7a8b0000000000000000000000bb".into(),
+            ],
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -976,7 +982,9 @@ mod tests {
 
     #[test]
     fn run_detach_request_survives_a_round_trip() {
-        let req = Request::RunDetach { run_id: 7 };
+        let req = Request::RunDetach {
+            run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+        };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -1038,7 +1046,7 @@ mod tests {
             size_bytes: 3 * 1024 * 1024,
             layers: 2,
             pulled: "2026-06-10T12:00:00Z".into(),
-            in_use_by: Some(7),
+            in_use_by: Some("1a2b3c4d0000000000000000000000aa".into()),
         };
         for resp in [
             Response::ImagePulled {
@@ -1151,16 +1159,18 @@ mod tests {
 
     #[test]
     fn validate_run_name_accepts_the_volume_charset() {
-        for ok in ["reviewer", "build-cache", "agent.v2_3", "a", "x7"] {
+        for ok in ["reviewer", "build-cache", "agent.v2_3", "g", "x7"] {
             validate_run_name(ok).unwrap();
         }
     }
 
     #[test]
-    fn validate_run_name_rejects_all_digit_names_so_ids_stay_unambiguous() {
+    fn validate_run_name_rejects_all_hex_names_so_ids_stay_unambiguous() {
         let err = validate_run_name("7").unwrap_err();
-        assert!(err.contains("all digits"), "got: {err}");
+        assert!(err.contains("all lowercase hex"), "got: {err}");
         validate_run_name("0042").unwrap_err();
+        validate_run_name("abcdef").unwrap_err();
+        validate_run_name("1a2b3c4d").unwrap_err();
     }
 
     #[test]

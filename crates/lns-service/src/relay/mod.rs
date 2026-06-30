@@ -58,8 +58,8 @@ impl AuditBudget {
     }
 }
 
-fn audit_path(run_id: u32) -> Result<PathBuf> {
-    let path = lns_ipc::audit_log_for_run(&format!("{run_id}"))?;
+fn audit_path(run_id: &str) -> Result<PathBuf> {
+    let path = lns_ipc::audit_log_for_run(run_id)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -75,7 +75,7 @@ pub struct Relay {
 }
 
 pub fn spawn(
-    run_id: u32,
+    run_id: &str,
     session: Arc<ApprovalSession>,
     credential_session: Arc<CredentialSession>,
     frame_rx: mpsc::UnboundedReceiver<HostFrame>,
@@ -641,8 +641,8 @@ mod tests {
     async fn audit_path_creates_run_directory_and_returns_jsonl_path() {
         let temp = tempdir().unwrap();
         let _home = home_for(&temp);
-        let path = audit_path(42).expect("audit_path");
-        assert!(path.ends_with("runs/42/audit.jsonl"));
+        let path = audit_path("aa42").expect("audit_path");
+        assert!(path.ends_with("runs/aa42/audit.jsonl"));
         let parent = path.parent().unwrap();
         assert!(parent.is_dir());
     }
@@ -1169,7 +1169,7 @@ mod tests {
         let session = session_with_dummy_sink();
         let (_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let relay = spawn(
-            1234,
+            "aa1234",
             session,
             credential_session_with_dummy_sink(),
             frame_rx,
@@ -1186,7 +1186,7 @@ mod tests {
             relay
                 .audit_path
                 .to_string_lossy()
-                .ends_with("runs/1234/audit.jsonl")
+                .ends_with("runs/aa1234/audit.jsonl")
         );
         drop(relay.fd_tx);
         tokio::task::yield_now().await;

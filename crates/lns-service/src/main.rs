@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use lns_service::{
     approval_flow::window::{self as approval_window, WindowState},
-    cache, ipc, log, paths, run_registry,
+    ipc, log, paths,
     shutdown::Shutdown,
     tray,
 };
@@ -14,8 +14,6 @@ fn main() -> anyhow::Result<()> {
 
     let socket = paths::socket_path()?;
     paths::ensure_parent_dir(&socket)?;
-
-    run_registry::init_from_existing_runs(&cache::root()?);
 
     let shutdown = Arc::new(Shutdown::new());
     let started_at = Instant::now();

@@ -211,7 +211,7 @@ fn render_volume_table<W: Write>(out: &mut W, rows: &[VolumeInfo]) -> std::io::R
                 v.name.clone(),
                 format_size(v.disk_bytes),
                 crate::service::friendly_started(&v.created),
-                in_use_str(v.in_use_by),
+                in_use_str(v.in_use_by.as_deref()),
             )
         })
         .collect();
@@ -238,9 +238,9 @@ fn render_volume_table<W: Write>(out: &mut W, rows: &[VolumeInfo]) -> std::io::R
     Ok(())
 }
 
-fn in_use_str(holder: Option<u32>) -> String {
+fn in_use_str(holder: Option<&str>) -> String {
     match holder {
-        Some(run_id) => format!("run #{run_id}"),
+        Some(run_id) => format!("run {}", lns_ipc::short_run_id(run_id)),
         None => "-".to_string(),
     }
 }
@@ -414,7 +414,10 @@ mod tests {
 
     #[test]
     fn in_use_str_names_the_holder_or_dashes() {
-        assert_eq!(in_use_str(Some(7)), "run #7");
+        assert_eq!(
+            in_use_str(Some("1a2b3c4d0000000000000000000000aa")),
+            "run 1a2b3c4d0000"
+        );
         assert_eq!(in_use_str(None), "-");
     }
 }

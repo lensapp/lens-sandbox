@@ -13,5 +13,5 @@ pub trait ServiceClient: Send + Sync {
     fn start_and_wait_for_ready(&self, total_timeout: Duration) -> BoxFuture<'_, Result<bool>>;
     fn wait_for_ready(&self, total_timeout: Duration) -> BoxFuture<'_, bool>;
     fn wait_for_stopped(&self, total_timeout: Duration) -> BoxFuture<'_, bool>;
-    fn cancel_run(&self, run_id: u32) -> BoxFuture<'_, ()>;
+    fn cancel_run(&self, run_id: String) -> BoxFuture<'_, ()>;
 }

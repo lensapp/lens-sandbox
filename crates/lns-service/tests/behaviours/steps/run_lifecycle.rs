@@ -3,7 +3,7 @@ use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_ipc::Request;
 
-pub fn register_run(run_id: u32) {
+pub fn register_run(run_id: String) {
     register_run_with(run_id, "some-image", lns_ipc::RunConfig::default());
 }
 
@@ -29,22 +29,22 @@ pub fn fresh_handle(
     }
 }
 
-pub fn register_run_with(run_id: u32, image: &str, config: lns_ipc::RunConfig) {
+pub fn register_run_with(run_id: String, image: &str, config: lns_ipc::RunConfig) {
     lns_service::run_registry::register(run_id, fresh_handle(image, config));
 }
 
 #[given("a registered run that has already exited")]
 async fn registered_exited_run(world: &mut BehaviourWorld) {
     let run_id = lns_service::run_registry::allocate_run_id();
-    register_run(run_id);
-    lns_service::run_registry::set_exit_code(run_id, 0);
+    register_run(run_id.clone());
+    lns_service::run_registry::set_exit_code(&run_id, 0);
     world.lifecycle_run = Some(run_id);
 }
 
 #[given("a registered run that is still running")]
 async fn registered_running_run(world: &mut BehaviourWorld) {
     let run_id = lns_service::run_registry::allocate_run_id();
-    register_run(run_id);
+    register_run(run_id.clone());
     world.lifecycle_run = Some(run_id);
 }
 
@@ -63,7 +63,10 @@ async fn remove_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
 
 #[when("a RemoveRun request for that run arrives")]
 async fn remove_registered_run(world: &mut BehaviourWorld) {
-    let run_id = world.lifecycle_run.expect("a run must be registered first");
+    let run_id = world
+        .lifecycle_run
+        .clone()
+        .expect("a run must be registered first");
     world.response = Some(
         run_one_shot(
             &Request::RemoveRun {
@@ -73,7 +76,7 @@ async fn remove_registered_run(world: &mut BehaviourWorld) {
         )
         .await,
     );
-    lns_service::run_registry::deregister(run_id);
+    lns_service::run_registry::deregister(&run_id);
 }
 
 #[when(regex = r#"^a StopRun request for run (\d+) arrives$"#)]
@@ -92,7 +95,10 @@ async fn stop_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
 
 #[when("a StopRun request for that run arrives")]
 async fn stop_registered_run(world: &mut BehaviourWorld) {
-    let run_id = world.lifecycle_run.expect("a run must be registered first");
+    let run_id = world
+        .lifecycle_run
+        .clone()
+        .expect("a run must be registered first");
     world.response = Some(
         run_one_shot(
             &Request::StopRun {
@@ -103,7 +109,7 @@ async fn stop_registered_run(world: &mut BehaviourWorld) {
         )
         .await,
     );
-    lns_service::run_registry::deregister(run_id);
+    lns_service::run_registry::deregister(&run_id);
 }
 
 #[then("the response is RunStopped without force")]
@@ -125,7 +131,7 @@ async fn registered_run_with_config(
 ) {
     let run_id = lns_service::run_registry::allocate_run_id();
     register_run_with(
-        run_id,
+        run_id.clone(),
         &image,
         lns_ipc::RunConfig {
             cpus,
@@ -151,7 +157,10 @@ async fn inspect_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
 
 #[when("an InspectRun request for that run arrives")]
 async fn inspect_registered_run(world: &mut BehaviourWorld) {
-    let run_id = world.lifecycle_run.expect("a run must be registered first");
+    let run_id = world
+        .lifecycle_run
+        .clone()
+        .expect("a run must be registered first");
     world.response = Some(
         run_one_shot(
             &Request::InspectRun {
@@ -161,7 +170,7 @@ async fn inspect_registered_run(world: &mut BehaviourWorld) {
         )
         .await,
     );
-    lns_service::run_registry::deregister(run_id);
+    lns_service::run_registry::deregister(&run_id);
 }
 
 fn inspect_details(world: &BehaviourWorld) -> Result<&lns_ipc::RunDetails, String> {

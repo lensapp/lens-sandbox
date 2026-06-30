@@ -106,19 +106,19 @@ async fn spec_marks_ro(w: &mut BehaviourWorld, name: String) {
 #[then(expr = "the request is refused because the volume is in use")]
 async fn refused_in_use(w: &mut BehaviourWorld) {
     let err = w.volume().last_error.clone().expect("an error");
-    assert!(err.contains("in use by run #"), "got: {err}");
+    assert!(err.contains("in use by run "), "got: {err}");
 }
 
 #[then(expr = "the first run's hold on {string} is unaffected")]
 async fn hold_unaffected(w: &mut BehaviourWorld, name: String) {
     let rig = w.volume();
-    let holder = rig.holder_run_id.expect("a holder run id");
+    let holder = rig.holder_run_id.clone().expect("a holder run id");
     let again = lns_service::volume_store::acquire_with(
         &rig.fs,
         &rig.registry,
         &rig.store_root,
         &name,
-        9999,
+        "deadbeef00000000000000000000aa99",
     )
     .await;
     assert!(

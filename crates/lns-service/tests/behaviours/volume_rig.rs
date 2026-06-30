@@ -82,7 +82,7 @@ pub struct VolumeRig {
     last_leases: Vec<VolumeLease>,
     pub last_error: Option<String>,
     next_run_id: u32,
-    pub holder_run_id: Option<u32>,
+    pub holder_run_id: Option<String>,
     pub last_list: Option<Vec<lns_ipc::VolumeInfo>>,
     pub last_inspect: Option<lns_ipc::VolumeInfo>,
     pub last_prune: Option<PruneReport>,
@@ -111,8 +111,8 @@ impl VolumeRig {
         }
     }
 
-    fn alloc_run_id(&mut self) -> u32 {
-        let id = self.next_run_id;
+    fn alloc_run_id(&mut self) -> String {
+        let id = format!("{:032x}", self.next_run_id);
         self.next_run_id += 1;
         id
     }
@@ -132,7 +132,7 @@ impl VolumeRig {
             &self.registry,
             &self.store_root,
             name,
-            id,
+            &id,
         )
         .await
         .expect("hold acquire");
@@ -163,7 +163,7 @@ impl VolumeRig {
             &self.registry,
             &self.store_root,
             &mounts,
-            id,
+            &id,
         )
         .await
         {
