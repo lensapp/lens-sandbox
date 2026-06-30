@@ -18,7 +18,7 @@ fn valid_chain(world: &mut E2eWorld, run_id: String) {
         payload.push('\n');
     }
     fs::write(run_dir.join("audit.jsonl"), payload).expect("write audit.jsonl");
-    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    let anchor = chain.anchor().unwrap();
     fs::write(run_dir.join("audit.anchor"), anchor.to_line()).expect("write audit.anchor");
 }
 
@@ -38,7 +38,7 @@ fn guest_egress(world: &mut E2eWorld, run_id: String) {
     payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));
     payload.push('\n');
     fs::write(run_dir.join("audit.jsonl"), payload).expect("write audit.jsonl");
-    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    let anchor = chain.anchor().unwrap();
     fs::write(run_dir.join("audit.anchor"), anchor.to_line()).expect("write audit.anchor");
 }
 
@@ -56,7 +56,7 @@ fn connection_ledger(world: &mut E2eWorld) {
         payload.push('\n');
     }
     fs::write(dir.join("ledger.jsonl"), payload).expect("write ledger.jsonl");
-    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    let anchor = chain.anchor().unwrap();
     fs::write(dir.join("ledger.anchor"), anchor.to_line()).expect("write ledger.anchor");
 }
 
@@ -73,7 +73,7 @@ fn tampered_connection_ledger(world: &mut E2eWorld) {
         payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));
         payload.push('\n');
     }
-    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    let anchor = chain.anchor().unwrap();
     let tampered = payload.replacen("41aaaaaa", "42aaaaaa", 1);
     fs::write(dir.join("ledger.jsonl"), tampered).expect("write ledger.jsonl");
     fs::write(dir.join("ledger.anchor"), anchor.to_line()).expect("write ledger.anchor");
