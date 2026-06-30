@@ -239,7 +239,7 @@ mod tests {
             run: 49,
             microvm: "calm-finch".into(),
             event: lns_ipc::LedgerEvent::Connection {
-                integration: "github".into(),
+                integration: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: Some("@hchen".into()),
                 scopes: vec!["repo".into()],
@@ -440,7 +440,7 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("github"), "got: {text}");
+        assert!(text.contains("some-oauth"), "got: {text}");
     }
 
     #[tokio::test]

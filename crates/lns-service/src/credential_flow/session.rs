@@ -1002,7 +1002,7 @@ mod tests {
         let recorder = Arc::new(CapturingRecorder::default());
         s.set_ledger_recorder(recorder.clone());
         s.apply_persistent_entry(
-            "open-router".into(),
+            "some-provider".into(),
             CredentialEntry::Stored {
                 value: "sk-secret".into(),
             },
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::CredentialUse {
-                integration: "open-router".into(),
+                integration: "some-provider".into(),
                 auth: AuthKind::Apikey,
                 fp: Some(lns_ipc::fingerprint("sk-secret")),
                 dest: vec![],

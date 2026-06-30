@@ -234,19 +234,19 @@ mod tests {
         }
     }
 
-    fn github(ts_account: bool) -> LedgerEvent {
+    fn oauth_conn(with_account: bool) -> LedgerEvent {
         LedgerEvent::Connection {
-            integration: "github".into(),
+            integration: "some-oauth".into(),
             auth: AuthKind::Oauth,
-            account: ts_account.then(|| "@hchen".to_string()),
+            account: with_account.then(|| "@hchen".to_string()),
             scopes: vec!["repo".into(), "read:org".into()],
             expires: Some("2026-07-29T00:00:00Z".into()),
         }
     }
 
-    fn openrouter(fp: &str, run_dest: &str) -> LedgerEvent {
+    fn apikey_use(fp: &str, run_dest: &str) -> LedgerEvent {
         LedgerEvent::CredentialUse {
-            integration: "open-router".into(),
+            integration: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some(fp.into()),
             dest: vec![run_dest.into()],
@@ -280,24 +280,24 @@ mod tests {
     #[test]
     fn the_summary_groups_oauth_and_apikey_integrations() {
         let records = vec![
-            rec(41, "2026-06-28T10:14:00Z", github(true)),
-            rec(49, "2026-06-29T14:02:00Z", github(true)),
+            rec(41, "2026-06-28T10:14:00Z", oauth_conn(true)),
+            rec(49, "2026-06-29T14:02:00Z", oauth_conn(true)),
             rec(
                 49,
                 "2026-06-29T14:05:00Z",
-                openrouter("9c2f1a3d", "api.openrouter.ai"),
+                apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
         ];
         let text = summary_of(&records);
-        assert!(text.contains("github"));
+        assert!(text.contains("some-oauth"));
         assert!(text.contains("oauth"));
         assert!(text.contains("@hchen"));
         assert!(text.contains("repo, read:org"));
         assert!(text.contains("#41, #49"));
-        assert!(text.contains("open-router"));
+        assert!(text.contains("some-provider"));
         assert!(text.contains("apikey"));
         assert!(text.contains("fp 9c2f1a3d"));
-        assert!(text.contains("api.openrouter.ai"));
+        assert!(text.contains("api.some-provider.example"));
     }
 
     #[test]
@@ -306,12 +306,12 @@ mod tests {
             rec(
                 41,
                 "2026-06-20T00:00:00Z",
-                openrouter("9c2f1a3d", "api.openrouter.ai"),
+                apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
                 52,
                 "2026-06-29T00:00:00Z",
-                openrouter("3e8b07aa", "api.openrouter.ai"),
+                apikey_use("3e8b07aa", "api.some-provider.example"),
             ),
         ];
         let text = summary_of(&records);
@@ -320,9 +320,9 @@ mod tests {
 
     #[test]
     fn the_oauth_drill_in_shows_account_scopes_and_expiry() {
-        let records = vec![rec(49, "2026-06-29T14:02:00Z", github(true))];
-        let text = detail_of("github", &records);
-        assert!(text.contains("github  (oauth)"));
+        let records = vec![rec(49, "2026-06-29T14:02:00Z", oauth_conn(true))];
+        let text = detail_of("some-oauth", &records);
+        assert!(text.contains("some-oauth  (oauth)"));
         assert!(text.contains("account    @hchen"));
         assert!(text.contains("scopes     repo, read:org"));
         assert!(text.contains("expires    2026-07-29 00:00:00"));
@@ -335,24 +335,24 @@ mod tests {
             rec(
                 41,
                 "2026-06-20T00:00:00Z",
-                openrouter("9c2f1a3d", "api.openrouter.ai"),
+                apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
                 49,
                 "2026-06-29T00:00:00Z",
-                openrouter("9c2f1a3d", "api.openrouter.ai"),
+                apikey_use("9c2f1a3d", "api.some-provider.example"),
             ),
             rec(
                 52,
                 "2026-06-29T12:00:00Z",
-                openrouter("3e8b07aa", "api.openrouter.ai"),
+                apikey_use("3e8b07aa", "api.some-provider.example"),
             ),
         ];
-        let text = detail_of("open-router", &records);
+        let text = detail_of("some-provider", &records);
         assert!(text.contains("keys used"));
         assert!(text.contains("fp 9c2f1a3d   runs #41, #49"));
         assert!(text.contains("fp 3e8b07aa   runs #52"));
-        assert!(text.contains("injected   api.openrouter.ai"));
+        assert!(text.contains("injected   api.some-provider.example"));
     }
 
     #[test]
@@ -364,10 +364,10 @@ mod tests {
     #[test]
     fn an_account_arriving_after_a_blank_connection_is_retained() {
         let records = vec![
-            rec(40, "2026-06-19T00:00:00Z", github(false)),
-            rec(41, "2026-06-20T00:00:00Z", github(true)),
+            rec(40, "2026-06-19T00:00:00Z", oauth_conn(false)),
+            rec(41, "2026-06-20T00:00:00Z", oauth_conn(true)),
         ];
-        let text = detail_of("github", &records);
+        let text = detail_of("some-oauth", &records);
         assert!(text.contains("account    @hchen"));
     }
 
@@ -378,16 +378,16 @@ mod tests {
             "2026-06-19T00:00:00Z",
             LedgerEvent::Approval {
                 kind: lns_ipc::ApprovalKind::Integration,
-                target: "linear".into(),
+                target: "some-oauth".into(),
                 decision: lns_ipc::Decision::AllowOnce,
                 reason: None,
-                integration: Some("linear".into()),
+                integration: Some("some-oauth".into()),
             },
         )];
         let summary = summary_of(&records);
-        assert!(summary.contains("linear"));
-        let detail = detail_of("linear", &records);
-        assert!(detail.contains("linear  (-)"));
+        assert!(summary.contains("some-oauth"));
+        let detail = detail_of("some-oauth", &records);
+        assert!(detail.contains("some-oauth  (-)"));
         assert!(detail.contains("runs       #7"));
     }
 

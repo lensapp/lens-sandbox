@@ -161,7 +161,7 @@ mod tests {
 
     fn connection() -> LedgerEvent {
         LedgerEvent::Connection {
-            integration: "github".into(),
+            integration: "some-oauth".into(),
             auth: AuthKind::Oauth,
             account: Some("@hchen".into()),
             scopes: vec!["repo".into(), "read:org".into()],
@@ -171,10 +171,10 @@ mod tests {
 
     fn credential_use() -> LedgerEvent {
         LedgerEvent::CredentialUse {
-            integration: "open-router".into(),
+            integration: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some("9c2f1a3d".into()),
-            dest: vec!["api.openrouter.ai".into()],
+            dest: vec!["api.some-provider.example".into()],
         }
     }
 
@@ -209,8 +209,8 @@ mod tests {
         let text = render_to_string(&no_filter(), &records);
         assert!(text.contains("WHEN"));
         assert!(text.contains("2026-06-29 14:02:11"));
-        assert!(text.contains("connect github (oauth) @hchen [repo, read:org]"));
-        assert!(text.contains("use open-router fp 9c2f1a3d → api.openrouter.ai"));
+        assert!(text.contains("connect some-oauth (oauth) @hchen [repo, read:org]"));
+        assert!(text.contains("use some-provider fp 9c2f1a3d → api.some-provider.example"));
         assert!(text.contains("network allow-always api.foo.com:443  [policy-ambiguous]"));
     }
 
@@ -222,20 +222,20 @@ mod tests {
             ..no_filter()
         };
         let text = render_to_string(&args, &records);
-        assert!(text.contains("open-router"));
-        assert!(!text.contains("github"));
+        assert!(text.contains("some-provider"));
+        assert!(!text.contains("some-oauth"));
     }
 
     #[test]
     fn the_integration_filter_keeps_only_matching_integrations() {
         let records = vec![rec(41, connection()), rec(49, credential_use())];
         let args = LogArgs {
-            integration: Some("github".into()),
+            integration: Some("some-oauth".into()),
             ..no_filter()
         };
         let text = render_to_string(&args, &records);
-        assert!(text.contains("github"));
-        assert!(!text.contains("open-router"));
+        assert!(text.contains("some-oauth"));
+        assert!(!text.contains("some-provider"));
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
             ..no_filter()
         };
         let text = render_to_string(&args, &records);
-        assert!(text.contains("open-router"));
+        assert!(text.contains("some-provider"));
         assert!(!text.contains("api.foo.com"));
     }
 
@@ -266,12 +266,12 @@ mod tests {
     fn an_approval_without_a_reason_omits_the_bracket() {
         let event = LedgerEvent::Approval {
             kind: ApprovalKind::Credential,
-            target: "open-router".into(),
+            target: "some-provider".into(),
             decision: Decision::Deny,
             reason: None,
-            integration: Some("open-router".into()),
+            integration: Some("some-provider".into()),
         };
-        assert_eq!(detail(&event), "credential deny open-router");
+        assert_eq!(detail(&event), "credential deny some-provider");
     }
 
     #[test]

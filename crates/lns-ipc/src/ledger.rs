@@ -134,26 +134,26 @@ mod tests {
     #[test]
     fn connection_event_round_trips_with_oauth_detail() {
         let back = round_trip(LedgerEvent::Connection {
-            integration: "github".into(),
+            integration: "some-oauth".into(),
             auth: AuthKind::Oauth,
             account: Some("@hchen".into()),
             scopes: vec!["repo".into(), "read:org".into()],
             expires: Some("2026-07-29T00:00:00Z".into()),
         });
         assert_eq!(back.event.name(), "connection");
-        assert_eq!(back.event.integration(), Some("github"));
+        assert_eq!(back.event.integration(), Some("some-oauth"));
     }
 
     #[test]
     fn credential_use_event_round_trips_with_fingerprint() {
         let back = round_trip(LedgerEvent::CredentialUse {
-            integration: "open-router".into(),
+            integration: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some("9c2f1a3d".into()),
-            dest: vec!["api.openrouter.ai".into()],
+            dest: vec!["api.some-provider.example".into()],
         });
         assert_eq!(back.event.name(), "credential_use");
-        assert_eq!(back.event.integration(), Some("open-router"));
+        assert_eq!(back.event.integration(), Some("some-provider"));
     }
 
     #[test]
@@ -163,10 +163,10 @@ mod tests {
             run: 49,
             microvm: "calm-finch".into(),
             event: LedgerEvent::CredentialUse {
-                integration: "open-router".into(),
+                integration: "some-provider".into(),
                 auth: AuthKind::Apikey,
                 fp: Some("9c2f1a3d".into()),
-                dest: vec!["api.openrouter.ai".into()],
+                dest: vec!["api.some-provider.example".into()],
             },
         };
         let mut chain = AuditChain::new();

@@ -38,10 +38,10 @@ mod tests {
             run: 49,
             microvm: "calm-finch".into(),
             event: LedgerEvent::CredentialUse {
-                integration: "open-router".into(),
+                integration: "some-provider".into(),
                 auth: AuthKind::Apikey,
                 fp: Some("9c2f1a3d".into()),
-                dest: vec!["api.openrouter.ai".into()],
+                dest: vec!["api.some-provider.example".into()],
             },
         };
         serde_json::to_string(&record).unwrap()

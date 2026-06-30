@@ -162,7 +162,7 @@ mod tests {
             run,
             microvm: "calm-finch".into(),
             event: LedgerEvent::Connection {
-                integration: "github".into(),
+                integration: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: Some("@hchen".into()),
                 scopes: vec!["repo".into()],
@@ -184,7 +184,10 @@ mod tests {
         append_ledger_record_at(&path, &anchor_path, &sample(49)).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("\"integration\":\"github\""), "{content}");
+        assert!(
+            content.contains("\"integration\":\"some-oauth\""),
+            "{content}"
+        );
         assert!(
             content.contains(&format!("\"prev_hash\":\"{}\"", lns_ipc::GENESIS_PREV_HASH)),
             "first line must be genesis: {content}"
