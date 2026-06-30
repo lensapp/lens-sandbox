@@ -183,6 +183,7 @@ async fn handle_connection(
         &mut chain,
         &mut audit_file,
         &mut anchor_sink,
+        &crate::oauth::RealClock,
     )
     .await?;
 
@@ -244,8 +245,17 @@ async fn serve(
                         break;
                     }
                 };
-                if handle_inbound(msg, session, credential_session, chain, audit_file, anchor_sink, budget)
-                    .await?
+                if handle_inbound(
+                    msg,
+                    session,
+                    credential_session,
+                    chain,
+                    audit_file,
+                    anchor_sink,
+                    budget,
+                    &crate::oauth::RealClock,
+                )
+                .await?
                 {
                     break;
                 }

@@ -131,7 +131,12 @@ async fn orchestrate(
     let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
     for vol in &args.volumes {
-        crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
+        crate::audit::record_volume_attached(
+            run_id,
+            &vol.name,
+            &vol.target,
+            &crate::oauth::RealClock,
+        )?;
     }
 
     let bind_attachments: Vec<vm::BindAttachment> = args
@@ -151,6 +156,7 @@ async fn orchestrate(
             &bind.target,
             &bind.kept_paths,
             &bind.dropped_paths,
+            &crate::oauth::RealClock,
         )?;
     }
 

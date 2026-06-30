@@ -56,6 +56,7 @@ impl BindRig {
             target,
             &exposed,
             &dropped,
+            &lns_service::oauth::RealClock,
         )
         .expect("record bind audit event");
     }

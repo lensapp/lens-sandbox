@@ -142,17 +142,30 @@ async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink
     Ok(())
 }
 
+fn augment_with_ts(
+    chain: &mut lns_ipc::AuditChain,
+    mut obj: serde_json::Map<String, Value>,
+    clock: &dyn crate::oauth::Clock,
+) -> Vec<u8> {
+    obj.insert(
+        "ts".to_string(),
+        Value::String(crate::time_fmt::rfc3339_from_unix(clock.now_unix())),
+    );
+    chain.augment_obj(obj)
+}
+
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
     extra_managed: &[String],
     chain: &mut lns_ipc::AuditChain,
     audit_file: &mut L,
     anchor_sink: &mut S,
+    clock: &dyn crate::oauth::Clock,
 ) -> Result<()> {
     let Some(obj) = crate::workload_env::injected_env_audit(user_env, extra_managed) else {
         return Ok(());
     };
-    let bytes = chain.augment_obj(obj);
+    let bytes = augment_with_ts(chain, obj, clock);
     write_chain_line(&bytes, chain, audit_file, anchor_sink).await
 }
 
@@ -180,6 +193,7 @@ fn stamp_guest_audit_event(
     Some(obj)
 }
 
+#[allow(clippy::too_many_arguments)] // a flat inbound-frame seam over the audit-write context keeps it host-testable
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     msg: Message,
     session: &Arc<ApprovalSession>,
@@ -188,6 +202,7 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     audit_file: &mut L,
     anchor_sink: &mut S,
     budget: &AuditBudget,
+    clock: &dyn crate::oauth::Clock,
 ) -> Result<bool> {
     let text = match msg {
         Message::Text(text) => text,
@@ -211,7 +226,7 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 );
                 return Ok(false);
             }
-            let bytes = chain.augment_obj(stamped);
+            let bytes = augment_with_ts(chain, stamped, clock);
             write_chain_line(&bytes, chain, audit_file, anchor_sink).await?;
         }
         Some("request_pending") => {
@@ -302,6 +317,14 @@ mod tests {
     use lns_policy::RouteRule;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    struct FixedClock(u64);
+    impl crate::oauth::Clock for FixedClock {
+        fn now_unix(&self) -> u64 {
+            self.0
+        }
+    }
+    static CLOCK: FixedClock = FixedClock(1_700_000_000);
 
     #[derive(Default)]
     struct MemLog {
@@ -639,6 +662,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -653,6 +677,13 @@ mod tests {
         assert!(
             written.contains("prev_hash"),
             "the chain must augment each line with a prev_hash field; got: {written}"
+        );
+        assert!(
+            written.contains(&format!(
+                "\"ts\":\"{}\"",
+                crate::time_fmt::rfc3339_from_unix(1_700_000_000)
+            )),
+            "the host stamps a timestamp on every recorded audit event; got: {written}"
         );
         assert_eq!(
             anchor.anchors.len(),
@@ -679,6 +710,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -718,6 +750,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -746,6 +779,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -774,6 +808,7 @@ mod tests {
             &mut chain,
             &mut log,
             &mut anchor,
+            &CLOCK,
         )
         .await
         .expect("write_run_env_event");
@@ -799,7 +834,7 @@ mod tests {
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
-        write_run_env_event(&[], &[], &mut chain, &mut log, &mut anchor)
+        write_run_env_event(&[], &[], &mut chain, &mut log, &mut anchor, &CLOCK)
             .await
             .expect("write_run_env_event");
         assert!(log.bytes.is_empty(), "no injected env → no audit line");
@@ -856,6 +891,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &exhausted_budget,
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -905,6 +941,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -930,6 +967,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -955,6 +993,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -982,6 +1021,7 @@ mod tests {
                 &mut log,
                 &mut anchor,
                 &AuditBudget::with_defaults(),
+                &CLOCK,
             )
             .await
             .expect("handle_inbound");
@@ -1005,6 +1045,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("malformed audit_event must NOT propagate as an error");
@@ -1042,6 +1083,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -1073,6 +1115,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("unknown type must not error");
@@ -1200,6 +1243,7 @@ mod tests {
             &mut log,
             &mut anchor,
             &budget,
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");

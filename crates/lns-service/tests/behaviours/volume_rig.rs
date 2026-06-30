@@ -253,8 +253,13 @@ impl VolumeRig {
     }
 
     pub fn record_attach(&self, name: &str, target: &str) {
-        lns_service::audit::record_volume_attached_at(&self.audit_file, name, target)
-            .expect("record audit event");
+        lns_service::audit::record_volume_attached_at(
+            &self.audit_file,
+            name,
+            target,
+            &lns_service::oauth::RealClock,
+        )
+        .expect("record audit event");
     }
 
     pub fn audit_contents(&self) -> String {
