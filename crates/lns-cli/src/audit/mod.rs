@@ -6,6 +6,7 @@ mod table;
 pub mod verify;
 
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use clap::FromArgMatches;
@@ -191,6 +192,34 @@ fn report_no_anchor(
     Ok(if allow_missing_anchor { 0 } else { 1 })
 }
 
+/// Verifies a log against its anchor on the read paths and warns when it can't be trusted, so a tampered or truncated log surfaces inline instead of only under `lns audit verify`.
+pub(super) fn warn_if_compromised(path: &Path, anchor: &Path) {
+    if let Ok(outcome) = verify::verify_chain_with_anchor(path, anchor)
+        && let Some(advisory) = integrity_advisory(&outcome)
+    {
+        log::warn!("{advisory}");
+    }
+}
+
+fn integrity_advisory(outcome: &verify::VerifyOutcome) -> Option<String> {
+    match outcome {
+        verify::VerifyOutcome::Ok { .. } => None,
+        verify::VerifyOutcome::Broken { at_line, reason } => Some(format!(
+            "audit integrity: chain broken at line {at_line} ({reason}) — entries shown may have been altered"
+        )),
+        verify::VerifyOutcome::Truncated { reason } => Some(format!(
+            "audit integrity: log truncated or rolled back ({reason}) — entries may be missing"
+        )),
+        verify::VerifyOutcome::AnchorUnreadable { reason, .. } => Some(format!(
+            "audit integrity: anchor unreadable ({reason}) — the log cannot be confirmed intact"
+        )),
+        verify::VerifyOutcome::NoAnchor { .. } => Some(
+            "audit integrity: no anchor beside the log — truncation or rollback cannot be detected"
+                .to_string(),
+        ),
+    }
+}
+
 pub(super) fn friendly_when(ts: &str) -> String {
     ts.trim_end_matches('Z').replacen('T', " ", 1)
 }
@@ -361,6 +390,43 @@ mod tests {
         assert_eq!(KindArg::Approval.event_name(), "approval");
         assert_eq!(KindArg::Connection.event_name(), "connection");
         assert_eq!(KindArg::CredentialUse.event_name(), "credential_use");
+    }
+
+    #[test]
+    fn integrity_advisory_is_silent_only_for_an_intact_chain() {
+        assert_eq!(
+            integrity_advisory(&verify::VerifyOutcome::Ok { line_count: 3 }),
+            None
+        );
+        let broken = integrity_advisory(&verify::VerifyOutcome::Broken {
+            at_line: 7,
+            reason: "prev_hash mismatch".into(),
+        })
+        .expect("a broken chain advises");
+        assert!(
+            broken.contains("line 7") && broken.contains("altered"),
+            "{broken}"
+        );
+        assert!(
+            integrity_advisory(&verify::VerifyOutcome::Truncated {
+                reason: "tail".into()
+            })
+            .expect("truncation advises")
+            .contains("truncated")
+        );
+        assert!(
+            integrity_advisory(&verify::VerifyOutcome::AnchorUnreadable {
+                line_count: 2,
+                reason: "corrupt".into(),
+            })
+            .expect("an unreadable anchor advises")
+            .contains("anchor unreadable")
+        );
+        assert!(
+            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 2 })
+                .expect("a missing anchor advises")
+                .contains("no anchor")
+        );
     }
 
     #[tokio::test]

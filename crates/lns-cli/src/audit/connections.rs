@@ -10,6 +10,7 @@ use super::{ConnectionsArgs, auth_word, friendly_when};
 
 pub fn run(args: &ConnectionsArgs, out: &mut dyn Write) -> Result<i32> {
     let path = lns_ipc::connection_ledger()?;
+    super::warn_if_compromised(&path, &lns_ipc::connection_ledger_anchor()?);
     run_with_records(args, store::stream_ledger(&path)?, out)
 }
 

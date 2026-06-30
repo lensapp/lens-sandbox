@@ -27,6 +27,7 @@ fn run_with_path(args: &ShowArgs, path: &Path, out: &mut dyn Write) -> Result<i3
             return Err(e).with_context(|| format!("reading audit log {}", path.display()));
         }
     };
+    super::warn_if_compromised(path, &path.with_file_name("audit.anchor"));
     if args.json {
         write!(out, "{text}")?;
         return Ok(0);
