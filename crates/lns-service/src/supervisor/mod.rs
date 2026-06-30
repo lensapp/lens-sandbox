@@ -72,7 +72,7 @@ pub struct SupervisorSession {
 impl SupervisorSession {
     pub async fn start_if_policy(
         run_id: u32,
-        run_name: String,
+        microvm_name: String,
         policy: Option<&Path>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
@@ -80,9 +80,15 @@ impl SupervisorSession {
         let Some(policy_path) = policy else {
             return Ok(None);
         };
-        adapter::start(run_id, run_name, policy_path, guest_tools_root, user_env)
-            .await
-            .map(Some)
+        adapter::start(
+            run_id,
+            microvm_name,
+            policy_path,
+            guest_tools_root,
+            user_env,
+        )
+        .await
+        .map(Some)
     }
 }
 

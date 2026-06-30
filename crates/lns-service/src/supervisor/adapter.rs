@@ -466,7 +466,7 @@ async fn start_credential_subsystem(
 
 pub(super) async fn start(
     run_id: u32,
-    run_name: String,
+    microvm_name: String,
     policy_path: &Path,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
@@ -564,9 +564,12 @@ pub(super) async fn start(
         credential_session: Arc::downgrade(&credential_session),
     }));
 
-    let recorder: Arc<dyn crate::ledger::LedgerRecorder> = Arc::new(
-        crate::ledger::RunLedgerRecorder::new(run_id, run_name, Arc::new(crate::oauth::RealClock)),
-    );
+    let recorder: Arc<dyn crate::ledger::LedgerRecorder> =
+        Arc::new(crate::ledger::RunLedgerRecorder::new(
+            run_id,
+            microvm_name,
+            Arc::new(crate::oauth::RealClock),
+        ));
     session.set_ledger_recorder(recorder.clone());
     credential_session.set_ledger_recorder(recorder);
 
