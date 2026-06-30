@@ -755,7 +755,8 @@ impl CredentialSession {
                 } else {
                     scopes.clone()
                 },
-                expires: Some(crate::time_fmt::rfc3339_from_unix(*expires_at)),
+                expires: (*expires_at != 0)
+                    .then(|| crate::time_fmt::rfc3339_from_unix(*expires_at)),
             }),
             _ => None,
         }
@@ -1030,6 +1031,33 @@ mod tests {
                 account: None,
                 access_token: "tok".into(),
                 refresh_token: "r".into(),
+                expires_at: 1_735_689_600,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec![],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
+            }
+        );
+    }
+
+    #[test]
+    fn an_oauth_grant_with_no_known_expiry_omits_the_expires_field() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
                 expires_at: 0,
             },
         );
@@ -1040,8 +1068,9 @@ mod tests {
                 auth: AuthKind::Oauth,
                 account: None,
                 scopes: vec![],
-                expires: Some(crate::time_fmt::rfc3339_from_unix(0)),
-            }
+                expires: None,
+            },
+            "a 0 expiry means long-lived, so the ledger omits expires rather than recording the epoch"
         );
     }
 
@@ -1112,7 +1141,7 @@ mod tests {
             CredentialEntry::Oauth {
                 access_token: "tok".into(),
                 refresh_token: "r".into(),
-                expires_at: 0,
+                expires_at: 1_735_689_600,
                 scopes: vec!["repo".into(), "read:org".into()],
                 account: Some("@hchen".into()),
             },
@@ -1124,7 +1153,7 @@ mod tests {
                 auth: AuthKind::Oauth,
                 account: Some("@hchen".into()),
                 scopes: vec!["repo".into(), "read:org".into()],
-                expires: Some(crate::time_fmt::rfc3339_from_unix(0)),
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
             }
         );
     }
