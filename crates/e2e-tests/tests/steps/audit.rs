@@ -46,6 +46,26 @@ fn connection_ledger(world: &mut E2eWorld) {
     fs::write(dir.join("ledger.anchor"), anchor.to_line()).expect("write ledger.anchor");
 }
 
+#[given("a connection ledger with a tampered event")]
+fn tampered_connection_ledger(world: &mut E2eWorld) {
+    let dir = ledger_dir(world);
+    let mut chain = lns_ipc::AuditChain::new();
+    let mut payload = String::new();
+    for event in [
+        r#"{"ts":"2026-06-29T14:02:11Z","run":41,"microvm":"calm-finch","event":"connection","integration":"some-oauth","auth":"oauth","account":"@some-user","scopes":["repo","read:org"]}"#,
+        r#"{"ts":"2026-06-29T14:05:30Z","run":49,"microvm":"calm-finch","event":"credential_use","integration":"some-provider","auth":"apikey","fp":"9c2f1a3d","dest":["api.some-provider.example"]}"#,
+    ] {
+        let augmented = chain.augment(event).expect("augment ledger record");
+        payload.push_str(std::str::from_utf8(&augmented).expect("augmented line is utf8"));
+        payload.push('\n');
+    }
+    let anchor = chain.anchor().expect("a non-empty chain anchors its head");
+    // Editing a recorded event's content after the fact breaks the chain at the next line.
+    let tampered = payload.replacen("\"run\":41", "\"run\":42", 1);
+    fs::write(dir.join("ledger.jsonl"), tampered).expect("write ledger.jsonl");
+    fs::write(dir.join("ledger.anchor"), anchor.to_line()).expect("write ledger.anchor");
+}
+
 fn run_dir(world: &E2eWorld, run_id: &str) -> PathBuf {
     let home = world
         .home

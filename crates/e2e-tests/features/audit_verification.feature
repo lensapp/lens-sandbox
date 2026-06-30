@@ -63,3 +63,11 @@ Feature: lns audit inspects and verifies audit logs and the connection ledger
     When I run "lns audit verify"
     Then the exit code is 0
     And the output contains "Verified"
+
+  Scenario: reading a tampered ledger still lists events but warns about integrity
+    Given a clean lns cache home
+    And a connection ledger with a tampered event
+    When I run "lns audit log"
+    Then the exit code is 0
+    And the output contains "integrity"
+    And the output contains "some-oauth"
