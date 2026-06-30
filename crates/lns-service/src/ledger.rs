@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use lns_ipc::{LedgerEvent, LedgerRecord};
 use serde_json::{Map, Value};
+use tokio::sync::mpsc;
 
 use crate::oauth::Clock;
 
@@ -59,7 +60,8 @@ pub struct RunLedgerRecorder {
     run: u32,
     microvm: String,
     clock: Arc<dyn Clock>,
-    sink: Arc<dyn LedgerSink>,
+    tx: Option<mpsc::UnboundedSender<LedgerRecord>>,
+    writer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RunLedgerRecorder {
@@ -73,11 +75,18 @@ impl RunLedgerRecorder {
         clock: Arc<dyn Clock>,
         sink: Arc<dyn LedgerSink>,
     ) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<LedgerRecord>();
+        let writer = std::thread::spawn(move || {
+            while let Some(record) = rx.blocking_recv() {
+                warn_on_record_failure(sink.append(&record));
+            }
+        });
         Self {
             run,
             microvm,
             clock,
-            sink,
+            tx: Some(tx),
+            writer: Some(writer),
         }
     }
 }
@@ -90,12 +99,18 @@ impl LedgerRecorder for RunLedgerRecorder {
             microvm: self.microvm.clone(),
             event,
         };
-        let sink = self.sink.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(move || warn_on_record_failure(sink.append(&record)));
-            }
-            Err(_) => warn_on_record_failure(sink.append(&record)),
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(record);
+        }
+    }
+}
+
+impl Drop for RunLedgerRecorder {
+    /// Closing the channel then joining the writer flushes the run's queued events, so a single FIFO writer keeps them in record order and none are lost on teardown.
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
         }
     }
 }
@@ -129,19 +144,6 @@ mod tests {
             if self.fail {
                 anyhow::bail!("disk full");
             }
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct SignalingSink {
-        appended: tokio::sync::Notify,
-        count: std::sync::Mutex<usize>,
-    }
-    impl LedgerSink for SignalingSink {
-        fn append(&self, _record: &LedgerRecord) -> Result<()> {
-            *self.count.lock().unwrap() += 1;
-            self.appended.notify_one();
             Ok(())
         }
     }
@@ -230,6 +232,7 @@ mod tests {
             sink.clone(),
         );
         recorder.record(network_approval());
+        drop(recorder);
         let records = sink.records.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].run, 49);
@@ -246,6 +249,7 @@ mod tests {
         let recorder =
             RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
         recorder.record(network_approval());
+        drop(recorder);
         assert_eq!(
             sink.records.lock().unwrap().len(),
             1,
@@ -267,19 +271,52 @@ mod tests {
             reason: Some("policy-ambiguous".into()),
             integration: None,
         });
+        drop(recorder);
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
         assert!(content.contains("\"run\":7"), "{content}");
         assert!(content.contains("deny_once"), "{content}");
     }
 
-    #[tokio::test]
-    async fn record_offloads_the_blocking_append_when_a_runtime_is_live() {
-        let sink = Arc::new(SignalingSink::default());
+    #[test]
+    fn the_writer_preserves_record_order_even_when_an_early_append_is_slow() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct SlowFirstSink {
+            targets: std::sync::Mutex<Vec<String>>,
+            seen_first: AtomicBool,
+        }
+        impl LedgerSink for SlowFirstSink {
+            fn append(&self, record: &LedgerRecord) -> Result<()> {
+                if !self.seen_first.swap(true, Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if let LedgerEvent::Approval { target, .. } = &record.event {
+                    self.targets.lock().unwrap().push(target.clone());
+                }
+                Ok(())
+            }
+        }
+
+        let sink = Arc::new(SlowFirstSink::default());
         let recorder =
             RunLedgerRecorder::with_sink(1, "vm".into(), Arc::new(FakeClock(0)), sink.clone());
-        recorder.record(network_approval());
-        sink.appended.notified().await;
-        assert_eq!(*sink.count.lock().unwrap(), 1);
+        for target in ["a", "b", "c", "d", "e"] {
+            recorder.record(LedgerEvent::Approval {
+                kind: ApprovalKind::Network,
+                target: target.into(),
+                decision: Decision::AllowOnce,
+                reason: None,
+                integration: None,
+            });
+        }
+        drop(recorder);
+        assert_eq!(
+            *sink.targets.lock().unwrap(),
+            ["a", "b", "c", "d", "e"],
+            "a single FIFO writer must persist events in record order even when an early append blocks; independent spawn_blocking tasks would let later events overtake"
+        );
     }
 
     #[test]
