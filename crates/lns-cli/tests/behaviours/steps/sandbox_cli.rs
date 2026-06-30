@@ -156,7 +156,7 @@ fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
 #[then("the service received a ListRuns request")]
 fn then_list_runs_request(w: &mut BehaviourWorld) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
-    if requests.contains(&Request::ListRuns) {
+    if requests.contains(&Request::ListRuns { all: false }) {
         Ok(())
     } else {
         Err(format!("expected ListRuns among {requests:?}"))

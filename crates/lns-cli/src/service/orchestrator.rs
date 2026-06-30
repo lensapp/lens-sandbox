@@ -306,7 +306,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
 
 pub async fn ls() -> Result<()> {
     let socket = super::socket_path()?;
-    let response = real::send_request(&socket, &Request::ListRuns)
+    let response = real::send_request(&socket, &Request::ListRuns { all: false })
         .await
         .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
     let mut rows = match response {

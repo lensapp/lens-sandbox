@@ -148,7 +148,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             forward_session_input(*run_id, session_input_from_signal(*signal), "RunSignal").await
         }
         Request::Kill { run, signal } => kill_request(run, *signal).await,
-        Request::ListRuns => Response::RunList {
+        Request::ListRuns { .. } => Response::RunList {
             runs: crate::run_registry::snapshot(),
         },
         Request::ListVolumes => volume_response(
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_list_runs_returns_snapshot() {
-        let response = handle_request(&Request::ListRuns, Instant::now()).await;
+        let response = handle_request(&Request::ListRuns { all: false }, Instant::now()).await;
         assert!(matches!(response, Response::RunList { .. }));
     }
 

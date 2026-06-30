@@ -36,7 +36,10 @@ pub enum Request {
         run: String,
         signal: SignalKind,
     },
-    ListRuns,
+    ListRuns {
+        #[serde(default)]
+        all: bool,
+    },
     StopRun {
         run: String,
         timeout_secs: u64,
@@ -962,6 +965,21 @@ mod tests {
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn list_runs_all_true_survives_a_request_round_trip() {
+        let req = Request::ListRuns { all: true };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn list_runs_without_all_field_deserializes_as_all_false() {
+        let json = serde_json::json!({"type": "ListRuns"});
+        let decoded: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, Request::ListRuns { all: false });
     }
 
     #[test]

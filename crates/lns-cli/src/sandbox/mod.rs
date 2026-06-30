@@ -206,7 +206,7 @@ pub(crate) fn run_label(run: &str) -> String {
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::ListRuns).await?;
+    let response = svc.one_shot(Request::ListRuns { all: false }).await?;
     match response {
         Response::RunList { mut runs } => {
             runs.sort_by(|a, b| b.started.cmp(&a.started));
