@@ -96,3 +96,22 @@ fn output_does_not_contain(world: &mut E2eWorld, needle: String) -> Result<(), S
         Ok(())
     }
 }
+
+#[then(regex = r#"^the output shows "([^"]*)" before "([^"]*)"$"#)]
+fn output_shows_before(world: &mut E2eWorld, first: String, second: String) -> Result<(), String> {
+    let res = world.result.as_ref().ok_or("no CLI run captured")?;
+    let out = &res.stdout;
+    let first_at = out
+        .find(&first)
+        .ok_or_else(|| format!("output missing {first:?}:\n{out}"))?;
+    let second_at = out
+        .find(&second)
+        .ok_or_else(|| format!("output missing {second:?}:\n{out}"))?;
+    if first_at < second_at {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {first:?} before {second:?}, but order was reversed:\n{out}"
+        ))
+    }
+}
