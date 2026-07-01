@@ -15,7 +15,7 @@ pub fn note_write() {
     if WATCHING.load(Ordering::Acquire)
         && let Some(ctx) = crate::approval_flow::window::ctx()
     {
-        ctx.request_repaint_of(ViewportId::ROOT);
+        ctx.request_repaint_of(viewport_id());
     }
 }
 

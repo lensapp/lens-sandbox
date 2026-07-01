@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::Context;
@@ -200,10 +201,15 @@ struct TrayApp {
     credential_inputs: HashMap<String, String>,
     token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
-    dashboard: crate::dashboard::DashboardState,
-    audit_open: bool,
-    dashboard_gen: u64,
-    dashboard_focused: bool,
+    audit: Arc<Mutex<AuditWindow>>,
+    audit_open: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct AuditWindow {
+    state: crate::dashboard::DashboardState,
+    last_gen: u64,
+    focused: bool,
 }
 
 /// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
@@ -248,64 +254,67 @@ impl TrayApp {
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
-            dashboard: crate::dashboard::DashboardState::new(),
-            audit_open: false,
-            dashboard_gen: 0,
-            dashboard_focused: false,
+            audit: Arc::new(Mutex::new(AuditWindow::default())),
+            audit_open: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
         if crate::dashboard::live::take_open_request() {
-            self.audit_open = true;
-            self.dashboard = crate::dashboard::DashboardState::new();
-            crate::dashboard::load(&mut self.dashboard);
-            self.dashboard_gen = crate::dashboard::live::generation();
+            self.audit_open.store(true, Ordering::Relaxed);
+            if let Ok(mut w) = self.audit.lock() {
+                w.state = crate::dashboard::DashboardState::new();
+                crate::dashboard::load(&mut w.state);
+                w.last_gen = crate::dashboard::live::generation();
+                w.focused = false;
+            }
             ctx.send_viewport_cmd_to(
                 crate::dashboard::live::viewport_id(),
                 egui::ViewportCommand::Focus,
             );
         }
-        if !self.audit_open {
+        if !self.audit_open.load(Ordering::Relaxed) {
             return;
         }
-        let saved_style = ctx.global_style();
-        crate::dashboard::apply_theme(ctx);
-        let dashboard = &mut self.dashboard;
-        let audit_open = &mut self.audit_open;
-        let last_gen = &mut self.dashboard_gen;
-        let was_focused = &mut self.dashboard_focused;
-        ctx.show_viewport_immediate(
+        let audit = self.audit.clone();
+        let audit_open = self.audit_open.clone();
+        ctx.show_viewport_deferred(
             crate::dashboard::live::viewport_id(),
             crate::dashboard::viewport_builder(),
-            |ui, _class| {
-                let (focused, close_requested) = ui.ctx().input(|i| {
-                    let vp = i.viewport();
-                    (vp.focused.unwrap_or(false), vp.close_requested())
-                });
-                crate::dashboard::live::set_watching(focused);
-                let generation = crate::dashboard::live::generation();
-                if (focused && !*was_focused) || generation != *last_gen {
-                    crate::dashboard::load(dashboard);
-                    *last_gen = crate::dashboard::live::generation();
-                }
-                *was_focused = focused;
-                if crate::dashboard::render(ui, dashboard)
-                    == crate::dashboard::DashboardAction::Refresh
-                {
-                    crate::dashboard::load(dashboard);
-                    *last_gen = crate::dashboard::live::generation();
-                }
-                if close_requested {
-                    *audit_open = false;
-                    *was_focused = false;
-                    crate::dashboard::live::set_watching(false);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            },
+            move |ui, _class| audit_frame(ui, &audit, &audit_open),
         );
-        ctx.set_global_style(saved_style);
     }
+}
+
+fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &AtomicBool) {
+    let saved_style = ui.ctx().global_style();
+    crate::dashboard::apply_theme(ui.ctx());
+    ui.set_style(ui.ctx().global_style());
+    let (focused, close_requested) = ui.ctx().input(|i| {
+        let vp = i.viewport();
+        (vp.focused.unwrap_or(false), vp.close_requested())
+    });
+    crate::dashboard::live::set_watching(focused);
+    if let Ok(mut w) = audit.lock() {
+        let generation = crate::dashboard::live::generation();
+        if (focused && !w.focused) || generation != w.last_gen {
+            crate::dashboard::load(&mut w.state);
+            w.last_gen = crate::dashboard::live::generation();
+        }
+        w.focused = focused;
+        if crate::dashboard::render(ui, &mut w.state) == crate::dashboard::DashboardAction::Refresh
+        {
+            crate::dashboard::load(&mut w.state);
+            w.last_gen = crate::dashboard::live::generation();
+        }
+    }
+    if close_requested {
+        audit_open.store(false, Ordering::Relaxed);
+        crate::dashboard::live::set_watching(false);
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+    }
+    ui.ctx().set_global_style(saved_style);
 }
 
 /// Drives the approval viewport's show/hide and programmatic resize from the current stack, so the production tray and the `approval_preview` harness exercise the identical window lifecycle.
