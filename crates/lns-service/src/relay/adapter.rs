@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -164,11 +163,11 @@ async fn handle_connection(
 
     let (mut write, mut read) = ws.split();
 
-    let mut audit_file = crate::audit::open_audit_log_async(&audit_path).await?;
     let anchor_path = crate::audit::anchor_path_for(&audit_path);
     let resume_anchor = crate::audit::read_anchor_async(&anchor_path).await;
     let mut chain = lns_ipc::AuditChain::resuming_from_anchor(resume_anchor.as_ref());
     let mut anchor_sink = crate::audit::FileAnchorSink::new(anchor_path);
+    let mut audit_file = crate::audit::LazyAuditLog::new(audit_path);
     let extra_managed: Vec<String> = {
         use crate::credential_flow::providers::Provider;
         credential_session
@@ -220,7 +219,7 @@ async fn serve(
     session: &Arc<ApprovalSession>,
     credential_session: &Arc<CredentialSession>,
     frame_rx: &mut mpsc::UnboundedReceiver<HostFrame>,
-    writer: &mut super::AuditWriter<'_, tokio::fs::File, crate::audit::FileAnchorSink>,
+    writer: &mut super::AuditWriter<'_, crate::audit::LazyAuditLog, crate::audit::FileAnchorSink>,
     mut shutdown: oneshot::Receiver<()>,
     budget: &AuditBudget,
 ) -> Result<()> {

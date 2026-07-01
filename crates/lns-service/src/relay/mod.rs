@@ -59,11 +59,7 @@ impl AuditBudget {
 }
 
 fn audit_path(run_id: &str) -> Result<PathBuf> {
-    let path = lns_ipc::audit_log_for_run(run_id)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    Ok(path)
+    Ok(lns_ipc::audit_log_for_run(run_id)?)
 }
 
 pub struct Relay {
@@ -83,7 +79,7 @@ pub fn spawn(
 ) -> Result<Relay> {
     let token = generate_token();
     let url = format!("vsock://host:{VSOCK_PORT}/v1/sandbox");
-    let audit = audit_path(run_id).context("creating audit log dir")?;
+    let audit = audit_path(run_id).context("resolving audit log path")?;
     let (fd_tx, fd_rx) = mpsc::unbounded_channel::<RawFd>();
 
     let token_clone = token.clone();
@@ -638,13 +634,15 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn audit_path_creates_run_directory_and_returns_jsonl_path() {
+    async fn audit_path_resolves_the_jsonl_path_without_creating_the_run_dir() {
         let temp = tempdir().unwrap();
         let _home = home_for(&temp);
         let path = audit_path("aa42").expect("audit_path");
         assert!(path.ends_with("runs/aa42/audit.jsonl"));
-        let parent = path.parent().unwrap();
-        assert!(parent.is_dir());
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the run dir is created lazily on the first audit event, not at spawn"
+        );
     }
 
     #[tokio::test]

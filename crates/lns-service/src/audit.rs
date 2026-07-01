@@ -85,6 +85,38 @@ impl AuditLog for tokio::fs::File {
     }
 }
 
+pub struct LazyAuditLog {
+    path: PathBuf,
+    file: Option<tokio::fs::File>,
+}
+
+impl LazyAuditLog {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, file: None }
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            use tokio::io::AsyncWriteExt;
+            file.flush().await.context("flushing audit log")?;
+        }
+        Ok(())
+    }
+}
+
+impl AuditLog for LazyAuditLog {
+    async fn append_synced(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.file.is_none() {
+            self.file = Some(open_audit_log_async(&self.path).await?);
+        }
+        self.file
+            .as_mut()
+            .expect("file was opened on the preceding line")
+            .append_synced(bytes)
+            .await
+    }
+}
+
 pub struct FileAnchorSink {
     path: PathBuf,
 }
@@ -371,6 +403,29 @@ mod tests {
             line["dropped_secrets"],
             serde_json::json!([".npmrc", ".ssh"]),
             "and the secrets it masked"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_audit_log_creates_no_file_or_dir_until_the_first_event() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("runs").join("zzz").join("audit.jsonl");
+        let mut log = LazyAuditLog::new(path.clone());
+        log.flush().await.unwrap();
+        assert!(!path.exists(), "a zero-event run must leave no audit log");
+        assert!(
+            !path.parent().unwrap().exists(),
+            "a zero-event run must leave no run dir under data_root"
+        );
+
+        log.append_synced(b"first\n").await.unwrap();
+        assert!(path.exists(), "the first event opens (creates) the log");
+        log.append_synced(b"second\n").await.unwrap();
+        log.flush().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "first\nsecond\n",
+            "the reused handle appends after the first event"
         );
     }
 
