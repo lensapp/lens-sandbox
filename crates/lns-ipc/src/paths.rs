@@ -29,6 +29,10 @@ pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
     Ok(cache_root()?.join("runs").join(run_id).join("audit.anchor"))
 }
 
+pub fn run_metadata_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("runs").join(run_id).join("run.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +50,13 @@ mod tests {
         let anchor = audit_anchor_for_run("42").expect("audit_anchor_for_run");
         assert_eq!(anchor.parent(), log.parent());
         assert!(anchor.ends_with("runs/42/audit.anchor"));
+    }
+
+    #[test]
+    fn run_metadata_path_appends_runs_runid_filename_under_data_root() {
+        let root = data_root().expect("data dir resolves in test env");
+        let p = run_metadata_for_run("42").expect("run_metadata_for_run");
+        assert_eq!(p, root.join("runs").join("42").join("run.json"));
     }
 
     #[test]

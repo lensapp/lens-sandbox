@@ -112,10 +112,10 @@ a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
 
 ## `lns sandbox`
 
-Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.
+Manage sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.
 
 ```bash
-lns sandbox ls
+lns sandbox ls [-a|--all]
 lns sandbox exec [OPTIONS] <RUN> -- <COMMAND...>
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
@@ -133,17 +133,17 @@ interchangeable everywhere a run is addressed.
 
 | Subcommand | Meaning |
 | ---------- | ------- |
-| `ls`       | List active runs (`docker ps`-style). |
+| `ls`       | List running runs by default (`docker ps`-style); `-a` / `--all` also shows finished runs from the durable run history. |
 | `exec`     | Open a new session against a running run (`docker exec`-style). `-i`/`-t` and `--detach-keys` work as for `lns run`; detaching closes only the exec session. |
 | `kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
-| `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, and only while the run is listed by `lns sandbox ls`. |
+| `logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run while it still has that run in memory. |
 | `attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
 | `inspect`  | Print the run's state and launch configuration as JSON, with the policy file's parsed contents embedded when it is readable. |
 | `stats`    | Sample the sandbox's CPU share and memory over one second, via the guest's `/proc`. |
-| `rm`       | Remove a single finished run from the list (`docker rm`-style). Refuses a run that is still running — stop it first. |
+| `rm`       | Remove a single finished run record and its on-disk run directory (`docker rm`-style). Refuses a run that is still running — stop it first. |
 | `rename`   | Give a run a name or change it (`docker rename`-style); the new name resolves immediately and must be unique among listed runs. |
-| `prune`    | Remove every finished run from the list at once (`docker container prune`-style); running runs are left untouched. |
+| `prune`    | Remove every finished run record at once (`docker container prune`-style); running runs are left untouched. |
 
 The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
 as hidden aliases; the `lns sandbox` forms are the documented ones.

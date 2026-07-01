@@ -148,9 +148,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             forward_session_input(*run_id, session_input_from_signal(*signal), "RunSignal").await
         }
         Request::Kill { run, signal } => kill_request(run, *signal).await,
-        Request::ListRuns => Response::RunList {
-            runs: crate::run_registry::snapshot(),
-        },
+        Request::ListRuns { all } => list_runs_response(*all),
         Request::ListVolumes => volume_response(
             crate::volume_store::list()
                 .await
@@ -220,9 +218,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             Ok(()) => Response::Acknowledged,
             Err(message) => Response::Error { message },
         },
-        Request::PruneRuns => Response::RunsPruned {
-            removed: crate::run_registry::prune_exited(),
-        },
+        Request::PruneRuns => prune_runs_request(),
         Request::RunLogs { .. } => {
             unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
         }
@@ -289,19 +285,93 @@ fn inspect_run_request(run: &str) -> Response {
 fn remove_run_request(run: &str) -> Response {
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
-        Err(message) => return Response::Error { message },
+        Err(live_message) => match crate::run_metadata::resolve_disk_handle(run) {
+            Ok(Some(id)) => {
+                return match crate::run_metadata::remove_run_dirs(id) {
+                    Ok(()) => Response::Acknowledged,
+                    Err(e) => Response::Error {
+                        message: format!("{e:#}"),
+                    },
+                };
+            }
+            Ok(None) => {
+                return Response::Error {
+                    message: live_message,
+                };
+            }
+            Err(e) => {
+                return Response::Error {
+                    message: format!("{e:#}"),
+                };
+            }
+        },
     };
     match crate::run_registry::remove_if_exited(id) {
-        crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+        crate::run_registry::RemoveOutcome::Removed => {
+            remove_run_dirs_response(id).unwrap_or(Response::Acknowledged)
+        }
         crate::run_registry::RemoveOutcome::Running => Response::Error {
             message: format!(
                 "run {id} is still running; stop it first with `lns sandbox stop {id}`"
             ),
         },
-        crate::run_registry::RemoveOutcome::NotFound => Response::Error {
-            message: format!("no run with id {id}"),
+        crate::run_registry::RemoveOutcome::NotFound => {
+            match crate::run_metadata::resolve_disk_handle(run) {
+                Ok(Some(id)) => remove_run_dirs_response(id).unwrap_or(Response::Acknowledged),
+                Ok(None) => Response::Error {
+                    message: format!("no run with id {id}"),
+                },
+                Err(e) => Response::Error {
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+    }
+}
+
+fn list_runs_response(all: bool) -> Response {
+    let live = crate::run_registry::snapshot();
+    if !all {
+        return Response::RunList { runs: live };
+    }
+    match crate::run_metadata::list() {
+        Ok(disk) => Response::RunList {
+            runs: crate::run_metadata::merge_live_and_disk(live, disk),
+        },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
         },
     }
+}
+
+fn remove_run_dirs_response(id: u32) -> Option<Response> {
+    crate::run_metadata::remove_run_dirs(id)
+        .err()
+        .map(|e| Response::Error {
+            message: format!("{e:#}"),
+        })
+}
+
+fn prune_runs_request() -> Response {
+    let live_before = crate::run_registry::snapshot();
+    let disk = match crate::run_metadata::list() {
+        Ok(disk) => disk,
+        Err(e) => {
+            return Response::Error {
+                message: format!("{e:#}"),
+            };
+        }
+    };
+    let mut removed = crate::run_registry::prune_exited();
+    removed.extend(crate::run_metadata::disk_only_ids(&live_before, &disk));
+    removed.sort_unstable();
+    removed.dedup();
+    for id in &removed {
+        if let Some(response) = remove_run_dirs_response(*id) {
+            return response;
+        }
+    }
+    Response::RunsPruned { removed }
 }
 
 fn volume_response(result: anyhow::Result<Response>) -> Response {
@@ -1008,7 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_list_runs_returns_snapshot() {
-        let response = handle_request(&Request::ListRuns, Instant::now()).await;
+        let response = handle_request(&Request::ListRuns { all: false }, Instant::now()).await;
         assert!(matches!(response, Response::RunList { .. }));
     }
 

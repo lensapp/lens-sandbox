@@ -23,9 +23,9 @@ pub struct SandboxArgs {
 pub enum SandboxCommand {
     #[command(
         visible_alias = "list",
-        about = "List active runs (`docker ps`-style)."
+        about = "List running runs (`docker ps`-style); use --all for finished history."
     )]
-    Ls,
+    Ls(SandboxLsArgs),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
     Exec(ExecArgs),
     #[command(about = "Send a signal to a running run (`docker kill`-style).")]
@@ -48,6 +48,17 @@ pub enum SandboxCommand {
     Rename(SandboxRenameArgs),
     #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
     Prune,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxLsArgs {
+    #[arg(
+        short = 'a',
+        long,
+        default_value_t = false,
+        help = "Show finished runs from the durable run history as well as active runs."
+    )]
+    pub all: bool,
 }
 
 #[derive(clap::Args)]
@@ -142,7 +153,7 @@ pub struct SandboxRenameArgs {
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(subcommand::<SandboxArgs>("sandbox").about(
-        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.",
+        "Manage sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.",
     ))
 }
 
@@ -183,7 +194,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
-        SandboxCommand::Ls => ls(svc, out).await,
+        SandboxCommand::Ls(args) => ls(svc, args, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
@@ -205,8 +216,12 @@ pub(crate) fn run_label(run: &str) -> String {
     }
 }
 
-async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::ListRuns).await?;
+async fn ls<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxLsArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc.one_shot(Request::ListRuns { all: args.all }).await?;
     match response {
         Response::RunList { mut runs } => {
             runs.sort_by(|a, b| b.started.cmp(&a.started));
@@ -648,7 +663,9 @@ mod tests {
             message: "registry poisoned".into(),
         });
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &SandboxLsArgs { all: false }, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
     }
 
@@ -656,8 +673,24 @@ mod tests {
     async fn ls_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &SandboxLsArgs { all: false }, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn ls_all_sets_the_all_field_on_the_request() {
+        let svc = CannedService::new(Response::RunList { runs: vec![] });
+        let mut out = Vec::new();
+        let code = ls(&svc, &SandboxLsArgs { all: true }, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            *svc.requests.lock().unwrap(),
+            vec![Request::ListRuns { all: true }]
+        );
     }
 
     #[tokio::test]

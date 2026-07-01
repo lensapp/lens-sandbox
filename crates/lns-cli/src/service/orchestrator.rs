@@ -51,10 +51,10 @@ pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
     })
 }
 
-pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn ls_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         require_running().await;
-        ls().await?;
+        ls(matches.get_flag("all")).await?;
         Ok(0)
     })
 }
@@ -304,9 +304,9 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     }
 }
 
-pub async fn ls() -> Result<()> {
+pub async fn ls(all: bool) -> Result<()> {
     let socket = super::socket_path()?;
-    let response = real::send_request(&socket, &Request::ListRuns)
+    let response = real::send_request(&socket, &Request::ListRuns { all })
         .await
         .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
     let mut rows = match response {

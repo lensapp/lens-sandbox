@@ -463,19 +463,30 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             input_tx: Some(input_tx),
             connector: None,
             name: String::new(),
-            image: image_label,
-            command: command_label,
-            started: started_label,
+            image: image_label.clone(),
+            command: command_label.clone(),
+            started: started_label.clone(),
             status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
             logs,
             config,
         },
     );
-    if let Err(message) = registered {
-        abort.abort();
-        let _ = write_error(&mut stream, message).await;
-        return Ok(());
-    }
+    let run_name = match registered {
+        Ok(run_name) => run_name,
+        Err(message) => {
+            abort.abort();
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
+    persist_run_summary(lns_ipc::RunSummary {
+        id: run_id,
+        name: run_name,
+        image: image_label,
+        command: command_label,
+        status: lns_ipc::RunStatus::Running,
+        started: started_label,
+    });
 
     drop(frame_tx);
 
@@ -499,6 +510,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     match post_pump_action(&outcome, detached) {
         PostPumpAction::Retain => {
             crate::run_registry::mark_exited_from_log(run_id);
+            persist_run_summary_from_registry(run_id);
         }
         PostPumpAction::BackgroundDrain => {
             if let PumpOutcome::WriteFailed(e) = &outcome {
@@ -507,6 +519,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             tokio::spawn(async move {
                 while frame_rx.recv().await.is_some() {}
                 crate::run_registry::mark_exited_from_log(run_id);
+                persist_run_summary_from_registry(run_id);
             });
         }
         PostPumpAction::CancelAndDeregister => {
@@ -518,6 +531,18 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         }
     }
     Ok(())
+}
+
+fn persist_run_summary(summary: lns_ipc::RunSummary) {
+    if let Err(e) = crate::run_metadata::persist(&summary) {
+        log::warn!(run_id = summary.id, error = %format_args!("{e:#}"), "failed to persist run metadata");
+    }
+}
+
+fn persist_run_summary_from_registry(run_id: u32) {
+    if let Some(summary) = crate::run_registry::summary(run_id) {
+        persist_run_summary(summary);
+    }
 }
 
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {

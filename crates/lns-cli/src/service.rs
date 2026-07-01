@@ -60,7 +60,20 @@ pub const KILL_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_ls(app: clap::Command) -> clap::Command {
-    app.subcommand(clap::Command::new("ls").visible_alias("list").hide(true))
+    app.subcommand(
+        clap::Command::new("ls")
+            .visible_alias("list")
+            .hide(true)
+            .arg(
+                clap::Arg::new("all")
+                    .short('a')
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue)
+                    .help(
+                        "Show finished runs from the durable run history as well as active runs.",
+                    ),
+            ),
+    )
 }
 
 pub const LS_SPEC: CommandSpec = CommandSpec {

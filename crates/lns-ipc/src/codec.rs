@@ -275,6 +275,20 @@ mod tests {
     }
 
     #[test]
+    fn list_runs_defaults_to_live_only_when_the_all_field_is_absent() {
+        let decoded: Request = serde_json::from_slice(br#"{"type":"ListRuns"}"#).unwrap();
+        assert_eq!(decoded, Request::ListRuns { all: false });
+    }
+
+    #[test]
+    fn list_runs_round_trips_with_all_enabled() {
+        let request = Request::ListRuns { all: true };
+        let frame = encode_frame(&request).unwrap();
+        let decoded: Request = decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn rejects_frame_too_large() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&FRAME_MAGIC);

@@ -248,6 +248,13 @@ fn summary_of(id: u32, h: &RunHandle) -> lns_ipc::RunSummary {
     }
 }
 
+pub fn summary(run_id: u32) -> Option<lns_ipc::RunSummary> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(&run_id))
+        .map(|h| summary_of(run_id, h))
+}
+
 pub fn inspect(run_id: u32) -> Option<lns_ipc::RunDetails> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
@@ -935,6 +942,21 @@ mod tests {
         assert_eq!(row.command, "sleep 1");
         assert_eq!(row.started, "2026-05-21 10:00:00");
         assert_eq!(row.status, RunStatus::Running);
+
+        deregister(id);
+    }
+
+    #[tokio::test]
+    async fn summary_returns_one_registered_run() {
+        let id = allocate_run_id();
+        let (mut handle, _rx) = make_handle();
+        handle.image = "alpine:latest".to_string();
+        register(id, handle);
+
+        let row = summary(id).expect("registered run has a summary");
+        assert_eq!(row.id, id);
+        assert_eq!(row.image, "alpine:latest");
+        assert_eq!(summary(id + 6_000_000), None);
 
         deregister(id);
     }

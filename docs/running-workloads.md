@@ -297,7 +297,8 @@ cancelled. Use the chord — or start the run with `-d` — to step away safely.
 Everything you do to a run after starting it lives under `lns sandbox`:
 
 ```bash
-lns sandbox ls                 # list active runs
+lns sandbox ls                 # list running runs
+lns sandbox ls -a              # include finished run history
 lns sandbox exec 7 -- bash     # open another session inside a run
 lns sandbox kill 7             # send one signal (default SIGTERM)
 lns sandbox stop 7             # SIGTERM, wait up to 10s, then SIGKILL
@@ -337,7 +338,7 @@ exit, `killed run #7` when it had to escalate.
 ### Logs
 
 The service keeps a rolling capture of every run's stdout and stderr — the most
-recent 2 MiB — for as long as the run is listed by `lns sandbox ls`. `lns sandbox logs`
+recent 2 MiB — while the service still has that run in memory. `lns sandbox logs`
 prints what's buffered; `-f` streams new output until the run exits. Output of
 exec sessions is not captured, only the run's primary session.
 
@@ -365,11 +366,12 @@ so the numbers cover everything the run is doing.
 
 ### Cleaning up the list
 
-A finished run lingers in `lns sandbox ls` (as `exited`) until its teardown
-completes, so you can still read its captured logs. To drop it sooner, `lns
-sandbox rm 7` removes one finished run; `lns sandbox prune` removes every
-finished run at once. Both refuse to touch a run that is still running — stop it
-first with `lns sandbox stop`. Removing a run also discards its buffered logs.
+By default, `lns sandbox ls` shows running runs. Add `-a` / `--all` to include
+finished runs from the durable run history, including runs discovered after a
+service restart. `lns sandbox rm 7` removes one finished run record and its
+on-disk run directory; `lns sandbox prune` removes every finished run at once.
+Both refuse to touch a run that is still running — stop it first with `lns
+sandbox stop`.
 
 ## See also
 

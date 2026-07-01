@@ -36,7 +36,10 @@ pub enum Request {
         run: String,
         signal: SignalKind,
     },
-    ListRuns,
+    ListRuns {
+        #[serde(default)]
+        all: bool,
+    },
     StopRun {
         run: String,
         timeout_secs: u64,

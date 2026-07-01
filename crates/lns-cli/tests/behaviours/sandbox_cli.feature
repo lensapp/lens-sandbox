@@ -42,6 +42,12 @@ Feature: managing running sandboxes from the CLI
     And the output contains "running"
     And the service received a ListRuns request
 
+  Scenario: sandbox ls --all asks the service for historical runs too
+    Given the service reports a run listing with run 3 of image "some-image" running
+    When the user runs sandbox command "ls --all"
+    Then the exit code is 0
+    And the service received a ListRuns --all request
+
   Scenario: sandbox list is an alias for sandbox ls
     Given the service reports a run listing with run 3 of image "some-image" running
     When the user runs sandbox command "list"
