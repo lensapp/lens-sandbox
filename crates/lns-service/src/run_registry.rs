@@ -121,6 +121,9 @@ pub fn resolve(handle: &str) -> Result<String, String> {
 }
 
 fn resolve_in(map: Option<&HashMap<String, RunHandle>>, handle: &str) -> Result<String, String> {
+    if handle.is_empty() {
+        return Err(format!("no such run: {handle}"));
+    }
     let Some(map) = map else {
         return Err(format!("no such run: {handle}"));
     };
@@ -504,6 +507,17 @@ mod tests {
             resolve_in(None, "reviewer")
                 .unwrap_err()
                 .contains("no such run")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_in_rejects_an_empty_handle_instead_of_matching_the_only_run() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
+        let err = resolve_in(Some(&map), "").unwrap_err();
+        assert!(
+            err.contains("no such run"),
+            "an empty handle must not wildcard-match the sole run, got: {err}"
         );
     }
 
