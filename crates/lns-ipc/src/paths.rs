@@ -22,7 +22,7 @@ pub fn data_root() -> Result<PathBuf, CachePathError> {
 }
 
 pub fn short_run_id(id: &str) -> &str {
-    &id[..id.len().min(12)]
+    id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
 }
 
 pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
@@ -53,6 +53,12 @@ mod tests {
         );
         assert_eq!(short_run_id("abc"), "abc");
         assert_eq!(short_run_id(""), "");
+    }
+
+    #[test]
+    fn short_run_id_truncates_on_a_char_boundary_for_tampered_multibyte_ids() {
+        assert_eq!(short_run_id("abcdefghijké"), "abcdefghijké");
+        assert_eq!(short_run_id("aaaaaaaaaaaéz"), "aaaaaaaaaaaé");
     }
 
     #[test]
