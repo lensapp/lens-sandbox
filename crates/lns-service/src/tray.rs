@@ -416,6 +416,7 @@ impl eframe::App for TrayApp {
             .filter(|d| d.is_revealed())
             .count();
         self.placement.sync_visibility(ctx, &order, revealed);
+        self.render_audit_dashboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -485,7 +486,6 @@ impl eframe::App for TrayApp {
             None => {}
         }
 
-        self.render_audit_dashboard(ui.ctx());
         refresh_window_shadows();
     }
 }
