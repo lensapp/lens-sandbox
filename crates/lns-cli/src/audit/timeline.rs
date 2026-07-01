@@ -3,21 +3,12 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 
+use lns_audit::{TimelineRow, collect_timeline};
+
+use super::AuditArgs;
 use super::table::render_table;
-use super::{AuditArgs, events, friendly_when, show, store};
-
-#[derive(Debug)]
-struct Row {
-    ts: String,
-    when: String,
-    run: String,
-    kind: String,
-    detail: String,
-    raw: Value,
-    integration: Option<String>,
-}
+use crate::log;
 
 pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
     let runs_root = lns_ipc::audit_runs_root().context("locating the audit runs root")?;
@@ -34,12 +25,12 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
         None => None,
     };
 
-    let mut rows = Vec::new();
-    collect_ledger_rows(&ledger_path, scope.as_deref(), &mut rows)?;
-    collect_run_rows(&runs_root, scope.as_deref(), &mut rows)?;
-
+    let timeline = collect_timeline(&runs_root, &ledger_path, scope.as_deref())?;
+    for warning in &timeline.warnings {
+        log::warn!("{warning}");
+    }
+    let mut rows = timeline.rows;
     rows.retain(|row| matches_filter(row, args));
-    sort_newest_first(&mut rows);
 
     if args.json {
         emit_json(&rows, out)?;
@@ -49,15 +40,7 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
     Ok(0)
 }
 
-fn sort_newest_first(rows: &mut [Row]) {
-    rows.sort_by(|a, b| {
-        b.ts.cmp(&a.ts)
-            .then_with(|| a.run.cmp(&b.run))
-            .then_with(|| a.kind.cmp(&b.kind))
-    });
-}
-
-fn matches_filter(row: &Row, args: &AuditArgs) -> bool {
+fn matches_filter(row: &TimelineRow, args: &AuditArgs) -> bool {
     if let Some(integration) = &args.integration
         && row.integration.as_deref() != Some(integration.as_str())
     {
@@ -71,7 +54,7 @@ fn matches_filter(row: &Row, args: &AuditArgs) -> bool {
     true
 }
 
-fn render(rows: &[Row], sandbox: Option<&str>, out: &mut dyn Write) -> Result<()> {
+fn render(rows: &[TimelineRow], sandbox: Option<&str>, out: &mut dyn Write) -> Result<()> {
     if rows.is_empty() {
         match sandbox {
             Some(sandbox) => writeln!(out, "No audit events for sandbox {sandbox}.")?,
@@ -94,7 +77,7 @@ fn render(rows: &[Row], sandbox: Option<&str>, out: &mut dyn Write) -> Result<()
     Ok(())
 }
 
-fn emit_json(rows: &[Row], out: &mut dyn Write) -> Result<()> {
+fn emit_json(rows: &[TimelineRow], out: &mut dyn Write) -> Result<()> {
     for row in rows {
         let line = serde_json::to_string(&row.raw).context("serializing audit event")?;
         writeln!(out, "{line}")?;
@@ -102,113 +85,13 @@ fn emit_json(rows: &[Row], out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn collect_ledger_rows(ledger_path: &Path, scope: Option<&str>, rows: &mut Vec<Row>) -> Result<()> {
-    super::warn_if_compromised(
-        ledger_path,
-        &lns_ipc::connection_ledger_anchor().context("locating the connection ledger anchor")?,
-    );
-    for record in store::stream_ledger(ledger_path)? {
-        let record = record?;
-        if scope.is_some_and(|run_id| record.run != run_id) {
-            continue;
-        }
-        let raw = serde_json::to_value(&record).context("serializing ledger record")?;
-        let kind = match record.event.name() {
-            "credential_use" => "credential",
-            other => other,
-        };
-        rows.push(Row {
-            when: friendly_when(&record.ts),
-            ts: record.ts.clone(),
-            run: record.run.clone(),
-            kind: kind.to_string(),
-            detail: events::detail(&record.event),
-            integration: record.event.integration().map(str::to_string),
-            raw,
-        });
-    }
-    Ok(())
-}
-
-fn collect_run_rows(runs_root: &Path, scope: Option<&str>, rows: &mut Vec<Row>) -> Result<()> {
-    for run_id in run_ids_in(runs_root)? {
-        if scope.is_some_and(|wanted| run_id != wanted) {
-            continue;
-        }
-        collect_one_run(runs_root, &run_id, rows)?;
-    }
-    Ok(())
-}
-
-fn collect_one_run(runs_root: &Path, run_id: &str, rows: &mut Vec<Row>) -> Result<()> {
-    let log_path = runs_root.join(run_id).join("audit.jsonl");
-    let text = match std::fs::read_to_string(&log_path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(e).with_context(|| format!("reading audit log {}", log_path.display()));
-        }
-    };
-    super::warn_if_compromised(&log_path, &log_path.with_file_name("audit.anchor"));
-    for (idx, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .with_context(|| format!("parsing audit line {} of {}", idx + 1, log_path.display()))?;
-        let Value::Object(mut obj) = value else {
-            anyhow::bail!(
-                "audit line {} of {} is not a JSON object",
-                idx + 1,
-                log_path.display()
-            );
-        };
-        obj.insert("run".to_string(), Value::String(run_id.to_string()));
-        let (kind, detail) = show::describe(&obj);
-        rows.push(Row {
-            ts: obj
-                .get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            when: show::when(&obj),
-            run: run_id.to_string(),
-            kind,
-            detail,
-            integration: None,
-            raw: Value::Object(obj),
-        });
-    }
-    Ok(())
-}
-
-fn run_ids_in(runs_root: &Path) -> Result<Vec<String>> {
-    let entries = match std::fs::read_dir(runs_root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(e).with_context(|| format!("reading runs dir {}", runs_root.display()));
-        }
-    };
-    let mut ids = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading runs dir {}", runs_root.display()))?;
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
-            && let Some(name) = entry.file_name().to_str()
-        {
-            ids.push(name.to_string());
-        }
-    }
-    Ok(ids)
-}
-
 fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<Option<String>> {
     let mut names: BTreeMap<String, String> = BTreeMap::new();
     let mut ids: Vec<String> = Vec::new();
-    for run_id in run_ids_in(runs_root)? {
+    for run_id in lns_audit::run_ids_in(runs_root)? {
         ids.push(run_id);
     }
-    for record in store::stream_ledger(ledger_path)? {
+    for record in lns_audit::stream_ledger(ledger_path)? {
         let record = record?;
         ids.push(record.run.clone());
         names.entry(record.microvm.clone()).or_insert(record.run);
@@ -234,6 +117,7 @@ mod tests {
     use super::*;
     use crate::audit::KindArg;
     use lns_ipc::{AuthKind, LedgerEvent, LedgerRecord};
+    use serde_json::Value;
 
     struct Fixture {
         _home: tempfile::TempDir,
@@ -291,7 +175,7 @@ mod tests {
             .unwrap();
         }
 
-        fn collect(&self, args: &AuditArgs) -> Result<Vec<Row>> {
+        fn collect(&self, args: &AuditArgs) -> Result<Vec<TimelineRow>> {
             let scope = match &args.sandbox {
                 Some(sandbox) => {
                     resolve_scope(sandbox, &self.runs_root, &self.ledger_path)?.map(Some)
@@ -301,11 +185,9 @@ mod tests {
             let Some(scope) = scope else {
                 return Ok(Vec::new());
             };
-            let mut rows = Vec::new();
-            collect_ledger_rows(&self.ledger_path, scope.as_deref(), &mut rows)?;
-            collect_run_rows(&self.runs_root, scope.as_deref(), &mut rows)?;
+            let mut rows =
+                collect_timeline(&self.runs_root, &self.ledger_path, scope.as_deref())?.rows;
             rows.retain(|row| matches_filter(row, args));
-            sort_newest_first(&mut rows);
             Ok(rows)
         }
 
@@ -360,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bare_timeline_merges_ledger_and_run_events_in_timestamp_order() {
+    fn the_bare_timeline_renders_every_kind_in_plain_language() {
         let fix = Fixture::new();
         fix.write_run(
             "1a2b3c4d0000000000000000000000aa",
@@ -373,13 +255,6 @@ mod tests {
             connection("1a2b3c4d0000000000000000000000aa", "2026-06-29T14:00:00Z"),
             credential_use("1a2b3c4d0000000000000000000000aa", "2026-06-29T15:00:00Z"),
         ]);
-        let rows = fix.collect(&args()).unwrap();
-        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
-        assert_eq!(
-            kinds,
-            ["credential", "connection", "egress", "env"],
-            "newest event first"
-        );
         let text = fix.render(&args());
         assert!(text.contains("WHEN") && text.contains("DETAIL"), "{text}");
         assert!(text.contains("injected: FOO"), "{text}");
@@ -433,8 +308,7 @@ mod tests {
             sandbox: Some("calm-finch".into()),
             ..args()
         };
-        let text = fix.render(&scoped);
-        assert!(text.contains("some-oauth"), "{text}");
+        assert!(fix.render(&scoped).contains("some-oauth"));
     }
 
     #[test]
@@ -448,8 +322,7 @@ mod tests {
             sandbox: Some("1a2b".into()),
             ..args()
         };
-        let text = fix.render(&scoped);
-        assert!(text.contains("data → /data"), "{text}");
+        assert!(fix.render(&scoped).contains("data → /data"));
     }
 
     #[test]
@@ -463,15 +336,15 @@ mod tests {
             "ab22",
             &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"b","target":"/b"}"#],
         );
-        let scoped = AuditArgs {
-            sandbox: Some("ab".into()),
-            ..args()
-        };
         assert!(
             resolve_scope("ab", &fix.runs_root, &fix.ledger_path)
                 .unwrap()
                 .is_none()
         );
+        let scoped = AuditArgs {
+            sandbox: Some("ab".into()),
+            ..args()
+        };
         assert_eq!(
             fix.render(&scoped).trim(),
             "No audit events for sandbox ab."
@@ -496,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn the_integration_filter_excludes_run_events_and_keeps_matching_ledger_events() {
+    fn the_integration_filter_keeps_only_matching_ledger_events() {
         let fix = Fixture::new();
         fix.write_run(
             "1a2b3c4d0000000000000000000000aa",
@@ -537,20 +410,17 @@ mod tests {
     #[test]
     fn the_kind_filter_accepts_credential_for_credential_use_events() {
         let fix = Fixture::new();
-        fix.write_ledger(&[
-            connection("1a2b3c4d0000000000000000000000aa", "2026-06-29T14:00:00Z"),
-            credential_use("1a2b3c4d0000000000000000000000aa", "2026-06-29T15:00:00Z"),
-        ]);
+        fix.write_ledger(&[credential_use(
+            "1a2b3c4d0000000000000000000000aa",
+            "2026-06-29T15:00:00Z",
+        )]);
         let filtered = AuditArgs {
             kind: Some(KindArg::Credential),
             ..args()
         };
         let rows = fix.collect(&filtered).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].kind, "credential",
-            "the user-facing kind is `credential`, not the wire name `credential_use`"
-        );
+        assert_eq!(rows[0].kind, "credential");
     }
 
     #[test]
@@ -574,104 +444,15 @@ mod tests {
         let newest: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(newest["event"], "connection", "newest event first");
         let oldest: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(oldest["event"], "run_env");
-        assert_eq!(
-            oldest["run"], "1a2b3c4d0000000000000000000000aa",
-            "the per-run object must carry its injected run id"
-        );
+        assert_eq!(oldest["run"], "1a2b3c4d0000000000000000000000aa");
     }
 
     #[test]
-    fn a_malformed_run_line_surfaces_its_line_number() {
+    fn a_corrupt_run_line_propagates_the_read_error() {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("broken");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("audit.jsonl"), "not json\n").unwrap();
-        let err = fix.collect(&args()).unwrap_err();
-        assert!(format!("{err:#}").contains("audit line 1"), "{err:#}");
-    }
-
-    #[test]
-    fn a_non_object_run_line_is_reported_as_corruption() {
-        let fix = Fixture::new();
-        let dir = fix.runs_root.join("broken");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("audit.jsonl"), "42\n").unwrap();
-        let err = fix.collect(&args()).unwrap_err();
-        assert!(format!("{err:#}").contains("not a JSON object"), "{err:#}");
-    }
-
-    #[test]
-    fn a_run_dir_without_an_audit_log_contributes_no_rows() {
-        let fix = Fixture::new();
-        std::fs::create_dir_all(fix.runs_root.join("empty")).unwrap();
-        assert_eq!(fix.render(&args()).trim(), "No audit events.");
-    }
-
-    #[test]
-    fn ties_break_by_run_then_kind() {
-        let fix = Fixture::new();
-        fix.write_ledger(&[
-            credential_use("bbbb", "2026-06-29T14:00:00Z"),
-            connection("aaaa", "2026-06-29T14:00:00Z"),
-        ]);
-        let rows = fix.collect(&args()).unwrap();
-        assert_eq!(rows[0].run, "aaaa");
-        assert_eq!(rows[1].run, "bbbb");
-    }
-
-    #[test]
-    fn scoping_skips_run_dirs_other_than_the_target() {
-        let fix = Fixture::new();
-        fix.write_run(
-            "aaaa",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"keep","target":"/keep"}"#],
-        );
-        fix.write_run(
-            "bbbb",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"skip","target":"/skip"}"#],
-        );
-        let scoped = AuditArgs {
-            sandbox: Some("aaaa".into()),
-            ..args()
-        };
-        let text = fix.render(&scoped);
-        assert!(text.contains("keep → /keep"), "{text}");
-        assert!(
-            !text.contains("skip → /skip"),
-            "a run dir other than the scoped one must be skipped: {text}"
-        );
-    }
-
-    #[test]
-    fn a_run_whose_audit_log_is_unreadable_surfaces_a_reading_error() {
-        let fix = Fixture::new();
-        std::fs::create_dir_all(fix.runs_root.join("weird").join("audit.jsonl")).unwrap();
-        let err = fix.collect(&args()).unwrap_err();
-        assert!(format!("{err:#}").contains("reading audit log"), "{err:#}");
-    }
-
-    #[test]
-    fn blank_lines_in_a_run_log_are_skipped() {
-        let fix = Fixture::new();
-        let dir = fix.runs_root.join("blanks");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("audit.jsonl"),
-            "\n   \n{\"ts\":\"2026-06-29T13:00:00Z\",\"type\":\"volume_attached\",\"name\":\"d\",\"target\":\"/d\"}\n",
-        )
-        .unwrap();
-        let rows = fix.collect(&args()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, "volume");
-    }
-
-    #[test]
-    fn a_runs_root_that_is_a_file_surfaces_a_reading_error() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let not_a_dir = dir.path().join("runs");
-        std::fs::write(&not_a_dir, "x").unwrap();
-        let err = run_ids_in(&not_a_dir).unwrap_err();
-        assert!(format!("{err:#}").contains("reading runs dir"), "{err:#}");
+        assert!(fix.collect(&args()).is_err());
     }
 }

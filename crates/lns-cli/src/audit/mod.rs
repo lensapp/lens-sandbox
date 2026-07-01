@@ -1,17 +1,9 @@
-mod events;
-mod show;
-mod store;
 mod table;
 mod timeline;
-pub mod verify;
-
-use std::path::Path;
 
 use clap::FromArgMatches;
-use lns_ipc::AuthKind;
 
 use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
-use crate::log;
 
 #[derive(clap::Args)]
 pub struct AuditArgs {
@@ -74,45 +66,6 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
     })
 }
 
-pub(super) fn warn_if_compromised(path: &Path, anchor: &Path) {
-    if let Ok(outcome) = verify::verify_chain_with_anchor(path, anchor)
-        && let Some(advisory) = integrity_advisory(&outcome)
-    {
-        log::warn!("{advisory}");
-    }
-}
-
-fn integrity_advisory(outcome: &verify::VerifyOutcome) -> Option<String> {
-    match outcome {
-        verify::VerifyOutcome::Ok { .. } => None,
-        verify::VerifyOutcome::Broken { at_line, reason } => Some(format!(
-            "audit integrity: chain broken at line {at_line} ({reason}) — entries shown may have been altered"
-        )),
-        verify::VerifyOutcome::Truncated { reason } => Some(format!(
-            "audit integrity: log truncated or rolled back ({reason}) — entries may be missing"
-        )),
-        verify::VerifyOutcome::AnchorUnreadable { reason, .. } => Some(format!(
-            "audit integrity: anchor unreadable ({reason}) — the log cannot be confirmed intact"
-        )),
-        verify::VerifyOutcome::NoAnchor { line_count: 0 } => None,
-        verify::VerifyOutcome::NoAnchor { .. } => Some(
-            "audit integrity: no anchor beside the log — truncation or rollback cannot be detected"
-                .to_string(),
-        ),
-    }
-}
-
-pub(super) fn friendly_when(ts: &str) -> String {
-    ts.trim_end_matches('Z').replacen('T', " ", 1)
-}
-
-pub(super) fn auth_word(auth: AuthKind) -> &'static str {
-    match auth {
-        AuthKind::Oauth => "oauth",
-        AuthKind::Apikey => "apikey",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +91,24 @@ mod tests {
                 chain.anchor().expect("chain has events").to_line(),
             )
             .unwrap();
+        }
+    }
+
+    fn tamper_run_log(home: &std::path::Path, run_id: &str) {
+        for data in ["Library/Application Support", ".local/share"] {
+            let log = home
+                .join(data)
+                .join("lns")
+                .join("runs")
+                .join(run_id)
+                .join("audit.jsonl");
+            if log.exists() {
+                std::fs::write(
+                    &log,
+                    "{\"ts\":\"2026-06-29T13:00:00Z\",\"type\":\"volume_attached\",\"name\":\"data\",\"target\":\"/data\",\"prev_hash\":\"deadbeef\"}\n",
+                )
+                .unwrap();
+            }
         }
     }
 
@@ -171,6 +142,8 @@ mod tests {
         }
     }
 
+    use lns_ipc::AuthKind;
+
     fn home_env(home: &std::path::Path) -> Vec<crate::test_env::EnvScope> {
         vec![
             crate::test_env::EnvScope::set("HOME", home),
@@ -195,18 +168,6 @@ mod tests {
     }
 
     #[test]
-    fn friendly_when_strips_the_zulu_marker_and_spaces_the_date() {
-        assert_eq!(friendly_when("2026-06-29T14:02:11Z"), "2026-06-29 14:02:11");
-        assert_eq!(friendly_when(""), "");
-    }
-
-    #[test]
-    fn auth_word_maps_both_kinds() {
-        assert_eq!(auth_word(AuthKind::Oauth), "oauth");
-        assert_eq!(auth_word(AuthKind::Apikey), "apikey");
-    }
-
-    #[test]
     fn kind_arg_labels_match_the_event_kind_names() {
         assert_eq!(KindArg::Egress.label(), "egress");
         assert_eq!(KindArg::Env.label(), "env");
@@ -215,58 +176,6 @@ mod tests {
         assert_eq!(KindArg::Approval.label(), "approval");
         assert_eq!(KindArg::Connection.label(), "connection");
         assert_eq!(KindArg::Credential.label(), "credential");
-    }
-
-    #[test]
-    fn integrity_advisory_is_silent_only_for_an_intact_chain() {
-        assert_eq!(
-            integrity_advisory(&verify::VerifyOutcome::Ok { line_count: 3 }),
-            None
-        );
-        let broken = integrity_advisory(&verify::VerifyOutcome::Broken {
-            at_line: 7,
-            reason: "prev_hash mismatch".into(),
-        })
-        .expect("a broken chain advises");
-        assert!(
-            broken.contains("line 7") && broken.contains("altered"),
-            "{broken}"
-        );
-        assert!(
-            integrity_advisory(&verify::VerifyOutcome::Truncated {
-                reason: "tail".into()
-            })
-            .expect("truncation advises")
-            .contains("truncated")
-        );
-        assert!(
-            integrity_advisory(&verify::VerifyOutcome::AnchorUnreadable {
-                line_count: 2,
-                reason: "corrupt".into(),
-            })
-            .expect("an unreadable anchor advises")
-            .contains("anchor unreadable")
-        );
-        assert!(
-            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 2 })
-                .expect("a missing anchor advises")
-                .contains("no anchor")
-        );
-    }
-
-    #[test]
-    fn integrity_advisory_ignores_a_missing_anchor_only_when_the_log_is_empty() {
-        assert_eq!(
-            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 0 }),
-            None,
-            "a zero-event log has nothing to protect and nothing truncatable; a wiped non-empty log is caught by Truncated against its surviving anchor"
-        );
-        assert!(
-            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 1 })
-                .expect("a non-empty log with no anchor still advises")
-                .contains("no anchor"),
-            "content with no checkpoint is still a real integrity gap"
-        );
     }
 
     #[tokio::test]
@@ -327,6 +236,19 @@ mod tests {
             !text.contains("some-oauth"),
             "scoped out the ledger: {text}"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_compromised_run_chain_is_still_listed_when_reading_the_timeline() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_run_chain(home.path(), "424242");
+        tamper_run_log(home.path(), "424242");
+        let _env = home_env(home.path());
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit"], &mut out).await.unwrap();
+        assert_eq!(code, 0, "a compromised chain warns but still lists");
+        assert!(String::from_utf8(out).unwrap().contains("WHEN"));
     }
 
     #[tokio::test]

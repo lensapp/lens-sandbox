@@ -1,0 +1,27 @@
+[package]
+name = "lns-audit"
+version = "0.1.0"
+edition = "2024"
+description = "Shared audit-timeline reader for Lens Sandbox — merges per-run logs and the connection ledger into one chronological view"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "lns_audit"
+path = "src/lib.rs"
+
+[dependencies]
+lns-ipc = { path = "../lns-ipc" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+cognitive_complexity = { level = "deny", priority = 1 }
+
+[lints.rust]
+unsafe_code = "forbid"

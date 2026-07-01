@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
 lns-ipc    = { path = "../lns-ipc" }
+lns-audit  = { path = "../lns-audit" }
 lns-policy = { path = "../lns-policy" }
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "time", "sync"] }
 anyhow     = "1"

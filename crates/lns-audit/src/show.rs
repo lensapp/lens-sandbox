@@ -1,15 +1,15 @@
 use serde_json::Value;
 
-use super::friendly_when;
+use crate::friendly_when;
 
-pub(super) fn when(obj: &serde_json::Map<String, Value>) -> String {
+pub(crate) fn when(obj: &serde_json::Map<String, Value>) -> String {
     match obj.get("ts").and_then(Value::as_str) {
         Some(ts) => friendly_when(ts),
         None => "-".to_string(),
     }
 }
 
-pub(super) fn describe(obj: &serde_json::Map<String, Value>) -> (String, String) {
+pub(crate) fn describe(obj: &serde_json::Map<String, Value>) -> (String, String) {
     if obj.get("event").and_then(Value::as_str) == Some("run_env") {
         return ("env".to_string(), env_detail(obj));
     }

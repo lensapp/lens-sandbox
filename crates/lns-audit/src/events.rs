@@ -1,8 +1,8 @@
 use lns_ipc::{ApprovalKind, Decision, LedgerEvent};
 
-use super::auth_word;
+use crate::auth_word;
 
-pub(super) fn detail(event: &LedgerEvent) -> String {
+pub(crate) fn detail(event: &LedgerEvent) -> String {
     match event {
         LedgerEvent::Approval {
             kind,
