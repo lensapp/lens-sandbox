@@ -154,15 +154,15 @@ Show one chronological timeline of every audit event across all sandboxes — or
 
 ```bash
 lns audit                                   # every event, every sandbox, newest first
-lns audit <sandbox>                         # scope to one sandbox: run id, name, or unique id prefix
+lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
 lns audit [--integration <id>] [--kind <kind>] [--json]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
 logs (egress, injected env, volume/bind mounts) and the durable connection ledger
 (`approval`, `connection`, and `credential` events recorded across runs). `<sandbox>`
-narrows it to one run — resolved as a run id, the run's name (e.g. `calm-finch`), or a
-unique id prefix; an unknown sandbox prints `No audit events for sandbox …` and exits `0`.
+narrows it to one run — resolved as a run id or a unique id prefix; an unknown sandbox
+prints `No audit events for sandbox …` and exits `0`.
 
 Filters compose:
 

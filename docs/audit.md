@@ -32,7 +32,7 @@ anchor mirrored to external append-only storage) is tracked as follow-up.
 `lns audit` shows one chronological timeline of every event across all sandboxes —
 egress and mounts from each run's log, plus the approvals, sign-ins, and credential
 uses recorded across runs in the durable connection ledger. `lns audit <sandbox>`
-scopes it to one run (by run id, name, or unique id prefix). See the
+scopes it to one run (by run id or unique id prefix). See the
 [CLI reference](cli-reference.md) for filters.
 
 Integrity is verified **as the log is read** — there is no separate verify step. As
