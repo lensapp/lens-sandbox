@@ -225,6 +225,7 @@ pub fn append_event_with_sink<S: AnchorSink>(
     if let Some(updated) = chain.anchor() {
         sink.write(&updated)?;
     }
+    crate::dashboard::live::note_write();
     Ok(())
 }
 

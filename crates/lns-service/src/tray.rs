@@ -45,6 +45,10 @@ fn build_tray_icon(
     on_event: impl Fn() + Send + Sync + 'static,
 ) -> anyhow::Result<tray_icon::TrayIcon> {
     let menu = Menu::new();
+    let audit_item = MenuItem::new("Audit", true, None);
+    menu.append(&audit_item)
+        .context("failed to append audit menu item")?;
+    let audit_id = audit_item.id().clone();
     let quit_item = MenuItem::new(
         "Quit Lens Sandbox",
         true,
@@ -65,7 +69,12 @@ fn build_tray_icon(
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == quit_id {
+        if event.id == audit_id {
+            crate::dashboard::live::request_open();
+            if let Some(ctx) = window::ctx() {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        } else if event.id == quit_id {
             shutdown.signal();
         }
         on_event();
@@ -194,6 +203,10 @@ struct TrayApp {
     token_drafts: HashMap<String, TokenDraft>,
     /// Per-network-card "remember this decision" toggle, keyed by request id; true persists the choice as an always-rule.
     remember: HashMap<String, bool>,
+    dashboard: crate::dashboard::DashboardState,
+    audit_open: bool,
+    dashboard_gen: u64,
+    dashboard_focused: bool,
 }
 
 /// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
@@ -238,7 +251,63 @@ impl TrayApp {
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
+            dashboard: crate::dashboard::DashboardState::new(),
+            audit_open: false,
+            dashboard_gen: 0,
+            dashboard_focused: false,
         })
+    }
+
+    fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
+        if crate::dashboard::live::take_open_request() {
+            self.audit_open = true;
+            self.dashboard = crate::dashboard::DashboardState::new();
+            crate::dashboard::load(&mut self.dashboard);
+            self.dashboard_gen = crate::dashboard::live::generation();
+            ctx.send_viewport_cmd_to(
+                crate::dashboard::live::viewport_id(),
+                egui::ViewportCommand::Focus,
+            );
+        }
+        if !self.audit_open {
+            return;
+        }
+        let saved_style = ctx.global_style();
+        crate::dashboard::apply_theme(ctx);
+        let dashboard = &mut self.dashboard;
+        let audit_open = &mut self.audit_open;
+        let last_gen = &mut self.dashboard_gen;
+        let was_focused = &mut self.dashboard_focused;
+        ctx.show_viewport_immediate(
+            crate::dashboard::live::viewport_id(),
+            crate::dashboard::viewport_builder(),
+            |ui, _class| {
+                let (focused, close_requested) = ui.ctx().input(|i| {
+                    let vp = i.viewport();
+                    (vp.focused.unwrap_or(false), vp.close_requested())
+                });
+                crate::dashboard::live::set_watching(focused);
+                let generation = crate::dashboard::live::generation();
+                if (focused && !*was_focused) || generation != *last_gen {
+                    crate::dashboard::load(dashboard);
+                    *last_gen = crate::dashboard::live::generation();
+                }
+                *was_focused = focused;
+                if crate::dashboard::render(ui, dashboard)
+                    == crate::dashboard::DashboardAction::Refresh
+                {
+                    crate::dashboard::load(dashboard);
+                    *last_gen = crate::dashboard::live::generation();
+                }
+                if close_requested {
+                    *audit_open = false;
+                    *was_focused = false;
+                    crate::dashboard::live::set_watching(false);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            },
+        );
+        ctx.set_global_style(saved_style);
     }
 }
 
@@ -410,6 +479,7 @@ impl eframe::App for TrayApp {
             None => {}
         }
 
+        self.render_audit_dashboard(ui.ctx());
         refresh_window_shadows();
     }
 }
