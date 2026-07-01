@@ -197,9 +197,7 @@ struct TrayApp {
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
-    /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
     credential_inputs: HashMap<String, String>,
-    /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
     dashboard: crate::dashboard::DashboardState,
