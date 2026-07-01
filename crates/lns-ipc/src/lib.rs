@@ -16,8 +16,8 @@ pub use codec::{
 };
 pub use ledger::{ApprovalKind, AuthKind, Decision, LedgerEvent, LedgerRecord, fingerprint};
 pub use paths::{
-    CachePathError, audit_anchor_for_run, audit_log_for_run, cache_root, connection_ledger,
-    connection_ledger_anchor, data_root, short_run_id,
+    CachePathError, audit_anchor_for_run, audit_log_for_run, audit_runs_root, cache_root,
+    connection_ledger, connection_ledger_anchor, data_root, short_run_id,
 };
 pub use protocol::{
     BindMount, BindSpec, ExecImageArgs, ImageInfo, LogLevel, MountSpec, PortPublish, Protocol,

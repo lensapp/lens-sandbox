@@ -64,14 +64,16 @@ see what the log claims.
 
 ## Where logs live
 
-Audit logs and their anchors are kept per run under the service's cache directory:
+Audit logs and their anchors are kept per run under the service's data directory, so
+the trail outlives the ephemeral run overlay under the cache directory:
 
 ```text
-<cache>/lns/runs/<run-id>/audit.jsonl
-<cache>/lns/runs/<run-id>/audit.anchor
+<data>/lns/runs/<run-id>/audit.jsonl
+<data>/lns/runs/<run-id>/audit.anchor
 ```
 
-On macOS `<cache>` is `~/Library/Caches`.
+The connection ledger sits alongside them at `<data>/lns/ledger.jsonl`. On macOS
+`<data>` is `~/Library/Application Support`.
 
 ## See also
 

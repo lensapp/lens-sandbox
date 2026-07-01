@@ -118,8 +118,8 @@ mod tests {
     use anyhow::Result;
 
     fn write_run_chain(home: &std::path::Path, run_id: &str) {
-        for cache in ["Library/Caches", ".cache"] {
-            let dir = home.join(cache).join("lns").join("runs").join(run_id);
+        for data in ["Library/Application Support", ".local/share"] {
+            let dir = home.join(data).join("lns").join("runs").join(run_id);
             std::fs::create_dir_all(&dir).unwrap();
             let mut chain = lns_ipc::AuditChain::new();
             let mut payload = String::new();

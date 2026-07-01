@@ -20,8 +20,7 @@ struct Row {
 }
 
 pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
-    let cache_root = lns_ipc::cache_root().context("locating the cache root")?;
-    let runs_root = cache_root.join("runs");
+    let runs_root = lns_ipc::audit_runs_root().context("locating the audit runs root")?;
     let ledger_path = lns_ipc::connection_ledger().context("locating the connection ledger")?;
 
     let scope = match &args.sandbox {

@@ -25,12 +25,16 @@ pub fn short_run_id(id: &str) -> &str {
     id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
 }
 
+pub fn audit_runs_root() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("runs"))
+}
+
 pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
-    Ok(cache_root()?.join("runs").join(run_id).join("audit.jsonl"))
+    Ok(audit_runs_root()?.join(run_id).join("audit.jsonl"))
 }
 
 pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
-    Ok(cache_root()?.join("runs").join(run_id).join("audit.anchor"))
+    Ok(audit_runs_root()?.join(run_id).join("audit.anchor"))
 }
 
 pub fn connection_ledger() -> Result<PathBuf, CachePathError> {
@@ -62,10 +66,26 @@ mod tests {
     }
 
     #[test]
-    fn audit_log_path_appends_runs_runid_filename_under_cache_root() {
-        let root = cache_root().expect("cache dir resolves in test env");
+    fn audit_log_lives_under_data_root_so_it_outlives_the_ephemeral_run_dir() {
+        let data = data_root().expect("data dir resolves in test env");
         let p = audit_log_for_run("42").expect("audit_log_for_run");
-        assert_eq!(p, root.join("runs").join("42").join("audit.jsonl"));
+        assert_eq!(p, data.join("runs").join("42").join("audit.jsonl"));
+        assert!(
+            !p.starts_with(cache_root().expect("cache dir resolves in test env")),
+            "the audit trail must outlive ephemeral run dirs, so it cannot live under cache_root: {p:?}"
+        );
+    }
+
+    #[test]
+    fn audit_runs_root_is_the_shared_base_of_every_per_run_log() {
+        let root = audit_runs_root().expect("audit_runs_root");
+        assert_eq!(root, data_root().expect("data dir").join("runs"));
+        assert!(audit_log_for_run("42").expect("log").starts_with(&root));
+        assert!(
+            audit_anchor_for_run("42")
+                .expect("anchor")
+                .starts_with(&root)
+        );
     }
 
     #[test]
