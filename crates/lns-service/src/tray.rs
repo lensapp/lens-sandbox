@@ -201,7 +201,6 @@ struct TrayApp {
     credential_inputs: HashMap<String, String>,
     /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
-    /// Per-network-card "remember this decision" toggle, keyed by request id; true persists the choice as an always-rule.
     remember: HashMap<String, bool>,
     dashboard: crate::dashboard::DashboardState,
     audit_open: bool,
