@@ -1,5 +1,5 @@
 use crate::E2eWorld;
-use crate::specutil::{TAMPERED_AUDIT_CHAIN, cache_runs_dir, data_lns_dir};
+use crate::specutil::{TAMPERED_AUDIT_CHAIN, audit_runs_dir, data_lns_dir};
 use cucumber::given;
 use std::fs;
 use std::path::PathBuf;
@@ -84,7 +84,7 @@ fn run_dir(world: &E2eWorld, run_id: &str) -> PathBuf {
         .home
         .as_ref()
         .expect("Given a clean lns cache home before writing a fixture");
-    let dir = cache_runs_dir(home.path()).join(run_id);
+    let dir = audit_runs_dir(home.path()).join(run_id);
     fs::create_dir_all(&dir).expect("create run dir");
     dir
 }

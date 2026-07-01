@@ -184,12 +184,8 @@ pub fn capture_with_timeout(mut cmd: Command, timeout: Duration) -> CliResult {
     }
 }
 
-pub fn cache_runs_dir(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Caches/lns/runs")
-    } else {
-        home.join(".cache/lns/runs")
-    }
+pub fn audit_runs_dir(home: &Path) -> PathBuf {
+    data_lns_dir(home).join("runs")
 }
 
 pub fn data_lns_dir(home: &Path) -> PathBuf {
