@@ -28,7 +28,7 @@ COVERAGE_TARGET_DIR = $(WORKSPACE_ROOT)/target-cov
 # list above (`build-lns` / `build-lns-service`) — a crate can be in
 # this gate without producing a binary (e.g. `lns-ipc` is a pure
 # library).
-GATE_CRATES := lns-cli lns-service lns-ipc lns-audit lns-policy
+GATE_CRATES := lns-cli lns-service lns-ipc lns-audit lns-ocsf lns-policy
 
 # Every crate under crates/ EXCEPT e2e-tests. Used by `make coverage`
 # iteration. e2e-tests is excluded because Layer 1 tests don't
