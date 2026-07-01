@@ -132,6 +132,20 @@ fn audit_records_volume(world: &mut E2eWorld, name: String, path: String) -> Res
     }
 }
 
+#[then(regex = r#"^"lns audit" for that run reports an "([^"]+)" event naming "([^"]+)"$"#)]
+fn audit_reports_event(world: &mut E2eWorld, kind: String, name: String) -> Result<(), String> {
+    let id = last_run(world)?;
+    let result = world.run_with_service_env(&["audit", id.as_str(), "--kind", kind.as_str()]);
+    let out = format!("{}{}", result.stdout, result.stderr);
+    if out.contains(&kind) && out.contains(&name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`lns audit {id} --kind {kind}` did not report a {kind:?} event naming {name:?}:\n{out}"
+        ))
+    }
+}
+
 #[given(regex = r#"^a host directory with a file "([^"]+)" containing "([^"]*)"$"#)]
 fn host_dir_with_file(world: &mut E2eWorld, name: String, content: String) {
     let dir = tempfile::TempDir::new().expect("tempdir for host bind");
