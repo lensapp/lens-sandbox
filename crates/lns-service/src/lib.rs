@@ -7,6 +7,7 @@ pub mod composefs;
 pub mod content_store;
 pub mod cpio;
 pub mod credential_flow;
+pub mod dashboard;
 mod download;
 pub mod forward;
 pub mod guest_stats;
