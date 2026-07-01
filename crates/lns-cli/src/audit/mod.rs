@@ -94,6 +94,7 @@ fn integrity_advisory(outcome: &verify::VerifyOutcome) -> Option<String> {
         verify::VerifyOutcome::AnchorUnreadable { reason, .. } => Some(format!(
             "audit integrity: anchor unreadable ({reason}) — the log cannot be confirmed intact"
         )),
+        verify::VerifyOutcome::NoAnchor { line_count: 0 } => None,
         verify::VerifyOutcome::NoAnchor { .. } => Some(
             "audit integrity: no anchor beside the log — truncation or rollback cannot be detected"
                 .to_string(),
@@ -250,6 +251,21 @@ mod tests {
             integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 2 })
                 .expect("a missing anchor advises")
                 .contains("no anchor")
+        );
+    }
+
+    #[test]
+    fn integrity_advisory_ignores_a_missing_anchor_only_when_the_log_is_empty() {
+        assert_eq!(
+            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 0 }),
+            None,
+            "a zero-event log has nothing to protect and nothing truncatable; a wiped non-empty log is caught by Truncated against its surviving anchor"
+        );
+        assert!(
+            integrity_advisory(&verify::VerifyOutcome::NoAnchor { line_count: 1 })
+                .expect("a non-empty log with no anchor still advises")
+                .contains("no anchor"),
+            "content with no checkpoint is still a real integrity gap"
         );
     }
 

@@ -53,11 +53,15 @@ so a compromised log surfaces even when you only meant to look:
   audit integrity: log truncated or rolled back (<reason>) — entries may be missing
   ```
 
-- no anchor beside the log, so truncation and rollback can't be checked at all:
+- a log that holds events but has no anchor beside it, so truncation and rollback
+  can't be checked at all:
 
   ```text
   audit integrity: no anchor beside the log — truncation or rollback cannot be detected
   ```
+
+  (An empty log is not flagged — it has nothing to protect, and a log that once held
+  events but was wiped is caught as a truncation against its surviving anchor.)
 
 The warning marks the entries untrustworthy; the events are still printed so you can
 see what the log claims.
