@@ -91,8 +91,8 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
     for run_id in lns_audit::run_ids_in(runs_root)? {
         ids.push(run_id);
     }
-    for record in lns_audit::stream_ledger(ledger_path)? {
-        let record = record?;
+    for entry in lns_audit::stream_ledger(ledger_path)? {
+        let record = entry?.record;
         ids.push(record.run.clone());
         names.entry(record.microvm.clone()).or_insert(record.run);
     }
