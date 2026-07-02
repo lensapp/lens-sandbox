@@ -1,4 +1,5 @@
 mod filter;
+mod format;
 pub mod live;
 mod sandboxes;
 
@@ -548,7 +549,7 @@ fn dropdown_item(ui: &mut egui::Ui, label: &str, checked: bool) -> bool {
 fn event_row(ui: &mut egui::Ui, state: &mut DashboardState, i: usize) {
     let selected = state.selected == Some(i);
     let row = &state.rows[i];
-    let when = friendly_time(&row.ts);
+    let when = format::friendly_time(now_unix_secs(), &row.ts);
     let short = lns_ipc::short_run_id(&row.run).to_string();
     let kind = row.kind.clone();
     let detail = row.detail.clone();
@@ -641,7 +642,11 @@ fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow)
                 ui,
                 state,
                 "When",
-                &format!("{} ({})", row.when, relative_time(&row.ts)),
+                &format!(
+                    "{} ({})",
+                    row.when,
+                    format::relative_time(now_unix_secs(), &row.ts)
+                ),
                 Some(&row.ts),
             );
             sandbox_field(ui, state, &row.run);
@@ -650,13 +655,19 @@ fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow)
             }
             if let Some(obj) = row.raw.as_object() {
                 for (key, value) in obj {
-                    if RAW_SKIP.contains(&key.as_str()) || is_empty_value(value) {
+                    if RAW_SKIP.contains(&key.as_str()) || format::is_empty_value(value) {
                         continue;
                     }
-                    if is_structured(value) {
-                        structured_field(ui, &field_label(key), value);
+                    if format::is_structured(value) {
+                        structured_field(ui, &format::field_label(key), value);
                     } else {
-                        field(ui, state, &field_label(key), &render_value(value), None);
+                        field(
+                            ui,
+                            state,
+                            &format::field_label(key),
+                            &format::render_value(value),
+                            None,
+                        );
                     }
                 }
             }
@@ -812,120 +823,11 @@ fn copy_control(
     }
 }
 
-fn is_empty_value(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => true,
-        serde_json::Value::String(s) => s.is_empty(),
-        serde_json::Value::Array(a) => a.is_empty(),
-        serde_json::Value::Object(m) => m.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_structured(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(_) => true,
-        serde_json::Value::Array(items) => items.iter().any(|e| {
-            matches!(
-                e,
-                serde_json::Value::Object(_) | serde_json::Value::Array(_)
-            )
-        }),
-        _ => false,
-    }
-}
-
-fn render_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .map(render_value)
-            .collect::<Vec<_>>()
-            .join(", "),
-        other => other.to_string(),
-    }
-}
-
-fn field_label(key: &str) -> String {
-    match key {
-        "activity_name" => "Activity".to_string(),
-        "category_name" => "Category".to_string(),
-        "class_name" => "Class".to_string(),
-        "type_name" => "Type".to_string(),
-        "status_detail" => "Detail".to_string(),
-        _ => humanize(key),
-    }
-}
-
-fn humanize(key: &str) -> String {
-    let mut chars = key.replace('_', " ").chars().collect::<Vec<_>>();
-    if let Some(first) = chars.first_mut() {
-        first.make_ascii_uppercase();
-    }
-    chars.into_iter().collect()
-}
-
-fn friendly_time(ts: &str) -> String {
-    let Some(event) = rfc3339_to_unix(ts) else {
-        return ts.to_string();
-    };
-    let now = std::time::SystemTime::now()
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(event);
-    let delta = now - event;
-    if delta < 45 {
-        "just now".to_string()
-    } else if delta < 5_400 {
-        format!("{}m ago", (delta / 60).max(1))
-    } else if delta < 86_400 {
-        format!("{}h ago", delta / 3_600)
-    } else if delta < 6 * 86_400 {
-        format!("{}d ago", delta / 86_400)
-    } else {
-        ts.get(0..10).unwrap_or(ts).to_string()
-    }
-}
-
-fn relative_time(ts: &str) -> String {
-    let Some(event) = rfc3339_to_unix(ts) else {
-        return String::new();
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(event);
-    let delta = (now - event).max(0);
-    if delta < 45 {
-        "just now".to_string()
-    } else if delta < 5_400 {
-        format!("{}m ago", (delta / 60).max(1))
-    } else if delta < 86_400 {
-        format!("{}h ago", delta / 3_600)
-    } else {
-        format!("{}d ago", delta / 86_400)
-    }
-}
-
-fn rfc3339_to_unix(ts: &str) -> Option<i64> {
-    let field = |range: std::ops::Range<usize>| ts.get(range).and_then(|s| s.parse::<i64>().ok());
-    let year = field(0..4)?;
-    let month = field(5..7)?;
-    let day = field(8..10)?;
-    let hour = field(11..13)?;
-    let minute = field(14..16)?;
-    let second = field(17..19)?;
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+        .unwrap_or(0)
 }
 
 fn search_modal(ui: &mut egui::Ui, state: &mut DashboardState, reveal: f32) {

@@ -13,9 +13,13 @@ pub(crate) fn rfc3339_from_unix(secs: u64) -> String {
 }
 
 pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
+    unix_from_rfc3339_opt(ts).unwrap_or(0)
+}
+
+pub(crate) fn unix_from_rfc3339_opt(ts: &str) -> Option<u64> {
     let b = ts.as_bytes();
     if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
-        return 0;
+        return None;
     }
     let field = |range: std::ops::Range<usize>| ts.get(range).and_then(|s| s.parse::<u64>().ok());
     let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
@@ -26,7 +30,7 @@ pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
         field(14..16),
         field(17..19),
     ) else {
-        return 0;
+        return None;
     };
     if year == 0
         || !(1..=12).contains(&month)
@@ -35,9 +39,9 @@ pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
         || minute > 59
         || second > 59
     {
-        return 0;
+        return None;
     }
-    ymdhms_to_unix(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+    Some(ymdhms_to_unix(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 fn ymdhms_to_unix(year: u64, month: u64, day: u64) -> u64 {

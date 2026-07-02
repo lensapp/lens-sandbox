@@ -40,6 +40,6 @@ Feature: lns-service injects user env into the workload without breaching the cr
     When the user runs `lns run -e A=1 someimage`
     Then the workload's environment contains A set to "1"
 
-  Scenario: Audit records the injected env keys and values
+  Scenario: Audit records the injected env var names but redacts their values
     When the user runs `lns run -e CLAUDE_CODE_USE_BEDROCK=1 someimage`
-    Then the audit entry for the run records CLAUDE_CODE_USE_BEDROCK set to "1"
+    Then the audit entry for the run records CLAUDE_CODE_USE_BEDROCK set to "<redacted>"

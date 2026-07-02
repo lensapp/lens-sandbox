@@ -449,8 +449,11 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     ));
     let run_args = args;
     let task_run_id = run_id.clone();
+    let (microvm_tx, microvm_rx) = oneshot::channel::<String>();
+    let fallback_microvm = run_id.clone();
     let run_task = tokio::spawn(async move {
-        crate::run::handle(task_run_id, run_args, task_frame_tx, input_rx).await;
+        let microvm = microvm_rx.await.unwrap_or(fallback_microvm);
+        crate::run::handle(task_run_id, microvm, run_args, task_frame_tx, input_rx).await;
     });
 
     let abort = run_task.abort_handle();
@@ -472,10 +475,15 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             config,
         },
     );
-    if let Err(message) = registered {
-        abort.abort();
-        let _ = write_error(&mut stream, message).await;
-        return Ok(());
+    match registered {
+        Ok(microvm) => {
+            let _ = microvm_tx.send(microvm);
+        }
+        Err(message) => {
+            abort.abort();
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
     }
 
     drop(frame_tx);

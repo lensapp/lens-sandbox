@@ -166,18 +166,6 @@ async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink
     Ok(())
 }
 
-fn augment_with_ts(
-    chain: &mut lns_ipc::AuditChain,
-    mut obj: serde_json::Map<String, Value>,
-    clock: &dyn crate::oauth::Clock,
-) -> Vec<u8> {
-    obj.insert(
-        "ts".to_string(),
-        Value::String(crate::time_fmt::rfc3339_from_unix(clock.now_unix())),
-    );
-    chain.augment_obj(obj)
-}
-
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
     extra_managed: &[String],
@@ -194,12 +182,21 @@ pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::aud
     write_chain_line(&bytes, writer).await
 }
 
+fn egress_method_and_url(action: &str) -> (&str, &str) {
+    let (method, rest) = action.split_once(' ').unwrap_or(("", action));
+    if method == "TLS_BRIDGE" {
+        let host = rest.split_once(" -> ").map_or(rest, |(host, _addr)| host);
+        return (method, host);
+    }
+    (method, rest)
+}
+
 fn guest_egress_to_ocsf(
     cx: &crate::ocsf_audit::OcsfCtx,
     obj: &serde_json::Map<String, Value>,
 ) -> Option<serde_json::Map<String, Value>> {
     let action = obj.get("action").and_then(Value::as_str)?;
-    let (method, url) = action.split_once(' ').unwrap_or(("", action));
+    let (method, url) = egress_method_and_url(action);
     let status_code = obj.get("status_code").and_then(Value::as_u64);
     let result = obj.get("result").and_then(Value::as_str);
     let reason = obj
@@ -208,38 +205,12 @@ fn guest_egress_to_ocsf(
         .and_then(Value::as_str);
     let mut event =
         crate::ocsf_audit::egress_event(cx, method, url, status_code, result, reason, true);
-    // The guest resolves the client endpoint + owning process; copy the
-    // OCSF-ready fragments through when present.
     for key in ["src_endpoint", "actor"] {
         if let Some(value) = obj.get(key) {
             event.insert(key.to_string(), value.clone());
         }
     }
     Some(event)
-}
-
-const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
-
-fn stamp_guest_audit_event(
-    mut obj: serde_json::Map<String, Value>,
-) -> Option<serde_json::Map<String, Value>> {
-    let event = obj.get("event").and_then(Value::as_str);
-    if let Some(event) = event
-        && HOST_RESERVED_EVENTS.contains(&event)
-    {
-        crate::log::warn!(
-            reserved_event = event,
-            "rejected guest audit_event with a host-reserved event value"
-        );
-        return None;
-    }
-    obj.remove("source");
-    obj.remove("origin");
-    obj.insert(
-        "origin".to_string(),
-        Value::String("guest-proxy".to_string()),
-    );
-    Some(obj)
 }
 
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
@@ -263,7 +234,9 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     let ty = obj.get("type").and_then(Value::as_str);
     match ty {
         Some("audit_event") => {
-            let Some(stamped) = stamp_guest_audit_event(obj) else {
+            let cx = writer.ctx(clock);
+            let Some(ocsf) = guest_egress_to_ocsf(&cx, &obj) else {
+                crate::log::warn!("dropping guest audit_event that is not an egress record");
                 return Ok(false);
             };
             if !budget.try_charge(frame_len) {
@@ -272,11 +245,7 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 );
                 return Ok(false);
             }
-            let cx = writer.ctx(clock);
-            let bytes = match guest_egress_to_ocsf(&cx, &stamped) {
-                Some(ocsf) => writer.chain.augment_obj(ocsf),
-                None => augment_with_ts(writer.chain, stamped, clock),
-            };
+            let bytes = writer.chain.augment_obj(ocsf);
             write_chain_line(&bytes, writer).await?;
         }
         Some("request_pending") => {
@@ -707,7 +676,10 @@ mod tests {
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
         let stop = handle_inbound(
-            Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test/","result":"success"}"#
+                    .into(),
+            ),
             &session,
             &credential_session_with_dummy_sink(),
             &mut AuditWriter {
@@ -734,12 +706,11 @@ mod tests {
             written.contains("prev_hash"),
             "the chain must augment each line with a prev_hash field; got: {written}"
         );
-        assert!(
-            written.contains(&format!(
-                "\"ts\":\"{}\"",
-                crate::time_fmt::rfc3339_from_unix(1_700_000_000)
-            )),
-            "the host stamps a timestamp on every recorded audit event; got: {written}"
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(
+            obj["unmapped"]["lns_ts"],
+            crate::time_fmt::rfc3339_from_unix(1_700_000_000),
+            "the host clock stamps the time on every recorded audit event; got: {written}"
         );
         assert_eq!(
             anchor.anchors.len(),
@@ -751,14 +722,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_inbound_audit_event_stamps_guest_proxy_origin_and_strips_guest_provenance() {
+    async fn a_guest_cannot_forge_host_attribution_through_a_smuggled_unmapped_block() {
         let session = session_with_dummy_sink();
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
         let stop = handle_inbound(
             Message::Text(
-                r#"{"type":"audit_event","route":"deny","source":"host","origin":"host"}"#.into(),
+                r#"{"type":"audit_event","action":"GET http://api.example.test/","result":"success","source":"host","origin":"host","unmapped":{"lns_kind":"approval","lns_origin":"host","lns_decision":"allow_always","lns_ts":"2000-01-01T00:00:00Z"}}"#
+                    .into(),
             ),
             &session,
             &credential_session_with_dummy_sink(),
@@ -778,23 +750,29 @@ mod tests {
         let written = String::from_utf8(log.bytes).unwrap();
         let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
         assert_eq!(
-            obj.get("origin").and_then(Value::as_str),
-            Some("guest-proxy"),
-            "host must stamp every guest audit_event with the guest-proxy origin: {written}"
+            obj["unmapped"]["lns_kind"], "egress",
+            "a guest audit_event is always recorded as guest-proxy egress, never a host kind: {written}"
+        );
+        assert_eq!(obj["unmapped"]["lns_origin"], "guest-proxy");
+        assert_eq!(
+            obj["unmapped"]["lns_ts"],
+            crate::time_fmt::rfc3339_from_unix(1_700_000_000),
+            "the host clock stamps the time; the guest cannot backdate the row: {written}"
+        );
+        assert_eq!(obj["unmapped"]["lns_run"], "test-run");
+        assert!(
+            obj["unmapped"].get("lns_decision").is_none(),
+            "smuggled approval fields are dropped, never carried into the chain: {written}"
         );
         assert!(
             obj.get("source").is_none(),
-            "guest-supplied `source` provenance must be stripped: {written}"
+            "guest-supplied top-level provenance is discarded: {written}"
         );
-        assert_eq!(
-            anchor.anchors.len(),
-            1,
-            "a stamped guest event is still written to the chain"
-        );
+        assert_eq!(anchor.anchors.len(), 1);
     }
 
     #[tokio::test]
-    async fn handle_inbound_audit_event_with_reserved_run_env_event_is_rejected_and_warns() {
+    async fn handle_inbound_drops_a_guest_audit_event_that_is_not_an_egress_record() {
         let session = session_with_dummy_sink();
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
@@ -818,51 +796,15 @@ mod tests {
         )
         .await
         .expect("handle_inbound");
-        assert!(!stop, "a rejected forgery must not kill the relay");
+        assert!(!stop, "a dropped frame must not kill the relay");
         assert!(
             log.bytes.is_empty(),
-            "a guest event claiming the reserved `run_env` type must not reach the chain"
+            "only egress records (which carry an `action`) are accepted from the guest; a frame trying to forge a host-authored env row never reaches the chain"
         );
         assert!(
             anchor.anchors.is_empty(),
-            "a rejected forgery must not advance the anchor"
+            "a dropped frame must not advance the anchor"
         );
-    }
-
-    #[tokio::test]
-    async fn handle_inbound_audit_event_with_non_reserved_event_value_is_stamped_and_written() {
-        let session = session_with_dummy_sink();
-        let mut chain = lns_ipc::AuditChain::new();
-        let mut log = MemLog::default();
-        let mut anchor = MemAnchor::default();
-        handle_inbound(
-            Message::Text(r#"{"type":"audit_event","event":"net_connect","host":"x"}"#.into()),
-            &session,
-            &credential_session_with_dummy_sink(),
-            &mut AuditWriter {
-                chain: &mut chain,
-                log: &mut log,
-                anchor: &mut anchor,
-                run: "test-run",
-                microvm: "calm-finch",
-            },
-            &AuditBudget::with_defaults(),
-            &CLOCK,
-        )
-        .await
-        .expect("handle_inbound");
-        let written = String::from_utf8(log.bytes).unwrap();
-        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
-        assert_eq!(
-            obj.get("event").and_then(Value::as_str),
-            Some("net_connect")
-        );
-        assert_eq!(
-            obj.get("origin").and_then(Value::as_str),
-            Some("guest-proxy"),
-            "a guest event whose `event` value is not host-reserved is still stamped and written: {written}"
-        );
-        assert_eq!(anchor.anchors.len(), 1);
     }
 
     #[tokio::test]
@@ -889,7 +831,11 @@ mod tests {
         assert_eq!(obj["class_uid"], 1007, "OCSF Process Activity: {written}");
         assert_eq!(obj["unmapped"]["lns_kind"], "env");
         assert_eq!(obj["device"]["name"], "calm-finch");
-        assert_eq!(obj["unmapped"]["lns_env"]["CLAUDE_CODE_USE_BEDROCK"], "1");
+        assert_eq!(
+            obj["unmapped"]["lns_env"]["CLAUDE_CODE_USE_BEDROCK"],
+            crate::workload_env::REDACTED_ENV_VALUE,
+            "the recorded env carries names, not raw -e values: {written}"
+        );
         assert_eq!(
             obj["unmapped"]["lns_origin"], "host",
             "the host-authored run_env event must carry the host origin: {written}"
@@ -969,6 +915,45 @@ mod tests {
         assert_eq!(obj["src_endpoint"]["port"], 37494);
         assert_eq!(obj["actor"]["process"]["name"], "curl");
         assert_eq!(obj["actor"]["process"]["pid"], 57);
+    }
+
+    #[tokio::test]
+    async fn a_tls_bridge_frame_yields_a_clean_destination_not_a_garbled_host() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","action":"TLS_BRIDGE example.com -> 1.2.3.4:443","host":"example.com","result":"success","metadata":{"host":"example.com","tls_bridge":true}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+        )
+        .await
+        .expect("handle_inbound");
+        let obj: Value =
+            serde_json::from_str(String::from_utf8(log.bytes).unwrap().trim_end()).unwrap();
+        assert_eq!(
+            obj["dst_endpoint"]["domain"], "example.com",
+            "the TLS_BRIDGE host, not the `host -> addr` action tail, is the destination domain: {obj}"
+        );
+        assert!(
+            obj["dst_endpoint"].get("port").is_none(),
+            "the mangled `example.com -> 1.2.3.4:443` no longer leaks a bogus port: {obj}"
+        );
+        assert_eq!(obj["http_request"]["url"]["text"], "example.com");
+        assert_eq!(obj["unmapped"]["lns_kind"], "egress");
     }
 
     #[tokio::test]
@@ -1422,7 +1407,10 @@ mod tests {
         let mut anchor = MemAnchor::default();
         let budget = AuditBudget::new(0, 1_000_000);
         let stop = handle_inbound(
-            Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test/","result":"success"}"#
+                    .into(),
+            ),
             &session,
             &credential_session_with_dummy_sink(),
             &mut AuditWriter {
