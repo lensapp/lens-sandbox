@@ -255,6 +255,8 @@ impl VolumeRig {
     pub fn record_attach(&self, name: &str, target: &str) {
         lns_service::audit::record_volume_attached_at(
             &self.audit_file,
+            "test-run",
+            "calm-finch",
             name,
             target,
             &lns_service::oauth::RealClock,
