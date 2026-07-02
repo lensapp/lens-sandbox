@@ -1,25 +1,15 @@
 mod collect;
-mod events;
 mod ocsf;
-mod show;
 mod store;
 pub mod verify;
 
-use lns_ipc::AuthKind;
-
 pub use collect::{Timeline, TimelineRow, collect_timeline, run_ids_in};
-pub use store::{LedgerEntry, LedgerStream, stream_ledger};
+pub use ocsf::{Row, microvm, read};
+pub use store::{LedgerStream, stream_ledger};
 pub use verify::{VerifyOutcome, verify_chain, verify_chain_with_anchor};
 
 pub fn friendly_when(ts: &str) -> String {
     ts.trim_end_matches('Z').replacen('T', " ", 1)
-}
-
-pub(crate) fn auth_word(auth: AuthKind) -> &'static str {
-    match auth {
-        AuthKind::Oauth => "oauth",
-        AuthKind::Apikey => "apikey",
-    }
 }
 
 pub fn integrity_advisory(outcome: &VerifyOutcome) -> Option<String> {
