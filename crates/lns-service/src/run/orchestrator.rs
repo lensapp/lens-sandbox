@@ -130,6 +130,12 @@ async fn orchestrate(
     let upper_disk_path = upper_res?;
     let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
+    crate::audit::record_run_launched(
+        &run_id,
+        &microvm,
+        args.image.as_deref().unwrap_or("<imageless>"),
+        &crate::oauth::RealClock,
+    )?;
     for vol in &args.volumes {
         crate::audit::record_volume_attached(
             &run_id,

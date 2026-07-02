@@ -1,28 +1,42 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use lns_audit::TimelineRow;
 
 use super::Sandbox;
 
 pub fn merge_sandboxes(active: &[Sandbox], rows: &[TimelineRow]) -> Vec<Sandbox> {
-    let mut seen: HashSet<&str> = HashSet::new();
     let mut out: Vec<Sandbox> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
     for sb in active {
-        if seen.insert(sb.id.as_str()) {
+        index.entry(sb.id.as_str()).or_insert_with(|| {
             out.push(sb.clone());
-        }
-    }
-    for row in rows {
-        if row.run.is_empty() || !seen.insert(row.run.as_str()) {
-            continue;
-        }
-        out.push(Sandbox {
-            id: row.run.clone(),
-            name: historical_name(row),
-            status: String::new(),
+            out.len() - 1
         });
     }
+    for row in rows {
+        if row.run.is_empty() {
+            continue;
+        }
+        match index.get(row.run.as_str()) {
+            Some(&i) => backfill_image(&mut out[i], row),
+            None => {
+                index.insert(row.run.as_str(), out.len());
+                out.push(Sandbox {
+                    id: row.run.clone(),
+                    name: historical_name(row),
+                    image: row_image(row),
+                    status: String::new(),
+                });
+            }
+        }
+    }
     out
+}
+
+fn backfill_image(sandbox: &mut Sandbox, row: &TimelineRow) {
+    if sandbox.image.is_empty() {
+        sandbox.image = row_image(row);
+    }
 }
 
 /// A finished run keeps its auto-name in every OCSF event's `unmapped.lns_microvm`; fall back to a short run id only when the row carries no name.
@@ -32,6 +46,14 @@ fn historical_name(row: &TimelineRow) -> String {
         .map(lns_audit::microvm)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| lns_ipc::short_run_id(&row.run).to_string())
+}
+
+/// Only the per-run launch event carries the image; every other row yields an empty string, so the first non-empty one wins.
+fn row_image(row: &TimelineRow) -> String {
+    row.raw
+        .as_object()
+        .map(lns_audit::image)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -60,27 +82,70 @@ mod tests {
         }
     }
 
-    fn active(id: &str, name: &str, status: &str) -> Sandbox {
+    fn row_launch(run: &str, microvm: &str, image: &str) -> TimelineRow {
+        TimelineRow {
+            raw: serde_json::json!({
+                "unmapped": {"lns_run": run, "lns_microvm": microvm, "lns_kind": "launch", "lns_image": image}
+            }),
+            ..row(run)
+        }
+    }
+
+    fn active(id: &str, name: &str, image: &str, status: &str) -> Sandbox {
         Sandbox {
             id: id.into(),
             name: name.into(),
+            image: image.into(),
             status: status.into(),
         }
     }
 
     #[test]
-    fn active_sandboxes_lead_and_keep_their_name_and_status() {
+    fn active_sandboxes_lead_and_keep_their_name_status_and_image() {
         let merged = merge_sandboxes(
             &[active(
                 "9e8d7c6b0000000000000000000000aa",
                 "calm-finch",
+                "alpine:latest",
                 "running",
             )],
             &[row("9e8d7c6b0000000000000000000000aa")],
         );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "calm-finch");
+        assert_eq!(merged[0].image, "alpine:latest");
         assert_eq!(merged[0].status, "running");
+    }
+
+    #[test]
+    fn a_finished_runs_image_is_recovered_from_its_launch_row() {
+        let run = "1a2b3c4d0000000000000000000000bb";
+        let merged = merge_sandboxes(
+            &[],
+            &[
+                row_named(run, "calm-finch"),
+                row_launch(run, "calm-finch", "ubuntu:24.04"),
+            ],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].image, "ubuntu:24.04",
+            "the image is backfilled from the launch row even though newer rows precede it"
+        );
+    }
+
+    #[test]
+    fn an_active_runs_registry_image_is_not_clobbered_by_a_launch_row() {
+        let run = "9e8d7c6b0000000000000000000000aa";
+        let merged = merge_sandboxes(
+            &[active(run, "calm-finch", "alpine:3.20", "running")],
+            &[row_launch(run, "calm-finch", "ubuntu:24.04")],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].image, "alpine:3.20",
+            "an active run keeps the image the registry reported"
+        );
     }
 
     #[test]
@@ -115,7 +180,7 @@ mod tests {
     #[test]
     fn a_run_repeated_across_rows_appears_once_and_after_the_active_set() {
         let merged = merge_sandboxes(
-            &[active("aaaa1111", "bold-otter", "exited")],
+            &[active("aaaa1111", "bold-otter", "", "exited")],
             &[
                 row("bbbb2222"),
                 row("bbbb2222"),

@@ -94,6 +94,10 @@ pub fn run_env_event(cx: &OcsfCtx, env: &Map<String, Value>) -> Map<String, Valu
     into_object(lns_ocsf::run_env(&cx.ctx(), env))
 }
 
+pub fn workload_launch_event(cx: &OcsfCtx, image: &str) -> Map<String, Value> {
+    into_object(lns_ocsf::workload_launch(&cx.ctx(), image))
+}
+
 pub fn volume_event(cx: &OcsfCtx, name: &str, target: &str) -> Map<String, Value> {
     into_object(lns_ocsf::volume_mount(&cx.ctx(), name, target))
 }

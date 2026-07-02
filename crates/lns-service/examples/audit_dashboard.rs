@@ -89,6 +89,15 @@ fn seed_rows() -> Vec<TimelineRow> {
     env.insert("PATH".into(), "…".into());
     vec![
         ocsf_row(
+            "2026-06-29T13:00:00Z",
+            RUN_B,
+            None,
+            lns_ocsf::workload_launch(
+                &ctx("2026-06-29T13:00:00Z", RUN_B, "calm-finch"),
+                "alpine:latest",
+            ),
+        ),
+        ocsf_row(
             "2026-06-29T15:12:00Z",
             RUN_A,
             Some("some-provider"),
@@ -151,11 +160,13 @@ fn seed_sandboxes() -> Vec<Sandbox> {
         Sandbox {
             id: RUN_B.into(),
             name: "calm-finch".into(),
+            image: "alpine:latest".into(),
             status: "running".into(),
         },
         Sandbox {
             id: RUN_A.into(),
             name: "bold-otter".into(),
+            image: "ubuntu:24.04".into(),
             status: "exited".into(),
         },
     ]

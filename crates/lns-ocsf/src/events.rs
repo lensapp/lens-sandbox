@@ -266,6 +266,24 @@ pub fn egress(
     ev.build()
 }
 
+pub fn workload_launch(ctx: &Context, image: &str) -> Value {
+    Event::new(
+        "launch",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set("message", format!("launched {image}").into())
+    .set("process", json!({"uid": ctx.run, "name": "workload"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_image", image.into())
+    .build()
+}
+
 pub fn run_env(ctx: &Context, env: &Map<String, Value>) -> Value {
     let message = format!(
         "injected: {}",
@@ -560,6 +578,20 @@ mod tests {
         assert!(ev["unmapped"].get("lns_result").is_none());
         assert!(ev.get("disposition_id").is_none());
         assert_eq!(ev["unmapped"]["lns_reason"], "prefetch");
+    }
+
+    #[test]
+    fn workload_launch_records_the_image_as_a_process_activity() {
+        let ev = workload_launch(&ctx(), "alpine:latest");
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["message"], "launched alpine:latest");
+        assert_eq!(ev["process"]["uid"], "9e8d7c6b0000");
+        assert_eq!(ev["device"]["name"], "calm-finch");
+        assert_eq!(ev["actor"]["app_name"], "lns");
+        assert_eq!(ev["unmapped"]["lns_kind"], "launch");
+        assert_eq!(ev["unmapped"]["lns_image"], "alpine:latest");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
     }
 
     #[test]

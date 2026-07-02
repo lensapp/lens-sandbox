@@ -31,6 +31,12 @@ pub fn microvm(event: &Map<String, Value>) -> String {
         .unwrap_or_default()
 }
 
+pub fn image(event: &Map<String, Value>) -> String {
+    unmapped(event)
+        .map(|um| text(um, "lns_image"))
+        .unwrap_or_default()
+}
+
 fn unmapped(event: &Map<String, Value>) -> Result<&Map<String, Value>> {
     event
         .get("unmapped")
@@ -108,6 +114,23 @@ mod tests {
             "calm-finch"
         );
         assert_eq!(microvm(&Map::new()), "", "a non-OCSF object has no microVM");
+    }
+
+    #[test]
+    fn image_reads_the_launch_event_image_and_is_empty_otherwise() {
+        assert_eq!(
+            image(&obj(&lns_ocsf::workload_launch(
+                &octx("r"),
+                "alpine:latest"
+            ))),
+            "alpine:latest"
+        );
+        assert_eq!(
+            image(&obj(&lns_ocsf::volume_mount(&octx("r"), "d", "/d"))),
+            "",
+            "a non-launch event carries no image"
+        );
+        assert_eq!(image(&Map::new()), "", "a non-OCSF object has no image");
     }
 
     #[test]

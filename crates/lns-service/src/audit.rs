@@ -229,6 +229,27 @@ fn run_ctx(run: &str, microvm: &str, clock: &dyn Clock) -> crate::ocsf_audit::Oc
     crate::ocsf_audit::OcsfCtx::at_unix(run.to_string(), microvm.to_string(), clock.now_unix())
 }
 
+pub fn record_run_launched_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    image: &str,
+) -> Result<()> {
+    append_ocsf_at(path, crate::ocsf_audit::workload_launch_event(cx, image))
+}
+
+pub fn record_run_launched(
+    run_id: &str,
+    microvm: &str,
+    image: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_run_launched_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        image,
+    )
+}
+
 pub fn record_volume_attached_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
@@ -312,6 +333,29 @@ mod tests {
             volume_obj("prism-data", "/data")["unmapped"]["lns_origin"],
             "host",
             "host-authored events must be distinguishable from guest-proxied ones"
+        );
+    }
+
+    #[test]
+    fn record_run_launched_writes_a_host_authored_launch_line_with_the_image() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_run_launched_at(&path, &cx(), "alpine:latest").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("\"class_uid\":1007"),
+            "OCSF launch: {content}"
+        );
+        assert!(content.contains("\"lns_kind\":\"launch\""), "{content}");
+        assert!(
+            content.contains("\"lns_image\":\"alpine:latest\""),
+            "{content}"
+        );
+        assert!(content.contains("\"lns_origin\":\"host\""), "{content}");
+        assert!(
+            content.contains(&format!("\"prev_hash\":\"{}\"", lns_ipc::GENESIS_PREV_HASH)),
+            "the launch line is the run's genesis: {content}"
         );
     }
 
@@ -467,6 +511,20 @@ mod tests {
         let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(content.contains("\"lns_name\":\"prism-data\""), "{content}");
         assert!(content.contains("\"lns_target\":\"/data\""), "{content}");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn record_run_launched_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_run_launched("aa124", "calm-finch", "alpine:latest", &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa124").unwrap()).unwrap();
+        assert!(
+            content.contains("\"lns_image\":\"alpine:latest\""),
+            "{content}"
+        );
     }
 
     #[derive(Default)]
