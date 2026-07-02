@@ -198,11 +198,7 @@ where
 }
 
 pub(crate) fn run_label(run: &str) -> String {
-    if !run.is_empty() && run.bytes().all(|b| b.is_ascii_digit()) {
-        format!("#{run}")
-    } else {
-        run.to_string()
-    }
+    run.to_string()
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
@@ -325,7 +321,7 @@ async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Res
             } else {
                 removed.sort_unstable();
                 for id in removed {
-                    writeln!(out, "removed run #{id}")?;
+                    writeln!(out, "removed run {}", lns_ipc::short_run_id(&id))?;
                 }
             }
             Ok(0)
@@ -396,7 +392,7 @@ fn render_inspect<W: std::io::Write>(
     config.insert("detached".into(), details.config.detached.into());
 
     let mut doc = serde_json::Map::new();
-    doc.insert("id".into(), details.summary.id.into());
+    doc.insert("id".into(), details.summary.id.clone().into());
     doc.insert("image".into(), details.summary.image.clone().into());
     doc.insert("command".into(), details.summary.command.clone().into());
     doc.insert(
@@ -516,7 +512,7 @@ where
     .await
 }
 
-async fn expect_run_started<S: AsyncRead + Unpin>(stream: &mut S) -> Result<u32> {
+async fn expect_run_started<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
     let bytes = read_frame_bytes_async(stream)
         .await
         .context("reading stream handshake")?;
@@ -910,7 +906,10 @@ mod tests {
     #[tokio::test]
     async fn attach_relays_output_and_adopts_the_workloads_exit_code() {
         let svc = CannedService::with_frames(vec![
-            encode_frame(&Response::RunStarted { run_id: 9 }).unwrap(),
+            encode_frame(&Response::RunStarted {
+                run_id: "5e6f7a8b0000000000000000000000bb".to_string(),
+            })
+            .unwrap(),
             lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"live".to_vec())).unwrap(),
             encode_frame(&Response::RunExit { code: 4 }).unwrap(),
         ]);
@@ -941,7 +940,7 @@ mod tests {
         let svc = CannedService::new(Response::RunInspect {
             details: Box::new(RunDetails {
                 summary: lns_ipc::RunSummary {
-                    id: 1,
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
                     name: "reviewer".into(),
                     image: "some-image".into(),
                     command: String::new(),

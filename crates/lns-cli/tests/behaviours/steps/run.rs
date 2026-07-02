@@ -115,9 +115,18 @@ fn pulled_line_erases_bar(world: &mut BehaviourWorld) -> Result<(), String> {
 }
 
 fn emit_started_run_42(world: &mut BehaviourWorld) {
-    render_started_run(42, &mut world.phase_output, false).expect("render Started");
+    render_started_run(
+        "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+        &mut world.phase_output,
+        false,
+    )
+    .expect("render Started");
     if world.detached {
-        writeln!(world.detached_stdout, "run #42").expect("write run id");
+        writeln!(
+            world.detached_stdout,
+            "run 2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"
+        )
+        .expect("write run id");
     }
 }
 
@@ -425,7 +434,7 @@ fn boot_and_session_ready_follow(world: &mut BehaviourWorld) -> Result<(), Strin
     if !s.contains("✓ booted") {
         return Err(format!("missing booted line:\n{s}"));
     }
-    if !s.contains("✓ started run #") {
+    if !s.contains("✓ started run ") {
         return Err(format!("missing Started line:\n{s}"));
     }
     Ok(())
@@ -458,7 +467,7 @@ fn phase_lines_stream(world: &mut BehaviourWorld) -> Result<(), String> {
 #[then(regex = r"^`([^`]+)` is printed on its own line \(the existing scripting contract\)$")]
 fn run_id_printed_on_stdout(world: &mut BehaviourWorld, line: String) -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&world.detached_stdout);
-    let needle = line.replace('N', "42");
+    let needle = line.replace('N', "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a");
     if stdout.lines().any(|l| l == needle) {
         Ok(())
     } else {
@@ -483,7 +492,7 @@ fn phase_lines_lead_up_to(
     started_marker: String,
 ) -> Result<(), String> {
     let s = String::from_utf8_lossy(&world.phase_output);
-    let needle = strip_placeholder_suffix(&started_marker).replace('N', "42");
+    let needle = strip_placeholder_suffix(&started_marker).replace('N', "2a2a2a2a2a2a");
     let started_pos = s
         .find(&needle)
         .ok_or_else(|| format!("Started marker {needle:?} missing in:\n{s}"))?;
@@ -624,7 +633,7 @@ async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>)
     drive_attached_session_with_writers(
         client,
         None,
-        42,
+        "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a".to_string(),
         false,
         world.attached_stdout_is_terminal.unwrap_or(true),
         Vec::new(),
@@ -669,7 +678,7 @@ fn each_phase_once(world: &mut BehaviourWorld) -> Result<(), String> {
         "✓ resolved",
         "✓ booted",
         "✓ session ready",
-        "✓ started run #42",
+        "✓ started run 2a2a2a2a2a2a",
         "✓ finished in 2.53s",
     ] {
         let count = combined.matches(phrase).count();
@@ -765,7 +774,7 @@ fn captured_stdout_is_byte_exact(world: &mut BehaviourWorld) -> Result<(), Strin
 fn line_present(buf: &[u8], expected: &str) -> Result<(), String> {
     let s = String::from_utf8_lossy(buf);
     let prefix = strip_placeholder_suffix(expected);
-    let normalised = prefix.replace('N', "42");
+    let normalised = prefix.replace('N', "2a2a2a2a2a2a");
     if s.contains(&prefix) || s.contains(&normalised) {
         Ok(())
     } else {

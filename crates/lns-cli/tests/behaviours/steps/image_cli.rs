@@ -11,7 +11,11 @@ use lns_ipc::{ImageInfo, Request, Response};
 
 const FIXTURE_PULLED: &str = "2026-06-01T12:00:00Z";
 
-fn fixture_image(reference: &str, digest: &str, size: u64, in_use_by: Option<u32>) -> ImageInfo {
+fn hexid(n: u32) -> String {
+    format!("{n:08x}{}", "0".repeat(24))
+}
+
+fn fixture_image(reference: &str, digest: &str, size: u64, in_use_by: Option<String>) -> ImageInfo {
     ImageInfo {
         reference: reference.to_string(),
         digest: digest.to_string(),
@@ -106,7 +110,7 @@ fn reports_used_image(world: &mut BehaviourWorld, reference: String, size: u64, 
         &reference,
         &full_digest("sha256:aa"),
         size,
-        Some(run),
+        Some(hexid(run)),
     ));
 }
 

@@ -31,7 +31,7 @@ Feature: managing named volumes from the CLI
     And the output contains "ON DISK"
     And the output contains "prism-data"
     And the output contains "32 MiB"
-    And the output contains "run #7"
+    And the output contains "run 000000070000"
 
   Scenario: listing volumes marks an unattached volume as idle
     Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
