@@ -205,15 +205,18 @@ mod tests {
             "first line must be genesis: {content}"
         );
 
-        let entries: Vec<_> = lns_audit::stream_ledger(&path)
+        let events: Vec<_> = lns_audit::stream_ledger(&path)
             .unwrap()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(entries.len(), 1);
+        assert_eq!(events.len(), 1);
+        let row = lns_audit::read(&events[0]).unwrap();
+        assert_eq!(row.run, "aa49");
+        assert_eq!(row.kind, "connection");
+        assert_eq!(row.integration.as_deref(), Some("some-oauth"));
         assert_eq!(
-            entries[0].record,
-            sample("aa49"),
-            "the OCSF line reads back to the exact record it was written from"
+            row.detail, "connect some-oauth (oauth) @hchen [repo]",
+            "the OCSF line reads back to the same connection the record described"
         );
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 1);

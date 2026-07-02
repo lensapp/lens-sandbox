@@ -71,16 +71,27 @@ mod tests {
     use super::*;
     use anyhow::Result;
 
+    fn octx<'a>(run: &'a str, ts: &'a str) -> lns_ocsf::Context<'a> {
+        lns_ocsf::Context {
+            time_unix_secs: 1_780_000_000,
+            ts_rfc3339: ts,
+            run,
+            microvm: "calm-finch",
+        }
+    }
+
     fn write_run_chain(home: &std::path::Path, run_id: &str) {
+        let volume = lns_ocsf::volume_mount(&octx(run_id, "2026-06-29T13:00:00Z"), "data", "/data")
+            .to_string();
+        let mut env = serde_json::Map::new();
+        env.insert("FOO".into(), "bar".into());
+        let run_env = lns_ocsf::run_env(&octx(run_id, "2026-06-29T13:00:01Z"), &env).to_string();
         for data in ["Library/Application Support", ".local/share"] {
             let dir = home.join(data).join("lns").join("runs").join(run_id);
             std::fs::create_dir_all(&dir).unwrap();
             let mut chain = lns_ipc::AuditChain::new();
             let mut payload = String::new();
-            for line in [
-                r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"data","target":"/data"}"#,
-                r#"{"ts":"2026-06-29T13:00:01Z","event":"run_env","env":{"FOO":"bar"}}"#,
-            ] {
+            for line in [&volume, &run_env] {
                 let aug = chain.augment(line).unwrap();
                 payload.push_str(std::str::from_utf8(&aug).unwrap());
                 payload.push('\n');
@@ -95,6 +106,13 @@ mod tests {
     }
 
     fn tamper_run_log(home: &std::path::Path, run_id: &str) {
+        let mut event =
+            lns_ocsf::volume_mount(&octx(run_id, "2026-06-29T13:00:00Z"), "data", "/data");
+        event
+            .as_object_mut()
+            .unwrap()
+            .insert("prev_hash".into(), "deadbeef".into());
+        let line = format!("{event}\n");
         for data in ["Library/Application Support", ".local/share"] {
             let log = home
                 .join(data)
@@ -103,35 +121,26 @@ mod tests {
                 .join(run_id)
                 .join("audit.jsonl");
             if log.exists() {
-                std::fs::write(
-                    &log,
-                    "{\"ts\":\"2026-06-29T13:00:00Z\",\"type\":\"volume_attached\",\"name\":\"data\",\"target\":\"/data\",\"prev_hash\":\"deadbeef\"}\n",
-                )
-                .unwrap();
+                std::fs::write(&log, &line).unwrap();
             }
         }
     }
 
     fn write_ledger(home: &std::path::Path) {
-        let record = lns_ipc::LedgerRecord {
-            ts: "2026-06-29T14:02:11Z".into(),
-            run: "5e6f7a8b0000000000000000000000bb".into(),
-            microvm: "calm-finch".into(),
-            event: lns_ipc::LedgerEvent::Connection {
-                integration: "some-oauth".into(),
-                auth: AuthKind::Oauth,
-                account: Some("@hchen".into()),
-                scopes: vec!["repo".into()],
-                expires: None,
-            },
-        };
+        let event = lns_ocsf::connection(
+            &octx("5e6f7a8b0000000000000000000000bb", "2026-06-29T14:02:11Z"),
+            "some-oauth",
+            "oauth",
+            Some("@hchen"),
+            &["repo".to_string()],
+            None,
+        )
+        .to_string();
         for data in ["Library/Application Support", ".local/share"] {
             let dir = home.join(data).join("lns");
             std::fs::create_dir_all(&dir).unwrap();
             let mut chain = lns_ipc::AuditChain::new();
-            let mut line = chain
-                .augment(&serde_json::to_string(&record).unwrap())
-                .unwrap();
+            let mut line = chain.augment(&event).unwrap();
             line.push(b'\n');
             std::fs::write(dir.join("ledger.jsonl"), line).unwrap();
             std::fs::write(
@@ -141,8 +150,6 @@ mod tests {
             .unwrap();
         }
     }
-
-    use lns_ipc::AuthKind;
 
     fn home_env(home: &std::path::Path) -> Vec<crate::test_env::EnvScope> {
         vec![
@@ -215,7 +222,8 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .expect("a json line");
         let v: serde_json::Value = serde_json::from_str(line).expect("each line is a json object");
-        assert_eq!(v["event"], "connection", "got: {text}");
+        assert_eq!(v["unmapped"]["lns_kind"], "connection", "got: {text}");
+        assert_eq!(v["class_uid"], 3002, "emitted as OCSF: {text}");
     }
 
     #[tokio::test]

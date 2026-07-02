@@ -3228,6 +3228,7 @@ dependencies = [
  "libc",
  "lns-audit",
  "lns-ipc",
+ "lns-ocsf",
  "lns-policy",
  "regex",
  "reqwest 0.12.28",
