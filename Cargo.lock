@@ -3050,7 +3050,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lens-sandbox-core"
 version = "0.1.0"
-source = "git+https://github.com/lensapp/lens-sandbox-core?rev=08c588f#08c588fcb8b5d68fe153c184c6cd7d3ce4f14f60"
+source = "git+https://github.com/lensapp/lens-sandbox-core?rev=08c588fcb8b5d68fe153c184c6cd7d3ce4f14f60#08c588fcb8b5d68fe153c184c6cd7d3ce4f14f60"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -7135,7 +7135,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

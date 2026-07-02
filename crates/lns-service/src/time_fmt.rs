@@ -28,6 +28,15 @@ pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
     ) else {
         return 0;
     };
+    if year == 0
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return 0;
+    }
     ymdhms_to_unix(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
 }
 
@@ -107,6 +116,21 @@ mod tests {
             0,
             "non-numeric year"
         );
+    }
+
+    #[test]
+    fn unix_from_rfc3339_yields_zero_for_out_of_range_fields_without_panicking() {
+        for ts in [
+            "0000-06-15T12:00:00Z", // year 0 would underflow year - 1
+            "2024-06-00T12:00:00Z", // day 0 would underflow day - 1
+            "2024-00-15T12:00:00Z", // month 0
+            "2024-13-15T12:00:00Z", // month 13
+            "2024-06-15T24:00:00Z", // hour 24
+            "2024-06-15T12:60:00Z", // minute 60
+            "2024-06-15T12:00:60Z", // second 60
+        ] {
+            assert_eq!(unix_from_rfc3339(ts), 0, "{ts} must be rejected, not panic");
+        }
     }
 
     #[test]
