@@ -12,6 +12,36 @@ pub(crate) fn rfc3339_from_unix(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+/// Inverts `rfc3339_from_unix` for our fixed `YYYY-MM-DDTHH:MM:SSZ` shape; a malformed stamp yields 0 so OCSF `time` degrades rather than panics.
+pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
+    let b = ts.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
+        return 0;
+    }
+    let field = |range: std::ops::Range<usize>| ts.get(range).and_then(|s| s.parse::<u64>().ok());
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        field(0..4),
+        field(5..7),
+        field(8..10),
+        field(11..13),
+        field(14..16),
+        field(17..19),
+    ) else {
+        return 0;
+    };
+    ymdhms_to_unix(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+}
+
+fn ymdhms_to_unix(year: u64, month: u64, day: u64) -> u64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn unix_to_ymdhms(secs: u64) -> (i32, u8, u8, u8, u8, u8) {
     let days = (secs / 86_400) as i64;
     let day_of_year_secs = secs % 86_400;
@@ -48,6 +78,36 @@ mod tests {
     fn rfc3339_from_unix_pins_the_epoch_and_a_modern_timestamp() {
         assert_eq!(rfc3339_from_unix(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_from_unix(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn unix_from_rfc3339_round_trips_every_stamp_rfc3339_from_unix_produces() {
+        for secs in [
+            0,
+            951_825_600,
+            1_677_591_907,
+            1_704_067_200,
+            1_780_000_000,
+            4_102_444_800,
+        ] {
+            assert_eq!(
+                unix_from_rfc3339(&rfc3339_from_unix(secs)),
+                secs,
+                "round trip for {secs}"
+            );
+        }
+    }
+
+    #[test]
+    fn unix_from_rfc3339_yields_zero_for_a_malformed_stamp() {
+        assert_eq!(unix_from_rfc3339(""), 0);
+        assert_eq!(unix_from_rfc3339("2026-06-29 14:00:00Z"), 0, "space, not T");
+        assert_eq!(unix_from_rfc3339("2026-06-29T14:00:00"), 0, "no Z");
+        assert_eq!(
+            unix_from_rfc3339("20x6-06-29T14:00:00Z"),
+            0,
+            "non-numeric year"
+        );
     }
 
     #[test]

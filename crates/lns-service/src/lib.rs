@@ -23,6 +23,7 @@ pub mod ledger;
 pub mod log;
 pub mod oauth;
 pub mod oci_layer_cache;
+pub mod ocsf_audit;
 pub mod paths;
 pub mod relay;
 pub mod run;
