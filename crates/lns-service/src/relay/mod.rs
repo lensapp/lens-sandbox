@@ -697,15 +697,8 @@ mod tests {
         assert!(!stop, "audit_event keeps the read loop running");
         assert_eq!(log.syncs, 1, "each appended audit line is fsync'd");
         let written = String::from_utf8(log.bytes).unwrap();
-        assert!(
-            written.ends_with('\n'),
-            "every appended record must terminate with a newline so \
-             the JSONL tail consumer can split lines: {written:?}"
-        );
-        assert!(
-            written.contains("prev_hash"),
-            "the chain must augment each line with a prev_hash field; got: {written}"
-        );
+        assert!(written.ends_with('\n'), "unterminated record: {written:?}");
+        assert!(written.contains("prev_hash"), "unchained record: {written}");
         let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
         assert_eq!(
             obj["unmapped"]["lns_ts"],
