@@ -1393,6 +1393,7 @@ dependencies = [
  "dirs 5.0.1",
  "libc",
  "lns-ipc",
+ "lns-ocsf",
  "lns-service",
  "sha2 0.10.9",
  "tempfile",
