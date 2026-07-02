@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.15.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.14.0...lns-v0.15.0) (2026-07-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **lns-cli:** unify lns audit into one cross-sandbox OCSF timeline
+
+### Features
+
+* **cli:** add `list` alias for `ls` and `sandbox ls` ([3db4880](https://github.com/lensapp/lens-sandbox/commit/3db488066c2e4f328437eef08cc57960d89a7d41))
+* **dashboard:** record the run image in a launch event and show it per sandbox ([cc83d07](https://github.com/lensapp/lens-sandbox/commit/cc83d0719521d87a524591f658d7678b86ac5e59))
+* **lns-cli:** unify lns audit into one cross-sandbox OCSF timeline ([0f148b2](https://github.com/lensapp/lens-sandbox/commit/0f148b2e3d850c2ceaebe2db92d6cc7eef0afb90))
+* **lns-ipc:** opaque hex run ids and connection-ledger wire types ([55b4391](https://github.com/lensapp/lens-sandbox/commit/55b43911b2a1f36fb37c10615f9bf0f4a83c6ad2))
+* **lns-service:** OCSF audit recording, durable ledger, egui dashboard, client-attributed egress ([3611c16](https://github.com/lensapp/lens-sandbox/commit/3611c16b48cc9dbbff5965ec5cdc331c4519e241))
+* make the `lns run` detach chord a docker-style detach ([0f63739](https://github.com/lensapp/lens-sandbox/commit/0f63739c0d9296731f388923489b15d74f941177)), closes [#58](https://github.com/lensapp/lens-sandbox/issues/58)
+* **ocsf:** add the lns-ocsf crate — strict OCSF v1.7.0 event builders ([c1e5e55](https://github.com/lensapp/lens-sandbox/commit/c1e5e55f718bdda116353f5ad496057b1a72a42a))
+
+
+### Bug Fixes
+
+* **audit:** degrade the ledger per-line and harden name resolution + calendar math ([b45db4e](https://github.com/lensapp/lens-sandbox/commit/b45db4eb25c28464f501b730fee96be6f249ba1d))
+* **audit:** harden the OCSF trail against unreadable and forged rows ([3a29298](https://github.com/lensapp/lens-sandbox/commit/3a292981637700c8961fb25d335c05bf29840b80))
+* **audit:** reject out-of-range timestamps and pin core by full SHA ([cc40f57](https://github.com/lensapp/lens-sandbox/commit/cc40f57d4a1ea560deab83e55ee9620247e9faee))
+* **dashboard:** read a finished sandbox's auto-name from the audit trail ([d5e54a5](https://github.com/lensapp/lens-sandbox/commit/d5e54a55990db78f18877375c2fec0e1e8518d62))
+* **lns-service:** report accurate RunDetach errors, not always "no active run" ([d6d715f](https://github.com/lensapp/lens-sandbox/commit/d6d715fe0be8eebdedc53182c079017235954123))
+
 ## [0.14.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.13.0...lns-v0.14.0) (2026-06-25)
 
 

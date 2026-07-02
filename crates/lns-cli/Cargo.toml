@@ -1,6 +1,6 @@
 [package]
 name = "lns-cli"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 description = "Lens Sandbox — thin CLI that drives the lns-service daemon"
 repository = "https://github.com/lensapp/lens-sandbox"
