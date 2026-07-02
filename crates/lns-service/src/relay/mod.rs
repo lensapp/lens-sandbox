@@ -194,7 +194,6 @@ pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::aud
     write_chain_line(&bytes, writer).await
 }
 
-/// Translates the guest's legacy egress frame (`action`, `result`, `status_code`, `metadata.reason`) into an OCSF HTTP Activity; a frame with no `action` is not egress and stays legacy.
 fn guest_egress_to_ocsf(
     cx: &crate::ocsf_audit::OcsfCtx,
     obj: &serde_json::Map<String, Value>,
@@ -888,10 +887,7 @@ mod tests {
         let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
         assert_eq!(obj["class_uid"], 1007, "OCSF Process Activity: {written}");
         assert_eq!(obj["unmapped"]["lns_kind"], "env");
-        assert_eq!(
-            obj["device"]["name"], "calm-finch",
-            "the run_env device is the microVM"
-        );
+        assert_eq!(obj["device"]["name"], "calm-finch");
         assert_eq!(obj["unmapped"]["lns_env"]["CLAUDE_CODE_USE_BEDROCK"], "1");
         assert_eq!(
             obj["unmapped"]["lns_origin"], "host",

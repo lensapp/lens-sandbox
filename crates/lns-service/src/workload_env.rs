@@ -11,7 +11,6 @@ fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
     extra_managed.iter().any(|m| m == env_var)
 }
 
-/// The user-supplied vars actually injected into the workload (managed credentials excluded); `None` when nothing was carried, so no run_env event is emitted.
 pub fn injected_env(user_env: &[String], extra_managed: &[String]) -> Option<Map<String, Value>> {
     let mut env = Map::new();
     for kv in user_env {
