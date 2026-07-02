@@ -247,15 +247,21 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_apikey_approval_kind_word_is_covered() {
-        let ev = ledger_event(&record(LedgerEvent::Approval {
-            kind: ApprovalKind::Credential,
-            target: "some-provider".into(),
-            decision: Decision::AllowOnce,
-            reason: Some("placeholder-unauthorized".into()),
-            integration: None,
-        }));
-        assert_eq!(ev["unmapped"]["lns_approval_kind"], "credential");
+    fn each_approval_kind_maps_to_its_word() {
+        for (kind, word) in [
+            (ApprovalKind::Network, "network"),
+            (ApprovalKind::Credential, "credential"),
+            (ApprovalKind::Integration, "integration"),
+        ] {
+            let ev = ledger_event(&record(LedgerEvent::Approval {
+                kind,
+                target: "t".into(),
+                decision: Decision::AllowOnce,
+                reason: None,
+                integration: None,
+            }));
+            assert_eq!(ev["unmapped"]["lns_approval_kind"], word);
+        }
     }
 
     #[test]
