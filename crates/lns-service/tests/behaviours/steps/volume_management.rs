@@ -49,7 +49,7 @@ async fn listing_empty(w: &mut BehaviourWorld) {
 #[then(expr = "the listing names {string} as in use by the holding run")]
 async fn listing_in_use(w: &mut BehaviourWorld, name: String) {
     let rig = w.volume();
-    let holder = rig.holder_run_id.expect("a holder run id");
+    let holder = rig.holder_run_id.clone().expect("a holder run id");
     assert_eq!(listed(rig, &name).in_use_by, Some(holder));
 }
 
@@ -84,7 +84,7 @@ async fn inspection_idle(w: &mut BehaviourWorld, name: String) {
 #[then(expr = "the inspection reports {string} as in use by the holding run")]
 async fn inspection_in_use(w: &mut BehaviourWorld, name: String) {
     let rig = w.volume();
-    let holder = rig.holder_run_id.expect("a holder run id");
+    let holder = rig.holder_run_id.clone().expect("a holder run id");
     assert_eq!(inspected(rig, &name).in_use_by, Some(holder));
 }
 

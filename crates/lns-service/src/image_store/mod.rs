@@ -96,12 +96,12 @@ async fn load_records<F: Fs>(fs: &F, images_root: &Path) -> Result<Vec<ImageReco
     Ok(records)
 }
 
-fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<u32> {
+fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
     active
         .iter()
         .filter(|r| matches!(r.status, lns_ipc::RunStatus::Running))
         .find(|r| normalize_reference(&r.image).is_ok_and(|whole| whole == reference))
-        .map(|r| r.id)
+        .map(|r| r.id.clone())
 }
 
 fn info_from(record: &ImageRecord, active: &[lns_ipc::RunSummary]) -> lns_ipc::ImageInfo {
@@ -146,7 +146,10 @@ pub async fn remove_with<F: Fs, C: Caches>(
         bail!("no such image: {reference}");
     }
     if let Some(run_id) = holder(active, &reference) {
-        bail!("image {reference:?} in use by run #{run_id}");
+        bail!(
+            "image {reference:?} in use by run {}",
+            lns_ipc::short_run_id(&run_id)
+        );
     }
     fs.remove_file(&record_path(images_root, &reference))
         .await
@@ -401,9 +404,9 @@ mod tests {
         }
     }
 
-    fn running(id: u32, image: &str) -> lns_ipc::RunSummary {
+    fn running(id: &str, image: &str) -> lns_ipc::RunSummary {
         lns_ipc::RunSummary {
-            id,
+            id: id.to_string(),
             name: String::new(),
             image: image.to_string(),
             command: String::new(),
@@ -577,10 +580,10 @@ mod tests {
     #[tokio::test]
     async fn list_names_the_running_holder_matching_its_raw_cli_reference() {
         let fs = FakeFs::with_records(&[rec("docker.io/library/some-image:1.0", &[])]);
-        let listed = list_with(&fs, Path::new(ROOT), &[running(7, "some-image:1.0")])
+        let listed = list_with(&fs, Path::new(ROOT), &[running("aa07", "some-image:1.0")])
             .await
             .unwrap();
-        assert_eq!(listed[0].in_use_by, Some(7));
+        assert_eq!(listed[0].in_use_by, Some("aa07".to_string()));
     }
 
     #[tokio::test]
@@ -588,7 +591,7 @@ mod tests {
         let fs = FakeFs::with_records(&[rec("docker.io/library/some-image:1.0", &[])]);
         let exited = lns_ipc::RunSummary {
             status: lns_ipc::RunStatus::Exited { code: 0 },
-            ..running(7, "some-image:1.0")
+            ..running("aa07", "some-image:1.0")
         };
         let listed = list_with(&fs, Path::new(ROOT), &[exited]).await.unwrap();
         assert_eq!(listed[0].in_use_by, None);
@@ -597,7 +600,7 @@ mod tests {
     #[tokio::test]
     async fn list_ignores_an_imageless_run() {
         let fs = FakeFs::with_records(&[rec("docker.io/library/some-image:1.0", &[])]);
-        let listed = list_with(&fs, Path::new(ROOT), &[running(7, "<imageless>")])
+        let listed = list_with(&fs, Path::new(ROOT), &[running("aa07", "<imageless>")])
             .await
             .unwrap();
         assert_eq!(listed[0].in_use_by, None);
@@ -636,13 +639,13 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
-            &[running(7, "some-image:1.0")],
+            &[running("aa07", "some-image:1.0")],
             "some-image:1.0",
         )
         .await
         .unwrap_err()
         .to_string();
-        assert!(err.contains("in use by run #7"), "got: {err}");
+        assert!(err.contains("in use by run aa07"), "got: {err}");
         assert!(fs.has(&record_path(
             Path::new(ROOT),
             "docker.io/library/some-image:1.0"
@@ -761,9 +764,14 @@ mod tests {
             freed: 4,
             ..Default::default()
         };
-        let report = prune_with(&fs, &caches, Path::new(ROOT), &[running(3, "held:1.0")])
-            .await
-            .unwrap();
+        let report = prune_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &[running("aa03", "held:1.0")],
+        )
+        .await
+        .unwrap();
         assert_eq!(report.removed, vec!["registry.example.test/idle:1"]);
         assert_eq!(report.reclaimed_bytes, 4);
         assert!(fs.has(&record_path(Path::new(ROOT), "docker.io/library/held:1.0")));

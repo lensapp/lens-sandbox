@@ -8,6 +8,8 @@ use tokio::sync::mpsc;
 use crate::approval_flow::protocol::{
     Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending,
 };
+use crate::ledger::LedgerRecorder;
+use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
 use lns_policy::integrations::TokenFallback;
 use lns_policy::{Policy, PolicyStore, RouteRule};
 
@@ -66,6 +68,7 @@ struct PendingEntry {
     host: String,
     deadline: Instant,
     offer: Option<OfferRef>,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +89,7 @@ pub struct ApprovalSession {
     offerable: Vec<OfferableIntegration>,
     connector: OnceLock<Arc<dyn IntegrationConnector>>,
     connecting: Mutex<HashSet<String>>,
+    ledger: OnceLock<Arc<dyn LedgerRecorder>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +118,7 @@ impl ApprovalSession {
             offerable: Vec::new(),
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
+            ledger: OnceLock::new(),
         }
     }
 
@@ -136,6 +141,10 @@ impl ApprovalSession {
     /// Installs the integration connector once the credential subsystem exists; idempotent, the first wins.
     pub fn set_connector(&self, connector: Arc<dyn IntegrationConnector>) {
         let _ = self.connector.set(connector);
+    }
+
+    pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
+        let _ = self.ledger.set(recorder);
     }
 
     fn offer_for_host(&self, host: &str) -> Option<&OfferableIntegration> {
@@ -198,6 +207,7 @@ impl ApprovalSession {
                 host: req.host.clone(),
                 deadline: now + self.timeout,
                 offer: offer_ref,
+                reason: req.reason.clone(),
             },
         );
         drop(pending);
@@ -226,7 +236,51 @@ impl ApprovalSession {
         if let Some(rule) = rule_for_always_decision(&entry.host, decision) {
             self.apply_persistent_rule(rule);
         }
+        self.record_approval(&entry, decision);
         DecisionOutcome::Resolved
+    }
+
+    fn record_approval(&self, entry: &PendingEntry, decision: Decision) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        let Some(decision) = Self::ledger_decision(decision) else {
+            return;
+        };
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Network,
+            target: entry.host.clone(),
+            decision,
+            reason: (!entry.reason.is_empty()).then(|| entry.reason.clone()),
+            integration: entry.offer.as_ref().map(|o| o.integration_id.clone()),
+        });
+    }
+
+    fn record_offer_decision(&self, integration_id: &str, connected: bool) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Integration,
+            target: integration_id.to_string(),
+            decision: if connected {
+                LedgerDecision::AllowOnce
+            } else {
+                LedgerDecision::DenyOnce
+            },
+            reason: None,
+            integration: Some(integration_id.to_string()),
+        });
+    }
+
+    fn ledger_decision(decision: Decision) -> Option<LedgerDecision> {
+        match decision {
+            Decision::AllowAlways => Some(LedgerDecision::AllowAlways),
+            Decision::AllowOnce => Some(LedgerDecision::AllowOnce),
+            Decision::DenyAlways => Some(LedgerDecision::DenyAlways),
+            Decision::DenyOnce => Some(LedgerDecision::DenyOnce),
+            Decision::Timeout => None,
+        }
     }
 
     fn remove_pending(&self, id: &str) -> Option<PendingEntry> {
@@ -278,6 +332,7 @@ impl ApprovalSession {
         } else {
             Decision::DenyOnce
         };
+        self.record_offer_decision(&offer.integration_id, connected);
         for request_id in self.drain_offer_requests(&offer.integration_id) {
             self.send_decision_frame(&request_id, decision);
         }
@@ -535,6 +590,17 @@ pub(crate) mod tests {
         }
     }
 
+    #[derive(Default)]
+    pub(crate) struct CapturingRecorder {
+        pub(crate) events: StdMutex<Vec<LedgerEvent>>,
+    }
+
+    impl crate::ledger::LedgerRecorder for CapturingRecorder {
+        fn record(&self, event: LedgerEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
     type Fixture = (
         ApprovalSession,
         Arc<RecordingNotifier>,
@@ -569,6 +635,87 @@ pub(crate) mod tests {
             action: format!("CONNECT {host}:443"),
             reason: "policy-ambiguous".into(),
         }
+    }
+
+    fn only_approval(events: &[LedgerEvent]) -> &LedgerEvent {
+        assert_eq!(events.len(), 1, "expected exactly one ledger event");
+        &events[0]
+    }
+
+    #[test]
+    fn a_network_decision_is_recorded_to_the_ledger_with_its_reason() {
+        let (session, _n, _s, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        session.set_ledger_recorder(recorder.clone());
+        session.submit_pending(pending("r1", "api.foo.com"), Instant::now());
+        assert_eq!(
+            session.record_decision("r1", Decision::AllowAlways),
+            DecisionOutcome::Resolved
+        );
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Network,
+                target: "api.foo.com".into(),
+                decision: LedgerDecision::AllowAlways,
+                reason: Some("policy-ambiguous".into()),
+                integration: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_decision_without_a_reason_records_none() {
+        let (session, _n, _s, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        session.set_ledger_recorder(recorder.clone());
+        let mut req = pending("r1", "api.foo.com");
+        req.reason = String::new();
+        session.submit_pending(req, Instant::now());
+        session.record_decision("r1", Decision::DenyOnce);
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Network,
+                target: "api.foo.com".into(),
+                decision: LedgerDecision::DenyOnce,
+                reason: None,
+                integration: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_not_recorded_as_a_decision() {
+        let (session, _n, _s, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        session.set_ledger_recorder(recorder.clone());
+        session.submit_pending(pending("r1", "api.foo.com"), Instant::now());
+        session.record_decision("r1", Decision::Timeout);
+        assert!(recorder.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ledger_decision_maps_every_user_decision_and_drops_timeout() {
+        assert_eq!(
+            ApprovalSession::ledger_decision(Decision::AllowOnce),
+            Some(LedgerDecision::AllowOnce)
+        );
+        assert_eq!(
+            ApprovalSession::ledger_decision(Decision::AllowAlways),
+            Some(LedgerDecision::AllowAlways)
+        );
+        assert_eq!(
+            ApprovalSession::ledger_decision(Decision::DenyOnce),
+            Some(LedgerDecision::DenyOnce)
+        );
+        assert_eq!(
+            ApprovalSession::ledger_decision(Decision::DenyAlways),
+            Some(LedgerDecision::DenyAlways)
+        );
+        assert_eq!(ApprovalSession::ledger_decision(Decision::Timeout), None);
     }
 
     fn decision_frame(rx: &mut mpsc::UnboundedReceiver<HostFrame>) -> RequestDecision {
@@ -1347,6 +1494,58 @@ pub(crate) mod tests {
         s.connect_offer("r1").await;
 
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_integration_offer_records_an_integration_allow() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Integration,
+                target: "some-oauth".into(),
+                decision: LedgerDecision::AllowOnce,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_integration_connect_records_an_integration_deny() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector),
+        );
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+
+        s.connect_offer("r1").await;
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Integration,
+                target: "some-oauth".into(),
+                decision: LedgerDecision::DenyOnce,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
     }
 
     #[tokio::test]

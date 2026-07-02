@@ -165,7 +165,7 @@ async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()>
             return Ok(());
         }
     };
-    let response = match crate::run_registry::connector(run_id) {
+    let response = match crate::run_registry::connector(&run_id) {
         None => Response::Error {
             message: format!("no active run with id {run_id}"),
         },
@@ -190,7 +190,7 @@ async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyho
             return Ok(());
         }
     };
-    let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
+    let Some(buffer) = crate::run_registry::log_buffer(&run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
     };
@@ -207,7 +207,7 @@ async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()
             return Ok(());
         }
     };
-    let Some(buffer) = crate::run_registry::log_buffer(run_id) else {
+    let Some(buffer) = crate::run_registry::log_buffer(&run_id) else {
         let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
         return Ok(());
     };
@@ -448,13 +448,14 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         frame_tx.clone(),
     ));
     let run_args = args;
+    let task_run_id = run_id.clone();
     let run_task = tokio::spawn(async move {
-        crate::run::handle(run_id, run_args, task_frame_tx, input_rx).await;
+        crate::run::handle(task_run_id, run_args, task_frame_tx, input_rx).await;
     });
 
     let abort = run_task.abort_handle();
     let registered = crate::run_registry::register_named(
-        run_id,
+        run_id.clone(),
         requested_name,
         crate::run_registry::RunHandle {
             cancel_tx,
@@ -480,8 +481,10 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     drop(frame_tx);
 
     let handshake: anyhow::Result<()> = async {
-        let started_frame =
-            encode_frame(&Response::RunStarted { run_id }).context("encoding RunStarted frame")?;
+        let started_frame = encode_frame(&Response::RunStarted {
+            run_id: run_id.clone(),
+        })
+        .context("encoding RunStarted frame")?;
         match timeout(PEER_REQUEST_TIMEOUT, stream.write_all(&started_frame)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(anyhow::Error::from(e).context("writing RunStarted frame")),
@@ -490,31 +493,31 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     }
     .await;
     if let Err(e) = handshake {
-        crate::run_registry::cancel(run_id);
-        crate::run_registry::deregister(run_id);
+        crate::run_registry::cancel(&run_id);
+        crate::run_registry::deregister(&run_id);
         return Err(e);
     }
 
     let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx, detach_rx).await?;
     match post_pump_action(&outcome, detached) {
         PostPumpAction::Retain => {
-            crate::run_registry::mark_exited_from_log(run_id);
+            crate::run_registry::mark_exited_from_log(&run_id);
         }
         PostPumpAction::BackgroundDrain => {
             if let PumpOutcome::WriteFailed(e) = &outcome {
-                log::debug!(run_id, error = %e, "detached: CLI closed stream, draining in background");
+                log::debug!(run_id = %run_id, error = %e, "detached: CLI closed stream, draining in background");
             }
             tokio::spawn(async move {
                 while frame_rx.recv().await.is_some() {}
-                crate::run_registry::mark_exited_from_log(run_id);
+                crate::run_registry::mark_exited_from_log(&run_id);
             });
         }
         PostPumpAction::CancelAndDeregister => {
             if let PumpOutcome::WriteFailed(e) = &outcome {
-                log::debug!(run_id, error = %e, "ipc run stream write failed; cancelling run");
+                log::debug!(run_id = %run_id, error = %e, "ipc run stream write failed; cancelling run");
             }
-            crate::run_registry::cancel(run_id);
-            crate::run_registry::deregister(run_id);
+            crate::run_registry::cancel(&run_id);
+            crate::run_registry::deregister(&run_id);
         }
     }
     Ok(())
@@ -528,7 +531,7 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
             return Ok(());
         }
     };
-    let Some(connector) = crate::run_registry::connector(target_run_id) else {
+    let Some(connector) = crate::run_registry::connector(&target_run_id) else {
         let _ = write_error(
             &mut stream,
             format!("no active run with id {target_run_id}"),
@@ -554,7 +557,7 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     };
 
     let started_frame = encode_frame(&Response::RunStarted {
-        run_id: target_run_id,
+        run_id: target_run_id.clone(),
     })
     .context("encoding RunStarted frame")?;
     if let Err(e) = stream.write_all(&started_frame).await {

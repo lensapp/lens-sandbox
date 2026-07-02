@@ -106,19 +106,19 @@ async fn spec_marks_ro(w: &mut BehaviourWorld, name: String) {
 #[then(expr = "the request is refused because the volume is in use")]
 async fn refused_in_use(w: &mut BehaviourWorld) {
     let err = w.volume().last_error.clone().expect("an error");
-    assert!(err.contains("in use by run #"), "got: {err}");
+    assert!(err.contains("in use by run "), "got: {err}");
 }
 
 #[then(expr = "the first run's hold on {string} is unaffected")]
 async fn hold_unaffected(w: &mut BehaviourWorld, name: String) {
     let rig = w.volume();
-    let holder = rig.holder_run_id.expect("a holder run id");
+    let holder = rig.holder_run_id.clone().expect("a holder run id");
     let again = lns_service::volume_store::acquire_with(
         &rig.fs,
         &rig.registry,
         &rig.store_root,
         &name,
-        9999,
+        "deadbeef00000000000000000000aa99",
     )
     .await;
     assert!(
@@ -157,16 +157,13 @@ async fn no_path_outside(w: &mut BehaviourWorld) {
 #[then(expr = "the audit chain records the volume name {string} and target {string}")]
 async fn audit_records(w: &mut BehaviourWorld, name: String, target: String) {
     let content = w.volume().audit_contents();
+    assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
     assert!(
-        content.contains("\"type\":\"volume_attached\""),
+        content.contains(&format!("\"lns_name\":\"{name}\"")),
         "{content}"
     );
     assert!(
-        content.contains(&format!("\"name\":\"{name}\"")),
-        "{content}"
-    );
-    assert!(
-        content.contains(&format!("\"target\":\"{target}\"")),
+        content.contains(&format!("\"lns_target\":\"{target}\"")),
         "{content}"
     );
 }

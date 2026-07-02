@@ -247,6 +247,8 @@ mod tests {
         state.insert(
             "some-provider".into(),
             CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
                 access_token: "some-access".into(),
                 refresh_token: "some-refresh".into(),
                 expires_at: 0,

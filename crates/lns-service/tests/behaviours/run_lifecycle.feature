@@ -9,7 +9,7 @@ Feature: run lifecycle — graceful stop over IPC
     Given a fresh service handler
     When a StopRun request for run 99999 arrives
     Then the response is Error
-    And the error message contains "no active run with id 99999"
+    And the error message contains "no such run: 99999"
 
   Scenario: Stopping a run that has already exited succeeds without escalation
     Given a registered run that has already exited
@@ -20,7 +20,7 @@ Feature: run lifecycle — graceful stop over IPC
     Given a fresh service handler
     When an InspectRun request for run 99999 arrives
     Then the response is Error
-    And the error message contains "no active run with id 99999"
+    And the error message contains "no such run: 99999"
 
   Scenario: Inspecting a registered run reports its state and launch configuration
     Given a registered run launched from "some-image:1" with 2 cpus and 1024 MiB
@@ -33,7 +33,7 @@ Feature: run lifecycle — graceful stop over IPC
     Given a fresh service handler
     When a RemoveRun request for run 99999 arrives
     Then the response is Error
-    And the error message contains "no run with id 99999"
+    And the error message contains "no such run: 99999"
 
   Scenario: Removing a still-running run is refused
     Given a registered run that is still running

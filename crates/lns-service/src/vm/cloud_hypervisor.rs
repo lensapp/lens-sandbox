@@ -110,7 +110,7 @@ mod tests {
 
     fn spec(run_dir: &Path) -> VmSpec {
         VmSpec {
-            run_id: 1,
+            run_id: "aa01".to_string(),
             cpus: 1,
             memory_mib: 512,
             kernel: PathBuf::from("/kernel"),

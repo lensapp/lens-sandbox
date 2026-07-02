@@ -16,12 +16,12 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(20);
 type VsockStream = tokio::net::UnixStream;
 
 pub struct VsockForwarder {
-    run_id: u32,
+    run_id: String,
     tasks: Mutex<HashMap<SocketAddr, JoinHandle<()>>>,
 }
 
 impl VsockForwarder {
-    pub fn new(run_id: u32) -> Self {
+    pub fn new(run_id: String) -> Self {
         Self {
             run_id,
             tasks: Mutex::new(HashMap::new()),
@@ -43,7 +43,7 @@ impl PortForwarder for VsockForwarder {
             .map_err(|e| ForwardError::Other(e.to_string()))?;
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .map_err(|e| ForwardError::Other(e.to_string()))?;
-        let run_id = self.run_id;
+        let run_id = self.run_id.clone();
         let container_port = spec.container_port;
         let task = tokio::spawn(accept_loop(listener, run_id, container_port));
         self.tasks
@@ -60,10 +60,11 @@ impl PortForwarder for VsockForwarder {
     }
 }
 
-async fn accept_loop(listener: tokio::net::TcpListener, run_id: u32, container_port: u16) {
+async fn accept_loop(listener: tokio::net::TcpListener, run_id: String, container_port: u16) {
     while let Some(stream) = next_connection(&listener).await {
+        let run_id = run_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = bridge_one(stream, run_id, container_port).await {
+            if let Err(e) = bridge_one(stream, &run_id, container_port).await {
                 crate::log::debug!("port-forward connection ended: {e}");
             }
         });
@@ -94,7 +95,7 @@ async fn next_connection(listener: &tokio::net::TcpListener) -> Option<tokio::ne
 
 async fn bridge_one(
     mut host: tokio::net::TcpStream,
-    run_id: u32,
+    run_id: &str,
     container_port: u16,
 ) -> anyhow::Result<()> {
     let connector = run_registry::connector(run_id)

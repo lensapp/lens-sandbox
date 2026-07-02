@@ -1,7 +1,7 @@
 //! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -11,6 +11,8 @@ use crate::approval_flow::protocol::{
 };
 use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
+use crate::ledger::LedgerRecorder;
+use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::integrations::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -125,6 +127,7 @@ pub struct CredentialSession {
     oauth_display_names: HashMap<String, String>,
     token_fallbacks: HashMap<String, TokenFallback>,
     device_flow: Option<Arc<dyn crate::oauth::DeviceFlow>>,
+    userinfo_fetcher: Option<Arc<dyn crate::oauth::UserInfoFetcher>>,
     clock: Option<Arc<dyn crate::oauth::Clock>>,
     pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
     pkce_flow: Option<Arc<dyn crate::oauth::AuthCodeFlow>>,
@@ -132,6 +135,7 @@ pub struct CredentialSession {
     open_browser: BrowserOpener,
     pkce_challenge_gen: ChallengeGen,
     pkce_timeout: Duration,
+    ledger: OnceLock<Arc<dyn LedgerRecorder>>,
 }
 
 impl CredentialSession {
@@ -169,6 +173,7 @@ impl CredentialSession {
             oauth_display_names: HashMap::new(),
             token_fallbacks: HashMap::new(),
             device_flow: None,
+            userinfo_fetcher: None,
             clock: None,
             pkce_configs: HashMap::new(),
             pkce_flow: None,
@@ -176,7 +181,12 @@ impl CredentialSession {
             open_browser: Box::new(|_| {}),
             pkce_challenge_gen: Box::new(crate::oauth::PkceChallenge::generate),
             pkce_timeout: PKCE_SIGN_IN_TIMEOUT,
+            ledger: OnceLock::new(),
         }
+    }
+
+    pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
+        let _ = self.ledger.set(recorder);
     }
 
     /// Wires the device-flow engine and per-integration oauth configs so an accepted oauth prompt can run an interactive sign-in.
@@ -189,6 +199,15 @@ impl CredentialSession {
         self.oauth_configs = oauth_configs;
         self.device_flow = Some(device_flow);
         self.clock = Some(clock);
+        self
+    }
+
+    /// Wires the userinfo fetcher so an accepted device sign-in can resolve the signed-in account; absent it, oauth connections record no account.
+    pub fn with_userinfo_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::oauth::UserInfoFetcher>,
+    ) -> Self {
+        self.userinfo_fetcher = Some(fetcher);
         self
     }
 
@@ -385,7 +404,15 @@ impl CredentialSession {
         };
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
-        // Accepting an un-connected catalog integration connects it live (routes) before the value is armed, so the held request sees both.
+        match &request {
+            CredentialDecisionRequest::Allow(_) => {
+                self.record_credential_approval(&credential_id, Decision::Allow)
+            }
+            CredentialDecisionRequest::Deny => {
+                self.record_credential_approval(&credential_id, Decision::Deny)
+            }
+            CredentialDecisionRequest::Timeout => {}
+        }
         let connect_now = matches!(request, CredentialDecisionRequest::Allow(_))
             && self.connectable.contains(&credential_id);
         if let Some(entry) = persistent_entry(request) {
@@ -417,6 +444,14 @@ impl CredentialSession {
         let connected = self.run_signin_connect(&credential_id).await;
         self.notifier
             .connect_finished(&self.display_name_for(&credential_id));
+        self.record_credential_approval(
+            &credential_id,
+            if connected {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            },
+        );
         if connected {
             for request_id in &request_ids {
                 self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
@@ -584,6 +619,7 @@ impl CredentialSession {
         self.notifier.dismiss_sign_in(credential_id);
         match result {
             Ok(crate::oauth::SignIn::Completed(token)) => {
+                let token = self.resolve_account(cfg, token).await;
                 let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
                 self.arm_connected(credential_id, entry);
                 true
@@ -603,6 +639,17 @@ impl CredentialSession {
                     .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
                 false
             }
+        }
+    }
+
+    async fn resolve_account(
+        &self,
+        cfg: &crate::oauth::OauthConfig,
+        token: crate::oauth::TokenSet,
+    ) -> crate::oauth::TokenSet {
+        match &self.userinfo_fetcher {
+            Some(fetcher) => crate::oauth::resolve_account(fetcher.as_ref(), cfg, token).await,
+            None => token,
         }
     }
 
@@ -641,6 +688,7 @@ impl CredentialSession {
     }
 
     fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) {
+        self.record_credential_event(&credential_id, &entry);
         let snapshot = {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.insert(credential_id, entry);
@@ -653,6 +701,72 @@ impl CredentialSession {
         }
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
         (self.policy_emitter)(&snapshot);
+    }
+
+    fn record_credential_approval(&self, credential_id: &str, decision: Decision) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        recorder.record(LedgerEvent::Approval {
+            kind: ApprovalKind::Credential,
+            target: credential_id.to_string(),
+            decision,
+            reason: None,
+            integration: Some(credential_id.to_string()),
+        });
+    }
+
+    fn record_credential_event(&self, credential_id: &str, entry: &CredentialEntry) {
+        let Some(recorder) = self.ledger.get() else {
+            return;
+        };
+        if let Some(event) = self.credential_event(credential_id, entry) {
+            recorder.record(event);
+        }
+    }
+
+    fn credential_event(
+        &self,
+        credential_id: &str,
+        entry: &CredentialEntry,
+    ) -> Option<LedgerEvent> {
+        match entry {
+            CredentialEntry::Stored { value } if !value.is_empty() => {
+                let (_, domains, _) = self.provider_disclosure(credential_id);
+                Some(LedgerEvent::CredentialUse {
+                    integration: credential_id.to_string(),
+                    auth: AuthKind::Apikey,
+                    fp: Some(lns_ipc::fingerprint(value)),
+                    dest: domains,
+                })
+            }
+            CredentialEntry::Oauth {
+                access_token,
+                expires_at,
+                scopes,
+                account,
+                ..
+            } if !access_token.is_empty() => Some(LedgerEvent::Connection {
+                integration: credential_id.to_string(),
+                auth: AuthKind::Oauth,
+                account: account.clone(),
+                scopes: if scopes.is_empty() {
+                    self.scopes_for(credential_id)
+                } else {
+                    scopes.clone()
+                },
+                expires: (*expires_at != 0)
+                    .then(|| crate::time_fmt::rfc3339_from_unix(*expires_at)),
+            }),
+            _ => None,
+        }
+    }
+
+    fn scopes_for(&self, credential_id: &str) -> Vec<String> {
+        self.oauth_configs
+            .get(credential_id)
+            .map(|cfg| cfg.scopes.clone())
+            .unwrap_or_default()
     }
 
     /// Expired prompts emit a `Timeout` decision so the MITM fails every held request closed (S12).
@@ -741,6 +855,7 @@ fn injection_targets_host(inj: &CredentialInjection, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::session::tests::CapturingRecorder;
     use std::io;
     use std::sync::Mutex as StdMutex;
 
@@ -880,6 +995,218 @@ mod tests {
         let v = serde_json::to_value(rx.try_recv().expect("expected a frame")).unwrap();
         assert_eq!(v["type"], "credential_decision", "got {v}");
         serde_json::from_value(v).expect("CredentialDecision must round-trip through JSON")
+    }
+
+    #[test]
+    fn arming_a_stored_value_records_a_credential_use_with_a_fingerprint() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-provider".into(),
+            CredentialEntry::Stored {
+                value: "sk-secret".into(),
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::CredentialUse {
+                integration: "some-provider".into(),
+                auth: AuthKind::Apikey,
+                fp: Some(lns_ipc::fingerprint("sk-secret")),
+                dest: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn arming_an_oauth_token_records_a_connection_with_its_expiry() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 1_735_689_600,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec![],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
+            }
+        );
+    }
+
+    #[test]
+    fn an_oauth_grant_with_no_known_expiry_omits_the_expires_field() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 0,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec![],
+                expires: None,
+            },
+            "a 0 expiry means long-lived, so the ledger omits expires rather than recording the epoch"
+        );
+    }
+
+    #[test]
+    fn a_denied_credential_records_nothing() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry("some-provider".into(), CredentialEntry::Deny);
+        assert!(recorder.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_oauth_connection_carries_the_integrations_configured_scopes() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let configs = HashMap::from([(
+            "some-oauth".to_string(),
+            crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
+                client_id: "Iv1.test".into(),
+                client_secret: String::new(),
+                scopes: vec!["repo".into(), "read:org".into()],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let s = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier,
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_oauth(configs, FakeFlow::polling(vec![]), Arc::new(FixedClock(0)));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 1_735_689_600,
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: None,
+                scopes: vec!["repo".into(), "read:org".into()],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
+            }
+        );
+    }
+
+    #[test]
+    fn an_oauth_connection_records_its_granted_scopes_and_resolved_account() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.apply_persistent_entry(
+            "some-oauth".into(),
+            CredentialEntry::Oauth {
+                access_token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: 1_735_689_600,
+                scopes: vec!["repo".into(), "read:org".into()],
+                account: Some("@hchen".into()),
+            },
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Connection {
+                integration: "some-oauth".into(),
+                auth: AuthKind::Oauth,
+                account: Some("@hchen".into()),
+                scopes: vec!["repo".into(), "read:org".into()],
+                expires: Some(crate::time_fmt::rfc3339_from_unix(1_735_689_600)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_credential_allow_records_a_credential_approval() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-provider".into(),
+                decision: Decision::Allow,
+                reason: None,
+                integration: Some("some-provider".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_credential_deny_records_a_credential_approval() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-provider".into(),
+                decision: Decision::Deny,
+                reason: None,
+                integration: Some("some-provider".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_credential_timeout_records_nothing() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Timeout);
+        assert!(recorder.events.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1582,6 +1909,8 @@ mod tests {
         configs.insert(
             "some-oauth".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.test".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1724,6 +2053,8 @@ mod tests {
         use crate::oauth::DeviceFlow;
         let flow = FakeFlow::polling(vec![]);
         let cfg = crate::oauth::OauthConfig {
+            userinfo_endpoint: None,
+            account_field: None,
             client_id: "Iv1.test".into(),
             client_secret: String::new(),
             scopes: vec![],
@@ -1743,6 +2074,8 @@ mod tests {
 
     fn oauth_token(expires_in: u64) -> crate::oauth::TokenSet {
         crate::oauth::TokenSet {
+            scopes: Vec::new(),
+            account: None,
             access_token: "some-access".into(),
             refresh_token: "some-refresh".into(),
             expires_in: Duration::from_secs(expires_in),
@@ -1759,6 +2092,8 @@ mod tests {
         configs.insert(
             "some-oauth".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.test".into(),
                 client_secret: String::new(),
                 scopes: vec!["repo".into()],
@@ -1831,6 +2166,8 @@ mod tests {
                 .unwrap()
                 .get("some-oauth"),
             Some(&CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
                 access_token: "some-access".into(),
                 refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
@@ -1955,6 +2292,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_oauth_success_records_a_credential_allow() {
+        let (s, _n, _store, _rx, _c) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *events.last().expect("an approval after the connection"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-oauth".into(),
+                decision: Decision::Allow,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_denied_records_a_credential_deny() {
+        let (s, _n, _store, _rx, _c) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            *recorder.events.lock().unwrap().first().expect("one event"),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Credential,
+                target: "some-oauth".into(),
+                decision: Decision::Deny,
+                reason: None,
+                integration: Some("some-oauth".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_resolves_the_account_through_the_userinfo_fetcher() {
+        struct FakeUserInfo;
+        impl crate::oauth::UserInfoFetcher for FakeUserInfo {
+            fn fetch<'a>(
+                &'a self,
+                _url: &'a str,
+                _token: &'a str,
+            ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<u8>>> {
+                Box::pin(async { Ok(br#"{"login":"@hchen"}"#.to_vec()) })
+            }
+        }
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let configs = HashMap::from([(
+            "some-oauth".to_string(),
+            crate::oauth::OauthConfig {
+                userinfo_endpoint: Some("https://api.example.test/user".into()),
+                account_field: Some("login".into()),
+                client_id: "Iv1.test".into(),
+                client_secret: String::new(),
+                scopes: vec!["repo".into()],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let s = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier,
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_oauth(
+            configs,
+            FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(oauth_token(3600))]),
+            Arc::new(FixedClock(0)),
+        )
+        .with_userinfo_fetcher(Arc::new(FakeUserInfo));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        let accounts: Vec<_> = recorder
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                LedgerEvent::Connection { account, .. } => Some(account.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(accounts, vec![Some("@hchen".to_string())]);
+    }
+
+    #[tokio::test]
     async fn connect_oauth_expired_fails_held_requests_without_arming() {
         let (s, _n, store, mut rx, _connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Expired]));
@@ -2049,6 +2485,8 @@ mod tests {
         assert_eq!(
             s.current_state().get("some-oauth"),
             Some(&CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
                 access_token: "some-access".into(),
                 refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
@@ -2377,6 +2815,8 @@ mod tests {
 
     fn armed_oauth(access_token: &str) -> CredentialEntry {
         CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: access_token.into(),
             refresh_token: String::new(),
             expires_at: 9_999_999_999,

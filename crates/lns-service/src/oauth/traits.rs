@@ -13,6 +13,8 @@ pub struct OauthConfig {
     pub scopes: Vec<String>,
     pub device_authorization_endpoint: String,
     pub token_endpoint: String,
+    pub userinfo_endpoint: Option<String>,
+    pub account_field: Option<String>,
 }
 
 impl From<&OauthAuth> for OauthConfig {
@@ -26,6 +28,8 @@ impl From<&OauthAuth> for OauthConfig {
                 .clone()
                 .unwrap_or_default(),
             token_endpoint: o.token_endpoint.clone(),
+            userinfo_endpoint: o.userinfo_endpoint.clone(),
+            account_field: o.account_field.clone(),
         }
     }
 }
@@ -41,11 +45,13 @@ pub struct DeviceCode {
 }
 
 /// An obtained or renewed grant from the token endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: Duration,
+    pub scopes: Vec<String>,
+    pub account: Option<String>,
 }
 
 /// The result of one poll of the token endpoint while a device sign-in is pending (RFC 8628 §3.5).
@@ -77,6 +83,11 @@ pub trait DeviceFlow: Send + Sync {
 /// Wall-clock source for token-expiry arithmetic, injected so refresh decisions are deterministic in tests.
 pub trait Clock: Send + Sync {
     fn now_unix(&self) -> u64;
+}
+
+/// Fetches a provider's userinfo document for an armed access token, injected so account resolution is host-tested without real network.
+pub trait UserInfoFetcher: Send + Sync {
+    fn fetch<'a>(&'a self, url: &'a str, access_token: &'a str) -> BoxFuture<'a, Result<Vec<u8>>>;
 }
 
 /// The slice of an integration's oauth block the PKCE authorization-code flow needs.
