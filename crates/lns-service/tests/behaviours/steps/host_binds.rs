@@ -105,8 +105,8 @@ async fn audit_records(
     target: String,
 ) -> Result<(), String> {
     let content = w.bind().audit_contents();
-    if content.contains(&format!("\"source\":\"{source}\""))
-        && content.contains(&format!("\"target\":\"{target}\""))
+    if content.contains(&format!("\"lns_source\":\"{source}\""))
+        && content.contains(&format!("\"lns_target\":\"{target}\""))
     {
         Ok(())
     } else {
@@ -121,8 +121,8 @@ async fn audit_records_disposition(
     dropped: String,
 ) -> Result<(), String> {
     let content = w.bind().audit_contents();
-    if content.contains(&format!("\"exposed_secrets\":[\"{exposed}\"]"))
-        && content.contains(&format!("\"dropped_secrets\":[\"{dropped}\"]"))
+    if content.contains(&format!("\"lns_exposed_secrets\":[\"{exposed}\"]"))
+        && content.contains(&format!("\"lns_dropped_secrets\":[\"{dropped}\"]"))
     {
         Ok(())
     } else {

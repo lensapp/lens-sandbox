@@ -52,6 +52,8 @@ impl BindRig {
         let dropped: Vec<String> = dropped.iter().map(|s| s.to_string()).collect();
         lns_service::audit::record_bind_attached_at(
             &self.audit_file,
+            "test-run",
+            "calm-finch",
             source,
             target,
             &exposed,

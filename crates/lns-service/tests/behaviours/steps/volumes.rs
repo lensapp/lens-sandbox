@@ -157,16 +157,13 @@ async fn no_path_outside(w: &mut BehaviourWorld) {
 #[then(expr = "the audit chain records the volume name {string} and target {string}")]
 async fn audit_records(w: &mut BehaviourWorld, name: String, target: String) {
     let content = w.volume().audit_contents();
+    assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
     assert!(
-        content.contains("\"type\":\"volume_attached\""),
+        content.contains(&format!("\"lns_name\":\"{name}\"")),
         "{content}"
     );
     assert!(
-        content.contains(&format!("\"name\":\"{name}\"")),
-        "{content}"
-    );
-    assert!(
-        content.contains(&format!("\"target\":\"{target}\"")),
+        content.contains(&format!("\"lns_target\":\"{target}\"")),
         "{content}"
     );
 }
