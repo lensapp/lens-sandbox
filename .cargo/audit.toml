@@ -1,8 +1,10 @@
-# RUSTSEC-2026-0194 — quick-xml quadratic run time on duplicate attribute names.
-# Only reachable through wayland-scanner (build-time Wayland-protocol codegen in
-# the Linux winit/eframe GUI stack), which parses the fixed protocol XML shipped
-# with the crate — never untrusted input — so the DoS is not exploitable here.
-# wayland-scanner 0.31 pins quick-xml ^0.39 and 0.39.4 is the newest 0.39.x, so
-# the fix can't be taken without bumping the whole GUI stack. Revisit on that bump.
+# RUSTSEC-2026-0194 (quadratic run time on duplicate attribute names) and
+# RUSTSEC-2026-0195 (unbounded namespace-declaration allocation) — both quick-xml
+# DoS advisories, both reachable only through wayland-scanner (build-time
+# Wayland-protocol codegen in the Linux winit/eframe GUI stack), which parses the
+# fixed protocol XML shipped with the crate — never untrusted input — so neither
+# DoS is exploitable here. wayland-scanner 0.31 pins quick-xml ^0.39 and 0.39.4 is
+# the newest 0.39.x, so the fixes can't be taken without bumping the whole GUI
+# stack. Revisit on that bump.
 [advisories]
-ignore = ["RUSTSEC-2026-0194"]
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
