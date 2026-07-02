@@ -2,10 +2,18 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Lines};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use lns_ipc::LedgerRecord;
+use serde_json::Value;
 
-/// Streams the ledger one record per line so callers fold or filter without holding the whole file in memory; a missing ledger streams as empty.
+/// One ledger line: the reconstructed `record` for display, and the on-disk `raw` JSON (legacy or OCSF, `prev_hash` stripped) for pass-through emit.
+#[derive(Debug)]
+pub struct LedgerEntry {
+    pub raw: Value,
+    pub record: LedgerRecord,
+}
+
+/// Streams the ledger one entry per line so callers fold or filter without holding the whole file in memory; a missing ledger streams as empty.
 pub fn stream_ledger(path: &Path) -> Result<LedgerStream> {
     let lines = match File::open(path) {
         Ok(file) => Some(BufReader::new(file).lines()),
@@ -27,12 +35,12 @@ pub struct LedgerStream {
 }
 
 impl Iterator for LedgerStream {
-    type Item = Result<LedgerRecord>;
+    type Item = Result<LedgerEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let lines = self.lines.as_mut()?;
-        loop {
-            let line = match lines.next()? {
+        for line in lines.by_ref() {
+            let line = match line {
                 Ok(line) => line,
                 Err(e) => {
                     let path = self.path.display();
@@ -46,11 +54,28 @@ impl Iterator for LedgerStream {
             let line_no = self.line_no;
             let path = self.path.display();
             return Some(
-                serde_json::from_str(&line)
+                parse_ledger_line(&line)
                     .with_context(|| format!("parsing ledger line {line_no} of {path}")),
             );
         }
+        None
     }
+}
+
+fn parse_ledger_line(line: &str) -> Result<LedgerEntry> {
+    let Value::Object(mut obj) = serde_json::from_str::<Value>(line)? else {
+        bail!("ledger line is not a JSON object");
+    };
+    let record = if crate::ocsf::is_ocsf(&obj) {
+        crate::ocsf::ledger_record(&obj)?
+    } else {
+        serde_json::from_value::<LedgerRecord>(Value::Object(obj.clone()))?
+    };
+    obj.remove("prev_hash");
+    Ok(LedgerEntry {
+        raw: Value::Object(obj),
+        record,
+    })
 }
 
 #[cfg(test)]
@@ -73,7 +98,7 @@ mod tests {
         serde_json::to_string(&record).unwrap()
     }
 
-    fn collect(path: &Path) -> Result<Vec<LedgerRecord>> {
+    fn collect(path: &Path) -> Result<Vec<LedgerEntry>> {
         stream_ledger(path)?.collect()
     }
 
@@ -91,7 +116,69 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let records = collect(&path).unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].run, "5e6f7a8b0000000000000000000000bb");
+        assert_eq!(records[0].record.run, "5e6f7a8b0000000000000000000000bb");
+    }
+
+    #[test]
+    fn a_legacy_line_keeps_its_record_and_exposes_a_prev_hash_free_raw() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let mut chain = lns_ipc::AuditChain::new();
+        let augmented = chain.augment(&sample_line()).unwrap();
+        std::fs::write(&path, augmented).unwrap();
+
+        let entries = collect(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].record.event.name(), "credential_use");
+        let raw = &entries[0].raw;
+        assert_eq!(raw["event"], "credential_use");
+        assert!(
+            raw.get("prev_hash").is_none(),
+            "raw leaks the chain link: {raw}"
+        );
+    }
+
+    #[test]
+    fn an_ocsf_line_reconstructs_the_record_and_keeps_the_ocsf_raw() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let ev = lns_ocsf::credential_use(
+            &lns_ocsf::Context {
+                time_unix_secs: 1_780_000_000,
+                ts_rfc3339: "2026-06-29T14:05:30Z",
+                run: "5e6f7a8b0000000000000000000000bb",
+                microvm: "calm-finch",
+            },
+            "some-provider",
+            "apikey",
+            Some("9c2f1a3d"),
+            &["api.some-provider.example".into()],
+        );
+        let mut chain = lns_ipc::AuditChain::new();
+        let augmented = chain.augment(&serde_json::to_string(&ev).unwrap()).unwrap();
+        std::fs::write(&path, augmented).unwrap();
+
+        let entries = collect(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].record.run, "5e6f7a8b0000000000000000000000bb");
+        assert_eq!(entries[0].record.event.name(), "credential_use");
+        assert_eq!(
+            entries[0].raw["class_uid"], 3002,
+            "the raw stays OCSF for pass-through emit"
+        );
+        assert!(entries[0].raw.get("prev_hash").is_none());
+    }
+
+    #[test]
+    fn a_non_object_ledger_line_surfaces_a_parse_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        std::fs::write(&path, "42\n").unwrap();
+        let err = collect(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a JSON object"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

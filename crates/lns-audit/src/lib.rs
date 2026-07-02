@@ -1,5 +1,6 @@
 mod collect;
 mod events;
+mod ocsf;
 mod show;
 mod store;
 pub mod verify;
@@ -7,7 +8,7 @@ pub mod verify;
 use lns_ipc::AuthKind;
 
 pub use collect::{Timeline, TimelineRow, collect_timeline, run_ids_in};
-pub use store::{LedgerStream, stream_ledger};
+pub use store::{LedgerEntry, LedgerStream, stream_ledger};
 pub use verify::{VerifyOutcome, verify_chain, verify_chain_with_anchor};
 
 pub fn friendly_when(ts: &str) -> String {

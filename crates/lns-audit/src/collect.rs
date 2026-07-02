@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::{events, integrity_advisory, show, store, verify};
+use crate::{events, integrity_advisory, ocsf, show, store, verify};
 
 #[derive(Debug, Clone)]
 pub struct TimelineRow {
@@ -50,12 +50,12 @@ fn collect_ledger_rows(
     {
         timeline.warnings.push(warning);
     }
-    for record in store::stream_ledger(ledger_path)? {
-        let record = record?;
+    for entry in store::stream_ledger(ledger_path)? {
+        let entry = entry?;
+        let record = entry.record;
         if scope.is_some_and(|run_id| record.run != run_id) {
             continue;
         }
-        let raw = serde_json::to_value(&record).context("serializing ledger record")?;
         let kind = match record.event.name() {
             "credential_use" => "credential",
             other => other,
@@ -67,7 +67,7 @@ fn collect_ledger_rows(
             kind: kind.to_string(),
             detail: events::detail(&record.event),
             integration: record.event.integration().map(str::to_string),
-            raw,
+            raw: entry.raw,
         });
     }
     Ok(())
@@ -109,14 +109,11 @@ fn collect_one_run(runs_root: &Path, run_id: &str, timeline: &mut Timeline) -> R
             );
         };
         obj.insert("run".to_string(), Value::String(run_id.to_string()));
-        let (kind, detail) = show::describe(&obj);
+        let source = runlog_source(&obj, &log_path, idx + 1)?;
+        let (ts, when, kind, detail) = runlog_fields(&source);
         timeline.rows.push(TimelineRow {
-            ts: obj
-                .get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            when: show::when(&obj),
+            ts,
+            when,
             run: run_id.to_string(),
             kind,
             detail,
@@ -125,6 +122,33 @@ fn collect_one_run(runs_root: &Path, run_id: &str, timeline: &mut Timeline) -> R
         });
     }
     Ok(())
+}
+
+fn runlog_source(
+    obj: &serde_json::Map<String, Value>,
+    log_path: &Path,
+    line_no: usize,
+) -> Result<serde_json::Map<String, Value>> {
+    if ocsf::is_ocsf(obj) {
+        return ocsf::runlog_obj(obj).with_context(|| {
+            format!(
+                "reconstructing OCSF audit line {line_no} of {}",
+                log_path.display()
+            )
+        });
+    }
+    Ok(obj.clone())
+}
+
+fn runlog_fields(src: &serde_json::Map<String, Value>) -> (String, String, String, String) {
+    let (kind, detail) = show::describe(src);
+    let when = show::when(src);
+    let ts = src
+        .get("ts")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (ts, when, kind, detail)
 }
 
 pub fn run_ids_in(runs_root: &Path) -> Result<Vec<String>> {
@@ -204,6 +228,22 @@ mod tests {
             for record in records {
                 let line = serde_json::to_string(record).unwrap();
                 let augmented = chain.augment(&line).unwrap();
+                payload.push_str(std::str::from_utf8(&augmented).unwrap());
+                payload.push('\n');
+            }
+            std::fs::write(&self.ledger_path, payload).unwrap();
+            std::fs::write(
+                self.ledger_path.with_file_name("ledger.anchor"),
+                chain.anchor().expect("ledger has events").to_line(),
+            )
+            .unwrap();
+        }
+
+        fn write_ledger_lines(&self, lines: &[String]) {
+            let mut chain = lns_ipc::AuditChain::new();
+            let mut payload = String::new();
+            for line in lines {
+                let augmented = chain.augment(line).unwrap();
                 payload.push_str(std::str::from_utf8(&augmented).unwrap());
                 payload.push('\n');
             }
@@ -429,6 +469,113 @@ mod tests {
             timeline.warnings.iter().any(|w| w.contains("no anchor")),
             "a non-empty log with no anchor warns: {:?}",
             timeline.warnings
+        );
+    }
+
+    fn octx() -> lns_ocsf::Context<'static> {
+        lns_ocsf::Context {
+            time_unix_secs: 1_780_000_000,
+            ts_rfc3339: "2026-06-29T14:02:11Z",
+            run: "aa01",
+            microvm: "calm-finch",
+        }
+    }
+
+    fn line(value: serde_json::Value) -> String {
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn an_ocsf_ledger_row_matches_the_legacy_ledger_row_it_replaces() {
+        let legacy = Fixture::new();
+        legacy.write_ledger(&[connection("aa01", "2026-06-29T14:02:11Z")]);
+
+        let ocsf = Fixture::new();
+        ocsf.write_ledger_lines(&[line(lns_ocsf::connection(
+            &octx(),
+            "some-oauth",
+            "oauth",
+            Some("@some-user"),
+            &["repo".to_string()],
+            None,
+        ))]);
+
+        let legacy_row = &legacy.collect(None).rows[0];
+        let ocsf_row = &ocsf.collect(None).rows[0];
+        assert_eq!(ocsf_row.kind, legacy_row.kind);
+        assert_eq!(ocsf_row.when, legacy_row.when);
+        assert_eq!(ocsf_row.ts, legacy_row.ts);
+        assert_eq!(ocsf_row.detail, legacy_row.detail);
+        assert_eq!(ocsf_row.integration, legacy_row.integration);
+        assert_eq!(
+            ocsf_row.raw["class_uid"], 3002,
+            "the OCSF row keeps its OCSF raw for --json pass-through"
+        );
+    }
+
+    #[test]
+    fn an_ocsf_run_row_matches_the_legacy_run_row_it_replaces() {
+        let legacy = Fixture::new();
+        legacy.write_run(
+            "aa01",
+            &[r#"{"ts":"2026-06-29T14:02:11Z","action":"GET http://api.example.test:443/","status_code":200,"result":"success","origin":"guest-proxy"}"#],
+        );
+
+        let ocsf = Fixture::new();
+        ocsf.write_run(
+            "aa01",
+            &[&line(lns_ocsf::egress(
+                &octx(),
+                "GET",
+                "http://api.example.test:443/",
+                Some(200),
+                Some("success"),
+                None,
+                true,
+            ))],
+        );
+
+        let legacy_row = &legacy.collect(None).rows[0];
+        let ocsf_row = &ocsf.collect(None).rows[0];
+        assert_eq!(ocsf_row.kind, "egress");
+        assert_eq!(ocsf_row.kind, legacy_row.kind);
+        assert_eq!(ocsf_row.when, legacy_row.when);
+        assert_eq!(ocsf_row.detail, legacy_row.detail);
+    }
+
+    #[test]
+    fn an_unreconstructable_ocsf_run_line_surfaces_its_line_number() {
+        let fix = Fixture::new();
+        fix.write_run(
+            "aa01",
+            &[r#"{"class_uid":4002,"unmapped":{"lns_kind":"egress","lns_run":"aa01","lns_microvm":"m","lns_ts":"2026-06-29T14:00:00Z"}}"#],
+        );
+        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reconstructing OCSF audit line 1"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_single_run_log_mixing_legacy_and_ocsf_lines_reads_both() {
+        let fix = Fixture::new();
+        fix.write_run(
+            "aa01",
+            &[
+                r#"{"ts":"2026-06-29T14:02:00Z","action":"GET http://x/","origin":"guest-proxy"}"#,
+                &line(lns_ocsf::volume_mount(&octx(), "data", "/data")),
+            ],
+        );
+
+        let rows = fix.collect(None).rows;
+        assert_eq!(rows.len(), 2);
+        let kinds: std::collections::BTreeSet<&str> =
+            rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["egress", "volume"].into_iter().collect(),
+            "a legacy line and an OCSF line coexist in one file"
         );
     }
 }
