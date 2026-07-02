@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -25,6 +24,7 @@ use super::{
     is_expected_close, seed_frames, supersede_connection, validate_authorization_header,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_loop(
     mut fd_rx: mpsc::UnboundedReceiver<RawFd>,
     session: Arc<ApprovalSession>,
@@ -33,6 +33,7 @@ pub(super) async fn accept_loop(
     token: String,
     audit: PathBuf,
     user_env: Vec<String>,
+    identity: super::RunIdentity,
 ) {
     let mut conn_tx: Option<mpsc::UnboundedSender<HostFrame>> = None;
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -61,6 +62,7 @@ pub(super) async fn accept_loop(
                 let token_c = token.clone();
                 let audit_c = audit.clone();
                 let user_env_c = user_env.clone();
+                let identity_c = identity.clone();
                 let budget_c = budget.clone();
                 let span = tracing::Span::current();
                 let handle = tokio::spawn(
@@ -73,6 +75,7 @@ pub(super) async fn accept_loop(
                             token_c,
                             audit_c,
                             user_env_c,
+                            identity_c,
                             shutdown_rx,
                             budget_c,
                         )
@@ -116,6 +119,7 @@ async fn handle_connection(
     expected_token: String,
     audit_path: PathBuf,
     user_env: Vec<String>,
+    identity: super::RunIdentity,
     shutdown: oneshot::Receiver<()>,
     budget: AuditBudget,
 ) -> Result<()> {
@@ -164,11 +168,11 @@ async fn handle_connection(
 
     let (mut write, mut read) = ws.split();
 
-    let mut audit_file = crate::audit::open_audit_log_async(&audit_path).await?;
     let anchor_path = crate::audit::anchor_path_for(&audit_path);
     let resume_anchor = crate::audit::read_anchor_async(&anchor_path).await;
     let mut chain = lns_ipc::AuditChain::resuming_from_anchor(resume_anchor.as_ref());
     let mut anchor_sink = crate::audit::FileAnchorSink::new(anchor_path);
+    let mut audit_file = crate::audit::LazyAuditLog::new(audit_path);
     let extra_managed: Vec<String> = {
         use crate::credential_flow::providers::Provider;
         credential_session
@@ -177,12 +181,18 @@ async fn handle_connection(
             .map(|p| p.env_var().to_string())
             .collect()
     };
+    let mut writer = super::AuditWriter {
+        chain: &mut chain,
+        log: &mut audit_file,
+        anchor: &mut anchor_sink,
+        run: &identity.run,
+        microvm: &identity.microvm,
+    };
     super::write_run_env_event(
         &user_env,
         &extra_managed,
-        &mut chain,
-        &mut audit_file,
-        &mut anchor_sink,
+        &mut writer,
+        &crate::oauth::RealClock,
     )
     .await?;
 
@@ -192,9 +202,7 @@ async fn handle_connection(
         &session,
         &credential_session,
         &mut frame_rx,
-        &mut chain,
-        &mut audit_file,
-        &mut anchor_sink,
+        &mut writer,
         shutdown,
         &budget,
     )
@@ -218,9 +226,7 @@ async fn serve(
     session: &Arc<ApprovalSession>,
     credential_session: &Arc<CredentialSession>,
     frame_rx: &mut mpsc::UnboundedReceiver<HostFrame>,
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut tokio::fs::File,
-    anchor_sink: &mut crate::audit::FileAnchorSink,
+    writer: &mut super::AuditWriter<'_, crate::audit::LazyAuditLog, crate::audit::FileAnchorSink>,
     mut shutdown: oneshot::Receiver<()>,
     budget: &AuditBudget,
 ) -> Result<()> {
@@ -244,8 +250,15 @@ async fn serve(
                         break;
                     }
                 };
-                if handle_inbound(msg, session, credential_session, chain, audit_file, anchor_sink, budget)
-                    .await?
+                if handle_inbound(
+                    msg,
+                    session,
+                    credential_session,
+                    writer,
+                    budget,
+                    &crate::oauth::RealClock,
+                )
+                .await?
                 {
                     break;
                 }

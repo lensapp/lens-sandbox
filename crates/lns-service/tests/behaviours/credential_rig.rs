@@ -244,6 +244,8 @@ impl CredentialRig {
         let connected_cb = connected.clone();
         let poll = match outcome {
             RigSignIn::Completes => PollOutcome::Token(TokenSet {
+                scopes: Vec::new(),
+                account: None,
                 access_token: "some-access".into(),
                 refresh_token: "some-refresh".into(),
                 expires_in: Duration::from_secs(3600),
@@ -254,6 +256,8 @@ impl CredentialRig {
         let configs = HashMap::from([(
             id.to_string(),
             OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: format!("Iv1.{id}"),
                 client_secret: String::new(),
                 scopes: vec!["repo".into()],

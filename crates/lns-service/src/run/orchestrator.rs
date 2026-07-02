@@ -17,7 +17,7 @@ use super::{
 };
 
 pub async fn handle(
-    run_id: u32,
+    run_id: String,
     args: RunImageArgs,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
@@ -34,7 +34,7 @@ pub async fn handle(
     name = "lns.run",
     skip_all,
     fields(
-        run_id = run_id,
+        run_id = %run_id,
         image = args.image.as_deref().unwrap_or("<imageless>"),
         cpus = args.cpus,
         mem_mib = args.mem,
@@ -43,7 +43,7 @@ pub async fn handle(
     err,
 )]
 async fn orchestrate(
-    run_id: u32,
+    run_id: String,
     args: RunImageArgs,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
@@ -51,7 +51,7 @@ async fn orchestrate(
     log::attach_to_run_span(frame_tx.clone());
 
     let forwards = crate::forward::establish(
-        std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id)),
+        std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id.clone())),
         &crate::forward::plan(&args.published_ports),
     )?;
 
@@ -61,7 +61,7 @@ async fn orchestrate(
     let cache_dir = cache::root()?;
     let layer_cache = oci_layer_cache::LayerCache::new(cache_dir.join("layers"));
     let content_store = content_store::ContentStore::new(cache_dir.join("content"));
-    let run_scratch_dir = cache_dir.join("runs").join(run_id.to_string());
+    let run_scratch_dir = cache_dir.join("runs").join(&run_id);
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir);
     let mut run_scratch =
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
@@ -72,7 +72,10 @@ async fn orchestrate(
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
         let (session, initrd) = tokio::try_join!(
             supervisor::SupervisorSession::start_if_policy(
-                run_id,
+                run_id.clone(),
+                crate::run_registry::inspect(&run_id)
+                    .map(|d| d.summary.name)
+                    .unwrap_or_else(|| run_id.clone()),
                 policy.as_deref().map(Path::new),
                 guest_tools.root.clone(),
                 args.env.clone(),
@@ -103,12 +106,12 @@ async fn orchestrate(
         Ok::<_, anyhow::Error>(kernel_path)
     };
     let upper_fut = async {
-        let upper_disk_path = upperfs::provision(run_id).await?;
+        let upper_disk_path = upperfs::provision(&run_id).await?;
         log::debug!("upper disk ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(upper_disk_path)
     };
     let volumes_fut = async {
-        let resolved = crate::volume_store::resolve(&args.volumes, run_id).await?;
+        let resolved = crate::volume_store::resolve(&args.volumes, &run_id).await?;
         log::debug!("volumes ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(resolved)
     };
@@ -127,8 +130,17 @@ async fn orchestrate(
     let upper_disk_path = upper_res?;
     let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
+    let microvm = crate::run_registry::inspect(&run_id)
+        .map(|d| d.summary.name)
+        .unwrap_or_default();
     for vol in &args.volumes {
-        crate::audit::record_volume_attached(run_id, &vol.name, &vol.target)?;
+        crate::audit::record_volume_attached(
+            &run_id,
+            &microvm,
+            &vol.name,
+            &vol.target,
+            &crate::oauth::RealClock,
+        )?;
     }
 
     let bind_attachments: Vec<vm::BindAttachment> = args
@@ -143,11 +155,13 @@ async fn orchestrate(
         .collect();
     for bind in &args.binds {
         crate::audit::record_bind_attached(
-            run_id,
+            &run_id,
+            &microvm,
             &bind.host_source,
             &bind.target,
             &bind.kept_paths,
             &bind.dropped_paths,
+            &crate::oauth::RealClock,
         )?;
     }
 
@@ -222,7 +236,7 @@ async fn orchestrate(
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
     let spec = vm::VmSpec {
-        run_id,
+        run_id: run_id.clone(),
         cpus: args.cpus,
         memory_mib: args.mem,
         kernel: kernel_path,
@@ -320,7 +334,7 @@ async fn orchestrate(
         "microVM   ({:.2}s)",
         boot_start.elapsed().as_secs_f64()
     );
-    crate::run_registry::set_connector(run_id, connector.clone());
+    crate::run_registry::set_connector(&run_id, connector.clone());
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
     log::progress("Connecting", "session", 0, 0);
@@ -335,7 +349,7 @@ async fn orchestrate(
         vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx).await?;
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
-    crate::run_registry::set_exit_code(run_id, session_code);
+    crate::run_registry::set_exit_code(&run_id, session_code);
 
     super::shutdown::shutdown_after_session(forwards, std::time::Duration::from_secs(2), vm_task)
         .await?;

@@ -25,7 +25,7 @@ pub fn validate_target(target: &str) -> Result<()> {
 
 #[derive(Debug)]
 pub struct LeaseRegistry {
-    active: Mutex<HashMap<String, u32>>,
+    active: Mutex<HashMap<String, String>>,
 }
 
 impl LeaseRegistry {
@@ -35,12 +35,12 @@ impl LeaseRegistry {
         }
     }
 
-    fn try_acquire(&self, name: &str, run_id: u32) -> std::result::Result<(), u32> {
+    fn try_acquire(&self, name: &str, run_id: &str) -> std::result::Result<(), String> {
         let mut g = self.active.lock().expect("lease registry poisoned");
         match g.get(name) {
-            Some(&holder) => Err(holder),
+            Some(holder) => Err(holder.clone()),
             None => {
-                g.insert(name.to_string(), run_id);
+                g.insert(name.to_string(), run_id.to_string());
                 Ok(())
             }
         }
@@ -53,12 +53,12 @@ impl LeaseRegistry {
             .remove(name);
     }
 
-    fn holder(&self, name: &str) -> Option<u32> {
+    fn holder(&self, name: &str) -> Option<String> {
         self.active
             .lock()
             .expect("lease registry poisoned")
             .get(name)
-            .copied()
+            .cloned()
     }
 }
 
@@ -93,13 +93,13 @@ pub struct Acquired {
     pub lease: VolumeLease,
 }
 
-pub async fn acquire(name: &str, run_id: u32) -> Result<Acquired> {
+pub async fn acquire(name: &str, run_id: &str) -> Result<Acquired> {
     acquire_with(&real::RealFs, &global(), &store_root()?, name, run_id).await
 }
 
 pub async fn resolve(
     mounts: &[lns_ipc::VolumeMount],
-    run_id: u32,
+    run_id: &str,
 ) -> Result<(Vec<crate::vm::VolumeAttachment>, Vec<VolumeLease>)> {
     resolve_with(&real::RealFs, &global(), &store_root()?, mounts, run_id).await
 }
@@ -109,7 +109,7 @@ pub async fn resolve_with<F: Fs>(
     registry: &Arc<LeaseRegistry>,
     store_root: &Path,
     mounts: &[lns_ipc::VolumeMount],
-    run_id: u32,
+    run_id: &str,
 ) -> Result<(Vec<crate::vm::VolumeAttachment>, Vec<VolumeLease>)> {
     let mut attachments = Vec::with_capacity(mounts.len());
     let mut leases = Vec::new();
@@ -138,7 +138,7 @@ pub async fn acquire_with<F: Fs>(
     registry: &Arc<LeaseRegistry>,
     store_root: &Path,
     name: &str,
-    run_id: u32,
+    run_id: &str,
 ) -> Result<Acquired> {
     validate_name(name)?;
     let lease = take_lease(registry, name, run_id)?;
@@ -150,9 +150,12 @@ fn image_path_in(store_root: &Path, name: &str) -> PathBuf {
     store_root.join(format!("{name}.img"))
 }
 
-fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: u32) -> Result<VolumeLease> {
+fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: &str) -> Result<VolumeLease> {
     if let Err(holder) = registry.try_acquire(name, run_id) {
-        bail!("volume {name:?} in use by run #{holder}");
+        bail!(
+            "volume {name:?} in use by run {}",
+            lns_ipc::short_run_id(&holder)
+        );
     }
     Ok(VolumeLease {
         registry: registry.clone(),
@@ -160,7 +163,7 @@ fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: u32) -> Result<
     })
 }
 
-const MAINTENANCE_HOLDER_RUN_ID: u32 = 0;
+const MAINTENANCE_HOLDER_RUN_ID: &str = "maintenance";
 
 async fn ensure_image<F: Fs>(fs: &F, store_root: &Path, name: &str) -> Result<PathBuf> {
     let image_path = image_path_in(store_root, name);
@@ -422,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn acquiring_unknown_name_creates_the_backing_image() {
         let fs = FakeFs::default();
-        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", 1)
+        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", "aa01")
             .await
             .unwrap();
         assert_eq!(got.image_path, Path::new("/store/prism-data.img"));
@@ -435,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn acquiring_existing_name_does_not_recreate_the_image() {
         let fs = FakeFs::with(&["/store/prism-data.img"]);
-        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", 1)
+        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", "aa01")
             .await
             .unwrap();
         assert_eq!(got.image_path, Path::new("/store/prism-data.img"));
@@ -461,9 +464,10 @@ mod tests {
                 read_only: true,
             },
         ];
-        let (attachments, leases) = resolve_with(&fs, &registry, Path::new("/store"), &mounts, 1)
-            .await
-            .expect("the same volume at two paths in one run is allowed");
+        let (attachments, leases) =
+            resolve_with(&fs, &registry, Path::new("/store"), &mounts, "aa01")
+                .await
+                .expect("the same volume at two paths in one run is allowed");
         assert_eq!(attachments.len(), 2, "one attachment per requested path");
         assert_eq!(attachments[0].host_image, attachments[1].host_image);
         assert_eq!(attachments[0].target, "/data");
@@ -480,14 +484,14 @@ mod tests {
     async fn second_live_acquire_is_refused_naming_the_holder() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
             .await
             .unwrap();
-        let err = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 8)
+        let err = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa08")
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("in use by run #7"), "got: {err}");
+        assert!(err.contains("in use by run aa07"), "got: {err}");
     }
 
     #[tokio::test]
@@ -495,11 +499,11 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
         {
-            let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+            let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
                 .await
                 .unwrap();
         }
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 8)
+        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa08")
             .await
             .expect("volume should be free after the prior lease dropped");
     }
@@ -508,7 +512,7 @@ mod tests {
     async fn invalid_name_is_refused_before_any_image_is_created_or_lease_taken() {
         let registry = reg();
         let fs = FakeFs::default();
-        let err = acquire_with(&fs, &registry, Path::new("/store"), "../etc", 1)
+        let err = acquire_with(&fs, &registry, Path::new("/store"), "../etc", "aa01")
             .await
             .unwrap_err()
             .to_string();
@@ -518,7 +522,7 @@ mod tests {
             "no image for an invalid name"
         );
         registry
-            .try_acquire("../etc", 2)
+            .try_acquire("../etc", "aa02")
             .expect("invalid name must not have taken a lease");
     }
 
@@ -531,7 +535,7 @@ mod tests {
             target: "/data init=/bin/sh".into(),
             read_only: false,
         }];
-        let err = resolve_with(&fs, &registry, Path::new("/store"), &mounts, 1)
+        let err = resolve_with(&fs, &registry, Path::new("/store"), &mounts, "aa01")
             .await
             .unwrap_err()
             .to_string();
@@ -541,7 +545,7 @@ mod tests {
             "no image for an unparseable target"
         );
         registry
-            .try_acquire("prism-data", 2)
+            .try_acquire("prism-data", "aa02")
             .expect("a rejected target must not strand the lease");
     }
 
@@ -552,11 +556,11 @@ mod tests {
             fail_create: true,
             ..Default::default()
         };
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 1)
+        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa01")
             .await
             .expect_err("create should fail");
         registry
-            .try_acquire("prism-data", 2)
+            .try_acquire("prism-data", "aa02")
             .expect("a failed create must not strand the lease");
     }
 
@@ -595,7 +599,7 @@ mod tests {
     #[test]
     fn lease_registry_default_starts_empty() {
         LeaseRegistry::default()
-            .try_acquire("x", 1)
+            .try_acquire("x", "aa01")
             .expect("a default registry holds no leases");
     }
 
@@ -619,11 +623,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        let acq = acquire("cov-acquire", 1).await.unwrap();
+        let acq = acquire("cov-acquire", "aa01").await.unwrap();
         assert!(acq.image_path.ends_with("cov-acquire.img"));
         drop(acq);
         drop(
-            acquire("cov-acquire", 2)
+            acquire("cov-acquire", "aa02")
                 .await
                 .expect("lease freed on drop"),
         );
@@ -640,7 +644,7 @@ mod tests {
             target: "/data".to_string(),
             read_only: true,
         }];
-        let (attachments, leases) = resolve(&mounts, 3).await.unwrap();
+        let (attachments, leases) = resolve(&mounts, "aa03").await.unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].target, "/data");
         assert!(attachments[0].read_only);
@@ -665,7 +669,7 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
         fs.set_allocated("/store/prism-data.img", 1024);
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
             .await
             .unwrap();
         let got = list_with(&fs, &registry, Path::new("/store"))
@@ -675,7 +679,7 @@ mod tests {
         assert_eq!(got[0].size_bytes, VOLUME_DEFAULT_SIZE_BYTES);
         assert_eq!(got[0].disk_bytes, 1024);
         assert_eq!(got[0].created, "2025-12-06T12:00:00Z");
-        assert_eq!(got[0].in_use_by, Some(7));
+        assert_eq!(got[0].in_use_by, Some("aa07".to_string()));
     }
 
     #[tokio::test]
@@ -736,13 +740,13 @@ mod tests {
     async fn create_reports_an_already_held_volume_as_in_use_without_recreating_it() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
             .await
             .unwrap();
         let info = create_with(&fs, &registry, Path::new("/store"), "prism-data")
             .await
             .unwrap();
-        assert_eq!(info.in_use_by, Some(7));
+        assert_eq!(info.in_use_by, Some("aa07".to_string()));
         assert_eq!(fs.created_images().len(), 1, "no second image");
     }
 
@@ -750,12 +754,12 @@ mod tests {
     async fn create_of_a_new_image_yields_to_a_concurrent_holder_instead_of_racing_the_temp_file() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = take_lease(&registry, "prism-data", 9).unwrap();
+        let _held = take_lease(&registry, "prism-data", "aa09").unwrap();
         let err = create_with(&fs, &registry, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("in use by run #9"), "got: {err}");
+        assert!(err.contains("in use by run aa09"), "got: {err}");
         assert!(
             fs.created_images().is_empty(),
             "create must not write the backing image while a run holds the volume"
@@ -807,14 +811,14 @@ mod tests {
     async fn remove_of_an_in_use_volume_is_refused_naming_the_holder() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 7)
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
             .await
             .unwrap();
         let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("in use by run #7"), "got: {err}");
+        assert!(err.contains("in use by run aa07"), "got: {err}");
         assert!(fs.exists(Path::new("/store/prism-data.img")).await);
     }
 
@@ -828,7 +832,7 @@ mod tests {
             .to_string();
         assert!(err.contains("no such volume"), "got: {err}");
         registry
-            .try_acquire("prism-data", 2)
+            .try_acquire("prism-data", "aa02")
             .expect("a failed remove must not strand the maintenance lease");
     }
 
@@ -848,7 +852,7 @@ mod tests {
             .await
             .expect_err("remove should fail");
         registry
-            .try_acquire("prism-data", 2)
+            .try_acquire("prism-data", "aa02")
             .expect("a failed remove must not strand the maintenance lease");
     }
 
@@ -860,7 +864,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!fs.exists(Path::new("/store/prism-data.img")).await);
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", 3)
+        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa03")
             .await
             .expect("the name must be free right after remove");
     }
@@ -870,7 +874,7 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/held.img", "/store/idle.img"]);
         fs.set_allocated("/store/idle.img", 2048);
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "held", 7)
+        let _held = acquire_with(&fs, &registry, Path::new("/store"), "held", "aa07")
             .await
             .unwrap();
         let report = prune_with(&fs, &registry, Path::new("/store"))
@@ -890,7 +894,7 @@ mod tests {
             .await
             .unwrap();
         registry
-            .try_acquire("idle", 2)
+            .try_acquire("idle", "aa02")
             .expect("prune must not strand maintenance leases");
     }
 

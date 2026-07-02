@@ -132,7 +132,7 @@ mod tests {
 
     fn spec() -> VmSpec {
         VmSpec {
-            run_id: 7,
+            run_id: "aa07".to_string(),
             cpus: 4,
             memory_mib: 2048,
             kernel: PathBuf::from("/cache/kernel/Image"),

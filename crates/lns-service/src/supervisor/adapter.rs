@@ -434,6 +434,7 @@ async fn start_credential_subsystem(
             Arc::new(crate::oauth::RealDeviceFlow),
             Arc::new(crate::oauth::RealClock),
         )
+        .with_userinfo_fetcher(Arc::new(crate::oauth::RealUserInfoFetcher))
         .with_pkce(
             oauth.pkce_configs,
             Arc::new(crate::oauth::RealAuthCodeFlow),
@@ -464,7 +465,8 @@ async fn start_credential_subsystem(
 }
 
 pub(super) async fn start(
-    run_id: u32,
+    run_id: String,
+    microvm_name: String,
     policy_path: &Path,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
@@ -492,8 +494,7 @@ pub(super) async fn start(
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
     let window_state = window::get().context(
-        "approval window state was not installed at boot; \
-         tray::run_tray must run before any policy-bearing run starts",
+        "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts",
     )?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
     let notifier = Arc::new(WindowNotifier::new(
@@ -558,13 +559,29 @@ pub(super) async fn start(
     )
     .await?;
 
-    // Back-reference (Weak so it never outlives the run) so accepting a network offer drives the credential subsystem's connect.
+    // Weak so the connector back-reference never outlives the run.
     session.set_connector(Arc::new(CredentialConnector {
         credential_session: Arc::downgrade(&credential_session),
     }));
 
+    let recorder: Arc<dyn crate::ledger::LedgerRecorder> =
+        Arc::new(crate::ledger::RunLedgerRecorder::new(
+            run_id.clone(),
+            microvm_name.clone(),
+            Arc::new(crate::oauth::RealClock),
+        ));
+    session.set_ledger_recorder(recorder.clone());
+    credential_session.set_ledger_recorder(recorder);
+
     let supervisor_bin = ensure().await?;
-    let relay = relay::spawn(run_id, session, credential_session, frame_rx, user_env)?;
+    let relay = relay::spawn(
+        &run_id,
+        &microvm_name,
+        session,
+        credential_session,
+        frame_rx,
+        user_env,
+    )?;
     log::debug!(url = %relay.url, "relay listening");
     log::info!("Auditing", "to {}", relay.audit_path.display());
     Ok(SupervisorSession {
@@ -1136,6 +1153,8 @@ mod tests {
             }],
             credential: None,
             oauth: Some(OauthAuth {
+                userinfo_endpoint: None,
+                account_field: None,
                 flow: lns_policy::integrations::OauthFlow::Device,
                 client_id: Some("Iv1.x".into()),
                 client_secret: None,
@@ -1405,6 +1424,8 @@ mod tests {
         {
             Box::pin(async move {
                 Ok(crate::oauth::PollOutcome::Token(crate::oauth::TokenSet {
+                    scopes: Vec::new(),
+                    account: None,
                     access_token: "some-access".into(),
                     refresh_token: "some-refresh".into(),
                     expires_in: std::time::Duration::from_secs(3600),
@@ -1439,6 +1460,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1506,6 +1529,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1582,6 +1607,8 @@ mod tests {
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
                 client_id: "Iv1.acme".into(),
                 client_secret: String::new(),
                 scopes: vec![],
@@ -1638,6 +1665,8 @@ mod tests {
         // connect_oauth requests-then-polls and never refreshes, so the routing-test fake's refresh arm is exercised directly.
         use crate::oauth::DeviceFlow;
         let cfg = crate::oauth::OauthConfig {
+            userinfo_endpoint: None,
+            account_field: None,
             client_id: "x".into(),
             client_secret: String::new(),
             scopes: vec![],

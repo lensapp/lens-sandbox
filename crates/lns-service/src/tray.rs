@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::Context;
@@ -45,6 +46,10 @@ fn build_tray_icon(
     on_event: impl Fn() + Send + Sync + 'static,
 ) -> anyhow::Result<tray_icon::TrayIcon> {
     let menu = Menu::new();
+    let audit_item = MenuItem::new("Audit", true, None);
+    menu.append(&audit_item)
+        .context("failed to append audit menu item")?;
+    let audit_id = audit_item.id().clone();
     let quit_item = MenuItem::new(
         "Quit Lens Sandbox",
         true,
@@ -65,7 +70,12 @@ fn build_tray_icon(
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == quit_id {
+        if event.id == audit_id {
+            crate::dashboard::live::request_open();
+            if let Some(ctx) = window::ctx() {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        } else if event.id == quit_id {
             shutdown.signal();
         }
         on_event();
@@ -188,12 +198,18 @@ struct TrayApp {
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
-    /// Kept on `TrayApp` (not [`WindowState`]) so the snapshot passed to [`render_stack`] stays immutable.
     credential_inputs: HashMap<String, String>,
-    /// Per-card progressive-disclosure state for the "use a token instead" fallback, keyed by the shown card's id.
     token_drafts: HashMap<String, TokenDraft>,
-    /// Per-network-card "remember this decision" toggle, keyed by request id; true persists the choice as an always-rule.
     remember: HashMap<String, bool>,
+    audit: Arc<Mutex<AuditWindow>>,
+    audit_open: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct AuditWindow {
+    state: crate::dashboard::DashboardState,
+    last_gen: u64,
+    focused: bool,
 }
 
 /// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
@@ -238,8 +254,67 @@ impl TrayApp {
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
+            audit: Arc::new(Mutex::new(AuditWindow::default())),
+            audit_open: Arc::new(AtomicBool::new(false)),
         })
     }
+
+    fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
+        if crate::dashboard::live::take_open_request() {
+            self.audit_open.store(true, Ordering::Relaxed);
+            if let Ok(mut w) = self.audit.lock() {
+                w.state = crate::dashboard::DashboardState::new();
+                crate::dashboard::load(&mut w.state);
+                w.last_gen = crate::dashboard::live::generation();
+                w.focused = false;
+            }
+            ctx.send_viewport_cmd_to(
+                crate::dashboard::live::viewport_id(),
+                egui::ViewportCommand::Focus,
+            );
+        }
+        if !self.audit_open.load(Ordering::Relaxed) {
+            return;
+        }
+        let audit = self.audit.clone();
+        let audit_open = self.audit_open.clone();
+        ctx.show_viewport_deferred(
+            crate::dashboard::live::viewport_id(),
+            crate::dashboard::viewport_builder(),
+            move |ui, _class| audit_frame(ui, &audit, &audit_open),
+        );
+    }
+}
+
+fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &AtomicBool) {
+    let saved_style = ui.ctx().global_style();
+    crate::dashboard::apply_theme(ui.ctx());
+    ui.set_style(ui.ctx().global_style());
+    let (focused, close_requested) = ui.ctx().input(|i| {
+        let vp = i.viewport();
+        (vp.focused.unwrap_or(false), vp.close_requested())
+    });
+    crate::dashboard::live::set_watching(focused);
+    if let Ok(mut w) = audit.lock() {
+        let generation = crate::dashboard::live::generation();
+        if (focused && !w.focused) || generation != w.last_gen {
+            crate::dashboard::load(&mut w.state);
+            w.last_gen = crate::dashboard::live::generation();
+        }
+        w.focused = focused;
+        if crate::dashboard::render(ui, &mut w.state) == crate::dashboard::DashboardAction::Refresh
+        {
+            crate::dashboard::load(&mut w.state);
+            w.last_gen = crate::dashboard::live::generation();
+        }
+    }
+    if close_requested {
+        audit_open.store(false, Ordering::Relaxed);
+        crate::dashboard::live::set_watching(false);
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+    }
+    ui.ctx().set_global_style(saved_style);
 }
 
 /// Drives the approval viewport's show/hide and programmatic resize from the current stack, so the production tray and the `approval_preview` harness exercise the identical window lifecycle.
@@ -341,6 +416,7 @@ impl eframe::App for TrayApp {
             .filter(|d| d.is_revealed())
             .count();
         self.placement.sync_visibility(ctx, &order, revealed);
+        self.render_audit_dashboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

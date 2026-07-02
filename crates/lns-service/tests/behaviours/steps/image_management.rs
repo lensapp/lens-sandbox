@@ -76,7 +76,7 @@ fn listing_reports(w: &mut BehaviourWorld, reference: String, size: u64, layers:
 #[then(expr = "the image listing names {string} as in use by the holding run")]
 fn listing_in_use(w: &mut BehaviourWorld, reference: String) {
     let rig = w.image();
-    let holder = rig.holder_run_id.expect("a holder run id");
+    let holder = rig.holder_run_id.clone().expect("a holder run id");
     assert_eq!(listed(rig, &reference).in_use_by, Some(holder));
 }
 
@@ -152,7 +152,7 @@ fn removal_reclaimed(w: &mut BehaviourWorld, bytes: u64) {
 #[then(expr = "the request is refused because the image is in use")]
 fn refused_in_use(w: &mut BehaviourWorld) {
     let err = w.image().last_error.clone().expect("an error");
-    assert!(err.contains("in use by run #"), "got: {err}");
+    assert!(err.contains("in use by run "), "got: {err}");
 }
 
 #[then(expr = "the request is refused because there is no such image")]

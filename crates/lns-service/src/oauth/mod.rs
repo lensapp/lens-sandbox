@@ -11,10 +11,12 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
-pub use real::{RealAuthCodeFlow, RealCallbackListener, RealClock, RealDeviceFlow};
+pub use real::{
+    RealAuthCodeFlow, RealCallbackListener, RealClock, RealDeviceFlow, RealUserInfoFetcher,
+};
 pub use traits::{
     AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
-    OauthConfig, PkceConfig, PollOutcome, TokenSet,
+    OauthConfig, PkceConfig, PollOutcome, TokenSet, UserInfoFetcher,
 };
 
 /// RFC 8628 §3.5: a `slow_down` response bumps the poll interval by 5 seconds.
@@ -199,7 +201,30 @@ pub fn entry_from_token(clock: &dyn Clock, token: &TokenSet) -> CredentialEntry 
         access_token: token.access_token.clone(),
         refresh_token: token.refresh_token.clone(),
         expires_at: clock.now_unix().saturating_add(token.expires_in.as_secs()),
+        scopes: token.scopes.clone(),
+        account: token.account.clone(),
     }
+}
+
+/// Resolves the signed-in account from the integration's userinfo endpoint; best-effort, leaving `account` unset when the catalog declares no endpoint or the lookup fails.
+pub async fn resolve_account(
+    fetcher: &dyn UserInfoFetcher,
+    cfg: &OauthConfig,
+    mut token: TokenSet,
+) -> TokenSet {
+    let (Some(url), Some(field)) = (&cfg.userinfo_endpoint, &cfg.account_field) else {
+        return token;
+    };
+    match fetcher.fetch(url, &token.access_token).await {
+        Ok(bytes) => token.account = account_from_userinfo(&bytes, field),
+        Err(e) => crate::log::debug!("userinfo lookup for account failed: {e:#}"),
+    }
+    token
+}
+
+fn account_from_userinfo(bytes: &[u8], field: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get(field)?.as_str().map(str::to_string)
 }
 
 /// Refreshes an oauth entry whose access token is within `skew_secs` of expiry; `Ok(None)` means no refresh was needed (or the entry isn't oauth), `Err` means the grant can no longer be refreshed.
@@ -213,6 +238,8 @@ pub async fn refresh_if_due(
     let CredentialEntry::Oauth {
         refresh_token,
         expires_at,
+        scopes: prev_scopes,
+        account: prev_account,
         ..
     } = entry
     else {
@@ -226,7 +253,20 @@ pub async fn refresh_if_due(
         return Ok(None);
     }
     let token = flow.refresh(cfg, refresh_token).await?;
-    Ok(Some(entry_from_token(clock, &token)))
+    let mut refreshed = entry_from_token(clock, &token);
+    // A refresh response carries neither userinfo nor (usually) the scope grant, so keep the ones resolved at sign-in.
+    if let CredentialEntry::Oauth {
+        scopes, account, ..
+    } = &mut refreshed
+    {
+        if scopes.is_empty() {
+            scopes.clone_from(prev_scopes);
+        }
+        if account.is_none() {
+            account.clone_from(prev_account);
+        }
+    }
+    Ok(Some(refreshed))
 }
 
 /// Refreshes every due oauth grant in `state` (persisting through `store` if any changed) before a run's session begins serving; a grant that can no longer be refreshed is left in place for the next held request to re-prompt (scenario C).
@@ -356,6 +396,8 @@ mod tests {
 
     fn sample_cfg() -> OauthConfig {
         OauthConfig {
+            userinfo_endpoint: None,
+            account_field: None,
             client_id: "Iv1.test".into(),
             client_secret: String::new(),
             scopes: vec!["repo".into()],
@@ -366,6 +408,8 @@ mod tests {
 
     fn token(expires_in: u64) -> TokenSet {
         TokenSet {
+            scopes: Vec::new(),
+            account: None,
             access_token: "some-access".into(),
             refresh_token: "some-refresh".into(),
             expires_in: Duration::from_secs(expires_in),
@@ -914,6 +958,8 @@ mod tests {
     async fn refresh_if_due_leaves_a_still_fresh_token_untouched() {
         let flow = FakeDeviceFlow::polling(vec![]);
         let entry = CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: "still-good".into(),
             refresh_token: "r".into(),
             expires_at: 10_000,
@@ -932,6 +978,8 @@ mod tests {
     async fn refresh_if_due_leaves_a_refreshless_grant_in_place_even_past_expiry() {
         let flow = FakeDeviceFlow::refreshing(Err(anyhow!("must not be called")));
         let entry = CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: "long-lived".into(),
             refresh_token: String::new(),
             expires_at: 0,
@@ -953,6 +1001,8 @@ mod tests {
     async fn refresh_if_due_renews_a_token_within_the_skew_window() {
         let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
         let entry = CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: "expired".into(),
             refresh_token: "old-refresh".into(),
             expires_at: 1030,
@@ -963,6 +1013,8 @@ mod tests {
         assert_eq!(
             out,
             Some(CredentialEntry::Oauth {
+                scopes: Vec::new(),
+                account: None,
                 access_token: "some-access".into(),
                 refresh_token: "some-refresh".into(),
                 expires_at: 1000 + 3600,
@@ -980,6 +1032,8 @@ mod tests {
     async fn refresh_if_due_surfaces_a_failed_refresh_as_an_error() {
         let flow = FakeDeviceFlow::refreshing(Err(anyhow!("invalid_grant")));
         let entry = CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: "expired".into(),
             refresh_token: "revoked".into(),
             expires_at: 0,
@@ -1029,6 +1083,8 @@ mod tests {
 
     fn oauth_entry(access: &str, refresh: &str, expires_at: u64) -> CredentialEntry {
         CredentialEntry::Oauth {
+            scopes: Vec::new(),
+            account: None,
             access_token: access.into(),
             refresh_token: refresh.into(),
             expires_at,
@@ -1149,6 +1205,114 @@ mod tests {
             state.get("some-oauth"),
             Some(&oauth_entry("some-access", "some-refresh", 1000 + 3600)),
             "the refreshed token is live in memory even if the disk write failed"
+        );
+    }
+
+    struct FakeUserInfoFetcher(Result<Vec<u8>, ()>);
+    impl UserInfoFetcher for FakeUserInfoFetcher {
+        fn fetch<'a>(
+            &'a self,
+            _url: &'a str,
+            _access_token: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, Result<Vec<u8>>> {
+            Box::pin(async move {
+                match &self.0 {
+                    Ok(bytes) => Ok(bytes.clone()),
+                    Err(()) => bail!("userinfo unreachable"),
+                }
+            })
+        }
+    }
+
+    fn userinfo_cfg() -> OauthConfig {
+        OauthConfig {
+            userinfo_endpoint: Some("https://api.example.test/user".into()),
+            account_field: Some("login".into()),
+            ..sample_cfg()
+        }
+    }
+
+    #[test]
+    fn account_from_userinfo_reads_the_named_field() {
+        assert_eq!(
+            account_from_userinfo(br#"{"login":"@hchen","id":7}"#, "login"),
+            Some("@hchen".to_string())
+        );
+    }
+
+    #[test]
+    fn account_from_userinfo_is_none_for_missing_field_non_string_or_bad_json() {
+        assert_eq!(account_from_userinfo(br#"{"id":7}"#, "login"), None);
+        assert_eq!(account_from_userinfo(br#"{"login":7}"#, "login"), None);
+        assert_eq!(account_from_userinfo(b"not json", "login"), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_account_sets_the_account_on_a_successful_lookup() {
+        let fetcher = FakeUserInfoFetcher(Ok(br#"{"login":"@hchen"}"#.to_vec()));
+        let out = resolve_account(&fetcher, &userinfo_cfg(), token(3600)).await;
+        assert_eq!(out.account, Some("@hchen".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_account_leaves_it_unset_when_the_lookup_fails() {
+        let fetcher = FakeUserInfoFetcher(Err(()));
+        let out = resolve_account(&fetcher, &userinfo_cfg(), token(3600)).await;
+        assert_eq!(out.account, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_account_skips_the_lookup_when_the_catalog_declares_no_endpoint() {
+        let fetcher = FakeUserInfoFetcher(Err(()));
+        let out = resolve_account(&fetcher, &sample_cfg(), token(3600)).await;
+        assert_eq!(
+            out.account, None,
+            "no endpoint means no lookup, not a failure"
+        );
+    }
+
+    #[test]
+    fn entry_from_token_carries_the_granted_scopes_and_account() {
+        let token = TokenSet {
+            scopes: vec!["repo".into(), "read:org".into()],
+            account: Some("@hchen".into()),
+            ..token(3600)
+        };
+        assert_eq!(
+            entry_from_token(&FakeClock(0), &token),
+            CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: 3600,
+                scopes: vec!["repo".into(), "read:org".into()],
+                account: Some("@hchen".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_the_scopes_and_account_resolved_at_sign_in() {
+        let flow = FakeDeviceFlow::refreshing(Ok(token(3600)));
+        let entry = CredentialEntry::Oauth {
+            scopes: vec!["repo".into()],
+            account: Some("@hchen".into()),
+            access_token: "expired".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at: 1030,
+        };
+        let refreshed = refresh_if_due(&flow, &FakeClock(1000), &sample_cfg(), &entry, 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            refreshed,
+            Some(CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: 1000 + 3600,
+                scopes: vec!["repo".into()],
+                account: Some("@hchen".into()),
+            }),
+            "a refresh keeps the scopes and account resolved at sign-in"
         );
     }
 }

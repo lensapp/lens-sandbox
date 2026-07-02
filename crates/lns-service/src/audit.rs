@@ -5,8 +5,10 @@ use anyhow::{Context, Result};
 use lns_ipc::Anchor;
 use serde_json::{Map, Value};
 
-pub fn audit_path(run_id: u32) -> Result<PathBuf> {
-    Ok(lns_ipc::audit_log_for_run(&run_id.to_string())?)
+use crate::oauth::Clock;
+
+pub fn audit_path(run_id: &str) -> Result<PathBuf> {
+    Ok(lns_ipc::audit_log_for_run(run_id)?)
 }
 
 pub fn anchor_path_for(audit_path: &Path) -> PathBuf {
@@ -80,6 +82,38 @@ impl AuditLog for tokio::fs::File {
             .context("appending audit event")?;
         self.sync_all().await.context("fsync audit event")?;
         Ok(())
+    }
+}
+
+pub struct LazyAuditLog {
+    path: PathBuf,
+    file: Option<tokio::fs::File>,
+}
+
+impl LazyAuditLog {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, file: None }
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            use tokio::io::AsyncWriteExt;
+            file.flush().await.context("flushing audit log")?;
+        }
+        Ok(())
+    }
+}
+
+impl AuditLog for LazyAuditLog {
+    async fn append_synced(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.file.is_none() {
+            self.file = Some(open_audit_log_async(&self.path).await?);
+        }
+        self.file
+            .as_mut()
+            .expect("file was opened on the preceding line")
+            .append_synced(bytes)
+            .await
     }
 }
 
@@ -165,7 +199,7 @@ impl AnchorSink for FileAnchorSink {
     }
 }
 
-pub fn append_event_at(path: &Path, obj: Map<String, Value>) -> Result<()> {
+fn append_ocsf_at(path: &Path, obj: Map<String, Value>) -> Result<()> {
     let anchor = read_anchor(&anchor_path_for(path));
     let mut sink = FileAnchorSink::for_audit_log(path);
     append_event_with_sink(path, anchor, obj, &mut sink)
@@ -187,74 +221,64 @@ pub fn append_event_with_sink<S: AnchorSink>(
     if let Some(updated) = chain.anchor() {
         sink.write(&updated)?;
     }
+    crate::dashboard::live::note_write();
     Ok(())
 }
 
-fn volume_attached_obj(name: &str, target: &str) -> Map<String, Value> {
-    let mut obj = Map::new();
-    obj.insert(
-        "type".to_string(),
-        Value::String("volume_attached".to_string()),
-    );
-    obj.insert("origin".to_string(), Value::String("host".to_string()));
-    obj.insert("name".to_string(), Value::String(name.to_string()));
-    obj.insert("target".to_string(), Value::String(target.to_string()));
-    obj
+fn run_ctx(run: &str, microvm: &str, clock: &dyn Clock) -> crate::ocsf_audit::OcsfCtx {
+    crate::ocsf_audit::OcsfCtx::at_unix(run.to_string(), microvm.to_string(), clock.now_unix())
 }
 
-pub fn record_volume_attached_at(path: &Path, name: &str, target: &str) -> Result<()> {
-    append_event_at(path, volume_attached_obj(name, target))
-}
-
-pub fn record_volume_attached(run_id: u32, name: &str, target: &str) -> Result<()> {
-    record_volume_attached_at(&audit_path(run_id)?, name, target)
-}
-
-fn string_array(items: &[String]) -> Value {
-    Value::Array(items.iter().map(|s| Value::String(s.clone())).collect())
-}
-
-fn bind_attached_obj(
-    source: &str,
+pub fn record_volume_attached_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    name: &str,
     target: &str,
-    exposed_secrets: &[String],
-    dropped_secrets: &[String],
-) -> Map<String, Value> {
-    let mut obj = Map::new();
-    obj.insert(
-        "type".to_string(),
-        Value::String("bind_attached".to_string()),
-    );
-    obj.insert("origin".to_string(), Value::String("host".to_string()));
-    obj.insert("source".to_string(), Value::String(source.to_string()));
-    obj.insert("target".to_string(), Value::String(target.to_string()));
-    obj.insert("exposed_secrets".to_string(), string_array(exposed_secrets));
-    obj.insert("dropped_secrets".to_string(), string_array(dropped_secrets));
-    obj
+) -> Result<()> {
+    append_ocsf_at(path, crate::ocsf_audit::volume_event(cx, name, target))
+}
+
+pub fn record_volume_attached(
+    run_id: &str,
+    microvm: &str,
+    name: &str,
+    target: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_volume_attached_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        name,
+        target,
+    )
 }
 
 pub fn record_bind_attached_at(
     path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
     source: &str,
     target: &str,
     exposed_secrets: &[String],
     dropped_secrets: &[String],
 ) -> Result<()> {
-    append_event_at(
+    append_ocsf_at(
         path,
-        bind_attached_obj(source, target, exposed_secrets, dropped_secrets),
+        crate::ocsf_audit::bind_event(cx, source, target, exposed_secrets, dropped_secrets),
     )
 }
 
 pub fn record_bind_attached(
-    run_id: u32,
+    run_id: &str,
+    microvm: &str,
     source: &str,
     target: &str,
     exposed_secrets: &[String],
     dropped_secrets: &[String],
+    clock: &dyn Clock,
 ) -> Result<()> {
     record_bind_attached_at(
         &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
         source,
         target,
         exposed_secrets,
@@ -266,29 +290,48 @@ pub fn record_bind_attached(
 mod tests {
     use super::*;
 
+    struct FixedClock(u64);
+    impl Clock for FixedClock {
+        fn now_unix(&self) -> u64 {
+            self.0
+        }
+    }
+    static CLOCK: FixedClock = FixedClock(1_700_000_000);
+
+    fn cx() -> crate::ocsf_audit::OcsfCtx {
+        crate::ocsf_audit::OcsfCtx::at_unix("aa01".into(), "calm-finch".into(), 1_700_000_000)
+    }
+
+    fn volume_obj(name: &str, target: &str) -> Map<String, Value> {
+        crate::ocsf_audit::volume_event(&cx(), name, target)
+    }
+
     #[test]
-    fn volume_attached_obj_stamps_host_origin() {
-        let obj = volume_attached_obj("prism-data", "/data");
+    fn a_recorded_volume_event_is_marked_host_authored() {
         assert_eq!(
-            obj.get("origin").unwrap(),
+            volume_obj("prism-data", "/data")["unmapped"]["lns_origin"],
             "host",
-            "host-authored volume_attached events must be distinguishable from guest-proxied events"
+            "host-authored events must be distinguishable from guest-proxied ones"
         );
     }
 
     #[test]
-    fn record_volume_attached_writes_name_and_target_as_genesis_line() {
+    fn record_volume_attached_writes_an_ocsf_genesis_line() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "prism-data", "/data").unwrap();
+        record_volume_attached_at(&path, &cx(), "prism-data", "/data").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
+        assert!(content.contains("\"lns_name\":\"prism-data\""), "{content}");
+        assert!(content.contains("\"lns_target\":\"/data\""), "{content}");
         assert!(
-            content.contains("\"type\":\"volume_attached\""),
-            "{content}"
+            content.contains(&format!(
+                "\"lns_ts\":\"{}\"",
+                crate::time_fmt::rfc3339_from_unix(1_700_000_000)
+            )),
+            "the host stamps the event time: {content}"
         );
-        assert!(content.contains("\"name\":\"prism-data\""), "{content}");
-        assert!(content.contains("\"target\":\"/data\""), "{content}");
         assert!(
             content.contains(&format!("\"prev_hash\":\"{}\"", lns_ipc::GENESIS_PREV_HASH)),
             "first line must be genesis: {content}"
@@ -299,16 +342,16 @@ mod tests {
     fn record_bind_attached_writes_host_source_and_target() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_bind_attached_at(&path, "/Users/me/proj", "/work", &[], &[]).unwrap();
+        record_bind_attached_at(&path, &cx(), "/Users/me/proj", "/work", &[], &[]).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("\"type\":\"bind_attached\""), "{content}");
-        assert!(content.contains("\"origin\":\"host\""), "{content}");
+        assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
+        assert!(content.contains("\"lns_origin\":\"host\""), "{content}");
         assert!(
-            content.contains("\"source\":\"/Users/me/proj\""),
+            content.contains("\"lns_source\":\"/Users/me/proj\""),
             "{content}"
         );
-        assert!(content.contains("\"target\":\"/work\""), "{content}");
+        assert!(content.contains("\"lns_target\":\"/work\""), "{content}");
     }
 
     #[test]
@@ -317,6 +360,7 @@ mod tests {
         let path = d.path().join("audit.jsonl");
         record_bind_attached_at(
             &path,
+            &cx(),
             "/Users/me/proj",
             "/work",
             &[".env".to_string()],
@@ -327,14 +371,37 @@ mod tests {
         let line: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
         assert_eq!(
-            line["exposed_secrets"],
+            line["unmapped"]["lns_exposed_secrets"],
             serde_json::json!([".env"]),
             "the tamper-evident log must name the real secret the run exposed"
         );
         assert_eq!(
-            line["dropped_secrets"],
+            line["unmapped"]["lns_dropped_secrets"],
             serde_json::json!([".npmrc", ".ssh"]),
             "and the secrets it masked"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_audit_log_creates_no_file_or_dir_until_the_first_event() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("runs").join("zzz").join("audit.jsonl");
+        let mut log = LazyAuditLog::new(path.clone());
+        log.flush().await.unwrap();
+        assert!(!path.exists(), "a zero-event run must leave no audit log");
+        assert!(
+            !path.parent().unwrap().exists(),
+            "a zero-event run must leave no run dir under data_root"
+        );
+
+        log.append_synced(b"first\n").await.unwrap();
+        assert!(path.exists(), "the first event opens (creates) the log");
+        log.append_synced(b"second\n").await.unwrap();
+        log.flush().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "first\nsecond\n",
+            "the reused handle appends after the first event"
         );
     }
 
@@ -344,21 +411,30 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_bind_attached(123, "/Users/me/proj", "/work", &[], &[]).unwrap();
-        let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
+        record_bind_attached(
+            "aa123",
+            "calm-finch",
+            "/Users/me/proj",
+            "/work",
+            &[],
+            &[],
+            &CLOCK,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(
-            content.contains("\"source\":\"/Users/me/proj\""),
+            content.contains("\"lns_source\":\"/Users/me/proj\""),
             "{content}"
         );
-        assert!(content.contains("\"target\":\"/work\""), "{content}");
+        assert!(content.contains("\"lns_target\":\"/work\""), "{content}");
     }
 
     #[test]
     fn successive_events_form_a_valid_hash_chain() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "a", "/a").unwrap();
-        record_volume_attached_at(&path, "b", "/b").unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "b", "/b").unwrap();
 
         let content = std::fs::read(&path).unwrap();
         let lines: Vec<&[u8]> = content
@@ -377,8 +453,8 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn audit_path_lands_under_the_run_directory() {
-        let p = audit_path(99).unwrap();
-        assert!(p.ends_with("runs/99/audit.jsonl"), "got {}", p.display());
+        let p = audit_path("aa99").unwrap();
+        assert!(p.ends_with("runs/aa99/audit.jsonl"), "got {}", p.display());
     }
 
     #[test]
@@ -387,10 +463,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_volume_attached(123, "prism-data", "/data").unwrap();
-        let content = std::fs::read_to_string(audit_path(123).unwrap()).unwrap();
-        assert!(content.contains("\"name\":\"prism-data\""), "{content}");
-        assert!(content.contains("\"target\":\"/data\""), "{content}");
+        record_volume_attached("aa123", "calm-finch", "prism-data", "/data", &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
+        assert!(content.contains("\"lns_name\":\"prism-data\""), "{content}");
+        assert!(content.contains("\"lns_target\":\"/data\""), "{content}");
     }
 
     #[derive(Default)]
@@ -411,11 +487,11 @@ mod tests {
         let path = d.path().join("audit.jsonl");
         let mut sink = RecordingSink::default();
 
-        append_event_with_sink(&path, None, volume_attached_obj("a", "/a"), &mut sink).unwrap();
+        append_event_with_sink(&path, None, volume_obj("a", "/a"), &mut sink).unwrap();
         append_event_with_sink(
             &path,
             sink.anchors.last().cloned(),
-            volume_attached_obj("b", "/b"),
+            volume_obj("b", "/b"),
             &mut sink,
         )
         .unwrap();
@@ -440,8 +516,8 @@ mod tests {
     fn anchor_persisted_by_append_event_at_round_trips_via_read_anchor() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "a", "/a").unwrap();
-        record_volume_attached_at(&path, "b", "/b").unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "b", "/b").unwrap();
 
         let anchor = read_anchor(&anchor_path_for(&path)).expect("anchor file present");
         assert_eq!(anchor.line_count, 2);
@@ -458,7 +534,7 @@ mod tests {
     async fn read_anchor_async_matches_the_blocking_reader() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
         let anchor_path = anchor_path_for(&path);
         assert_eq!(
             read_anchor_async(&anchor_path).await,
@@ -492,7 +568,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
 
         let log_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(log_mode, 0o600, "audit log must be private to the owner");
@@ -511,7 +587,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let run_dir = d.path().join("runs").join("7");
         let path = run_dir.join("audit.jsonl");
-        record_volume_attached_at(&path, "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
         let mode = std::fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "run dir must be private to the owner");
     }
@@ -525,13 +601,7 @@ mod tests {
             line_count: 9,
         };
         let mut sink = RecordingSink::default();
-        append_event_with_sink(
-            &path,
-            Some(resume),
-            volume_attached_obj("a", "/a"),
-            &mut sink,
-        )
-        .unwrap();
+        append_event_with_sink(&path, Some(resume), volume_obj("a", "/a"), &mut sink).unwrap();
         assert_eq!(sink.anchors[0].line_count, 10);
     }
 

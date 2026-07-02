@@ -58,12 +58,8 @@ impl AuditBudget {
     }
 }
 
-fn audit_path(run_id: u32) -> Result<PathBuf> {
-    let path = lns_ipc::audit_log_for_run(&format!("{run_id}"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    Ok(path)
+fn audit_path(run_id: &str) -> Result<PathBuf> {
+    Ok(lns_ipc::audit_log_for_run(run_id)?)
 }
 
 pub struct Relay {
@@ -74,8 +70,15 @@ pub struct Relay {
     pub fd_tx: mpsc::UnboundedSender<RawFd>,
 }
 
+#[derive(Clone)]
+pub(super) struct RunIdentity {
+    pub(super) run: String,
+    pub(super) microvm: String,
+}
+
 pub fn spawn(
-    run_id: u32,
+    run_id: &str,
+    microvm: &str,
     session: Arc<ApprovalSession>,
     credential_session: Arc<CredentialSession>,
     frame_rx: mpsc::UnboundedReceiver<HostFrame>,
@@ -83,11 +86,15 @@ pub fn spawn(
 ) -> Result<Relay> {
     let token = generate_token();
     let url = format!("vsock://host:{VSOCK_PORT}/v1/sandbox");
-    let audit = audit_path(run_id).context("creating audit log dir")?;
+    let audit = audit_path(run_id).context("resolving audit log path")?;
     let (fd_tx, fd_rx) = mpsc::unbounded_channel::<RawFd>();
 
     let token_clone = token.clone();
     let audit_clone = audit.clone();
+    let identity = RunIdentity {
+        run: run_id.to_string(),
+        microvm: microvm.to_string(),
+    };
 
     let span = tracing::Span::current();
     tokio::spawn(
@@ -100,6 +107,7 @@ pub fn spawn(
                 token_clone,
                 audit_clone,
                 user_env,
+                identity,
             )
             .await;
         }
@@ -126,34 +134,88 @@ pub(super) fn current_credentials(session: &CredentialSession) -> Vec<Credential
     expand_credentials_for_wire_with_custom(&session.current_state(), session.custom_providers())
 }
 
+pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
+    pub(super) chain: &'a mut lns_ipc::AuditChain,
+    pub(super) log: &'a mut L,
+    pub(super) anchor: &'a mut S,
+    pub(super) run: &'a str,
+    pub(super) microvm: &'a str,
+}
+
+impl<L: crate::audit::AuditLog, S: crate::audit::AnchorSink> AuditWriter<'_, L, S> {
+    fn ctx(&self, clock: &dyn crate::oauth::Clock) -> crate::ocsf_audit::OcsfCtx {
+        crate::ocsf_audit::OcsfCtx::at_unix(
+            self.run.to_string(),
+            self.microvm.to_string(),
+            clock.now_unix(),
+        )
+    }
+}
+
 async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     bytes: &[u8],
-    chain: &lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
 ) -> Result<()> {
     let mut line = Vec::with_capacity(bytes.len() + 1);
     line.extend_from_slice(bytes);
     line.push(b'\n');
-    audit_file.append_synced(&line).await?;
-    if let Some(anchor) = chain.anchor() {
-        anchor_sink.write(&anchor)?;
+    writer.log.append_synced(&line).await?;
+    if let Some(anchor) = writer.chain.anchor() {
+        writer.anchor.write(&anchor)?;
     }
     Ok(())
+}
+
+fn augment_with_ts(
+    chain: &mut lns_ipc::AuditChain,
+    mut obj: serde_json::Map<String, Value>,
+    clock: &dyn crate::oauth::Clock,
+) -> Vec<u8> {
+    obj.insert(
+        "ts".to_string(),
+        Value::String(crate::time_fmt::rfc3339_from_unix(clock.now_unix())),
+    );
+    chain.augment_obj(obj)
 }
 
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
     extra_managed: &[String],
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
+    clock: &dyn crate::oauth::Clock,
 ) -> Result<()> {
-    let Some(obj) = crate::workload_env::injected_env_audit(user_env, extra_managed) else {
+    let Some(env) = crate::workload_env::injected_env(user_env, extra_managed) else {
         return Ok(());
     };
-    let bytes = chain.augment_obj(obj);
-    write_chain_line(&bytes, chain, audit_file, anchor_sink).await
+    let cx = writer.ctx(clock);
+    let bytes = writer
+        .chain
+        .augment_obj(crate::ocsf_audit::run_env_event(&cx, &env));
+    write_chain_line(&bytes, writer).await
+}
+
+fn guest_egress_to_ocsf(
+    cx: &crate::ocsf_audit::OcsfCtx,
+    obj: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let action = obj.get("action").and_then(Value::as_str)?;
+    let (method, url) = action.split_once(' ').unwrap_or(("", action));
+    let status_code = obj.get("status_code").and_then(Value::as_u64);
+    let result = obj.get("result").and_then(Value::as_str);
+    let reason = obj
+        .get("metadata")
+        .and_then(|m| m.get("reason"))
+        .and_then(Value::as_str);
+    let mut event =
+        crate::ocsf_audit::egress_event(cx, method, url, status_code, result, reason, true);
+    // The guest resolves the client endpoint + owning process; copy the
+    // OCSF-ready fragments through when present.
+    for key in ["src_endpoint", "actor"] {
+        if let Some(value) = obj.get(key) {
+            event.insert(key.to_string(), value.clone());
+        }
+    }
+    Some(event)
 }
 
 const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
@@ -184,10 +246,9 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     msg: Message,
     session: &Arc<ApprovalSession>,
     credential_session: &Arc<CredentialSession>,
-    chain: &mut lns_ipc::AuditChain,
-    audit_file: &mut L,
-    anchor_sink: &mut S,
+    writer: &mut AuditWriter<'_, L, S>,
     budget: &AuditBudget,
+    clock: &dyn crate::oauth::Clock,
 ) -> Result<bool> {
     let text = match msg {
         Message::Text(text) => text,
@@ -211,8 +272,12 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 );
                 return Ok(false);
             }
-            let bytes = chain.augment_obj(stamped);
-            write_chain_line(&bytes, chain, audit_file, anchor_sink).await?;
+            let cx = writer.ctx(clock);
+            let bytes = match guest_egress_to_ocsf(&cx, &stamped) {
+                Some(ocsf) => writer.chain.augment_obj(ocsf),
+                None => augment_with_ts(writer.chain, stamped, clock),
+            };
+            write_chain_line(&bytes, writer).await?;
         }
         Some("request_pending") => {
             if let Ok(GuestFrame::RequestPending(req)) =
@@ -302,6 +367,14 @@ mod tests {
     use lns_policy::RouteRule;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    struct FixedClock(u64);
+    impl crate::oauth::Clock for FixedClock {
+        fn now_unix(&self) -> u64 {
+            self.0
+        }
+    }
+    static CLOCK: FixedClock = FixedClock(1_700_000_000);
 
     #[derive(Default)]
     struct MemLog {
@@ -616,13 +689,15 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn audit_path_creates_run_directory_and_returns_jsonl_path() {
+    async fn audit_path_resolves_the_jsonl_path_without_creating_the_run_dir() {
         let temp = tempdir().unwrap();
         let _home = home_for(&temp);
-        let path = audit_path(42).expect("audit_path");
-        assert!(path.ends_with("runs/42/audit.jsonl"));
-        let parent = path.parent().unwrap();
-        assert!(parent.is_dir());
+        let path = audit_path("aa42").expect("audit_path");
+        assert!(path.ends_with("runs/aa42/audit.jsonl"));
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the run dir is created lazily on the first audit event, not at spawn"
+        );
     }
 
     #[tokio::test]
@@ -635,10 +710,15 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -653,6 +733,13 @@ mod tests {
         assert!(
             written.contains("prev_hash"),
             "the chain must augment each line with a prev_hash field; got: {written}"
+        );
+        assert!(
+            written.contains(&format!(
+                "\"ts\":\"{}\"",
+                crate::time_fmt::rfc3339_from_unix(1_700_000_000)
+            )),
+            "the host stamps a timestamp on every recorded audit event; got: {written}"
         );
         assert_eq!(
             anchor.anchors.len(),
@@ -675,10 +762,15 @@ mod tests {
             ),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -714,10 +806,15 @@ mod tests {
             ),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -742,10 +839,15 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","event":"net_connect","host":"x"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -771,22 +873,25 @@ mod tests {
         write_run_env_event(
             &["CLAUDE_CODE_USE_BEDROCK=1".into()],
             &[],
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &CLOCK,
         )
         .await
         .expect("write_run_env_event");
         let written = String::from_utf8(log.bytes).unwrap();
-        assert!(written.contains("run_env"), "got: {written}");
-        assert!(
-            written.contains("CLAUDE_CODE_USE_BEDROCK"),
-            "got: {written}"
-        );
         let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(obj["class_uid"], 1007, "OCSF Process Activity: {written}");
+        assert_eq!(obj["unmapped"]["lns_kind"], "env");
+        assert_eq!(obj["device"]["name"], "calm-finch");
+        assert_eq!(obj["unmapped"]["lns_env"]["CLAUDE_CODE_USE_BEDROCK"], "1");
         assert_eq!(
-            obj.get("origin").and_then(Value::as_str),
-            Some("host"),
+            obj["unmapped"]["lns_origin"], "host",
             "the host-authored run_env event must carry the host origin: {written}"
         );
         assert!(written.contains("prev_hash"), "must chain: {written}");
@@ -795,13 +900,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_inbound_translates_a_guest_egress_frame_into_ocsf() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test:443/","status_code":200,"result":"success","metadata":{"reason":"user-allowed-once"}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+        )
+        .await
+        .expect("handle_inbound");
+        let written = String::from_utf8(log.bytes).unwrap();
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(obj["class_uid"], 4002, "OCSF HTTP Activity: {written}");
+        assert_eq!(obj["http_request"]["http_method"], "GET");
+        assert_eq!(
+            obj["http_request"]["url"]["text"],
+            "http://api.example.test:443/"
+        );
+        assert_eq!(obj["http_response"]["code"], 200);
+        assert_eq!(obj["unmapped"]["lns_result"], "success");
+        assert_eq!(obj["unmapped"]["lns_origin"], "guest-proxy");
+        assert_eq!(anchor.anchors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_guest_egress_frame_carries_the_client_endpoint_and_process_through_to_ocsf() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test:443/","result":"success","src_endpoint":{"ip":"10.42.0.31","port":37494},"actor":{"process":{"name":"curl","pid":57}}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+        )
+        .await
+        .expect("handle_inbound");
+        let obj: Value =
+            serde_json::from_str(String::from_utf8(log.bytes).unwrap().trim_end()).unwrap();
+        assert_eq!(obj["src_endpoint"]["ip"], "10.42.0.31");
+        assert_eq!(obj["src_endpoint"]["port"], 37494);
+        assert_eq!(obj["actor"]["process"]["name"], "curl");
+        assert_eq!(obj["actor"]["process"]["pid"], 57);
+    }
+
+    #[tokio::test]
     async fn write_run_env_event_writes_nothing_when_no_user_env() {
         let mut chain = lns_ipc::AuditChain::new();
         let mut log = MemLog::default();
         let mut anchor = MemAnchor::default();
-        write_run_env_event(&[], &[], &mut chain, &mut log, &mut anchor)
-            .await
-            .expect("write_run_env_event");
+        write_run_env_event(
+            &[],
+            &[],
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &CLOCK,
+        )
+        .await
+        .expect("write_run_env_event");
         assert!(log.bytes.is_empty(), "no injected env → no audit line");
         assert!(
             anchor.anchors.is_empty(),
@@ -852,10 +1040,15 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session,
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &exhausted_budget,
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -901,10 +1094,15 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -926,10 +1124,15 @@ mod tests {
             Message::Close(None),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -951,10 +1154,15 @@ mod tests {
             Message::Text(r#"{"type":"something_else"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");
@@ -978,10 +1186,15 @@ mod tests {
                 msg,
                 &session,
                 &credential_session_with_dummy_sink(),
-                &mut chain,
-                &mut log,
-                &mut anchor,
+                &mut AuditWriter {
+                    chain: &mut chain,
+                    log: &mut log,
+                    anchor: &mut anchor,
+                    run: "test-run",
+                    microvm: "calm-finch",
+                },
                 &AuditBudget::with_defaults(),
+                &CLOCK,
             )
             .await
             .expect("handle_inbound");
@@ -1001,10 +1214,15 @@ mod tests {
             Message::Text(r#"this is not json but "type":"audit_event" appears"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("malformed audit_event must NOT propagate as an error");
@@ -1038,10 +1256,15 @@ mod tests {
             Message::Text(raw.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .unwrap();
@@ -1069,10 +1292,15 @@ mod tests {
             Message::Text(r#"{"type":"watch","payload":{}}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &AuditBudget::with_defaults(),
+            &CLOCK,
         )
         .await
         .expect("unknown type must not error");
@@ -1092,7 +1320,8 @@ mod tests {
         let session = session_with_dummy_sink();
         let (_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let relay = spawn(
-            1234,
+            "aa1234",
+            "calm-finch",
             session,
             credential_session_with_dummy_sink(),
             frame_rx,
@@ -1109,7 +1338,7 @@ mod tests {
             relay
                 .audit_path
                 .to_string_lossy()
-                .ends_with("runs/1234/audit.jsonl")
+                .ends_with("runs/aa1234/audit.jsonl")
         );
         drop(relay.fd_tx);
         tokio::task::yield_now().await;
@@ -1196,10 +1425,15 @@ mod tests {
             Message::Text(r#"{"type":"audit_event","route":"deny"}"#.into()),
             &session,
             &credential_session_with_dummy_sink(),
-            &mut chain,
-            &mut log,
-            &mut anchor,
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
             &budget,
+            &CLOCK,
         )
         .await
         .expect("handle_inbound");

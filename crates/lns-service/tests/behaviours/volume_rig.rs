@@ -82,7 +82,7 @@ pub struct VolumeRig {
     last_leases: Vec<VolumeLease>,
     pub last_error: Option<String>,
     next_run_id: u32,
-    pub holder_run_id: Option<u32>,
+    pub holder_run_id: Option<String>,
     pub last_list: Option<Vec<lns_ipc::VolumeInfo>>,
     pub last_inspect: Option<lns_ipc::VolumeInfo>,
     pub last_prune: Option<PruneReport>,
@@ -111,8 +111,8 @@ impl VolumeRig {
         }
     }
 
-    fn alloc_run_id(&mut self) -> u32 {
-        let id = self.next_run_id;
+    fn alloc_run_id(&mut self) -> String {
+        let id = format!("{:032x}", self.next_run_id);
         self.next_run_id += 1;
         id
     }
@@ -132,7 +132,7 @@ impl VolumeRig {
             &self.registry,
             &self.store_root,
             name,
-            id,
+            &id,
         )
         .await
         .expect("hold acquire");
@@ -163,7 +163,7 @@ impl VolumeRig {
             &self.registry,
             &self.store_root,
             &mounts,
-            id,
+            &id,
         )
         .await
         {
@@ -253,7 +253,12 @@ impl VolumeRig {
     }
 
     pub fn record_attach(&self, name: &str, target: &str) {
-        lns_service::audit::record_volume_attached_at(&self.audit_file, name, target)
+        let cx = lns_service::ocsf_audit::OcsfCtx::at_unix(
+            "test-run".into(),
+            "calm-finch".into(),
+            1_700_000_000,
+        );
+        lns_service::audit::record_volume_attached_at(&self.audit_file, &cx, name, target)
             .expect("record audit event");
     }
 
