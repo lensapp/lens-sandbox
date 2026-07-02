@@ -10,7 +10,7 @@ name = "lns-supervisor"
 path = "src/main.rs"
 
 [dependencies]
-lens-sandbox-core = { git = "https://github.com/lensapp/lens-sandbox-core", rev = "08c588f" }
+lens-sandbox-core = { git = "https://github.com/lensapp/lens-sandbox-core", rev = "08c588fcb8b5d68fe153c184c6cd7d3ce4f14f60" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 tracing = "0.1"
