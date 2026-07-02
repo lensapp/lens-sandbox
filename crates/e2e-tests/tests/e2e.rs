@@ -13,8 +13,8 @@ pub struct E2eWorld {
     pub home: Option<TempDir>,
     pub service_dir: Option<TempDir>,
     pub service_socket: Option<PathBuf>,
-    pub detached_runs: Vec<u32>,
-    pub last_run_id: Option<u32>,
+    pub detached_runs: Vec<String>,
+    pub last_run_id: Option<String>,
     pub created_volumes: Vec<String>,
     pub policy_dir: Option<TempDir>,
     pub policy_path: Option<PathBuf>,
@@ -50,7 +50,7 @@ impl E2eWorld {
 
     pub fn kill_detached_runs(&self) {
         for id in &self.detached_runs {
-            let _ = self.run_with_service_env(&["sandbox", "kill", &id.to_string()]);
+            let _ = self.run_with_service_env(&["sandbox", "kill", id]);
         }
     }
 

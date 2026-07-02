@@ -3,10 +3,12 @@ Feature: the network cage blocks denied egress from a real guest
   The supervisor confines the workload's traffic to a local enforcing proxy
   whose verdict comes from the loaded policy. This proves the enforcement end
   to end from inside a booted guest: under a deny-all policy a real outbound
-  connection is refused. It is guest-observable and uses the bundled busybox
-  `wget`. The interactive ask/approve flow needs a developer decision and is
-  pinned at Layer 2; this scenario preloads a deciding policy so no prompt is
-  raised. The allow-path (a permitted host is reachable) is deferred: a
+  connection is refused, and the recorded egress event attributes the attempt
+  to the guest client endpoint and owning process. It is guest-observable and
+  uses the bundled busybox `wget`. The interactive ask/approve flow needs a
+  developer decision and is pinned at Layer 2; this scenario preloads a
+  deciding policy so no prompt is raised. The allow-path (a permitted host is
+  reachable) is deferred: a
   reliable assertion needs a deterministic host-side endpoint rather than a
   real-internet host, whose reachability makes the test flaky.
 
@@ -17,3 +19,4 @@ Feature: the network cage blocks denied egress from a real guest
     Then the exit code is 0
     And the output contains "blocked-2"
     And the output does not contain "reached-9"
+    And the audit log for that run records the denied egress with the client endpoint and process

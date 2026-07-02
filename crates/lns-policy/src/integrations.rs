@@ -88,6 +88,10 @@ pub struct OauthAuth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_endpoint: Option<String>,
     pub token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userinfo_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_field: Option<String>,
     pub env_var: String,
     pub placeholder: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -298,6 +302,8 @@ mod tests {
             device_authorization_endpoint: Some("https://example.com/login/device/code".into()),
             authorization_endpoint: None,
             token_endpoint: "https://example.com/login/oauth/access_token".into(),
+            userinfo_endpoint: Some("https://example.com/user".into()),
+            account_field: Some("login".into()),
             env_var: env_var.into(),
             placeholder: placeholder.into(),
             injections: vec![InjectionDef {
@@ -317,6 +323,8 @@ mod tests {
             device_authorization_endpoint: None,
             authorization_endpoint: Some("https://example.com/auth".into()),
             token_endpoint: "https://example.com/api/v1/auth/keys".into(),
+            userinfo_endpoint: None,
+            account_field: None,
             env_var: env_var.into(),
             placeholder: placeholder.into(),
             injections: vec![InjectionDef {
@@ -897,6 +905,24 @@ mod tests {
                 .any(|i| i.kind == InjectionKind::BasicXAccessToken && i.domain == "github.com"),
             "git-over-HTTPS uses basic x-access-token, got: {:?}",
             oauth.injections
+        );
+    }
+
+    #[test]
+    fn bundled_github_resolves_its_account_from_the_user_endpoint() {
+        let gh = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "github")
+            .expect("github is bundled");
+        let oauth = gh.oauth.as_ref().expect("oauth block present");
+        assert_eq!(
+            oauth.userinfo_endpoint.as_deref(),
+            Some("https://api.github.com/user")
+        );
+        assert_eq!(
+            oauth.account_field.as_deref(),
+            Some("login"),
+            "the connection ledger reads GitHub's account from the `login` field"
         );
     }
 
