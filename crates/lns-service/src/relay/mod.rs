@@ -206,15 +206,16 @@ fn guest_egress_to_ocsf(
         .get("metadata")
         .and_then(|m| m.get("reason"))
         .and_then(Value::as_str);
-    Some(crate::ocsf_audit::egress_event(
-        cx,
-        method,
-        url,
-        status_code,
-        result,
-        reason,
-        true,
-    ))
+    let mut event =
+        crate::ocsf_audit::egress_event(cx, method, url, status_code, result, reason, true);
+    // The guest resolves the client endpoint + owning process; copy the
+    // OCSF-ready fragments through when present.
+    for key in ["src_endpoint", "actor"] {
+        if let Some(value) = obj.get(key) {
+            event.insert(key.to_string(), value.clone());
+        }
+    }
+    Some(event)
 }
 
 const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
@@ -935,6 +936,39 @@ mod tests {
         assert_eq!(obj["unmapped"]["lns_result"], "success");
         assert_eq!(obj["unmapped"]["lns_origin"], "guest-proxy");
         assert_eq!(anchor.anchors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_guest_egress_frame_carries_the_client_endpoint_and_process_through_to_ocsf() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test:443/","result":"success","src_endpoint":{"ip":"10.42.0.31","port":37494},"actor":{"process":{"name":"curl","pid":57}}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+        )
+        .await
+        .expect("handle_inbound");
+        let obj: Value =
+            serde_json::from_str(String::from_utf8(log.bytes).unwrap().trim_end()).unwrap();
+        assert_eq!(obj["src_endpoint"]["ip"], "10.42.0.31");
+        assert_eq!(obj["src_endpoint"]["port"], 37494);
+        assert_eq!(obj["actor"]["process"]["name"], "curl");
+        assert_eq!(obj["actor"]["process"]["pid"], 57);
     }
 
     #[tokio::test]
