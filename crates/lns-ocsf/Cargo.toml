@@ -1,0 +1,20 @@
+[package]
+name = "lns-ocsf"
+version = "0.1.0"
+edition = "2024"
+description = "OCSF v1.7.0 event builders for Lens Sandbox audit logs — strict, schema-valid event objects for the connection ledger and per-run logs"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "lns_ocsf"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1"
+
+[lints.clippy]
+cognitive_complexity = { level = "deny", priority = 1 }
+
+[lints.rust]
+unsafe_code = "forbid"
