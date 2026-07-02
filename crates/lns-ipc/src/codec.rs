@@ -244,7 +244,7 @@ mod tests {
         let resp = Response::RunList {
             runs: vec![
                 crate::RunSummary {
-                    id: 7,
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
                     name: "reviewer".into(),
                     image: "alpine:latest".into(),
                     command: "sleep 30".into(),
@@ -252,7 +252,7 @@ mod tests {
                     started: "2026-05-19T12:34:01Z".into(),
                 },
                 crate::RunSummary {
-                    id: 8,
+                    id: "5e6f7a8b0000000000000000000000bb".into(),
                     name: "auditor".into(),
                     image: "<imageless>".into(),
                     command: String::new(),

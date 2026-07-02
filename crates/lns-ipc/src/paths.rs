@@ -21,12 +21,28 @@ pub fn data_root() -> Result<PathBuf, CachePathError> {
         .ok_or(CachePathError::NoDataDir)
 }
 
+pub fn short_run_id(id: &str) -> &str {
+    id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
+}
+
+pub fn audit_runs_root() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("runs"))
+}
+
 pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
-    Ok(cache_root()?.join("runs").join(run_id).join("audit.jsonl"))
+    Ok(audit_runs_root()?.join(run_id).join("audit.jsonl"))
 }
 
 pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
-    Ok(cache_root()?.join("runs").join(run_id).join("audit.anchor"))
+    Ok(audit_runs_root()?.join(run_id).join("audit.anchor"))
+}
+
+pub fn connection_ledger() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("ledger.jsonl"))
+}
+
+pub fn connection_ledger_anchor() -> Result<PathBuf, CachePathError> {
+    Ok(data_root()?.join("ledger.anchor"))
 }
 
 #[cfg(test)]
@@ -34,10 +50,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audit_log_path_appends_runs_runid_filename_under_cache_root() {
-        let root = cache_root().expect("cache dir resolves in test env");
+    fn short_run_id_truncates_to_twelve_chars_and_passes_shorter_ids_through() {
+        assert_eq!(
+            short_run_id("1a2b3c4d0000000000000000000000aa"),
+            "1a2b3c4d0000"
+        );
+        assert_eq!(short_run_id("abc"), "abc");
+        assert_eq!(short_run_id(""), "");
+    }
+
+    #[test]
+    fn short_run_id_truncates_on_a_char_boundary_for_tampered_multibyte_ids() {
+        assert_eq!(short_run_id("abcdefghijké"), "abcdefghijké");
+        assert_eq!(short_run_id("aaaaaaaaaaaéz"), "aaaaaaaaaaaé");
+    }
+
+    #[test]
+    fn audit_log_lives_under_data_root_so_it_outlives_the_ephemeral_run_dir() {
+        let data = data_root().expect("data dir resolves in test env");
         let p = audit_log_for_run("42").expect("audit_log_for_run");
-        assert_eq!(p, root.join("runs").join("42").join("audit.jsonl"));
+        assert_eq!(p, data.join("runs").join("42").join("audit.jsonl"));
+        assert!(
+            !p.starts_with(cache_root().expect("cache dir resolves in test env")),
+            "the audit trail must outlive ephemeral run dirs, so it cannot live under cache_root: {p:?}"
+        );
+    }
+
+    #[test]
+    fn audit_runs_root_is_the_shared_base_of_every_per_run_log() {
+        let root = audit_runs_root().expect("audit_runs_root");
+        assert_eq!(root, data_root().expect("data dir").join("runs"));
+        assert!(audit_log_for_run("42").expect("log").starts_with(&root));
+        assert!(
+            audit_anchor_for_run("42")
+                .expect("anchor")
+                .starts_with(&root)
+        );
     }
 
     #[test]
@@ -76,5 +124,24 @@ mod tests {
             root.is_absolute(),
             "data_root must be absolute, got: {root:?}"
         );
+    }
+
+    #[test]
+    fn connection_ledger_lives_under_data_root_not_cache_root() {
+        let data = data_root().expect("data dir resolves in test env");
+        let ledger = connection_ledger().expect("connection_ledger");
+        assert_eq!(ledger, data.join("ledger.jsonl"));
+        assert!(
+            !ledger.starts_with(cache_root().expect("cache dir resolves in test env")),
+            "the ledger must outlive ephemeral run dirs, so it cannot live under cache_root: {ledger:?}"
+        );
+    }
+
+    #[test]
+    fn connection_ledger_anchor_is_a_sibling_of_the_ledger() {
+        let ledger = connection_ledger().expect("connection_ledger");
+        let anchor = connection_ledger_anchor().expect("connection_ledger_anchor");
+        assert_eq!(anchor.parent(), ledger.parent());
+        assert!(anchor.ends_with("ledger.anchor"));
     }
 }
