@@ -105,7 +105,6 @@ fn tampered_connection_ledger(world: &mut E2eWorld) {
         &connection_ledger_events(),
     );
     let good = fs::read_to_string(dir.join("ledger.jsonl")).unwrap();
-    // Tamper the microVM name (not part of the shown detail) so the event still lists but the chain breaks.
     fs::write(
         dir.join("ledger.jsonl"),
         good.replacen("calm-finch", "tampered", 1),
