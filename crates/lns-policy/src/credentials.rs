@@ -15,11 +15,15 @@ pub enum CredentialEntry {
         value: String,
     },
     Deny,
-    /// A device-flow grant: the access token armed at the boundary, the refresh token to renew it, and the access token's wall-clock expiry (unix seconds).
+    /// A device-flow grant: the access token armed at the boundary, the refresh token to renew it, the access token's wall-clock expiry (unix seconds), and the scopes granted and account resolved at sign-in.
     Oauth {
         access_token: String,
         refresh_token: String,
         expires_at: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
     },
 }
 
@@ -29,10 +33,7 @@ impl std::fmt::Debug for CredentialEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CredentialEntry::HostDetect => f.write_str("HostDetect"),
-            CredentialEntry::Stored { .. } => f
-                .debug_struct("Stored")
-                .field("value", &"<redacted>")
-                .finish(),
+            CredentialEntry::Stored { .. } => write!(f, "Stored {{ value: <redacted> }}"),
             CredentialEntry::Deny => f.write_str("Deny"),
             CredentialEntry::Oauth { expires_at, .. } => f
                 .debug_struct("Oauth")
@@ -128,6 +129,8 @@ mod tests {
                 access_token: "gho_secret".into(),
                 refresh_token: "ghr_secret".into(),
                 expires_at: 123,
+                scopes: vec!["repo".into()],
+                account: Some("@hchen".into()),
             }
         );
         assert!(
@@ -165,6 +168,8 @@ mod tests {
             access_token: "gho_access".into(),
             refresh_token: "ghr_refresh".into(),
             expires_at: 1_900_000_000,
+            scopes: vec!["repo".into(), "read:org".into()],
+            account: Some("@hchen".into()),
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(
@@ -173,9 +178,25 @@ mod tests {
                 "kind": "oauth",
                 "access_token": "gho_access",
                 "refresh_token": "ghr_refresh",
-                "expires_at": 1_900_000_000u64
+                "expires_at": 1_900_000_000u64,
+                "scopes": ["repo", "read:org"],
+                "account": "@hchen"
             })
         );
+    }
+
+    #[test]
+    fn oauth_omits_empty_scopes_and_absent_account() {
+        let entry = CredentialEntry::Oauth {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: 1,
+            scopes: vec![],
+            account: None,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v.get("scopes"), None, "empty scopes are skipped");
+        assert_eq!(v.get("account"), None, "an absent account is skipped");
     }
 
     #[test]
@@ -188,6 +209,8 @@ mod tests {
                 access_token: "a".into(),
                 refresh_token: "r".into(),
                 expires_at: 42,
+                scopes: vec!["repo".into()],
+                account: Some("@hchen".into()),
             },
         ] {
             let s = serde_json::to_string(&entry).unwrap();

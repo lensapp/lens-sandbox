@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lns-audit",
     "crates/lns-cli",
     "crates/lns-init",
     "crates/lns-ipc",
+    "crates/lns-ocsf",
     "crates/lns-policy",
     "crates/lns-service",
     "crates/lns-session",
@@ -25,9 +27,11 @@ members = [
 #                         default-members so host `cargo build` doesn't
 #                         pull the full proxy/MITM/rustls stack.
 default-members = [
+    "crates/lns-audit",
     "crates/lns-cli",
     "crates/lns-init",
     "crates/lns-ipc",
+    "crates/lns-ocsf",
     "crates/lns-policy",
     "crates/lns-service",
     "crates/lns-session",

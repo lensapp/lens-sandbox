@@ -184,11 +184,15 @@ pub fn capture_with_timeout(mut cmd: Command, timeout: Duration) -> CliResult {
     }
 }
 
-pub fn cache_runs_dir(home: &Path) -> PathBuf {
+pub fn audit_runs_dir(home: &Path) -> PathBuf {
+    data_lns_dir(home).join("runs")
+}
+
+pub fn data_lns_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
-        home.join("Library/Caches/lns/runs")
+        home.join("Library/Application Support/lns")
     } else {
-        home.join(".cache/lns/runs")
+        home.join(".local/share/lns")
     }
 }
 
@@ -217,10 +221,3 @@ pub fn assert_contains(haystack: &str, needle: &str, label: &str) -> Result<(), 
         ))
     }
 }
-
-pub const TAMPERED_AUDIT_CHAIN: &str = concat!(
-    r#"{"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","seq":1,"type":"audit_event"}"#,
-    "\n",
-    r#"{"prev_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","seq":2,"type":"audit_event"}"#,
-    "\n",
-);

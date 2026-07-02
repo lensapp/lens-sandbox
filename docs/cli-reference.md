@@ -150,16 +150,33 @@ as hidden aliases; the `lns sandbox` forms are the documented ones.
 
 ## `lns audit`
 
-Verify the audit chain of a run.
+Show one chronological timeline of every audit event across all sandboxes — or scope it to one.
 
 ```bash
-lns audit <RUN_ID> [--allow-missing-anchor]
+lns audit                                   # every event, every sandbox, newest first
+lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
+lns audit [--integration <id>] [--kind <kind>] [--json]
 ```
 
-`RUN_ID` is the identifier surfaced by `lns run` as `✓ started run #<id>`. Exits `0`
-on an intact chain, non-zero if tampering is detected, or if the anchor that guards
-against truncation is missing, corrupt, or unreadable. `--allow-missing-anchor`
-accepts a missing anchor (chain-only check) with exit `0`. See [Audit](audit.md).
+`lns audit` merges two sources into a single newest-first timeline: the per-run audit
+logs (egress, injected env, volume/bind mounts) and the durable connection ledger
+(`approval`, `connection`, and `credential` events recorded across runs). `<sandbox>`
+narrows it to one run — resolved as a run id or a unique id prefix; an unknown sandbox
+prints `No audit events for sandbox …` and exits `0`.
+
+Filters compose:
+
+- `--integration <id>` — only events for one integration. Discover the ids with
+  `lns integration list`; they also appear in the `DETAIL` column. Per-run egress/mount
+  events carry no integration, so this narrows the stream to ledger events.
+- `--kind <kind>` — one of `egress`, `env`, `volume`, `bind`, `approval`, `connection`,
+  `credential`.
+- `--json` — one raw JSON event per line instead of the table.
+
+Integrity is checked automatically as the log is read: if a hash chain has been altered,
+truncated, or can't be verified against its anchor, `lns audit` prints an inline
+`audit integrity:` warning and still lists what's there — the warning marks it
+untrustworthy. There is no separate verify step. See [Audit](audit.md).
 
 ## `lns service`
 

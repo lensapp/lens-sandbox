@@ -13,14 +13,13 @@ fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
         .unwrap_or_default()
 }
 
-fn parse_run_id(text: &str) -> Option<u32> {
-    let marker = text.find("run #")?;
-    text[marker + "run #".len()..]
+fn parse_run_id(text: &str) -> Option<String> {
+    let marker = text.find("run ")?;
+    let id: String = text[marker + "run ".len()..]
         .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()
+        .take_while(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        .collect();
+    (!id.is_empty()).then_some(id)
 }
 
 fn run_microvm(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
@@ -40,7 +39,7 @@ fn run_microvm(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) 
 fn last_run(world: &E2eWorld) -> Result<String, String> {
     world
         .last_run_id
-        .map(|id| id.to_string())
+        .clone()
         .ok_or_else(|| "no run id was captured from the run output".to_string())
 }
 
@@ -105,29 +104,88 @@ fn start_detached_with_volume(world: &mut E2eWorld, cmd_line: String, name: Stri
         vec!["-d".into(), "-v".into(), format!("{name}:{path}")],
         &cmd_line,
     );
-    if let Some(id) = world.last_run_id {
+    if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
 }
 
+fn resolve_run_audit_log(run_id: &str) -> Result<std::path::PathBuf, String> {
+    let direct = lns_ipc::audit_log_for_run(run_id)
+        .map_err(|e| format!("resolving audit log path for run {run_id}: {e}"))?;
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let runs_root = direct
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or("audit log path has no runs root")?;
+    std::fs::read_dir(runs_root)
+        .map_err(|e| format!("reading runs root {}: {e}", runs_root.display()))?
+        .flatten()
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(run_id))
+        .map(|entry| entry.path().join("audit.jsonl"))
+        .filter(|candidate| candidate.exists())
+        .ok_or_else(|| {
+            format!(
+                "no run directory matching {run_id:?} under {}",
+                runs_root.display()
+            )
+        })
+}
+
 #[then(regex = r#"^the audit chain for that run records volume "([^"]+)" at "([^"]+)"$"#)]
 fn audit_records_volume(world: &mut E2eWorld, name: String, path: String) -> Result<(), String> {
-    let run_id = world
-        .last_run_id
-        .ok_or("no run id was captured from the run output")?;
-    let log_path = lns_ipc::audit_log_for_run(&run_id.to_string())
-        .map_err(|e| format!("resolving audit log path for run {run_id}: {e}"))?;
+    let run_id = last_run(world)?;
+    let log_path = resolve_run_audit_log(&run_id)?;
     let contents = std::fs::read_to_string(&log_path)
         .map_err(|e| format!("reading audit chain {}: {e}", log_path.display()))?;
     let recorded = contents.lines().any(|line| {
-        line.contains("volume_attached") && line.contains(&name) && line.contains(&path)
+        line.contains("\"lns_kind\":\"volume\"") && line.contains(&name) && line.contains(&path)
     });
     if recorded {
         Ok(())
     } else {
         Err(format!(
-            "no volume_attached event for {name:?} at {path:?} in {}:\n{contents}",
+            "no volume mount event for {name:?} at {path:?} in {}:\n{contents}",
             log_path.display()
+        ))
+    }
+}
+
+#[then(regex = r#"^"lns audit" for that run reports an "([^"]+)" event naming "([^"]+)"$"#)]
+fn audit_reports_event(world: &mut E2eWorld, kind: String, name: String) -> Result<(), String> {
+    let id = last_run(world)?;
+    let result = world.run_with_service_env(&["audit", id.as_str(), "--kind", kind.as_str()]);
+    let out = format!("{}{}", result.stdout, result.stderr);
+    if out.contains(&kind) && out.contains(&name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`lns audit {id} --kind {kind}` did not report a {kind:?} event naming {name:?}:\n{out}"
+        ))
+    }
+}
+
+#[then("the audit log for that run records the denied egress with the client endpoint and process")]
+fn audit_egress_records_client(world: &mut E2eWorld) -> Result<(), String> {
+    let run_id = last_run(world)?;
+    let log_path = resolve_run_audit_log(&run_id)?;
+    let contents = std::fs::read_to_string(&log_path)
+        .map_err(|e| format!("reading audit log {}: {e}", log_path.display()))?;
+    let line = contents
+        .lines()
+        .find(|l| l.contains("1.1.1.1") && l.contains("\"src_endpoint\""))
+        .ok_or_else(|| {
+            format!(
+                "no egress event carrying src_endpoint for 1.1.1.1 in {}:\n{contents}",
+                log_path.display()
+            )
+        })?;
+    if line.contains("\"actor\"") && line.contains("\"process\"") && line.contains("\"pid\"") {
+        Ok(())
+    } else {
+        Err(format!(
+            "egress event carried src_endpoint but no actor.process:\n{line}"
         ))
     }
 }
@@ -208,7 +266,7 @@ fn run_command_with_workdir(world: &mut E2eWorld, cmd_line: String, dir: String)
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)"$"#)]
 fn start_detached(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["-d".into()], &cmd_line);
-    if let Some(id) = world.last_run_id {
+    if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
 }
@@ -220,7 +278,7 @@ fn start_detached_publishing(world: &mut E2eWorld, cmd_line: String, port: u16) 
         vec!["-d".into(), "-p".into(), format!("{port}:{port}")],
         &cmd_line,
     );
-    if let Some(id) = world.last_run_id {
+    if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
 }
