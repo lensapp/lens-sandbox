@@ -17,6 +17,58 @@ fn lns_actor() -> Value {
     json!({"app_name": "lns"})
 }
 
+fn decision_word(decision: &str) -> String {
+    decision.replace('_', "-")
+}
+
+fn request_summary(method: &str, url: &str) -> String {
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url);
+    if method.is_empty() {
+        host.to_string()
+    } else {
+        format!("{method} {host}")
+    }
+}
+
+fn decision_phrase(reason: &str) -> &str {
+    match reason {
+        "user-allowed-once" => "allowed once",
+        "user-allowed-persisted" => "allowed always",
+        "user-denied-once" => "denied once",
+        "user-denied-persisted" => "denied always",
+        other => other,
+    }
+}
+
+fn egress_outcome(status_code: Option<u64>, result: Option<&str>) -> Option<String> {
+    match (status_code, result) {
+        (Some(code), Some(result)) => Some(format!("→ {code} {result}")),
+        (Some(code), None) => Some(format!("→ {code}")),
+        (None, Some(result)) => Some(format!("→ {result}")),
+        (None, None) => None,
+    }
+}
+
+fn dst_endpoint(url: &str) -> Value {
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url);
+    match host.rsplit_once(':') {
+        Some((domain, port)) if port.parse::<u64>().is_ok() => {
+            json!({"domain": domain, "port": port.parse::<u64>().unwrap_or_default()})
+        }
+        _ => json!({"domain": host}),
+    }
+}
+
 pub fn connection(
     ctx: &Context,
     integration: &str,
@@ -32,6 +84,15 @@ pub fn connection(
         activity::LOGON,
         severity::INFORMATIONAL,
         ctx,
+    )
+    .set(
+        "message",
+        format!(
+            "connect {integration} ({auth}) {} [{}]",
+            account.unwrap_or("-"),
+            scopes.join(", ")
+        )
+        .into(),
     )
     .set("user", json!({"name": account.unwrap_or(integration)}))
     .set("service", json!({"name": integration}))
@@ -64,6 +125,17 @@ pub fn credential_use(
         activity::LOGON,
         severity::INFORMATIONAL,
         ctx,
+    )
+    .set(
+        "message",
+        format!(
+            "use {integration}{} → {}",
+            fingerprint
+                .map(|fp| format!(" fp {fp}"))
+                .unwrap_or_default(),
+            dest.join(", ")
+        )
+        .into(),
     )
     .set("user", json!({"name": integration}))
     .set("auth_protocol_id", auth_protocol_id(auth).into())
@@ -101,6 +173,11 @@ pub fn approval(
     } else {
         disposition::BLOCKED
     };
+    let base = format!("{approval_kind} {} {target}", decision_word(decision));
+    let message = match reason {
+        Some(reason) => format!("{base}  [{reason}]"),
+        None => base,
+    };
     let mut ev = Event::new(
         "approval",
         class::DETECTION_FINDING,
@@ -109,6 +186,7 @@ pub fn approval(
         sev,
         ctx,
     )
+    .set("message", message.into())
     .set(
         "finding_info",
         json!({"uid": target, "title": reason.unwrap_or(approval_kind)}),
@@ -135,6 +213,14 @@ pub fn egress(
     reason: Option<&str>,
     guest_proxied: bool,
 ) -> Value {
+    let mut message = request_summary(method, url);
+    if let Some(reason) = reason {
+        message.push_str(&format!(" — {}", decision_phrase(reason)));
+    }
+    if let Some(outcome) = egress_outcome(status_code, result) {
+        message.push(' ');
+        message.push_str(&outcome);
+    }
     let mut ev = Event::new(
         "egress",
         class::HTTP_ACTIVITY,
@@ -143,10 +229,12 @@ pub fn egress(
         severity::INFORMATIONAL,
         ctx,
     )
+    .set("message", message.into())
     .set(
         "http_request",
         json!({"http_method": method, "url": {"text": url}}),
     )
+    .set("dst_endpoint", dst_endpoint(url))
     .note(
         "lns_origin",
         if guest_proxied { "guest-proxy" } else { "host" }.into(),
@@ -164,7 +252,9 @@ pub fn egress(
         ev = ev.note("lns_result", result.into());
     }
     if let Some(reason) = reason {
-        ev = ev.note("lns_reason", reason.into());
+        ev = ev
+            .set("status_detail", reason.into())
+            .note("lns_reason", reason.into());
         if reason.contains("allowed") {
             ev = ev.set_disposition(disposition::ALLOWED);
         } else if reason.contains("denied") {
@@ -175,6 +265,10 @@ pub fn egress(
 }
 
 pub fn run_env(ctx: &Context, env: &Map<String, Value>) -> Value {
+    let message = format!(
+        "injected: {}",
+        env.keys().cloned().collect::<Vec<_>>().join(", ")
+    );
     Event::new(
         "env",
         class::PROCESS_ACTIVITY,
@@ -183,6 +277,7 @@ pub fn run_env(ctx: &Context, env: &Map<String, Value>) -> Value {
         severity::INFORMATIONAL,
         ctx,
     )
+    .set("message", message.into())
     .set("process", json!({"uid": ctx.run, "name": "workload"}))
     .set("device", microvm_device(ctx))
     .set("actor", lns_actor())
@@ -200,6 +295,7 @@ pub fn volume_mount(ctx: &Context, name: &str, target: &str) -> Value {
         severity::INFORMATIONAL,
         ctx,
     )
+    .set("message", format!("{name} → {target}").into())
     .set(
         "file",
         json!({"name": target, "type_id": file_type::FOLDER}),
@@ -224,6 +320,10 @@ pub fn bind_mount(
     } else {
         severity::MEDIUM
     };
+    let mut message = format!("{source} → {target}");
+    if !exposed_secrets.is_empty() {
+        message.push_str(&format!(" (exposed: {})", exposed_secrets.join(", ")));
+    }
     let mut ev = Event::new(
         "bind",
         class::FILE_ACTIVITY,
@@ -232,6 +332,7 @@ pub fn bind_mount(
         sev,
         ctx,
     )
+    .set("message", message.into())
     .set(
         "file",
         json!({"name": target, "type_id": file_type::FOLDER}),
@@ -276,6 +377,10 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 3002);
+        assert_eq!(
+            ev["message"],
+            "connect some-oauth (oauth) @user [repo, read:org]"
+        );
         assert_eq!(ev["user"]["name"], "@user");
         assert_eq!(ev["service"]["name"], "some-oauth");
         assert_eq!(ev["auth_protocol_id"], 6);
@@ -307,6 +412,10 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["unmapped"]["lns_kind"], "credential");
+        assert_eq!(
+            ev["message"],
+            "use some-provider fp 9c2f1a3d → api.some-provider.example"
+        );
         assert_eq!(ev["dst_endpoint"]["domain"], "api.some-provider.example");
         assert_eq!(ev["unmapped"]["lns_fp"], "9c2f1a3d");
         assert_eq!(ev["unmapped"]["lns_dest"][0], "api.some-provider.example");
@@ -335,6 +444,10 @@ mod tests {
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 2004);
         assert_eq!(ev["class_name"], "Detection Finding");
+        assert_eq!(
+            ev["message"],
+            "network allow-always api.example.test:443  [policy-ambiguous]"
+        );
         assert_eq!(ev["severity_id"], 1);
         assert_eq!(ev["disposition_id"], 1);
         assert_eq!(ev["disposition"], "Allowed");
@@ -381,6 +494,15 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 4002);
+        assert_eq!(
+            ev["message"],
+            "GET api.example.test:443 — allowed once → 200 success"
+        );
+        assert_eq!(
+            ev["dst_endpoint"],
+            json!({"domain": "api.example.test", "port": 443})
+        );
+        assert_eq!(ev["status_detail"], "user-allowed-once");
         assert_eq!(ev["activity_id"], 3);
         assert_eq!(ev["http_request"]["http_method"], "GET");
         assert_eq!(
@@ -450,6 +572,7 @@ mod tests {
         assert_eq!(ev["device"]["type_id"], 6);
         assert_eq!(ev["device"]["name"], "calm-finch");
         assert_eq!(ev["actor"]["app_name"], "lns");
+        assert_eq!(ev["message"], "injected: OPENAI_API_KEY, PATH");
         assert!(ev["unmapped"]["lns_env"]["OPENAI_API_KEY"].is_string());
     }
 
@@ -461,6 +584,7 @@ mod tests {
         assert_eq!(ev["activity_id"], 12);
         assert_eq!(ev["file"]["name"], "/data");
         assert_eq!(ev["file"]["type_id"], 2);
+        assert_eq!(ev["message"], "data → /data");
         assert_eq!(ev["unmapped"]["lns_name"], "data");
         assert_eq!(ev["unmapped"]["lns_target"], "/data");
     }
@@ -476,6 +600,7 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["severity_id"], 3);
+        assert_eq!(ev["message"], "/Users/me/proj → /work (exposed: .env)");
         assert_eq!(ev["unmapped"]["lns_source"], "/Users/me/proj");
         assert_eq!(ev["unmapped"]["lns_exposed_secrets"][0], ".env");
         assert_eq!(ev["unmapped"]["lns_dropped_secrets"][1], ".ssh");
@@ -486,7 +611,49 @@ mod tests {
         let ev = bind_mount(&ctx(), "/src", "/work", &[], &[]);
         assert_schema_valid(&ev);
         assert_eq!(ev["severity_id"], 1);
+        assert_eq!(ev["message"], "/src → /work");
         assert!(ev["unmapped"].get("lns_exposed_secrets").is_none());
         assert!(ev["unmapped"].get("lns_dropped_secrets").is_none());
+    }
+
+    #[test]
+    fn phrasing_helpers_cover_every_decision_and_outcome_branch() {
+        assert_eq!(decision_word("allow_once"), "allow-once");
+        assert_eq!(decision_word("deny_always"), "deny-always");
+        assert_eq!(decision_phrase("user-allowed-once"), "allowed once");
+        assert_eq!(decision_phrase("user-allowed-persisted"), "allowed always");
+        assert_eq!(decision_phrase("user-denied-once"), "denied once");
+        assert_eq!(decision_phrase("user-denied-persisted"), "denied always");
+        assert_eq!(decision_phrase("prefetch"), "prefetch");
+        assert_eq!(
+            egress_outcome(Some(200), Some("success")),
+            Some("→ 200 success".to_string())
+        );
+        assert_eq!(egress_outcome(Some(204), None), Some("→ 204".to_string()));
+        assert_eq!(
+            egress_outcome(None, Some("error")),
+            Some("→ error".to_string())
+        );
+        assert_eq!(egress_outcome(None, None), None);
+    }
+
+    #[test]
+    fn endpoint_and_summary_helpers_cover_every_branch() {
+        assert_eq!(request_summary("GET", "http://h:80/x"), "GET h:80");
+        assert_eq!(
+            request_summary("", "https://api.example.test/v1"),
+            "api.example.test"
+        );
+        assert_eq!(request_summary("CONNECT", "host:443"), "CONNECT host:443");
+        let ep = dst_endpoint("http://api.example.test:443/");
+        assert_eq!(ep["domain"], "api.example.test");
+        assert_eq!(ep["port"], 443);
+        let bare = dst_endpoint("internal.svc");
+        assert_eq!(bare["domain"], "internal.svc");
+        assert!(bare.get("port").is_none());
+        assert_eq!(
+            dst_endpoint("http://host:notaport/")["domain"],
+            "host:notaport"
+        );
     }
 }

@@ -430,7 +430,7 @@ mod tests {
     }
 
     fn unreadable_event() -> String {
-        r#"{"class_uid":1,"unmapped":{"lns_kind":"teleport"}}"#.to_string()
+        r#"{"class_uid":1,"unmapped":{"lns_run":"aa01"}}"#.to_string()
     }
 
     #[test]
