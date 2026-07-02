@@ -18,11 +18,20 @@ pub fn merge_sandboxes(active: &[Sandbox], rows: &[TimelineRow]) -> Vec<Sandbox>
         }
         out.push(Sandbox {
             id: row.run.clone(),
-            name: lns_ipc::short_run_id(&row.run).to_string(),
+            name: historical_name(row),
             status: String::new(),
         });
     }
     out
+}
+
+/// A finished run keeps its auto-name in every OCSF event's `unmapped.lns_microvm`; fall back to a short run id only when the row carries no name.
+fn historical_name(row: &TimelineRow) -> String {
+    row.raw
+        .as_object()
+        .map(lns_audit::microvm)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| lns_ipc::short_run_id(&row.run).to_string())
 }
 
 #[cfg(test)]
@@ -39,6 +48,15 @@ mod tests {
             detail: String::new(),
             raw: Value::Null,
             integration: None,
+        }
+    }
+
+    fn row_named(run: &str, microvm: &str) -> TimelineRow {
+        TimelineRow {
+            raw: serde_json::json!({
+                "unmapped": {"lns_run": run, "lns_microvm": microvm, "lns_kind": "egress"}
+            }),
+            ..row(run)
         }
     }
 
@@ -66,12 +84,32 @@ mod tests {
     }
 
     #[test]
-    fn a_run_seen_only_in_the_timeline_is_added_with_a_short_id_name() {
-        let merged = merge_sandboxes(&[], &[row("1a2b3c4d0000000000000000000000bb")]);
+    fn a_finished_run_keeps_its_auto_name_from_the_audit_trail() {
+        let merged = merge_sandboxes(
+            &[],
+            &[row_named("1a2b3c4d0000000000000000000000bb", "calm-finch")],
+        );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].id, "1a2b3c4d0000000000000000000000bb");
-        assert_eq!(merged[0].name, "1a2b3c4d0000");
+        assert_eq!(
+            merged[0].name, "calm-finch",
+            "a run no longer in the registry still reads by its auto-name, not a truncated id"
+        );
         assert_eq!(merged[0].status, "");
+    }
+
+    #[test]
+    fn a_timeline_row_without_a_name_falls_back_to_a_short_id() {
+        let no_microvm = TimelineRow {
+            raw: serde_json::json!({"unmapped": {"lns_run": "x"}}),
+            ..row("1a2b3c4d0000000000000000000000bb")
+        };
+        let merged = merge_sandboxes(&[], &[row("5e6f7a8b0000000000000000000000cc"), no_microvm]);
+        assert_eq!(merged[0].name, "5e6f7a8b0000", "no raw object → short id");
+        assert_eq!(
+            merged[1].name, "1a2b3c4d0000",
+            "raw present but no lns_microvm → short id"
+        );
     }
 
     #[test]
