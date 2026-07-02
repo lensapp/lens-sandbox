@@ -257,9 +257,12 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
         RunStatus::Exited { code } => format!("exited ({code})"),
     };
 
-    let id_w = "ID"
-        .len()
-        .max(rows.iter().map(|r| count_digits(r.id)).max().unwrap_or(0));
+    let id_w = "ID".len().max(
+        rows.iter()
+            .map(|r| lns_ipc::short_run_id(&r.id).len())
+            .max()
+            .unwrap_or(0),
+    );
     let name_w = "NAME"
         .len()
         .max(rows.iter().map(|r| r.name.len()).max().unwrap_or(0));
@@ -294,7 +297,7 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
         writeln!(
             out,
             "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {}",
-            r.id,
+            lns_ipc::short_run_id(&r.id),
             r.name,
             status_str(r.status),
             r.image,
@@ -308,18 +311,6 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
         )?;
     }
     Ok(())
-}
-
-pub(super) fn count_digits(mut n: u32) -> usize {
-    if n == 0 {
-        return 1;
-    }
-    let mut d = 0;
-    while n > 0 {
-        d += 1;
-        n /= 10;
-    }
-    d
 }
 
 pub(super) fn friendly_started(rfc3339: &str) -> String {
@@ -438,7 +429,7 @@ mod tests {
             Box::pin(async move { v })
         }
 
-        fn cancel_run(&self, _run_id: u32) -> BoxFuture<'_, ()> {
+        fn cancel_run(&self, _run_id: String) -> BoxFuture<'_, ()> {
             self.record("cancel_run");
             Box::pin(async {})
         }
@@ -652,16 +643,6 @@ exit 0
     }
 
     #[test]
-    fn count_digits_handles_boundaries() {
-        assert_eq!(count_digits(0), 1);
-        assert_eq!(count_digits(9), 1);
-        assert_eq!(count_digits(10), 2);
-        assert_eq!(count_digits(999), 3);
-        assert_eq!(count_digits(1_000), 4);
-        assert_eq!(count_digits(u32::MAX), 10);
-    }
-
-    #[test]
     fn friendly_started_renders_short_form() {
         let s = friendly_started("2024-03-15T08:30:00Z");
         assert!(!s.is_empty(), "got empty: {s:?}");
@@ -676,7 +657,7 @@ exit 0
     #[test]
     fn render_ls_table_emits_header_and_one_row_per_run() {
         let rows = vec![RunSummary {
-            id: 7,
+            id: "1a2b3c4d0000000000000000000000aa".to_string(),
             name: "reviewer".into(),
             image: "alpine:3.20".into(),
             command: "echo hi".into(),
@@ -692,7 +673,7 @@ exit 0
                 "expected header token {tok:?} in {out:?}"
             );
         }
-        assert!(out.contains("7"), "id 7 missing in {out:?}");
+        assert!(out.contains("1a2b3c4d0000"), "short id missing in {out:?}");
         assert!(out.contains("reviewer"), "name missing in {out:?}");
         assert!(out.contains("alpine:3.20"), "image missing in {out:?}");
     }
@@ -708,7 +689,7 @@ exit 0
     #[test]
     fn render_ls_table_renders_exited_status_with_code() {
         let rows = vec![RunSummary {
-            id: 42,
+            id: "5e6f7a8b0000000000000000000000bb".to_string(),
             name: "auditor".into(),
             image: "<imageless>".into(),
             command: "true".into(),
@@ -727,7 +708,7 @@ exit 0
     #[tokio::test]
     async fn fake_service_client_cancel_run_records_invocation() {
         let client = std::sync::Arc::new(FakeClient::default());
-        client.cancel_run(7).await;
+        client.cancel_run("aa07".to_string()).await;
         assert_eq!(client.calls(), vec!["cancel_run"]);
     }
 

@@ -15,7 +15,7 @@ Feature: addressing runs by name from the CLI
     Given the service will answer RunStopped without force
     When the user runs sandbox command "stop 3"
     Then the exit code is 0
-    And the output contains "stopped run #3"
+    And the output contains "stopped run 3"
     And the service received a StopRun request for run "3" with timeout 10
 
   Scenario: the run list shows a NAME column with each run's name

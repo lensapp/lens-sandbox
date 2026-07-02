@@ -111,6 +111,8 @@ fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
                 device_authorization_endpoint: Some("https://example.com/device/code".into()),
                 authorization_endpoint: None,
                 token_endpoint: "https://example.com/oauth/token".into(),
+                userinfo_endpoint: None,
+                account_field: None,
                 env_var: "SOME_OAUTH_TOKEN".into(),
                 placeholder: "some-oauth-placeholder-0000000000000000".into(),
                 injections: vec![InjectionDef {
@@ -155,6 +157,8 @@ fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
                 device_authorization_endpoint: None,
                 authorization_endpoint: Some("https://api.some-pkce.example/auth".into()),
                 token_endpoint: "https://api.some-pkce.example/api/v1/auth/keys".into(),
+                userinfo_endpoint: None,
+                account_field: None,
                 env_var: "SOME_PKCE_TOKEN".into(),
                 placeholder: "some-pkce-LNSPLACEHOLDER0000000000000000".into(),
                 injections: vec![InjectionDef {

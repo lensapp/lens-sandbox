@@ -15,12 +15,6 @@ Feature: clap rejects bad input with exit code 2
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
 
-  Scenario: lns audit with no run-id reports the missing arg
-    When I run "lns audit"
-    Then the exit code is 2
-    And the output contains "<RUN_ID>"
-    And the output contains "required arguments were not provided"
-
   Scenario: lns run -v with a non-absolute target is rejected before any service round-trip
     When I run "lns run -v data:notabsolute alpine"
     Then the exit code is 2
@@ -40,3 +34,9 @@ Feature: clap rejects bad input with exit code 2
     When I run "lns config set run.cpus"
     Then the exit code is 2
     And the output contains "required arguments were not provided"
+
+  Scenario: lns audit --kind rejects an unknown event kind
+    When I run "lns audit --kind bogus"
+    Then the exit code is 2
+    And the output contains "invalid value"
+    And the output contains "--kind"

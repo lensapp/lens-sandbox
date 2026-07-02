@@ -136,7 +136,7 @@ async fn wait_for_stopped_with(pinger: &dyn Pinger, total_timeout: Duration) -> 
     false
 }
 
-async fn send_cancel_impl(socket: &Path, run_id: u32) {
+async fn send_cancel_impl(socket: &Path, run_id: String) {
     let attempt = async {
         let mut stream = UnixStream::connect(socket).await.ok()?;
         let frame = encode_frame(&Request::CancelRun { run_id }).ok()?;
@@ -237,7 +237,7 @@ impl ServiceClient for RealServiceClient {
         })
     }
 
-    fn cancel_run(&self, run_id: u32) -> BoxFuture<'_, ()> {
+    fn cancel_run(&self, run_id: String) -> BoxFuture<'_, ()> {
         Box::pin(send_cancel_impl(&self.socket, run_id))
     }
 }

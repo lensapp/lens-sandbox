@@ -41,7 +41,7 @@ Feature: managing cached images from the CLI
     And the output contains "DIGEST"
     And the output contains "registry.example.test/some-image:1.0"
     And the output contains "3 MiB"
-    And the output contains "run #7"
+    And the output contains "run 000000070000"
 
   Scenario: listing marks an unused image as idle
     Given the service reports an unused cached image "registry.example.test/some-image:1.0" of 3145728 bytes
