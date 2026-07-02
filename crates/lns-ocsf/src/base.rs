@@ -65,6 +65,77 @@ pub fn http_method_activity(method: &str) -> u16 {
     }
 }
 
+fn class_name(class_uid: u32) -> &'static str {
+    match class_uid {
+        class::FILE_ACTIVITY => "File System Activity",
+        class::PROCESS_ACTIVITY => "Process Activity",
+        class::DETECTION_FINDING => "Detection Finding",
+        class::AUTHENTICATION => "Authentication",
+        class::HTTP_ACTIVITY => "HTTP Activity",
+        _ => "Unknown",
+    }
+}
+
+fn category_name(category_uid: u32) -> &'static str {
+    match category_uid {
+        category::SYSTEM => "System Activity",
+        category::FINDINGS => "Findings",
+        category::IAM => "Identity & Access Management",
+        category::NETWORK => "Network Activity",
+        _ => "Unknown",
+    }
+}
+
+fn activity_name(class_uid: u32, activity_id: u16) -> &'static str {
+    match (class_uid, activity_id) {
+        (class::AUTHENTICATION, activity::LOGON) => "Logon",
+        (class::DETECTION_FINDING, activity::FINDING_CREATE) => "Create",
+        (class::PROCESS_ACTIVITY, activity::PROCESS_LAUNCH) => "Launch",
+        (class::FILE_ACTIVITY, activity::FILE_MOUNT) => "Mount",
+        (class::HTTP_ACTIVITY, id) => http_activity_name(id),
+        _ => "Unknown",
+    }
+}
+
+fn http_activity_name(activity_id: u16) -> &'static str {
+    match activity_id {
+        1 => "Connect",
+        2 => "Delete",
+        3 => "Get",
+        4 => "Head",
+        5 => "Options",
+        6 => "Post",
+        7 => "Put",
+        8 => "Trace",
+        9 => "Patch",
+        _ => "Other",
+    }
+}
+
+fn severity_name(severity_id: u8) -> &'static str {
+    match severity_id {
+        severity::INFORMATIONAL => "Informational",
+        severity::MEDIUM => "Medium",
+        _ => "Unknown",
+    }
+}
+
+fn status_name(status_id: u8) -> &'static str {
+    match status_id {
+        status::SUCCESS => "Success",
+        status::FAILURE => "Failure",
+        _ => "Unknown",
+    }
+}
+
+fn disposition_name(disposition_id: u8) -> &'static str {
+    match disposition_id {
+        disposition::ALLOWED => "Allowed",
+        disposition::BLOCKED => "Blocked",
+        _ => "Unknown",
+    }
+}
+
 pub struct Context<'a> {
     pub time_unix_secs: u64,
     pub ts_rfc3339: &'a str,
@@ -92,10 +163,26 @@ impl Event {
             .saturating_mul(1000);
         let mut top = Map::new();
         top.insert("class_uid".into(), class_uid.into());
+        top.insert("class_name".into(), class_name(class_uid).into());
         top.insert("category_uid".into(), category_uid.into());
+        top.insert("category_name".into(), category_name(category_uid).into());
         top.insert("type_uid".into(), type_uid.into());
+        top.insert(
+            "type_name".into(),
+            format!(
+                "{}: {}",
+                class_name(class_uid),
+                activity_name(class_uid, activity_id)
+            )
+            .into(),
+        );
         top.insert("activity_id".into(), activity_id.into());
+        top.insert(
+            "activity_name".into(),
+            activity_name(class_uid, activity_id).into(),
+        );
         top.insert("severity_id".into(), severity_id.into());
+        top.insert("severity".into(), severity_name(severity_id).into());
         top.insert("time".into(), time_ms.into());
         top.insert(
             "metadata".into(),
@@ -116,6 +203,16 @@ impl Event {
         self
     }
 
+    pub fn set_status(self, status_id: u8) -> Self {
+        self.set("status_id", status_id.into())
+            .set("status", status_name(status_id).into())
+    }
+
+    pub fn set_disposition(self, disposition_id: u8) -> Self {
+        self.set("disposition_id", disposition_id.into())
+            .set("disposition", disposition_name(disposition_id).into())
+    }
+
     pub fn note(mut self, key: &str, value: Value) -> Self {
         self.unmapped.insert(key.into(), value);
         self
@@ -133,14 +230,19 @@ pub(crate) fn assert_schema_valid(ev: &Value) {
     let o = ev.as_object().expect("event is a JSON object");
     for key in [
         "activity_id",
+        "activity_name",
         "category_uid",
+        "category_name",
         "class_uid",
+        "class_name",
         "cloud",
         "metadata",
         "osint",
         "severity_id",
+        "severity",
         "time",
         "type_uid",
+        "type_name",
         "unmapped",
     ] {
         assert!(o.contains_key(key), "missing required base field {key}");
@@ -151,6 +253,15 @@ pub(crate) fn assert_schema_valid(ev: &Value) {
         o["type_uid"].as_u64().expect("type_uid is a number"),
         class_uid * 100 + activity_id,
         "type_uid must be class_uid*100 + activity_id"
+    );
+    assert_eq!(
+        o["type_name"].as_str().expect("type_name is a string"),
+        format!(
+            "{}: {}",
+            o["class_name"].as_str().unwrap(),
+            o["activity_name"].as_str().unwrap()
+        ),
+        "type_name must read as 'class: activity'"
     );
     assert_eq!(o["metadata"]["version"], "1.7.0");
     assert!(o["metadata"]["product"]["name"].is_string());
@@ -175,6 +286,72 @@ mod tests {
     }
 
     #[test]
+    fn class_and_category_captions_map_every_uid() {
+        assert_eq!(class_name(class::FILE_ACTIVITY), "File System Activity");
+        assert_eq!(class_name(class::PROCESS_ACTIVITY), "Process Activity");
+        assert_eq!(class_name(class::DETECTION_FINDING), "Detection Finding");
+        assert_eq!(class_name(class::AUTHENTICATION), "Authentication");
+        assert_eq!(class_name(class::HTTP_ACTIVITY), "HTTP Activity");
+        assert_eq!(class_name(9999), "Unknown");
+
+        assert_eq!(category_name(category::SYSTEM), "System Activity");
+        assert_eq!(category_name(category::FINDINGS), "Findings");
+        assert_eq!(category_name(category::IAM), "Identity & Access Management");
+        assert_eq!(category_name(category::NETWORK), "Network Activity");
+        assert_eq!(category_name(9), "Unknown");
+    }
+
+    #[test]
+    fn activity_captions_map_each_class_and_the_http_methods() {
+        assert_eq!(
+            activity_name(class::AUTHENTICATION, activity::LOGON),
+            "Logon"
+        );
+        assert_eq!(
+            activity_name(class::DETECTION_FINDING, activity::FINDING_CREATE),
+            "Create"
+        );
+        assert_eq!(
+            activity_name(class::PROCESS_ACTIVITY, activity::PROCESS_LAUNCH),
+            "Launch"
+        );
+        assert_eq!(
+            activity_name(class::FILE_ACTIVITY, activity::FILE_MOUNT),
+            "Mount"
+        );
+        assert_eq!(activity_name(class::HTTP_ACTIVITY, 3), "Get");
+        assert_eq!(activity_name(9999, 0), "Unknown");
+
+        for (id, name) in [
+            (1, "Connect"),
+            (2, "Delete"),
+            (3, "Get"),
+            (4, "Head"),
+            (5, "Options"),
+            (6, "Post"),
+            (7, "Put"),
+            (8, "Trace"),
+            (9, "Patch"),
+            (99, "Other"),
+        ] {
+            assert_eq!(http_activity_name(id), name);
+        }
+    }
+
+    #[test]
+    fn severity_status_and_disposition_captions_map_every_id() {
+        assert_eq!(severity_name(severity::INFORMATIONAL), "Informational");
+        assert_eq!(severity_name(severity::MEDIUM), "Medium");
+        assert_eq!(severity_name(9), "Unknown");
+        assert_eq!(status_name(status::SUCCESS), "Success");
+        assert_eq!(status_name(status::FAILURE), "Failure");
+        assert_eq!(status_name(9), "Unknown");
+        assert_eq!(disposition_name(disposition::ALLOWED), "Allowed");
+        assert_eq!(disposition_name(disposition::BLOCKED), "Blocked");
+        assert_eq!(disposition_name(9), "Unknown");
+    }
+
+    #[test]
     fn the_base_event_carries_the_required_fields_and_computes_type_uid() {
         let ev = Event::new(
             "connection",
@@ -187,6 +364,11 @@ mod tests {
         .build();
         assert_schema_valid(&ev);
         assert_eq!(ev["type_uid"], 300201);
+        assert_eq!(ev["class_name"], "Authentication");
+        assert_eq!(ev["category_name"], "Identity & Access Management");
+        assert_eq!(ev["activity_name"], "Logon");
+        assert_eq!(ev["type_name"], "Authentication: Logon");
+        assert_eq!(ev["severity"], "Informational");
         assert_eq!(ev["time"], 1_780_000_000_000i64);
         assert_eq!(ev["unmapped"]["lns_microvm"], "calm-finch");
         assert_eq!(ev["unmapped"]["lns_ts"], "2026-06-29T14:00:00Z");
