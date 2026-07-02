@@ -22,6 +22,7 @@ pub struct AuditArgs {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum KindArg {
+    Launch,
     Egress,
     Env,
     Volume,
@@ -34,6 +35,7 @@ pub enum KindArg {
 impl KindArg {
     pub(super) fn label(self) -> &'static str {
         match self {
+            KindArg::Launch => "launch",
             KindArg::Egress => "egress",
             KindArg::Env => "env",
             KindArg::Volume => "volume",
@@ -176,6 +178,7 @@ mod tests {
 
     #[test]
     fn kind_arg_labels_match_the_event_kind_names() {
+        assert_eq!(KindArg::Launch.label(), "launch");
         assert_eq!(KindArg::Egress.label(), "egress");
         assert_eq!(KindArg::Env.label(), "env");
         assert_eq!(KindArg::Volume.label(), "volume");

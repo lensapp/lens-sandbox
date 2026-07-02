@@ -4,7 +4,7 @@ mod store;
 pub mod verify;
 
 pub use collect::{Timeline, TimelineRow, collect_timeline, run_ids_in, run_microvm_identity};
-pub use ocsf::{Row, microvm, read};
+pub use ocsf::{Row, image, microvm, read};
 pub use store::{LedgerStream, stream_ledger};
 pub use verify::{VerifyOutcome, verify_chain, verify_chain_with_anchor};
 

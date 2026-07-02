@@ -44,6 +44,7 @@ const DRAG_LINE: Color32 = Color32::from_rgba_premultiplied(64, 64, 64, 64);
 pub struct Sandbox {
     pub id: String,
     pub name: String,
+    pub image: String,
     pub status: String,
 }
 
@@ -174,6 +175,7 @@ fn active_sandboxes() -> Vec<Sandbox> {
         .map(|s| Sandbox {
             id: s.id,
             name: s.name,
+            image: s.image,
             status: status_word(&s.status),
         })
         .collect()
@@ -310,7 +312,15 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
                 ui.add_space(2.0);
             }
             for sb in &sandboxes {
-                sidebar_item(ui, state, Some(&sb.id), &sb.name, &sb.id, &sb.status);
+                sidebar_item(
+                    ui,
+                    state,
+                    Some(&sb.id),
+                    &sb.name,
+                    &sb.image,
+                    &sb.id,
+                    &sb.status,
+                );
             }
         });
 }
@@ -345,6 +355,7 @@ fn sidebar_item(
     state: &mut DashboardState,
     id: Option<&str>,
     name: &str,
+    image: &str,
     run: &str,
     status: &str,
 ) {
@@ -372,6 +383,9 @@ fn sidebar_item(
                 }
                 ui.vertical(|ui| {
                     ui.label(RichText::new(name).size(FS_BODY).color(TEXT_PRIMARY));
+                    if !image.is_empty() {
+                        ui.label(RichText::new(image).size(FS_LABEL).color(TEXT_MUTED));
+                    }
                     if !short.is_empty() {
                         ui.label(
                             RichText::new(short)
@@ -972,6 +986,7 @@ fn status_dot(ui: &mut egui::Ui, status: &str) {
 
 fn kind_icon(kind: &str) -> MaterialIcon {
     match kind {
+        "launch" => icons::ICON_ROCKET_LAUNCH,
         "egress" => icons::ICON_SWAP_HORIZ,
         "env" => icons::ICON_TUNE,
         "volume" => icons::ICON_STORAGE,
