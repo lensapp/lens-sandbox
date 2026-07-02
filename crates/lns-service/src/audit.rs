@@ -231,14 +231,11 @@ fn run_ctx(run: &str, microvm: &str, clock: &dyn Clock) -> crate::ocsf_audit::Oc
 
 pub fn record_volume_attached_at(
     path: &Path,
-    run: &str,
-    microvm: &str,
+    cx: &crate::ocsf_audit::OcsfCtx,
     name: &str,
     target: &str,
-    clock: &dyn Clock,
 ) -> Result<()> {
-    let cx = run_ctx(run, microvm, clock);
-    append_ocsf_at(path, crate::ocsf_audit::volume_event(&cx, name, target))
+    append_ocsf_at(path, crate::ocsf_audit::volume_event(cx, name, target))
 }
 
 pub fn record_volume_attached(
@@ -248,23 +245,25 @@ pub fn record_volume_attached(
     target: &str,
     clock: &dyn Clock,
 ) -> Result<()> {
-    record_volume_attached_at(&audit_path(run_id)?, run_id, microvm, name, target, clock)
+    record_volume_attached_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        name,
+        target,
+    )
 }
 
 pub fn record_bind_attached_at(
     path: &Path,
-    run: &str,
-    microvm: &str,
+    cx: &crate::ocsf_audit::OcsfCtx,
     source: &str,
     target: &str,
     exposed_secrets: &[String],
     dropped_secrets: &[String],
-    clock: &dyn Clock,
 ) -> Result<()> {
-    let cx = run_ctx(run, microvm, clock);
     append_ocsf_at(
         path,
-        crate::ocsf_audit::bind_event(&cx, source, target, exposed_secrets, dropped_secrets),
+        crate::ocsf_audit::bind_event(cx, source, target, exposed_secrets, dropped_secrets),
     )
 }
 
@@ -279,13 +278,11 @@ pub fn record_bind_attached(
 ) -> Result<()> {
     record_bind_attached_at(
         &audit_path(run_id)?,
-        run_id,
-        microvm,
+        &run_ctx(run_id, microvm, clock),
         source,
         target,
         exposed_secrets,
         dropped_secrets,
-        clock,
     )
 }
 
@@ -301,9 +298,12 @@ mod tests {
     }
     static CLOCK: FixedClock = FixedClock(1_700_000_000);
 
+    fn cx() -> crate::ocsf_audit::OcsfCtx {
+        crate::ocsf_audit::OcsfCtx::at_unix("aa01".into(), "calm-finch".into(), 1_700_000_000)
+    }
+
     fn volume_obj(name: &str, target: &str) -> Map<String, Value> {
-        let cx = crate::ocsf_audit::OcsfCtx::at_unix("run".into(), "vm".into(), 1_700_000_000);
-        crate::ocsf_audit::volume_event(&cx, name, target)
+        crate::ocsf_audit::volume_event(&cx(), name, target)
     }
 
     #[test]
@@ -319,8 +319,7 @@ mod tests {
     fn record_volume_attached_writes_an_ocsf_genesis_line() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "aa01", "calm-finch", "prism-data", "/data", &CLOCK)
-            .unwrap();
+        record_volume_attached_at(&path, &cx(), "prism-data", "/data").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
@@ -343,17 +342,7 @@ mod tests {
     fn record_bind_attached_writes_host_source_and_target() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_bind_attached_at(
-            &path,
-            "aa01",
-            "calm-finch",
-            "/Users/me/proj",
-            "/work",
-            &[],
-            &[],
-            &CLOCK,
-        )
-        .unwrap();
+        record_bind_attached_at(&path, &cx(), "/Users/me/proj", "/work", &[], &[]).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"class_uid\":1001"), "OCSF: {content}");
@@ -371,13 +360,11 @@ mod tests {
         let path = d.path().join("audit.jsonl");
         record_bind_attached_at(
             &path,
-            "aa01",
-            "calm-finch",
+            &cx(),
             "/Users/me/proj",
             "/work",
             &[".env".to_string()],
             &[".npmrc".to_string(), ".ssh".to_string()],
-            &CLOCK,
         )
         .unwrap();
 
@@ -446,8 +433,8 @@ mod tests {
     fn successive_events_form_a_valid_hash_chain() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "run", "vm", "a", "/a", &CLOCK).unwrap();
-        record_volume_attached_at(&path, "run", "vm", "b", "/b", &CLOCK).unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "b", "/b").unwrap();
 
         let content = std::fs::read(&path).unwrap();
         let lines: Vec<&[u8]> = content
@@ -529,8 +516,8 @@ mod tests {
     fn anchor_persisted_by_append_event_at_round_trips_via_read_anchor() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "run", "vm", "a", "/a", &CLOCK).unwrap();
-        record_volume_attached_at(&path, "run", "vm", "b", "/b", &CLOCK).unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
+        record_volume_attached_at(&path, &cx(), "b", "/b").unwrap();
 
         let anchor = read_anchor(&anchor_path_for(&path)).expect("anchor file present");
         assert_eq!(anchor.line_count, 2);
@@ -547,7 +534,7 @@ mod tests {
     async fn read_anchor_async_matches_the_blocking_reader() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "run", "vm", "a", "/a", &CLOCK).unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
         let anchor_path = anchor_path_for(&path);
         assert_eq!(
             read_anchor_async(&anchor_path).await,
@@ -581,7 +568,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_volume_attached_at(&path, "run", "vm", "a", "/a", &CLOCK).unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
 
         let log_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(log_mode, 0o600, "audit log must be private to the owner");
@@ -600,7 +587,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let run_dir = d.path().join("runs").join("7");
         let path = run_dir.join("audit.jsonl");
-        record_volume_attached_at(&path, "run", "vm", "a", "/a", &CLOCK).unwrap();
+        record_volume_attached_at(&path, &cx(), "a", "/a").unwrap();
         let mode = std::fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "run dir must be private to the owner");
     }
