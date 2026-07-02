@@ -19,7 +19,7 @@ Feature: lns audit shows one unified timeline across all sandboxes
     And the output contains "egress"
     And the output contains "GET api.example.test:443"
     And the output contains "allowed once"
-    And the output does not contain "audit_event"
+    And the output does not contain "class_uid"
 
   Scenario: an unknown sandbox reports no events without erroring
     Given a clean lns cache home
@@ -74,6 +74,7 @@ Feature: lns audit shows one unified timeline across all sandboxes
     When I run "lns audit --json"
     Then the exit code is 0
     And the output contains "some-oauth"
+    And the output contains "class_uid"
     And the output does not contain "WHEN"
 
   Scenario: --kind narrows the timeline to a single event kind

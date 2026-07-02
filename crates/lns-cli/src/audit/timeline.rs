@@ -91,10 +91,11 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
     for run_id in lns_audit::run_ids_in(runs_root)? {
         ids.push(run_id);
     }
-    for entry in lns_audit::stream_ledger(ledger_path)? {
-        let record = entry?.record;
-        ids.push(record.run.clone());
-        names.entry(record.microvm.clone()).or_insert(record.run);
+    for event in lns_audit::stream_ledger(ledger_path)? {
+        let event = event?;
+        let run = lns_audit::read(&event)?.run;
+        ids.push(run.clone());
+        names.entry(lns_audit::microvm(&event)).or_insert(run);
     }
     ids.sort();
     ids.dedup();
@@ -116,13 +117,60 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
 mod tests {
     use super::*;
     use crate::audit::KindArg;
-    use lns_ipc::{AuthKind, LedgerEvent, LedgerRecord};
     use serde_json::Value;
 
     struct Fixture {
         _home: tempfile::TempDir,
         runs_root: std::path::PathBuf,
         ledger_path: std::path::PathBuf,
+    }
+
+    fn octx<'a>(run: &'a str, ts: &'a str) -> lns_ocsf::Context<'a> {
+        lns_ocsf::Context {
+            time_unix_secs: 1_780_000_000,
+            ts_rfc3339: ts,
+            run,
+            microvm: "calm-finch",
+        }
+    }
+
+    fn connection(run: &str, ts: &str) -> String {
+        lns_ocsf::connection(
+            &octx(run, ts),
+            "some-oauth",
+            "oauth",
+            Some("@hchen"),
+            &["repo".to_string()],
+            None,
+        )
+        .to_string()
+    }
+
+    fn credential_use(run: &str, ts: &str) -> String {
+        lns_ocsf::credential_use(
+            &octx(run, ts),
+            "some-provider",
+            "apikey",
+            Some("9c2f1a3d"),
+            &["api.some-provider.example".to_string()],
+        )
+        .to_string()
+    }
+
+    fn egress(run: &str, ts: &str, url: &str, reason: Option<&str>) -> String {
+        lns_ocsf::egress(&octx(run, ts), "GET", url, None, None, reason, true).to_string()
+    }
+
+    fn run_env(run: &str, ts: &str, keys: &[&str]) -> String {
+        let mut env = serde_json::Map::new();
+        for key in keys {
+            env.insert(key.to_string(), Value::String("…".into()));
+        }
+        lns_ocsf::run_env(&octx(run, ts), &env).to_string()
+    }
+
+    fn volume(run: &str, ts: &str, name: &str, target: &str) -> String {
+        lns_ocsf::volume_mount(&octx(run, ts), name, target).to_string()
     }
 
     impl Fixture {
@@ -139,9 +187,7 @@ mod tests {
             }
         }
 
-        fn write_run(&self, run_id: &str, lines: &[&str]) {
-            let dir = self.runs_root.join(run_id);
-            std::fs::create_dir_all(&dir).unwrap();
+        fn chain(lines: &[String]) -> (String, lns_ipc::Anchor) {
             let mut chain = lns_ipc::AuditChain::new();
             let mut payload = String::new();
             for line in lines {
@@ -149,28 +195,23 @@ mod tests {
                 payload.push_str(std::str::from_utf8(&aug).unwrap());
                 payload.push('\n');
             }
-            std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
-            std::fs::write(
-                dir.join("audit.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
-            )
-            .unwrap();
+            (payload, chain.anchor().expect("chain has events"))
         }
 
-        fn write_ledger(&self, records: &[LedgerRecord]) {
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = String::new();
-            for record in records {
-                let aug = chain
-                    .augment(&serde_json::to_string(record).unwrap())
-                    .unwrap();
-                payload.push_str(std::str::from_utf8(&aug).unwrap());
-                payload.push('\n');
-            }
+        fn write_run(&self, run_id: &str, lines: &[String]) {
+            let dir = self.runs_root.join(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let (payload, anchor) = Self::chain(lines);
+            std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+            std::fs::write(dir.join("audit.anchor"), anchor.to_line()).unwrap();
+        }
+
+        fn write_ledger(&self, events: &[String]) {
+            let (payload, anchor) = Self::chain(events);
             std::fs::write(&self.ledger_path, payload).unwrap();
             std::fs::write(
                 self.ledger_path.with_file_name("ledger.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
+                anchor.to_line(),
             )
             .unwrap();
         }
@@ -212,48 +253,26 @@ mod tests {
         }
     }
 
-    fn connection(run: &str, ts: &str) -> LedgerRecord {
-        LedgerRecord {
-            ts: ts.into(),
-            run: run.into(),
-            microvm: "calm-finch".into(),
-            event: LedgerEvent::Connection {
-                integration: "some-oauth".into(),
-                auth: AuthKind::Oauth,
-                account: Some("@hchen".into()),
-                scopes: vec!["repo".into()],
-                expires: None,
-            },
-        }
-    }
-
-    fn credential_use(run: &str, ts: &str) -> LedgerRecord {
-        LedgerRecord {
-            ts: ts.into(),
-            run: run.into(),
-            microvm: "calm-finch".into(),
-            event: LedgerEvent::CredentialUse {
-                integration: "some-provider".into(),
-                auth: AuthKind::Apikey,
-                fp: Some("9c2f1a3d".into()),
-                dest: vec!["api.some-provider.example".into()],
-            },
-        }
-    }
+    const RUN: &str = "1a2b3c4d0000000000000000000000aa";
 
     #[test]
     fn the_bare_timeline_renders_every_kind_in_plain_language() {
         let fix = Fixture::new();
         fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
+            RUN,
             &[
-                r#"{"ts":"2026-06-29T13:00:00Z","event":"run_env","env":{"FOO":"bar"}}"#,
-                r#"{"ts":"2026-06-29T13:30:00Z","action":"GET http://api.example.test:443/","metadata":{"reason":"user-allowed-once"}}"#,
+                run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"]),
+                egress(
+                    RUN,
+                    "2026-06-29T13:30:00Z",
+                    "http://api.example.test:443/",
+                    Some("user-allowed-once"),
+                ),
             ],
         );
         fix.write_ledger(&[
-            connection("1a2b3c4d0000000000000000000000aa", "2026-06-29T14:00:00Z"),
-            credential_use("1a2b3c4d0000000000000000000000aa", "2026-06-29T15:00:00Z"),
+            connection(RUN, "2026-06-29T14:00:00Z"),
+            credential_use(RUN, "2026-06-29T15:00:00Z"),
         ]);
         let text = fix.render(&args());
         assert!(text.contains("WHEN") && text.contains("DETAIL"), "{text}");
@@ -281,16 +300,13 @@ mod tests {
     #[test]
     fn an_exact_run_id_scopes_to_that_run() {
         let fix = Fixture::new();
-        fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"data","target":"/data"}"#],
-        );
+        fix.write_run(RUN, &[volume(RUN, "2026-06-29T13:00:00Z", "data", "/data")]);
         fix.write_ledger(&[connection(
             "5e6f7a8b0000000000000000000000bb",
             "2026-06-29T14:00:00Z",
         )]);
         let scoped = AuditArgs {
-            sandbox: Some("1a2b3c4d0000000000000000000000aa".into()),
+            sandbox: Some(RUN.into()),
             ..args()
         };
         let text = fix.render(&scoped);
@@ -301,9 +317,10 @@ mod tests {
     #[test]
     fn a_run_name_scopes_to_the_matching_run() {
         let fix = Fixture::new();
-        let mut rec = connection("5e6f7a8b0000000000000000000000bb", "2026-06-29T14:00:00Z");
-        rec.microvm = "calm-finch".into();
-        fix.write_ledger(&[rec]);
+        fix.write_ledger(&[connection(
+            "5e6f7a8b0000000000000000000000bb",
+            "2026-06-29T14:00:00Z",
+        )]);
         let scoped = AuditArgs {
             sandbox: Some("calm-finch".into()),
             ..args()
@@ -314,10 +331,7 @@ mod tests {
     #[test]
     fn a_unique_run_id_prefix_scopes_to_the_matching_run() {
         let fix = Fixture::new();
-        fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"data","target":"/data"}"#],
-        );
+        fix.write_run(RUN, &[volume(RUN, "2026-06-29T13:00:00Z", "data", "/data")]);
         let scoped = AuditArgs {
             sandbox: Some("1a2b".into()),
             ..args()
@@ -328,14 +342,8 @@ mod tests {
     #[test]
     fn an_ambiguous_prefix_does_not_resolve() {
         let fix = Fixture::new();
-        fix.write_run(
-            "ab11",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"a","target":"/a"}"#],
-        );
-        fix.write_run(
-            "ab22",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"b","target":"/b"}"#],
-        );
+        fix.write_run("ab11", &[volume("ab11", "2026-06-29T13:00:00Z", "a", "/a")]);
+        fix.write_run("ab22", &[volume("ab22", "2026-06-29T13:00:00Z", "b", "/b")]);
         assert!(
             resolve_scope("ab", &fix.runs_root, &fix.ledger_path)
                 .unwrap()
@@ -354,10 +362,7 @@ mod tests {
     #[test]
     fn an_unknown_sandbox_reports_no_events_scoped() {
         let fix = Fixture::new();
-        fix.write_run(
-            "1a2b",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","type":"volume_attached","name":"a","target":"/a"}"#],
-        );
+        fix.write_run("1a2b", &[volume("1a2b", "2026-06-29T13:00:00Z", "a", "/a")]);
         let scoped = AuditArgs {
             sandbox: Some("nope".into()),
             ..args()
@@ -372,12 +377,17 @@ mod tests {
     fn the_integration_filter_keeps_only_matching_ledger_events() {
         let fix = Fixture::new();
         fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","action":"GET http://api.example.test:443/"}"#],
+            RUN,
+            &[egress(
+                RUN,
+                "2026-06-29T13:00:00Z",
+                "http://api.example.test:443/",
+                None,
+            )],
         );
         fix.write_ledger(&[
-            connection("1a2b3c4d0000000000000000000000aa", "2026-06-29T14:00:00Z"),
-            credential_use("1a2b3c4d0000000000000000000000aa", "2026-06-29T15:00:00Z"),
+            connection(RUN, "2026-06-29T14:00:00Z"),
+            credential_use(RUN, "2026-06-29T15:00:00Z"),
         ]);
         let filtered = AuditArgs {
             integration: Some("some-oauth".into()),
@@ -392,10 +402,15 @@ mod tests {
     fn the_kind_filter_keeps_only_the_named_kind() {
         let fix = Fixture::new();
         fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
+            RUN,
             &[
-                r#"{"ts":"2026-06-29T13:00:00Z","event":"run_env","env":{"FOO":"bar"}}"#,
-                r#"{"ts":"2026-06-29T13:30:00Z","action":"GET http://api.example.test:443/"}"#,
+                run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"]),
+                egress(
+                    RUN,
+                    "2026-06-29T13:30:00Z",
+                    "http://api.example.test:443/",
+                    None,
+                ),
             ],
         );
         let filtered = AuditArgs {
@@ -410,10 +425,7 @@ mod tests {
     #[test]
     fn the_kind_filter_accepts_credential_for_credential_use_events() {
         let fix = Fixture::new();
-        fix.write_ledger(&[credential_use(
-            "1a2b3c4d0000000000000000000000aa",
-            "2026-06-29T15:00:00Z",
-        )]);
+        fix.write_ledger(&[credential_use(RUN, "2026-06-29T15:00:00Z")]);
         let filtered = AuditArgs {
             kind: Some(KindArg::Credential),
             ..args()
@@ -424,16 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn json_emits_one_self_describing_object_per_event_in_sorted_order() {
+    fn json_emits_one_ocsf_object_per_event_in_sorted_order() {
         let fix = Fixture::new();
-        fix.write_run(
-            "1a2b3c4d0000000000000000000000aa",
-            &[r#"{"ts":"2026-06-29T13:00:00Z","event":"run_env","env":{"FOO":"bar"}}"#],
-        );
-        fix.write_ledger(&[connection(
-            "1a2b3c4d0000000000000000000000aa",
-            "2026-06-29T14:00:00Z",
-        )]);
+        fix.write_run(RUN, &[run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"])]);
+        fix.write_ledger(&[connection(RUN, "2026-06-29T14:00:00Z")]);
         let json = AuditArgs {
             json: true,
             ..args()
@@ -442,9 +448,11 @@ mod tests {
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2);
         let newest: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(newest["event"], "connection", "newest event first");
+        assert_eq!(newest["unmapped"]["lns_kind"], "connection", "newest first");
+        assert_eq!(newest["class_uid"], 3002, "emitted as OCSF");
         let oldest: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(oldest["run"], "1a2b3c4d0000000000000000000000aa");
+        assert_eq!(oldest["unmapped"]["lns_kind"], "env");
+        assert_eq!(oldest["run"], RUN, "the per-run event carries its run id");
     }
 
     #[test]

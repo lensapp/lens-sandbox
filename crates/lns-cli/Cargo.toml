@@ -45,6 +45,7 @@ flate2  = "1"
 tar     = "0.4"
 
 [dev-dependencies]
+lns-ocsf = { path = "../lns-ocsf" }
 tempfile = "3"
 cucumber = "0.23"
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
