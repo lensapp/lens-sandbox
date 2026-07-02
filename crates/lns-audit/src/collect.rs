@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::{events, integrity_advisory, ocsf, show, store, verify};
+use crate::{integrity_advisory, ocsf, store, verify};
 
 #[derive(Debug, Clone)]
 pub struct TimelineRow {
@@ -50,24 +50,21 @@ fn collect_ledger_rows(
     {
         timeline.warnings.push(warning);
     }
-    for entry in store::stream_ledger(ledger_path)? {
-        let entry = entry?;
-        let record = entry.record;
-        if scope.is_some_and(|run_id| record.run != run_id) {
+    for event in store::stream_ledger(ledger_path)? {
+        let event = event?;
+        let row = ocsf::read(&event).context("reading ledger event")?;
+        if scope.is_some_and(|run_id| row.run != run_id) {
             continue;
         }
-        let kind = match record.event.name() {
-            "credential_use" => "credential",
-            other => other,
-        };
+        let when = crate::friendly_when(&row.ts);
         timeline.rows.push(TimelineRow {
-            when: crate::friendly_when(&record.ts),
-            ts: record.ts.clone(),
-            run: record.run.clone(),
-            kind: kind.to_string(),
-            detail: events::detail(&record.event),
-            integration: record.event.integration().map(str::to_string),
-            raw: entry.raw,
+            ts: row.ts,
+            when,
+            run: row.run,
+            kind: row.kind,
+            detail: row.detail,
+            integration: row.integration,
+            raw: Value::Object(event),
         });
     }
     Ok(())
@@ -109,46 +106,20 @@ fn collect_one_run(runs_root: &Path, run_id: &str, timeline: &mut Timeline) -> R
             );
         };
         obj.insert("run".to_string(), Value::String(run_id.to_string()));
-        let source = runlog_source(&obj, &log_path, idx + 1)?;
-        let (ts, when, kind, detail) = runlog_fields(&source);
+        let row = ocsf::read(&obj)
+            .with_context(|| format!("reading audit line {} of {}", idx + 1, log_path.display()))?;
+        let when = crate::friendly_when(&row.ts);
         timeline.rows.push(TimelineRow {
-            ts,
+            ts: row.ts,
             when,
             run: run_id.to_string(),
-            kind,
-            detail,
-            integration: None,
+            kind: row.kind,
+            detail: row.detail,
+            integration: row.integration,
             raw: Value::Object(obj),
         });
     }
     Ok(())
-}
-
-fn runlog_source(
-    obj: &serde_json::Map<String, Value>,
-    log_path: &Path,
-    line_no: usize,
-) -> Result<serde_json::Map<String, Value>> {
-    if ocsf::is_ocsf(obj) {
-        return ocsf::runlog_obj(obj).with_context(|| {
-            format!(
-                "reconstructing OCSF audit line {line_no} of {}",
-                log_path.display()
-            )
-        });
-    }
-    Ok(obj.clone())
-}
-
-fn runlog_fields(src: &serde_json::Map<String, Value>) -> (String, String, String, String) {
-    let (kind, detail) = show::describe(src);
-    let when = show::when(src);
-    let ts = src
-        .get("ts")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    (ts, when, kind, detail)
 }
 
 pub fn run_ids_in(runs_root: &Path) -> Result<Vec<String>> {
@@ -182,13 +153,59 @@ fn sort_newest_first(rows: &mut [TimelineRow]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_ipc::{AuthKind, LedgerEvent, LedgerRecord};
     use std::path::PathBuf;
 
     struct Fixture {
         _home: tempfile::TempDir,
         runs_root: PathBuf,
         ledger_path: PathBuf,
+    }
+
+    fn octx<'a>(run: &'a str, ts: &'a str) -> lns_ocsf::Context<'a> {
+        lns_ocsf::Context {
+            time_unix_secs: 1_780_000_000,
+            ts_rfc3339: ts,
+            run,
+            microvm: "calm-finch",
+        }
+    }
+
+    fn connection(run: &str, ts: &str) -> String {
+        lns_ocsf::connection(
+            &octx(run, ts),
+            "some-oauth",
+            "oauth",
+            Some("@some-user"),
+            &["repo".to_string()],
+            None,
+        )
+        .to_string()
+    }
+
+    fn credential(run: &str, ts: &str) -> String {
+        lns_ocsf::credential_use(
+            &octx(run, ts),
+            "some-provider",
+            "apikey",
+            Some("9c2f1a3d"),
+            &["api.some-provider.example".to_string()],
+        )
+        .to_string()
+    }
+
+    fn egress(run: &str, ts: &str, url: &str) -> String {
+        lns_ocsf::egress(&octx(run, ts), "GET", url, None, None, None, true).to_string()
+    }
+
+    fn chained(lines: &[String]) -> (String, lns_ipc::Anchor) {
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut payload = String::new();
+        for line in lines {
+            let augmented = chain.augment(line).unwrap();
+            payload.push_str(std::str::from_utf8(&augmented).unwrap());
+            payload.push('\n');
+        }
+        (payload, chain.anchor().expect("chain has events"))
     }
 
     impl Fixture {
@@ -204,53 +221,20 @@ mod tests {
             }
         }
 
-        fn write_run(&self, run_id: &str, events: &[&str]) {
+        fn write_run(&self, run_id: &str, events: &[String]) {
             let dir = self.runs_root.join(run_id);
             std::fs::create_dir_all(&dir).unwrap();
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = String::new();
-            for event in events {
-                let augmented = chain.augment(event).unwrap();
-                payload.push_str(std::str::from_utf8(&augmented).unwrap());
-                payload.push('\n');
-            }
+            let (payload, anchor) = chained(events);
             std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
-            std::fs::write(
-                dir.join("audit.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
-            )
-            .unwrap();
+            std::fs::write(dir.join("audit.anchor"), anchor.to_line()).unwrap();
         }
 
-        fn write_ledger(&self, records: &[LedgerRecord]) {
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = String::new();
-            for record in records {
-                let line = serde_json::to_string(record).unwrap();
-                let augmented = chain.augment(&line).unwrap();
-                payload.push_str(std::str::from_utf8(&augmented).unwrap());
-                payload.push('\n');
-            }
+        fn write_ledger(&self, events: &[String]) {
+            let (payload, anchor) = chained(events);
             std::fs::write(&self.ledger_path, payload).unwrap();
             std::fs::write(
                 self.ledger_path.with_file_name("ledger.anchor"),
-                chain.anchor().expect("ledger has events").to_line(),
-            )
-            .unwrap();
-        }
-
-        fn write_ledger_lines(&self, lines: &[String]) {
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = String::new();
-            for line in lines {
-                let augmented = chain.augment(line).unwrap();
-                payload.push_str(std::str::from_utf8(&augmented).unwrap());
-                payload.push('\n');
-            }
-            std::fs::write(&self.ledger_path, payload).unwrap();
-            std::fs::write(
-                self.ledger_path.with_file_name("ledger.anchor"),
-                chain.anchor().expect("ledger has events").to_line(),
+                anchor.to_line(),
             )
             .unwrap();
         }
@@ -260,41 +244,16 @@ mod tests {
         }
     }
 
-    fn connection(run: &str, ts: &str) -> LedgerRecord {
-        LedgerRecord {
-            ts: ts.into(),
-            run: run.into(),
-            microvm: "calm-finch".into(),
-            event: LedgerEvent::Connection {
-                integration: "some-oauth".into(),
-                auth: AuthKind::Oauth,
-                account: Some("@some-user".into()),
-                scopes: vec!["repo".into()],
-                expires: None,
-            },
-        }
-    }
-
-    fn credential(run: &str, ts: &str) -> LedgerRecord {
-        LedgerRecord {
-            ts: ts.into(),
-            run: run.into(),
-            microvm: "calm-finch".into(),
-            event: LedgerEvent::CredentialUse {
-                integration: "some-provider".into(),
-                auth: AuthKind::Apikey,
-                fp: Some("9c2f1a3d".into()),
-                dest: vec!["api.some-provider.example".into()],
-            },
-        }
-    }
-
     #[test]
     fn a_run_log_and_the_ledger_merge_newest_first() {
         let fix = Fixture::new();
         fix.write_run(
             "aa01",
-            &[r#"{"ts":"2026-06-29T14:02:00Z","action":"GET http://api.example.test:443/"}"#],
+            &[egress(
+                "aa01",
+                "2026-06-29T14:02:00Z",
+                "http://api.example.test:443/",
+            )],
         );
         fix.write_ledger(&[connection("aa01", "2026-06-29T14:02:11Z")]);
 
@@ -304,6 +263,7 @@ mod tests {
         assert_eq!(timeline.rows[0].kind, "connection", "14:02:11 is newest");
         assert_eq!(timeline.rows[1].kind, "egress");
         assert_eq!(timeline.rows[0].integration.as_deref(), Some("some-oauth"));
+        assert_eq!(timeline.rows[1].detail, "GET api.example.test:443");
         assert!(timeline.warnings.is_empty());
     }
 
@@ -312,11 +272,11 @@ mod tests {
         let fix = Fixture::new();
         fix.write_run(
             "aa01",
-            &[r#"{"ts":"2026-06-29T14:02:00Z","action":"GET http://x/"}"#],
+            &[egress("aa01", "2026-06-29T14:02:00Z", "http://x/")],
         );
         fix.write_run(
             "bb02",
-            &[r#"{"ts":"2026-06-29T14:03:00Z","action":"GET http://y/"}"#],
+            &[egress("bb02", "2026-06-29T14:03:00Z", "http://y/")],
         );
         fix.write_ledger(&[
             connection("aa01", "2026-06-29T14:02:11Z"),
@@ -456,11 +416,8 @@ mod tests {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("aa01");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("audit.jsonl"),
-            "{\"ts\":\"2026-06-29T14:02:00Z\",\"action\":\"GET http://x/\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}\n",
-        )
-        .unwrap();
+        let (payload, _anchor) = chained(&[egress("aa01", "2026-06-29T14:02:00Z", "http://x/")]);
+        std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
 
         let timeline = fix.collect(None);
 
@@ -472,110 +429,34 @@ mod tests {
         );
     }
 
-    fn octx() -> lns_ocsf::Context<'static> {
-        lns_ocsf::Context {
-            time_unix_secs: 1_780_000_000,
-            ts_rfc3339: "2026-06-29T14:02:11Z",
-            run: "aa01",
-            microvm: "calm-finch",
-        }
-    }
-
-    fn line(value: serde_json::Value) -> String {
-        serde_json::to_string(&value).unwrap()
+    fn unreadable_event() -> String {
+        r#"{"class_uid":1,"unmapped":{"lns_kind":"teleport"}}"#.to_string()
     }
 
     #[test]
-    fn an_ocsf_ledger_row_matches_the_legacy_ledger_row_it_replaces() {
-        let legacy = Fixture::new();
-        legacy.write_ledger(&[connection("aa01", "2026-06-29T14:02:11Z")]);
-
-        let ocsf = Fixture::new();
-        ocsf.write_ledger_lines(&[line(lns_ocsf::connection(
-            &octx(),
-            "some-oauth",
-            "oauth",
-            Some("@some-user"),
-            &["repo".to_string()],
-            None,
-        ))]);
-
-        let legacy_row = &legacy.collect(None).rows[0];
-        let ocsf_row = &ocsf.collect(None).rows[0];
-        assert_eq!(ocsf_row.kind, legacy_row.kind);
-        assert_eq!(ocsf_row.when, legacy_row.when);
-        assert_eq!(ocsf_row.ts, legacy_row.ts);
-        assert_eq!(ocsf_row.detail, legacy_row.detail);
-        assert_eq!(ocsf_row.integration, legacy_row.integration);
-        assert_eq!(
-            ocsf_row.raw["class_uid"], 3002,
-            "the OCSF row keeps its OCSF raw for --json pass-through"
-        );
-    }
-
-    #[test]
-    fn an_ocsf_run_row_matches_the_legacy_run_row_it_replaces() {
-        let legacy = Fixture::new();
-        legacy.write_run(
-            "aa01",
-            &[r#"{"ts":"2026-06-29T14:02:11Z","action":"GET http://api.example.test:443/","status_code":200,"result":"success","origin":"guest-proxy"}"#],
-        );
-
-        let ocsf = Fixture::new();
-        ocsf.write_run(
-            "aa01",
-            &[&line(lns_ocsf::egress(
-                &octx(),
-                "GET",
-                "http://api.example.test:443/",
-                Some(200),
-                Some("success"),
-                None,
-                true,
-            ))],
-        );
-
-        let legacy_row = &legacy.collect(None).rows[0];
-        let ocsf_row = &ocsf.collect(None).rows[0];
-        assert_eq!(ocsf_row.kind, "egress");
-        assert_eq!(ocsf_row.kind, legacy_row.kind);
-        assert_eq!(ocsf_row.when, legacy_row.when);
-        assert_eq!(ocsf_row.detail, legacy_row.detail);
-    }
-
-    #[test]
-    fn an_unreconstructable_ocsf_run_line_surfaces_its_line_number() {
+    fn an_unreadable_run_event_surfaces_its_line_number() {
         let fix = Fixture::new();
-        fix.write_run(
-            "aa01",
-            &[r#"{"class_uid":4002,"unmapped":{"lns_kind":"egress","lns_run":"aa01","lns_microvm":"m","lns_ts":"2026-06-29T14:00:00Z"}}"#],
-        );
+        let dir = fix.runs_root.join("aa01");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (payload, anchor) = chained(&[unreadable_event()]);
+        std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+        std::fs::write(dir.join("audit.anchor"), anchor.to_line()).unwrap();
+
         let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
         assert!(
-            format!("{err:#}").contains("reconstructing OCSF audit line 1"),
+            format!("{err:#}").contains("reading audit line 1"),
             "{err:#}"
         );
     }
 
     #[test]
-    fn a_single_run_log_mixing_legacy_and_ocsf_lines_reads_both() {
+    fn an_unreadable_ledger_event_is_surfaced() {
         let fix = Fixture::new();
-        fix.write_run(
-            "aa01",
-            &[
-                r#"{"ts":"2026-06-29T14:02:00Z","action":"GET http://x/","origin":"guest-proxy"}"#,
-                &line(lns_ocsf::volume_mount(&octx(), "data", "/data")),
-            ],
-        );
-
-        let rows = fix.collect(None).rows;
-        assert_eq!(rows.len(), 2);
-        let kinds: std::collections::BTreeSet<&str> =
-            rows.iter().map(|r| r.kind.as_str()).collect();
-        assert_eq!(
-            kinds,
-            ["egress", "volume"].into_iter().collect(),
-            "a legacy line and an OCSF line coexist in one file"
+        fix.write_ledger(&[unreadable_event()]);
+        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading ledger event"),
+            "{err:#}"
         );
     }
 }
