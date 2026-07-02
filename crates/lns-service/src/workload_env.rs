@@ -11,10 +11,8 @@ fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
     extra_managed.iter().any(|m| m == env_var)
 }
 
-pub fn injected_env_audit(
-    user_env: &[String],
-    extra_managed: &[String],
-) -> Option<Map<String, Value>> {
+/// The user-supplied vars actually injected into the workload (managed credentials excluded); `None` when nothing was carried, so no run_env event is emitted.
+pub fn injected_env(user_env: &[String], extra_managed: &[String]) -> Option<Map<String, Value>> {
     let mut env = Map::new();
     for kv in user_env {
         let Some((k, v)) = kv.split_once('=') else {
@@ -25,15 +23,7 @@ pub fn injected_env_audit(
         }
         env.insert(k.to_string(), Value::String(v.to_string()));
     }
-    if env.is_empty() {
-        return None;
-    }
-    let mut obj = Map::new();
-    obj.insert("type".to_string(), Value::String("audit_event".to_string()));
-    obj.insert("origin".to_string(), Value::String("host".to_string()));
-    obj.insert("event".to_string(), Value::String("run_env".to_string()));
-    obj.insert("env".to_string(), Value::Object(env));
-    Some(obj)
+    if env.is_empty() { None } else { Some(env) }
 }
 
 pub fn compose_workload_env(
@@ -307,45 +297,29 @@ mod tests {
     }
 
     #[test]
-    fn injected_env_audit_records_non_credential_vars() {
-        let obj =
-            injected_env_audit(&["CLAUDE_CODE_USE_BEDROCK=1".into()], &[]).expect("event built");
-        assert_eq!(obj.get("type").unwrap(), "audit_event");
-        assert_eq!(obj.get("event").unwrap(), "run_env");
-        let env = obj.get("env").unwrap().as_object().unwrap();
+    fn injected_env_records_non_credential_vars() {
+        let env = injected_env(&["CLAUDE_CODE_USE_BEDROCK=1".into()], &[]).expect("env built");
         assert_eq!(env.get("CLAUDE_CODE_USE_BEDROCK").unwrap(), "1");
     }
 
     #[test]
-    fn injected_env_audit_stamps_host_origin() {
-        let obj = injected_env_audit(&["A=1".into()], &[]).expect("event built");
-        assert_eq!(
-            obj.get("origin").unwrap(),
-            "host",
-            "the host-authored run_env event must be distinguishable from guest-proxied events"
-        );
-    }
-
-    #[test]
-    fn injected_env_audit_omits_managed_credentials() {
-        let obj = injected_env_audit(
+    fn injected_env_omits_managed_credentials() {
+        let env = injected_env(
             &["A=1".into(), "SOME_TOKEN=x".into()],
             &["SOME_TOKEN".to_string()],
         )
-        .expect("event built");
-        let env = obj.get("env").unwrap().as_object().unwrap();
+        .expect("env built");
         assert!(env.contains_key("A"));
         assert!(!env.contains_key("SOME_TOKEN"));
     }
 
     #[test]
-    fn injected_env_audit_omits_a_connected_integrations_value_from_the_log() {
-        let obj = injected_env_audit(
+    fn injected_env_omits_a_connected_integrations_value_from_the_log() {
+        let env = injected_env(
             &["A=1".into(), "GITLAB_TOKEN=glpat_real".into()],
             &["GITLAB_TOKEN".to_string()],
         )
-        .expect("event built");
-        let env = obj.get("env").unwrap().as_object().unwrap();
+        .expect("env built");
         assert!(env.contains_key("A"));
         assert!(
             !env.contains_key("GITLAB_TOKEN"),
@@ -354,17 +328,14 @@ mod tests {
     }
 
     #[test]
-    fn injected_env_audit_is_none_when_nothing_is_injected() {
-        assert!(injected_env_audit(&[], &[]).is_none());
-        assert!(
-            injected_env_audit(&["SOME_TOKEN=x".into()], &["SOME_TOKEN".to_string()]).is_none()
-        );
+    fn injected_env_is_none_when_nothing_is_injected() {
+        assert!(injected_env(&[], &[]).is_none());
+        assert!(injected_env(&["SOME_TOKEN=x".into()], &["SOME_TOKEN".to_string()]).is_none());
     }
 
     #[test]
-    fn injected_env_audit_skips_malformed_entries() {
-        let obj = injected_env_audit(&["NOEQUALS".into(), "A=1".into()], &[]).expect("event built");
-        let env = obj.get("env").unwrap().as_object().unwrap();
+    fn injected_env_skips_malformed_entries() {
+        let env = injected_env(&["NOEQUALS".into(), "A=1".into()], &[]).expect("env built");
         assert!(!env.contains_key("NOEQUALS"));
         assert!(env.contains_key("A"));
     }

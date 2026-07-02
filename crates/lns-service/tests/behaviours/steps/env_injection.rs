@@ -125,12 +125,8 @@ fn then_audit_records(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let obj = lns_service::workload_env::injected_env_audit(&world.user_env, &[])
+    let env = lns_service::workload_env::injected_env(&world.user_env, &[])
         .ok_or("no run_env audit event was built")?;
-    let env = obj
-        .get("env")
-        .and_then(|v| v.as_object())
-        .ok_or("audit event missing env object")?;
     match env.get(&key).and_then(|v| v.as_str()) {
         Some(v) if v == value => Ok(()),
         other => Err(format!("audit env[{key}] = {other:?}, want {value:?}")),

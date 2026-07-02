@@ -567,14 +567,21 @@ pub(super) async fn start(
     let recorder: Arc<dyn crate::ledger::LedgerRecorder> =
         Arc::new(crate::ledger::RunLedgerRecorder::new(
             run_id.clone(),
-            microvm_name,
+            microvm_name.clone(),
             Arc::new(crate::oauth::RealClock),
         ));
     session.set_ledger_recorder(recorder.clone());
     credential_session.set_ledger_recorder(recorder);
 
     let supervisor_bin = ensure().await?;
-    let relay = relay::spawn(&run_id, session, credential_session, frame_rx, user_env)?;
+    let relay = relay::spawn(
+        &run_id,
+        &microvm_name,
+        session,
+        credential_session,
+        frame_rx,
+        user_env,
+    )?;
     log::debug!(url = %relay.url, "relay listening");
     log::info!("Auditing", "to {}", relay.audit_path.display());
     Ok(SupervisorSession {

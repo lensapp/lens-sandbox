@@ -24,6 +24,7 @@ use super::{
     is_expected_close, seed_frames, supersede_connection, validate_authorization_header,
 };
 
+#[allow(clippy::too_many_arguments)] // per-connection glue: fd/session/credential/frames/token/audit/env/identity all flow to one spawned task.
 pub(super) async fn accept_loop(
     mut fd_rx: mpsc::UnboundedReceiver<RawFd>,
     session: Arc<ApprovalSession>,
@@ -32,6 +33,7 @@ pub(super) async fn accept_loop(
     token: String,
     audit: PathBuf,
     user_env: Vec<String>,
+    identity: super::RunIdentity,
 ) {
     let mut conn_tx: Option<mpsc::UnboundedSender<HostFrame>> = None;
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -60,6 +62,7 @@ pub(super) async fn accept_loop(
                 let token_c = token.clone();
                 let audit_c = audit.clone();
                 let user_env_c = user_env.clone();
+                let identity_c = identity.clone();
                 let budget_c = budget.clone();
                 let span = tracing::Span::current();
                 let handle = tokio::spawn(
@@ -72,6 +75,7 @@ pub(super) async fn accept_loop(
                             token_c,
                             audit_c,
                             user_env_c,
+                            identity_c,
                             shutdown_rx,
                             budget_c,
                         )
@@ -115,6 +119,7 @@ async fn handle_connection(
     expected_token: String,
     audit_path: PathBuf,
     user_env: Vec<String>,
+    identity: super::RunIdentity,
     shutdown: oneshot::Receiver<()>,
     budget: AuditBudget,
 ) -> Result<()> {
@@ -180,6 +185,8 @@ async fn handle_connection(
         chain: &mut chain,
         log: &mut audit_file,
         anchor: &mut anchor_sink,
+        run: &identity.run,
+        microvm: &identity.microvm,
     };
     super::write_run_env_event(
         &user_env,

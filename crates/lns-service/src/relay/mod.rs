@@ -70,8 +70,15 @@ pub struct Relay {
     pub fd_tx: mpsc::UnboundedSender<RawFd>,
 }
 
+#[derive(Clone)]
+pub(super) struct RunIdentity {
+    pub(super) run: String,
+    pub(super) microvm: String,
+}
+
 pub fn spawn(
     run_id: &str,
+    microvm: &str,
     session: Arc<ApprovalSession>,
     credential_session: Arc<CredentialSession>,
     frame_rx: mpsc::UnboundedReceiver<HostFrame>,
@@ -84,6 +91,10 @@ pub fn spawn(
 
     let token_clone = token.clone();
     let audit_clone = audit.clone();
+    let identity = RunIdentity {
+        run: run_id.to_string(),
+        microvm: microvm.to_string(),
+    };
 
     let span = tracing::Span::current();
     tokio::spawn(
@@ -96,6 +107,7 @@ pub fn spawn(
                 token_clone,
                 audit_clone,
                 user_env,
+                identity,
             )
             .await;
         }
@@ -126,6 +138,18 @@ pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::An
     pub(super) chain: &'a mut lns_ipc::AuditChain,
     pub(super) log: &'a mut L,
     pub(super) anchor: &'a mut S,
+    pub(super) run: &'a str,
+    pub(super) microvm: &'a str,
+}
+
+impl<L: crate::audit::AuditLog, S: crate::audit::AnchorSink> AuditWriter<'_, L, S> {
+    fn ctx(&self, clock: &dyn crate::oauth::Clock) -> crate::ocsf_audit::OcsfCtx {
+        crate::ocsf_audit::OcsfCtx::at_unix(
+            self.run.to_string(),
+            self.microvm.to_string(),
+            clock.now_unix(),
+        )
+    }
 }
 
 async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
@@ -160,11 +184,38 @@ pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::aud
     writer: &mut AuditWriter<'_, L, S>,
     clock: &dyn crate::oauth::Clock,
 ) -> Result<()> {
-    let Some(obj) = crate::workload_env::injected_env_audit(user_env, extra_managed) else {
+    let Some(env) = crate::workload_env::injected_env(user_env, extra_managed) else {
         return Ok(());
     };
-    let bytes = augment_with_ts(writer.chain, obj, clock);
+    let cx = writer.ctx(clock);
+    let bytes = writer
+        .chain
+        .augment_obj(crate::ocsf_audit::run_env_event(&cx, &env));
     write_chain_line(&bytes, writer).await
+}
+
+/// Translates the guest's legacy egress frame (`action`, `result`, `status_code`, `metadata.reason`) into an OCSF HTTP Activity; a frame with no `action` is not egress and stays legacy.
+fn guest_egress_to_ocsf(
+    cx: &crate::ocsf_audit::OcsfCtx,
+    obj: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let action = obj.get("action").and_then(Value::as_str)?;
+    let (method, url) = action.split_once(' ').unwrap_or(("", action));
+    let status_code = obj.get("status_code").and_then(Value::as_u64);
+    let result = obj.get("result").and_then(Value::as_str);
+    let reason = obj
+        .get("metadata")
+        .and_then(|m| m.get("reason"))
+        .and_then(Value::as_str);
+    Some(crate::ocsf_audit::egress_event(
+        cx,
+        method,
+        url,
+        status_code,
+        result,
+        reason,
+        true,
+    ))
 }
 
 const HOST_RESERVED_EVENTS: &[&str] = &["run_env"];
@@ -221,7 +272,11 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 );
                 return Ok(false);
             }
-            let bytes = augment_with_ts(writer.chain, stamped, clock);
+            let cx = writer.ctx(clock);
+            let bytes = match guest_egress_to_ocsf(&cx, &stamped) {
+                Some(ocsf) => writer.chain.augment_obj(ocsf),
+                None => augment_with_ts(writer.chain, stamped, clock),
+            };
             write_chain_line(&bytes, writer).await?;
         }
         Some("request_pending") => {
@@ -659,6 +714,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -709,6 +766,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -751,6 +810,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -782,6 +843,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -814,26 +877,68 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &CLOCK,
         )
         .await
         .expect("write_run_env_event");
         let written = String::from_utf8(log.bytes).unwrap();
-        assert!(written.contains("run_env"), "got: {written}");
-        assert!(
-            written.contains("CLAUDE_CODE_USE_BEDROCK"),
-            "got: {written}"
-        );
         let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(obj["class_uid"], 1007, "OCSF Process Activity: {written}");
+        assert_eq!(obj["unmapped"]["lns_kind"], "env");
         assert_eq!(
-            obj.get("origin").and_then(Value::as_str),
-            Some("host"),
+            obj["device"]["name"], "calm-finch",
+            "the run_env device is the microVM"
+        );
+        assert_eq!(obj["unmapped"]["lns_env"]["CLAUDE_CODE_USE_BEDROCK"], "1");
+        assert_eq!(
+            obj["unmapped"]["lns_origin"], "host",
             "the host-authored run_env event must carry the host origin: {written}"
         );
         assert!(written.contains("prev_hash"), "must chain: {written}");
         assert!(written.ends_with('\n'));
         assert_eq!(anchor.anchors.len(), 1, "run_env line updates the anchor");
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_translates_a_guest_egress_frame_into_ocsf() {
+        let session = session_with_dummy_sink();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(
+                r#"{"type":"audit_event","action":"GET http://api.example.test:443/","status_code":200,"result":"success","metadata":{"reason":"user-allowed-once"}}"#
+                    .into(),
+            ),
+            &session,
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+        )
+        .await
+        .expect("handle_inbound");
+        let written = String::from_utf8(log.bytes).unwrap();
+        let obj: Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(obj["class_uid"], 4002, "OCSF HTTP Activity: {written}");
+        assert_eq!(obj["http_request"]["http_method"], "GET");
+        assert_eq!(
+            obj["http_request"]["url"]["text"],
+            "http://api.example.test:443/"
+        );
+        assert_eq!(obj["http_response"]["code"], 200);
+        assert_eq!(obj["unmapped"]["lns_result"], "success");
+        assert_eq!(obj["unmapped"]["lns_origin"], "guest-proxy");
+        assert_eq!(anchor.anchors.len(), 1);
     }
 
     #[tokio::test]
@@ -848,6 +953,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &CLOCK,
         )
@@ -907,6 +1014,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &exhausted_budget,
             &CLOCK,
@@ -959,6 +1068,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -987,6 +1098,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -1015,6 +1128,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -1045,6 +1160,8 @@ mod tests {
                     chain: &mut chain,
                     log: &mut log,
                     anchor: &mut anchor,
+                    run: "test-run",
+                    microvm: "calm-finch",
                 },
                 &AuditBudget::with_defaults(),
                 &CLOCK,
@@ -1071,6 +1188,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -1111,6 +1230,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -1145,6 +1266,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
@@ -1168,6 +1291,7 @@ mod tests {
         let (_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let relay = spawn(
             "aa1234",
+            "calm-finch",
             session,
             credential_session_with_dummy_sink(),
             frame_rx,
@@ -1275,6 +1399,8 @@ mod tests {
                 chain: &mut chain,
                 log: &mut log,
                 anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
             },
             &budget,
             &CLOCK,
