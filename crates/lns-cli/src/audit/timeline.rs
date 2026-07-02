@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -86,16 +86,26 @@ fn emit_json(rows: &[TimelineRow], out: &mut dyn Write) -> Result<()> {
 }
 
 fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<Option<String>> {
-    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut names: HashMap<String, (String, String)> = HashMap::new();
     let mut ids: Vec<String> = Vec::new();
     for run_id in lns_audit::run_ids_in(runs_root)? {
+        if let Some((name, ts)) = lns_audit::run_microvm_identity(runs_root, &run_id) {
+            index_newest(&mut names, name, run_id.clone(), ts);
+        }
         ids.push(run_id);
     }
     for event in lns_audit::stream_ledger(ledger_path)? {
-        let event = event?;
-        let run = lns_audit::read(&event)?.run;
-        ids.push(run.clone());
-        names.insert(lns_audit::microvm(&event), run);
+        let Ok(event) = event else { continue };
+        let Ok(row) = lns_audit::read(&event) else {
+            continue;
+        };
+        index_newest(
+            &mut names,
+            lns_audit::microvm(&event),
+            row.run.clone(),
+            row.ts,
+        );
+        ids.push(row.run);
     }
     ids.sort();
     ids.dedup();
@@ -103,13 +113,27 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
     if ids.iter().any(|id| id == sandbox) {
         return Ok(Some(sandbox.to_string()));
     }
-    if let Some(run) = names.get(sandbox) {
+    if let Some((run, _ts)) = names.get(sandbox) {
         return Ok(Some(run.clone()));
     }
     let mut prefix_matches = ids.iter().filter(|id| id.starts_with(sandbox));
     match (prefix_matches.next(), prefix_matches.next()) {
         (Some(only), None) => Ok(Some(only.clone())),
         _ => Ok(None),
+    }
+}
+
+fn index_newest(
+    names: &mut HashMap<String, (String, String)>,
+    name: String,
+    run: String,
+    ts: String,
+) {
+    match names.get(&name) {
+        Some((_, prev_ts)) if *prev_ts >= ts => {}
+        _ => {
+            names.insert(name, (run, ts));
+        }
     }
 }
 
@@ -329,19 +353,51 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_run_name_resolves_to_the_most_recent_run() {
+    fn a_reused_run_name_resolves_to_the_most_recent_run_regardless_of_ledger_order() {
         let fix = Fixture::new();
         let older = "1111111100000000000000000000aaaa";
         let newer = "2222222200000000000000000000bbbb";
+        let middle = "3333333300000000000000000000cccc";
         fix.write_ledger(&[
             connection(older, "2026-06-29T10:00:00Z"),
             connection(newer, "2026-06-29T20:00:00Z"),
+            connection(middle, "2026-06-29T15:00:00Z"),
         ]);
         let resolved = resolve_scope("calm-finch", &fix.runs_root, &fix.ledger_path).unwrap();
         assert_eq!(
             resolved.as_deref(),
             Some(newer),
-            "a recurring auto-name must resolve to its latest holder, not the oldest"
+            "a recurring auto-name must resolve to its latest holder by time, not by ledger position"
+        );
+    }
+
+    #[test]
+    fn an_auto_name_resolves_a_run_that_only_produced_run_log_events() {
+        let fix = Fixture::new();
+        fix.write_run(RUN, &[volume(RUN, "2026-06-29T13:00:00Z", "data", "/data")]);
+        let resolved = resolve_scope("calm-finch", &fix.runs_root, &fix.ledger_path).unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(RUN),
+            "a sandbox that never wrote a ledger row is still resolvable by its auto-name via its run-log device.name"
+        );
+    }
+
+    #[test]
+    fn resolve_scope_skips_corrupt_ledger_lines_instead_of_failing_every_lookup() {
+        let fix = Fixture::new();
+        let good = connection(RUN, "2026-06-29T14:00:00Z");
+        let unreadable = r#"{"class_uid":1,"unmapped":{"lns_run":"x"}}"#;
+        std::fs::write(
+            &fix.ledger_path,
+            format!("{good}\n{unreadable}\ntorn-partial-line\n"),
+        )
+        .unwrap();
+        let resolved = resolve_scope("calm-finch", &fix.runs_root, &fix.ledger_path).unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(RUN),
+            "a torn or unreadable ledger line must not blank name resolution for every sandbox"
         );
     }
 

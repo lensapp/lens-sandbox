@@ -45,13 +45,17 @@ pub(crate) fn unix_from_rfc3339_opt(ts: &str) -> Option<u64> {
 }
 
 fn ymdhms_to_unix(year: u64, month: u64, day: u64) -> u64 {
-    let y = if month <= 2 { year - 1 } else { year };
+    let y = if month <= 2 {
+        year.saturating_sub(1)
+    } else {
+        year
+    };
     let era = y / 400;
     let yoe = y - era * 400;
     let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doy = (153 * mp + 2) / 5 + day.saturating_sub(1);
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    (era * 146_097 + doe).saturating_sub(719_468)
 }
 
 fn unix_to_ymdhms(secs: u64) -> (i32, u8, u8, u8, u8, u8) {
@@ -120,6 +124,26 @@ mod tests {
             0,
             "non-numeric year"
         );
+    }
+
+    #[test]
+    fn ymdhms_to_unix_clamps_pre_epoch_and_degenerate_fields_to_zero_without_panicking() {
+        assert_eq!(
+            ymdhms_to_unix(1900, 6, 15),
+            0,
+            "a pre-1970 date is unrepresentable in unix seconds and must clamp, not underflow-panic"
+        );
+        assert_eq!(ymdhms_to_unix(0, 1, 1), 0, "year 0 with month <= 2 clamps");
+        assert_eq!(
+            ymdhms_to_unix(2024, 1, 0),
+            ymdhms_to_unix(2024, 1, 1),
+            "day 0 saturates to day 1 rather than underflowing"
+        );
+    }
+
+    #[test]
+    fn unix_from_rfc3339_clamps_a_pre_epoch_timestamp_instead_of_panicking() {
+        assert_eq!(unix_from_rfc3339("1900-06-15T12:00:00Z"), 43_200);
     }
 
     #[test]

@@ -51,23 +51,38 @@ fn collect_ledger_rows(
         timeline.warnings.push(warning);
     }
     for event in store::stream_ledger(ledger_path)? {
-        let event = event?;
-        let row = ocsf::read(&event).context("reading ledger event")?;
-        if scope.is_some_and(|run_id| row.run != run_id) {
-            continue;
+        match read_ledger_row(event) {
+            Ok(row) => {
+                if scope.is_some_and(|run_id| row.run != run_id) {
+                    continue;
+                }
+                timeline.rows.push(row);
+            }
+            Err(reason) => timeline.warnings.push(unreadable_ledger_warning(&reason)),
         }
-        let when = crate::friendly_when(&row.ts);
-        timeline.rows.push(TimelineRow {
-            ts: row.ts,
-            when,
-            run: row.run,
-            kind: row.kind,
-            detail: row.detail,
-            integration: row.integration,
-            raw: Value::Object(event),
-        });
     }
     Ok(())
+}
+
+fn read_ledger_row(
+    event: Result<serde_json::Map<String, Value>>,
+) -> std::result::Result<TimelineRow, String> {
+    let event = event.map_err(|e| format!("{e:#}"))?;
+    let row = ocsf::read(&event).map_err(|e| format!("{e:#}"))?;
+    let when = crate::friendly_when(&row.ts);
+    Ok(TimelineRow {
+        ts: row.ts,
+        when,
+        run: row.run,
+        kind: row.kind,
+        detail: row.detail,
+        integration: row.integration,
+        raw: Value::Object(event),
+    })
+}
+
+fn unreadable_ledger_warning(reason: &str) -> String {
+    format!("audit integrity: unreadable ledger entry ({reason}) — that entry is not shown")
 }
 
 fn collect_run_rows(runs_root: &Path, scope: Option<&str>, timeline: &mut Timeline) -> Result<()> {
@@ -152,6 +167,25 @@ pub fn run_ids_in(runs_root: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(ids)
+}
+
+/// The microVM name and timestamp of a run's first readable audit event, so a run that only ever produced run-log events (no ledger row) is still resolvable by its auto-name.
+pub fn run_microvm_identity(runs_root: &Path, run_id: &str) -> Option<(String, String)> {
+    let log_path = runs_root.join(run_id).join("audit.jsonl");
+    let text = std::fs::read_to_string(log_path).ok()?;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Ok(row) = ocsf::read(&obj) else {
+            continue;
+        };
+        return Some((ocsf::microvm(&obj), row.ts));
+    }
+    None
 }
 
 fn sort_newest_first(rows: &mut [TimelineRow]) {
@@ -515,13 +549,86 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_ledger_event_is_surfaced() {
+    fn an_unreadable_ledger_event_is_skipped_with_a_warning_not_an_error() {
         let fix = Fixture::new();
         fix.write_ledger(&[unreadable_event()]);
-        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
+        let timeline = fix.collect(None);
         assert!(
-            format!("{err:#}").contains("reading ledger event"),
-            "{err:#}"
+            timeline.rows.is_empty(),
+            "the unreadable ledger event yields no row"
         );
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("ledger") && w.contains("not shown")),
+            "{:?}",
+            timeline.warnings
+        );
+    }
+
+    #[test]
+    fn a_torn_ledger_line_is_skipped_while_the_good_ledger_events_still_list() {
+        let fix = Fixture::new();
+        let (mut payload, anchor) = chained(&[connection("aa01", "2026-06-29T14:02:11Z")]);
+        payload.push_str("torn-partial-append\n");
+        std::fs::write(&fix.ledger_path, payload).unwrap();
+        std::fs::write(
+            fix.ledger_path.with_file_name("ledger.anchor"),
+            anchor.to_line(),
+        )
+        .unwrap();
+
+        let timeline = fix.collect(None);
+
+        assert_eq!(timeline.rows.len(), 1, "the good ledger event still lists");
+        assert_eq!(timeline.rows[0].kind, "connection");
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("ledger") && w.contains("not shown")),
+            "a torn ledger line is flagged, not fatal for every sandbox: {:?}",
+            timeline.warnings
+        );
+    }
+
+    #[test]
+    fn run_microvm_identity_reads_the_name_and_ts_of_the_first_readable_event() {
+        let fix = Fixture::new();
+        fix.write_run(
+            "aa01",
+            &[egress("aa01", "2026-06-29T14:02:00Z", "http://x/")],
+        );
+        let (name, ts) = run_microvm_identity(&fix.runs_root, "aa01").expect("identity");
+        assert_eq!(name, "calm-finch");
+        assert_eq!(ts, "2026-06-29T14:02:00Z");
+    }
+
+    #[test]
+    fn run_microvm_identity_skips_unreadable_leading_lines() {
+        let fix = Fixture::new();
+        let dir = fix.runs_root.join("aa01");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = String::from("garbage-not-json\n\n");
+        body.push_str(&unreadable_event());
+        body.push('\n');
+        let (good, _anchor) = chained(&[egress("aa01", "2026-06-29T14:02:00Z", "http://x/")]);
+        body.push_str(&good);
+        std::fs::write(dir.join("audit.jsonl"), body).unwrap();
+
+        let (name, ts) = run_microvm_identity(&fix.runs_root, "aa01").expect("identity");
+        assert_eq!(name, "calm-finch");
+        assert_eq!(ts, "2026-06-29T14:02:00Z");
+    }
+
+    #[test]
+    fn run_microvm_identity_is_none_for_a_missing_or_wholly_unreadable_log() {
+        let fix = Fixture::new();
+        assert!(run_microvm_identity(&fix.runs_root, "absent").is_none());
+        let dir = fix.runs_root.join("aa01");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("audit.jsonl"), "not json\n\n").unwrap();
+        assert!(run_microvm_identity(&fix.runs_root, "aa01").is_none());
     }
 }
