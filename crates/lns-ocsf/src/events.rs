@@ -113,7 +113,7 @@ pub fn approval(
         "finding_info",
         json!({"uid": target, "title": reason.unwrap_or(approval_kind)}),
     )
-    .set("disposition_id", disp.into())
+    .set_disposition(disp)
     .note("lns_approval_kind", approval_kind.into())
     .note("lns_decision", decision.into())
     .note("lns_target", target.into());
@@ -160,15 +160,15 @@ pub fn egress(
         } else {
             status::FAILURE
         };
-        ev = ev.set("status_id", id.into());
+        ev = ev.set_status(id);
         ev = ev.note("lns_result", result.into());
     }
     if let Some(reason) = reason {
         ev = ev.note("lns_reason", reason.into());
         if reason.contains("allowed") {
-            ev = ev.set("disposition_id", disposition::ALLOWED.into());
+            ev = ev.set_disposition(disposition::ALLOWED);
         } else if reason.contains("denied") {
-            ev = ev.set("disposition_id", disposition::BLOCKED.into());
+            ev = ev.set_disposition(disposition::BLOCKED);
         }
     }
     ev.build()
@@ -334,8 +334,10 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 2004);
+        assert_eq!(ev["class_name"], "Detection Finding");
         assert_eq!(ev["severity_id"], 1);
         assert_eq!(ev["disposition_id"], 1);
+        assert_eq!(ev["disposition"], "Allowed");
         assert_eq!(ev["finding_info"]["uid"], "api.example.test:443");
         assert_eq!(ev["finding_info"]["title"], "policy-ambiguous");
         assert_eq!(ev["unmapped"]["lns_approval_kind"], "network");
@@ -359,6 +361,7 @@ mod tests {
         assert_schema_valid(&ev);
         assert_eq!(ev["severity_id"], 3);
         assert_eq!(ev["disposition_id"], 2);
+        assert_eq!(ev["disposition"], "Blocked");
         assert_eq!(ev["finding_info"]["title"], "credential");
         assert_eq!(ev["unmapped"]["lns_decision"], "deny_always");
         assert_eq!(ev["unmapped"]["lns_integration"], "some-provider");
@@ -386,8 +389,11 @@ mod tests {
         );
         assert_eq!(ev["http_response"]["code"], 200);
         assert_eq!(ev["status_id"], 1);
+        assert_eq!(ev["status"], "Success");
+        assert_eq!(ev["activity_name"], "Get");
         assert_eq!(ev["unmapped"]["lns_result"], "success");
         assert_eq!(ev["disposition_id"], 1);
+        assert_eq!(ev["disposition"], "Allowed");
         assert_eq!(ev["unmapped"]["lns_origin"], "guest-proxy");
     }
 
@@ -404,9 +410,12 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["activity_id"], 6);
+        assert_eq!(ev["activity_name"], "Post");
         assert_eq!(ev["status_id"], 2);
+        assert_eq!(ev["status"], "Failure");
         assert_eq!(ev["unmapped"]["lns_result"], "error");
         assert_eq!(ev["disposition_id"], 2);
+        assert_eq!(ev["disposition"], "Blocked");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
         assert!(ev.get("http_response").is_none());
     }
