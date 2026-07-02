@@ -24,7 +24,7 @@ use super::{
     is_expected_close, seed_frames, supersede_connection, validate_authorization_header,
 };
 
-#[allow(clippy::too_many_arguments)] // per-connection glue: fd/session/credential/frames/token/audit/env/identity all flow to one spawned task.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_loop(
     mut fd_rx: mpsc::UnboundedReceiver<RawFd>,
     session: Arc<ApprovalSession>,

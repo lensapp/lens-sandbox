@@ -405,10 +405,7 @@ mod tests {
         assert_schema_valid(&ev);
         assert_eq!(ev["activity_id"], 6);
         assert_eq!(ev["status_id"], 2);
-        assert_eq!(
-            ev["unmapped"]["lns_result"], "error",
-            "a non-success result is preserved verbatim, not flattened to a boolean"
-        );
+        assert_eq!(ev["unmapped"]["lns_result"], "error");
         assert_eq!(ev["disposition_id"], 2);
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
         assert!(ev.get("http_response").is_none());

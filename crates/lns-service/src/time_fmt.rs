@@ -12,7 +12,6 @@ pub(crate) fn rfc3339_from_unix(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Inverts `rfc3339_from_unix` for our fixed `YYYY-MM-DDTHH:MM:SSZ` shape; a malformed stamp yields 0 so OCSF `time` degrades rather than panics.
 pub(crate) fn unix_from_rfc3339(ts: &str) -> u64 {
     let b = ts.as_bytes();
     if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
