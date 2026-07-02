@@ -86,10 +86,11 @@ pub fn approval(
     ctx: &Context,
     approval_kind: &str,
     target: &str,
-    allowed: bool,
+    decision: &str,
     reason: Option<&str>,
     integration: Option<&str>,
 ) -> Value {
+    let allowed = decision.starts_with("allow");
     let sev = if allowed {
         severity::INFORMATIONAL
     } else {
@@ -114,6 +115,7 @@ pub fn approval(
     )
     .set("disposition_id", disp.into())
     .note("lns_approval_kind", approval_kind.into())
+    .note("lns_decision", decision.into())
     .note("lns_target", target.into());
     if let Some(reason) = reason {
         ev = ev.note("lns_reason", reason.into());
@@ -129,7 +131,7 @@ pub fn egress(
     method: &str,
     url: &str,
     status_code: Option<u64>,
-    success: Option<bool>,
+    result: Option<&str>,
     reason: Option<&str>,
     guest_proxied: bool,
 ) -> Value {
@@ -152,13 +154,14 @@ pub fn egress(
     if let Some(code) = status_code {
         ev = ev.set("http_response", json!({"code": code}));
     }
-    if let Some(success) = success {
-        let id = if success {
+    if let Some(result) = result {
+        let id = if result == "success" {
             status::SUCCESS
         } else {
             status::FAILURE
         };
         ev = ev.set("status_id", id.into());
+        ev = ev.note("lns_result", result.into());
     }
     if let Some(reason) = reason {
         ev = ev.note("lns_reason", reason.into());
@@ -325,7 +328,7 @@ mod tests {
             &ctx(),
             "network",
             "api.example.test:443",
-            true,
+            "allow_always",
             Some("policy-ambiguous"),
             None,
         );
@@ -336,6 +339,10 @@ mod tests {
         assert_eq!(ev["finding_info"]["uid"], "api.example.test:443");
         assert_eq!(ev["finding_info"]["title"], "policy-ambiguous");
         assert_eq!(ev["unmapped"]["lns_approval_kind"], "network");
+        assert_eq!(
+            ev["unmapped"]["lns_decision"], "allow_always",
+            "the exact decision survives so the timeline still reads allow-always, not a collapsed allow"
+        );
         assert_eq!(ev["unmapped"]["lns_reason"], "policy-ambiguous");
     }
 
@@ -345,7 +352,7 @@ mod tests {
             &ctx(),
             "credential",
             "some-provider",
-            false,
+            "deny_always",
             None,
             Some("some-provider"),
         );
@@ -353,6 +360,7 @@ mod tests {
         assert_eq!(ev["severity_id"], 3);
         assert_eq!(ev["disposition_id"], 2);
         assert_eq!(ev["finding_info"]["title"], "credential");
+        assert_eq!(ev["unmapped"]["lns_decision"], "deny_always");
         assert_eq!(ev["unmapped"]["lns_integration"], "some-provider");
         assert!(ev["unmapped"].get("lns_reason").is_none());
     }
@@ -364,7 +372,7 @@ mod tests {
             "GET",
             "http://api.example.test:443/",
             Some(200),
-            Some(true),
+            Some("success"),
             Some("user-allowed-once"),
             true,
         );
@@ -378,6 +386,7 @@ mod tests {
         );
         assert_eq!(ev["http_response"]["code"], 200);
         assert_eq!(ev["status_id"], 1);
+        assert_eq!(ev["unmapped"]["lns_result"], "success");
         assert_eq!(ev["disposition_id"], 1);
         assert_eq!(ev["unmapped"]["lns_origin"], "guest-proxy");
     }
@@ -389,13 +398,17 @@ mod tests {
             "POST",
             "http://x.test/",
             None,
-            Some(false),
+            Some("error"),
             Some("user-denied-once"),
             false,
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["activity_id"], 6);
         assert_eq!(ev["status_id"], 2);
+        assert_eq!(
+            ev["unmapped"]["lns_result"], "error",
+            "a non-success result is preserved verbatim, not flattened to a boolean"
+        );
         assert_eq!(ev["disposition_id"], 2);
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
         assert!(ev.get("http_response").is_none());
@@ -414,6 +427,7 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert!(ev.get("status_id").is_none());
+        assert!(ev["unmapped"].get("lns_result").is_none());
         assert!(ev.get("disposition_id").is_none());
         assert_eq!(ev["unmapped"]["lns_reason"], "prefetch");
     }
