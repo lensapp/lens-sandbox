@@ -63,6 +63,13 @@ so a compromised log surfaces even when you only meant to look:
   (An empty log is not flagged — it has nothing to protect, and a log that once held
   events but was wiped is caught as a truncation against its surviving anchor.)
 
+- a single line that can't be parsed as an audit event — that one entry is skipped and
+  flagged, and the rest of the timeline still lists:
+
+  ```text
+  audit integrity: unreadable entry at line 12 of <path> (<reason>) — that entry is not shown
+  ```
+
 The warning marks the entries untrustworthy; the events are still printed so you can
 see what the log claims.
 

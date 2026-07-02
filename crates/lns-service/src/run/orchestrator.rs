@@ -18,11 +18,12 @@ use super::{
 
 pub async fn handle(
     run_id: String,
+    microvm: String,
     args: RunImageArgs,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) {
-    let result = orchestrate(run_id, args, frame_tx.clone(), input_rx)
+    let result = orchestrate(run_id, microvm, args, frame_tx.clone(), input_rx)
         .instrument(tracing::Span::current())
         .await;
     emit_completion(&frame_tx, result).await;
@@ -44,6 +45,7 @@ pub async fn handle(
 )]
 async fn orchestrate(
     run_id: String,
+    microvm: String,
     args: RunImageArgs,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
@@ -73,9 +75,7 @@ async fn orchestrate(
         let (session, initrd) = tokio::try_join!(
             supervisor::SupervisorSession::start_if_policy(
                 run_id.clone(),
-                crate::run_registry::inspect(&run_id)
-                    .map(|d| d.summary.name)
-                    .unwrap_or_else(|| run_id.clone()),
+                microvm.clone(),
                 policy.as_deref().map(Path::new),
                 guest_tools.root.clone(),
                 args.env.clone(),
@@ -130,9 +130,6 @@ async fn orchestrate(
     let upper_disk_path = upper_res?;
     let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
-    let microvm = crate::run_registry::inspect(&run_id)
-        .map(|d| d.summary.name)
-        .unwrap_or_default();
     for vol in &args.volumes {
         crate::audit::record_volume_attached(
             &run_id,

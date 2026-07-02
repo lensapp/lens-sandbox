@@ -96,30 +96,42 @@ fn collect_one_run(runs_root: &Path, run_id: &str, timeline: &mut Timeline) -> R
         if line.trim().is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(line)
-            .with_context(|| format!("parsing audit line {} of {}", idx + 1, log_path.display()))?;
-        let Value::Object(mut obj) = value else {
-            anyhow::bail!(
-                "audit line {} of {} is not a JSON object",
-                idx + 1,
-                log_path.display()
-            );
-        };
-        obj.insert("run".to_string(), Value::String(run_id.to_string()));
-        let row = ocsf::read(&obj)
-            .with_context(|| format!("reading audit line {} of {}", idx + 1, log_path.display()))?;
-        let when = crate::friendly_when(&row.ts);
-        timeline.rows.push(TimelineRow {
-            ts: row.ts,
-            when,
-            run: run_id.to_string(),
-            kind: row.kind,
-            detail: row.detail,
-            integration: row.integration,
-            raw: Value::Object(obj),
-        });
+        match read_run_row(line, run_id) {
+            Ok(row) => timeline.rows.push(row),
+            Err(reason) => {
+                timeline
+                    .warnings
+                    .push(unreadable_line_warning(&log_path, idx + 1, &reason))
+            }
+        }
     }
     Ok(())
+}
+
+fn read_run_row(line: &str, run_id: &str) -> std::result::Result<TimelineRow, String> {
+    let value: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let Value::Object(mut obj) = value else {
+        return Err("line is not a JSON object".to_string());
+    };
+    obj.insert("run".to_string(), Value::String(run_id.to_string()));
+    let row = ocsf::read(&obj).map_err(|e| format!("{e:#}"))?;
+    let when = crate::friendly_when(&row.ts);
+    Ok(TimelineRow {
+        ts: row.ts,
+        when,
+        run: run_id.to_string(),
+        kind: row.kind,
+        detail: row.detail,
+        integration: row.integration,
+        raw: Value::Object(obj),
+    })
+}
+
+fn unreadable_line_warning(log: &Path, line_no: usize, reason: &str) -> String {
+    format!(
+        "audit integrity: unreadable entry at line {line_no} of {} ({reason}) — that entry is not shown",
+        log.display()
+    )
 }
 
 pub fn run_ids_in(runs_root: &Path) -> Result<Vec<String>> {
@@ -358,23 +370,67 @@ mod tests {
     }
 
     #[test]
-    fn a_non_object_line_is_an_error() {
+    fn a_non_object_line_is_skipped_with_a_warning_not_an_error() {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("aa01");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("audit.jsonl"), "42\n").unwrap();
-        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
-        assert!(format!("{err:#}").contains("not a JSON object"), "{err:#}");
+        let timeline = fix.collect(None);
+        assert!(timeline.rows.is_empty(), "a non-object line yields no row");
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("not a JSON object") && w.contains("not shown")),
+            "{:?}",
+            timeline.warnings
+        );
     }
 
     #[test]
-    fn a_malformed_line_surfaces_its_line_number() {
+    fn a_malformed_line_is_skipped_with_a_line_numbered_warning() {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("aa01");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("audit.jsonl"), "not json\n").unwrap();
-        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
-        assert!(format!("{err:#}").contains("audit line 1"), "{err:#}");
+        let timeline = fix.collect(None);
+        assert!(timeline.rows.is_empty());
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("line 1") && w.contains("not shown")),
+            "{:?}",
+            timeline.warnings
+        );
+    }
+
+    #[test]
+    fn a_bad_line_is_skipped_while_the_good_lines_in_the_same_run_still_list() {
+        let fix = Fixture::new();
+        let dir = fix.runs_root.join("aa01");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut payload, anchor) = chained(&[egress(
+            "aa01",
+            "2026-06-29T14:02:00Z",
+            "http://api.example.test:443/",
+        )]);
+        payload.push_str("this is not json\n");
+        std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+        std::fs::write(dir.join("audit.anchor"), anchor.to_line()).unwrap();
+
+        let timeline = fix.collect(None);
+
+        assert_eq!(timeline.rows.len(), 1, "the good egress line still lists");
+        assert_eq!(timeline.rows[0].kind, "egress");
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("line 2") && w.contains("not shown")),
+            "the unreadable second line is flagged: {:?}",
+            timeline.warnings
+        );
     }
 
     #[test]
@@ -434,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_run_event_surfaces_its_line_number() {
+    fn an_unreadable_run_event_is_skipped_with_a_line_numbered_warning() {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("aa01");
         std::fs::create_dir_all(&dir).unwrap();
@@ -442,10 +498,19 @@ mod tests {
         std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
         std::fs::write(dir.join("audit.anchor"), anchor.to_line()).unwrap();
 
-        let err = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap_err();
+        let timeline = fix.collect(None);
+
         assert!(
-            format!("{err:#}").contains("reading audit line 1"),
-            "{err:#}"
+            timeline.rows.is_empty(),
+            "the unreadable event yields no row"
+        );
+        assert!(
+            timeline
+                .warnings
+                .iter()
+                .any(|w| w.contains("line 1") && w.contains("lns_kind")),
+            "the missing-kind event is flagged by line: {:?}",
+            timeline.warnings
         );
     }
 

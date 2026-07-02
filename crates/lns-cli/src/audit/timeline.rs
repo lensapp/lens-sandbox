@@ -95,7 +95,7 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
         let event = event?;
         let run = lns_audit::read(&event)?.run;
         ids.push(run.clone());
-        names.entry(lns_audit::microvm(&event)).or_insert(run);
+        names.insert(lns_audit::microvm(&event), run);
     }
     ids.sort();
     ids.dedup();
@@ -329,6 +329,23 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_run_name_resolves_to_the_most_recent_run() {
+        let fix = Fixture::new();
+        let older = "1111111100000000000000000000aaaa";
+        let newer = "2222222200000000000000000000bbbb";
+        fix.write_ledger(&[
+            connection(older, "2026-06-29T10:00:00Z"),
+            connection(newer, "2026-06-29T20:00:00Z"),
+        ]);
+        let resolved = resolve_scope("calm-finch", &fix.runs_root, &fix.ledger_path).unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(newer),
+            "a recurring auto-name must resolve to its latest holder, not the oldest"
+        );
+    }
+
+    #[test]
     fn a_unique_run_id_prefix_scopes_to_the_matching_run() {
         let fix = Fixture::new();
         fix.write_run(RUN, &[volume(RUN, "2026-06-29T13:00:00Z", "data", "/data")]);
@@ -456,11 +473,17 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_run_line_propagates_the_read_error() {
+    fn a_corrupt_run_line_is_skipped_with_a_warning_not_a_hard_error() {
         let fix = Fixture::new();
         let dir = fix.runs_root.join("broken");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("audit.jsonl"), "not json\n").unwrap();
-        assert!(fix.collect(&args()).is_err());
+        let timeline = collect_timeline(&fix.runs_root, &fix.ledger_path, None).unwrap();
+        assert!(timeline.rows.is_empty(), "the corrupt line yields no row");
+        assert!(
+            timeline.warnings.iter().any(|w| w.contains("not shown")),
+            "a corrupt run line is flagged, not fatal: {:?}",
+            timeline.warnings
+        );
     }
 }

@@ -11,16 +11,19 @@ fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
     extra_managed.iter().any(|m| m == env_var)
 }
 
+pub const REDACTED_ENV_VALUE: &str = "<redacted>";
+
+/// The audit record needs the set of injected var names, never their values — a mistyped secret in `-e KEY=VALUE` must not become durable audit data, so every value is redacted.
 pub fn injected_env(user_env: &[String], extra_managed: &[String]) -> Option<Map<String, Value>> {
     let mut env = Map::new();
     for kv in user_env {
-        let Some((k, v)) = kv.split_once('=') else {
+        let Some((k, _v)) = kv.split_once('=') else {
             continue;
         };
         if is_run_managed(k, extra_managed) {
             continue;
         }
-        env.insert(k.to_string(), Value::String(v.to_string()));
+        env.insert(k.to_string(), Value::String(REDACTED_ENV_VALUE.to_string()));
     }
     if env.is_empty() { None } else { Some(env) }
 }
@@ -296,9 +299,27 @@ mod tests {
     }
 
     #[test]
-    fn injected_env_records_non_credential_vars() {
+    fn injected_env_records_non_credential_var_names() {
         let env = injected_env(&["CLAUDE_CODE_USE_BEDROCK=1".into()], &[]).expect("env built");
-        assert_eq!(env.get("CLAUDE_CODE_USE_BEDROCK").unwrap(), "1");
+        assert_eq!(
+            env.get("CLAUDE_CODE_USE_BEDROCK").unwrap(),
+            REDACTED_ENV_VALUE
+        );
+    }
+
+    #[test]
+    fn injected_env_redacts_values_so_a_mistyped_secret_never_persists() {
+        let env = injected_env(&["SOME_PRIVATE_TOKEN=super-secret-value".into()], &[])
+            .expect("env built");
+        assert!(
+            env.contains_key("SOME_PRIVATE_TOKEN"),
+            "the var name is still recorded for the audit trail"
+        );
+        assert_eq!(
+            env.get("SOME_PRIVATE_TOKEN").unwrap(),
+            REDACTED_ENV_VALUE,
+            "the raw -e value must never land in a durable audit record"
+        );
     }
 
     #[test]
