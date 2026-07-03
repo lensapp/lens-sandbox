@@ -360,7 +360,7 @@ pub fn ls_filter_matches(filters: &[LsFilter], run: &lns_ipc::RunSummary) -> boo
     })
 }
 
-// Newtype: clap would otherwise treat Vec<u8> as a multi-value arg and downcast at runtime.
+// clap's derive reads a bare `Vec<u8>` field as a repeatable arg (one value per byte); the newtype hides the Vec so the whole chord flows through a single `value_parser`.
 #[derive(Clone, Debug)]
 pub struct DetachChord(pub Vec<u8>);
 
