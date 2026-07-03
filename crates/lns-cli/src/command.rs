@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::PathBuf;
@@ -78,7 +79,9 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    build_cli().try_get_matches_from(normalize_argv(argv))
+    let app = build_cli();
+    let normalized = normalize_argv(&app, argv);
+    app.try_get_matches_from(normalized)
 }
 
 pub fn spec_for(name: &str) -> Option<CommandSpec> {
@@ -99,20 +102,21 @@ where
     A::from_arg_matches(sub)
 }
 
-fn normalize_argv<I, T>(argv: I) -> Vec<OsString>
+fn normalize_argv<I, T>(app: &clap::Command, argv: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
     let raw: Vec<OsString> = argv.into_iter().map(Into::into).collect();
-    match first_subcommand(&raw) {
-        Some((idx, "run")) => normalize_run_argv(&raw, idx),
-        Some((idx, "exec")) => normalize_exec_argv(&raw, idx),
+    match first_subcommand(app, &raw) {
+        Some((idx, "run")) => normalize_run_argv(app, &raw, idx),
+        Some((idx, "exec")) => normalize_exec_argv(app, &raw, idx),
         _ => raw,
     }
 }
 
-fn first_subcommand(raw: &[OsString]) -> Option<(usize, &'static str)> {
+fn first_subcommand(app: &clap::Command, raw: &[OsString]) -> Option<(usize, &'static str)> {
+    let global = value_consuming_options(app);
     let mut idx = 1;
     while idx < raw.len() {
         let Some(arg) = raw[idx].to_str() else {
@@ -122,7 +126,7 @@ fn first_subcommand(raw: &[OsString]) -> Option<(usize, &'static str)> {
         if arg == "--" {
             return None;
         }
-        if arg.starts_with('-') && top_level_option_consumes_value(arg) && !arg.contains('=') {
+        if arg.starts_with('-') && global.contains(arg) && !arg.contains('=') {
             idx += 2;
         } else if arg.starts_with('-') {
             idx += 1;
@@ -141,19 +145,41 @@ fn normalized_subcommand(arg: &str) -> Option<&'static str> {
     }
 }
 
-fn top_level_option_consumes_value(arg: &str) -> bool {
-    matches!(arg, "--log-level")
-}
-
-fn normalize_exec_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
+fn normalize_exec_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec<OsString> {
+    let consumes = options_consuming_next_value(app, "exec");
     let mut out = raw[..=idx].to_vec();
-    out.extend(expand_it_cluster(&raw[idx + 1..]));
+    let rest = &raw[idx + 1..];
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = &rest[i];
+        if arg == "--" {
+            out.extend(rest[i..].iter().cloned());
+            return out;
+        }
+        if let Some(expanded) = expand_it(arg) {
+            out.extend(expanded);
+            i += 1;
+            continue;
+        }
+        out.push(arg.clone());
+        let s = arg.to_string_lossy();
+        if consumes.contains(s.as_ref())
+            && !s.contains('=')
+            && let Some(value) = rest.get(i + 1)
+        {
+            out.push(value.clone());
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
     out
 }
 
-fn normalize_run_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
+fn normalize_run_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec<OsString> {
+    let consumes = options_consuming_next_value(app, "run");
     let mut out = raw[..=idx].to_vec();
-    let rest = expand_it_cluster(&raw[idx + 1..]);
+    let rest = &raw[idx + 1..];
     let mut image_seen = false;
     let mut i = 0;
     while i < rest.len() {
@@ -167,9 +193,14 @@ fn normalize_run_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
             out.extend(rest[i..].iter().cloned());
             return out;
         }
+        if let Some(expanded) = expand_it(arg) {
+            out.extend(expanded);
+            i += 1;
+            continue;
+        }
         out.push(arg.clone());
         let s = arg.to_string_lossy();
-        if run_option_consumes_value(&s)
+        if consumes.contains(s.as_ref())
             && !s.contains('=')
             && let Some(value) = rest.get(i + 1)
         {
@@ -185,46 +216,42 @@ fn normalize_run_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
     out
 }
 
-fn expand_it_cluster(args: &[OsString]) -> Vec<OsString> {
-    args.iter()
-        .flat_map(|arg| match arg.to_str() {
-            Some("-it") => vec![OsString::from("-i"), OsString::from("-t")],
-            Some("-ti") => vec![OsString::from("-t"), OsString::from("-i")],
-            _ => vec![arg.clone()],
-        })
-        .collect()
+fn expand_it(arg: &OsString) -> Option<Vec<OsString>> {
+    match arg.to_str() {
+        Some("-it") => Some(vec![OsString::from("-i"), OsString::from("-t")]),
+        Some("-ti") => Some(vec![OsString::from("-t"), OsString::from("-i")]),
+        _ => None,
+    }
 }
 
-fn run_option_consumes_value(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--name"
-            | "--registry"
-            | "--cpus"
-            | "--mem"
-            | "--memory"
-            | "--policy"
-            | "--user"
-            | "--sandbox-user"
-            | "--sandbox-uid"
-            | "--pull"
-            | "--entrypoint"
-            | "--hostname"
-            | "--detach-keys"
-            | "--workdir"
-            | "--env"
-            | "--env-file"
-            | "--publish"
-            | "--volume"
-            | "--mount"
-            | "-m"
-            | "-u"
-            | "-h"
-            | "-w"
-            | "-e"
-            | "-p"
-            | "-v"
-    )
+fn options_consuming_next_value(app: &clap::Command, sub: &str) -> HashSet<String> {
+    let mut set = value_consuming_options(app);
+    if let Some(cmd) = app.get_subcommands().find(|c| c.get_name() == sub) {
+        set.extend(value_consuming_options(cmd));
+    }
+    set
+}
+
+fn value_consuming_options(cmd: &clap::Command) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for arg in cmd.get_arguments() {
+        if arg.is_positional()
+            || arg.is_require_equals_set()
+            || !matches!(
+                arg.get_action(),
+                clap::ArgAction::Set | clap::ArgAction::Append
+            )
+        {
+            continue;
+        }
+        for long in arg.get_long_and_visible_aliases().into_iter().flatten() {
+            set.insert(format!("--{long}"));
+        }
+        for short in arg.get_short_and_visible_aliases().into_iter().flatten() {
+            set.insert(format!("-{short}"));
+        }
+    }
+    set
 }
 
 #[cfg(test)]
@@ -324,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_style_run_command_expands_it_and_inserts_the_command_separator() {
+    fn run_command_expands_it_and_inserts_the_command_separator() {
         let args: crate::cli::RunArgs =
             parse_args(["lns", "run", "--rm", "-it", "alpine", "sh"]).unwrap();
         assert!(args.auto_remove);
@@ -335,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_style_run_command_still_normalizes_after_global_options() {
+    fn run_command_still_normalizes_after_global_options() {
         let args: crate::cli::RunArgs =
             parse_args(["lns", "--log-level", "debug", "run", "-it", "alpine", "sh"]).unwrap();
         assert!(args.interactive);
@@ -347,7 +374,7 @@ mod tests {
     #[test]
     fn normalization_ignores_run_and_exec_after_another_subcommand() {
         let raw = ["lns", "sandbox", "logs", "exec", "-it"];
-        let normalized = normalize_argv(raw);
+        let normalized = normalize_argv(&build_cli(), raw);
         assert_eq!(
             normalized,
             raw.into_iter().map(OsString::from).collect::<Vec<_>>()
@@ -357,7 +384,7 @@ mod tests {
     #[test]
     fn normalization_stops_at_a_top_level_separator() {
         let raw = ["lns", "--", "run", "-it"];
-        let normalized = normalize_argv(raw);
+        let normalized = normalize_argv(&build_cli(), raw);
         assert_eq!(
             normalized,
             raw.into_iter().map(OsString::from).collect::<Vec<_>>()
@@ -376,7 +403,7 @@ mod tests {
             OsString::from("alpine"),
             OsString::from("sh"),
         ];
-        let normalized = normalize_argv(raw);
+        let normalized = normalize_argv(&build_cli(), raw);
         let expected = vec![
             OsString::from("lns"),
             OsString::from_vec(vec![0xff]),
@@ -391,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_style_run_command_preserves_command_flags_after_the_image() {
+    fn run_command_preserves_command_flags_after_the_image() {
         let args: crate::cli::RunArgs =
             parse_args(["lns", "run", "alpine", "sh", "-c", "echo hi"]).unwrap();
         assert_eq!(args.image.as_deref(), Some("alpine"));
@@ -403,6 +430,30 @@ mod tests {
         let args: crate::cli::RunArgs = parse_args(["lns", "run", "--", "echo", "hi"]).unwrap();
         assert!(args.image.is_none());
         assert_eq!(args.cmd, ["echo", "hi"]);
+    }
+
+    #[test]
+    fn run_preserves_an_it_token_inside_the_workload_command() {
+        let args: crate::cli::RunArgs = parse_args(["lns", "run", "alpine", "sh", "-it"]).unwrap();
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.cmd, ["sh", "-it"]);
+    }
+
+    #[test]
+    fn exec_preserves_an_it_token_inside_the_workload_command() {
+        let args: crate::cli::ExecArgs =
+            parse_args(["lns", "exec", "demo", "--", "tool", "-ti"]).unwrap();
+        assert_eq!(args.run, "demo");
+        assert_eq!(args.cmd, ["tool", "-ti"]);
+    }
+
+    #[test]
+    fn run_treats_a_value_options_argument_as_its_value_not_the_image() {
+        let args: crate::cli::RunArgs =
+            parse_args(["lns", "run", "--workdir", "/w", "alpine", "sh"]).unwrap();
+        assert_eq!(args.workdir.as_deref(), Some("/w"));
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.cmd, ["sh"]);
     }
 
     #[test]

@@ -434,6 +434,14 @@ fn set_guest_hostname(hostname: Option<&str>) {
         let _ = writeln_stderr("hostname contained interior NUL");
         child_exit(126);
     };
+    // SAFETY: unshare(CLONE_NEWUTS) only detaches this child's UTS namespace so the rename can't leak to other sessions in the guest.
+    if unsafe { libc::unshare(libc::CLONE_NEWUTS) } < 0 {
+        let _ = writeln_stderr(&format!(
+            "unshare(CLONE_NEWUTS): {}",
+            io::Error::last_os_error()
+        ));
+        child_exit(126);
+    }
     // SAFETY: c points to hostname bytes without the trailing NUL, and len matches the original byte length.
     if unsafe { libc::sethostname(c.as_ptr(), hostname.len()) } < 0 {
         let _ = writeln_stderr(&format!(
