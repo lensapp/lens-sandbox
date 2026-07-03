@@ -252,10 +252,16 @@ pub fn resolve_run_as(
 }
 
 fn split_user_group(spec: &str) -> (&str, Option<&str>) {
-    match spec.split_once(':') {
+    let (user, group) = match spec.split_once(':') {
         Some((user, group)) => (user, (!group.is_empty()).then_some(group)),
         None => (spec, None),
-    }
+    };
+    let user = if user.is_empty() {
+        DEFAULT_SANDBOX_USER
+    } else {
+        user
+    };
+    (user, group)
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -1138,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn run_as_explicit_docker_user_parses_numeric_uid_and_group() {
+    fn run_as_explicit_user_parses_numeric_uid_and_group() {
         assert_eq!(
             resolve_run_as(Some("1000:1001"), Some(1000), None, false),
             RunAs {
@@ -1153,6 +1159,26 @@ mod tests {
                 user: "node".to_string(),
                 uid: Some(65534),
                 group: Some("staff".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn run_as_empty_user_segment_falls_back_to_the_sandbox_user() {
+        assert_eq!(
+            resolve_run_as(Some(":1000"), None, None, false),
+            RunAs {
+                user: "sandbox".to_string(),
+                uid: Some(65534),
+                group: Some("1000".to_string()),
+            }
+        );
+        assert_eq!(
+            resolve_run_as(Some(""), Some(1000), None, false),
+            RunAs {
+                user: "sandbox".to_string(),
+                uid: Some(1000),
+                group: None,
             }
         );
     }

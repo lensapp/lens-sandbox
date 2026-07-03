@@ -76,7 +76,7 @@ pub struct RunArgs {
         long = "user",
         value_name = "USER[:GROUP]",
         conflicts_with_all = ["sandbox_user", "sandbox_uid"],
-        help = "Docker-compatible run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`."
+        help = "Run-as user or uid inside the sandbox (`USER[:GROUP]`). Alias for `--sandbox-user` / `--sandbox-uid`."
     )]
     pub user: Option<String>,
 
@@ -103,7 +103,7 @@ pub struct RunArgs {
         long = "pull",
         value_name = "POLICY",
         value_parser = parse_pull_policy_arg,
-        help = "Docker-compatible pull policy accepted for tooling (`always`, `missing`, or `never`)."
+        help = "Pull policy accepted for tooling (`always`, `missing`, or `never`)."
     )]
     pub pull: Option<PullPolicy>,
 
@@ -202,7 +202,7 @@ pub struct RunArgs {
         long = "volume",
         visible_alias = "mount",
         value_parser = parse_mount_arg,
-        help = "Mount into the workload: `name:/path[:ro]`, `/host/path:/path[:ro]`, or Docker `--mount type=...,source=...,target=...`."
+        help = "Mount into the workload: `name:/path[:ro]`, `/host/path:/path[:ro]`, or `type=bind|volume,source=...,target=...[,readonly]`."
     )]
     pub mounts: Vec<lns_ipc::MountSpec>,
 
@@ -384,14 +384,36 @@ fn parse_workdir_arg(s: &str) -> Result<String, String> {
 }
 
 pub(crate) fn parse_mount_arg(s: &str) -> Result<lns_ipc::MountSpec, String> {
-    if s.contains('=') {
-        parse_docker_mount_arg(s)
+    if is_keyed_mount_spec(s) {
+        parse_keyed_mount_arg(s)
     } else {
         lns_ipc::MountSpec::parse(s)
     }
 }
 
-fn parse_docker_mount_arg(s: &str) -> Result<lns_ipc::MountSpec, String> {
+fn is_keyed_mount_spec(s: &str) -> bool {
+    s.split(',').any(|field| {
+        let field = field.trim();
+        matches!(
+            field.split_once('='),
+            Some((
+                "type"
+                    | "source"
+                    | "src"
+                    | "target"
+                    | "destination"
+                    | "dst"
+                    | "readonly"
+                    | "ro"
+                    | "readwrite"
+                    | "rw",
+                _,
+            ))
+        ) || matches!(field, "readonly" | "ro" | "readwrite" | "rw")
+    })
+}
+
+fn parse_keyed_mount_arg(s: &str) -> Result<lns_ipc::MountSpec, String> {
     let mut kind: Option<&str> = None;
     let mut source: Option<&str> = None;
     let mut target: Option<&str> = None;
@@ -616,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn run_accepts_docker_compat_flags_that_map_to_launch_config() {
+    fn run_accepts_compat_flags_that_map_to_launch_config() {
         let args = parse_run(&[
             "--rm",
             "--pull=always",
@@ -628,7 +650,7 @@ mod tests {
             "demo-host",
             "alpine:3.20",
         ])
-        .expect("docker-compatible flags parse");
+        .expect("compat flags parse");
         assert!(args.auto_remove);
         assert_eq!(args.pull, Some(PullPolicy::Always));
         assert_eq!(args.effective_sandbox_user().as_deref(), Some("1000:1000"));
@@ -638,13 +660,13 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_accepts_docker_bind_syntax() {
+    fn run_mount_accepts_keyed_bind_syntax() {
         let args = parse_run(&[
             "--mount",
             "type=bind,src=/Users/me/project,target=/work,readonly",
             "alpine:3.20",
         ])
-        .expect("docker --mount syntax parses");
+        .expect("keyed --mount syntax parses");
         let (volumes, binds) = split_mounts(&args.mounts);
         assert!(volumes.is_empty());
         assert_eq!(binds.len(), 1);
@@ -654,13 +676,13 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_accepts_docker_volume_syntax() {
+    fn run_mount_accepts_keyed_volume_syntax() {
         let args = parse_run(&[
             "--mount",
             "type=volume,source=cache,target=/cache",
             "alpine:3.20",
         ])
-        .expect("docker volume --mount syntax parses");
+        .expect("keyed volume --mount syntax parses");
         let (volumes, binds) = split_mounts(&args.mounts);
         assert!(binds.is_empty());
         assert_eq!(volumes.len(), 1);
@@ -670,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_pull_policy_arg_accepts_docker_values_and_rejects_unknowns() {
+    fn parse_pull_policy_arg_accepts_known_values_and_rejects_unknowns() {
         assert_eq!(parse_pull_policy_arg("missing"), Ok(PullPolicy::Missing));
         assert_eq!(parse_pull_policy_arg("never"), Ok(PullPolicy::Never));
         let err = parse_pull_policy_arg("sometimes").expect_err("unknown policy must fail");
@@ -750,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_mount_arg_rejects_unsupported_docker_mount_fields() {
+    fn parse_mount_arg_rejects_unsupported_mount_fields() {
         for spec in [
             "type=bind,source=/host,target=/work,unknown=value",
             "type=bind,source=/host,target=/work,mystery",
@@ -759,6 +781,19 @@ mod tests {
         ] {
             assert!(parse_mount_arg(spec).is_err(), "{spec} should be rejected");
         }
+    }
+
+    #[test]
+    fn parse_mount_arg_keeps_a_colon_spec_whose_host_path_contains_equals() {
+        let mount = parse_mount_arg("/tmp/a=b:/work").expect("bind path with '=' parses");
+        assert_eq!(
+            mount,
+            lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+                host_source: "/tmp/a=b".into(),
+                target: "/work".into(),
+                read_only: false,
+            })
+        );
     }
 
     #[test]
