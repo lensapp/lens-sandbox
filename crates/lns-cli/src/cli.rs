@@ -275,6 +275,91 @@ pub struct KillArgs {
     pub signal: String,
 }
 
+#[derive(clap::Args)]
+pub struct LsArgs {
+    #[arg(
+        short = 'a',
+        long = "all",
+        default_value_t = false,
+        help = "docker-ps compatibility flag. lns already lists finished runs until `rm`/`prune`, so this is a no-op; narrow the list instead with `--filter status=running`."
+    )]
+    pub all: bool,
+
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        default_value_t = false,
+        help = "Print run ids only, one per line — e.g. `lns kill $(lns ps -q)`."
+    )]
+    pub quiet: bool,
+
+    #[arg(
+        long = "filter",
+        value_name = "KEY=VALUE",
+        value_parser = parse_ls_filter,
+        help = "Restrict the list: `status=running`, `status=exited`, or `name=<substring>`. Repeatable; a run must match every filter."
+    )]
+    pub filters: Vec<LsFilter>,
+
+    #[arg(
+        long = "format",
+        value_enum,
+        help = "Output format: `table` (default) or `json`."
+    )]
+    pub format: Option<LsFormat>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum LsFormat {
+    Table,
+    Json,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatusFilter {
+    Running,
+    Exited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LsFilter {
+    Status(StatusFilter),
+    Name(String),
+}
+
+pub(crate) fn parse_ls_filter(s: &str) -> Result<LsFilter, String> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE filter, got `{s}`"))?;
+    match key {
+        "status" => match value {
+            "running" => Ok(LsFilter::Status(StatusFilter::Running)),
+            "exited" => Ok(LsFilter::Status(StatusFilter::Exited)),
+            other => Err(format!(
+                "unsupported status filter `{other}` (use `running` or `exited`)"
+            )),
+        },
+        "name" if value.is_empty() => Err("filter `name=` needs a value".to_string()),
+        "name" => Ok(LsFilter::Name(value.to_string())),
+        other => Err(format!(
+            "unsupported filter key `{other}` (supported: status, name)"
+        )),
+    }
+}
+
+pub fn ls_filter_matches(filters: &[LsFilter], run: &lns_ipc::RunSummary) -> bool {
+    filters.iter().all(|filter| match filter {
+        LsFilter::Status(StatusFilter::Running) => {
+            matches!(run.status, lns_ipc::RunStatus::Running)
+        }
+        LsFilter::Status(StatusFilter::Exited) => {
+            matches!(run.status, lns_ipc::RunStatus::Exited { .. })
+        }
+        LsFilter::Name(substring) => run.name.contains(substring.as_str()),
+    })
+}
+
 // Newtype: clap would otherwise treat Vec<u8> as a multi-value arg and downcast at runtime.
 #[derive(Clone, Debug)]
 pub struct DetachChord(pub Vec<u8>);
@@ -395,6 +480,30 @@ mod tests {
         args: ExecArgs,
     }
 
+    #[derive(Parser)]
+    struct LsHarness {
+        #[command(flatten)]
+        args: LsArgs,
+    }
+
+    fn parse_ls(argv: &[&str]) -> Result<LsArgs, clap::Error> {
+        let mut full = vec!["ls"];
+        full.extend_from_slice(argv);
+        LsHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    fn summary_named(name: &str, status: lns_ipc::RunStatus) -> lns_ipc::RunSummary {
+        lns_ipc::RunSummary {
+            id: "1a2b3c4d0000000000000000000000aa".into(),
+            name: name.into(),
+            image: "some-image".into(),
+            command: String::new(),
+            status,
+            started: String::new(),
+            published_ports: Vec::new(),
+        }
+    }
+
     fn parse_run(argv: &[&str]) -> Result<RunArgs, clap::Error> {
         let mut full = vec!["run"];
         full.extend_from_slice(argv);
@@ -483,6 +592,137 @@ mod tests {
         .expect("explicit false should parse");
         assert!(!args.interactive, "interactive should be false");
         assert!(!args.tty, "tty should be false");
+    }
+
+    #[test]
+    fn ls_defaults_are_show_all_table_no_filters() {
+        let args = parse_ls(&[]).expect("bare ls parses");
+        assert!(!args.all);
+        assert!(!args.quiet);
+        assert!(args.filters.is_empty());
+        assert_eq!(args.format, None);
+    }
+
+    #[test]
+    fn ls_accepts_the_docker_style_flags() {
+        let args = parse_ls(&["-a", "-q", "--filter", "status=running", "--format", "json"])
+            .expect("flags parse");
+        assert!(args.all);
+        assert!(args.quiet);
+        assert_eq!(args.filters, vec![LsFilter::Status(StatusFilter::Running)]);
+        assert_eq!(args.format, Some(LsFormat::Json));
+    }
+
+    #[test]
+    fn ls_filter_is_repeatable() {
+        let args = parse_ls(&["--filter", "status=exited", "--filter", "name=rev"])
+            .expect("repeated filters parse");
+        assert_eq!(
+            args.filters,
+            vec![
+                LsFilter::Status(StatusFilter::Exited),
+                LsFilter::Name("rev".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ls_rejects_an_unknown_format() {
+        assert!(parse_ls(&["--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn parse_ls_filter_reads_status_running_and_exited() {
+        assert_eq!(
+            parse_ls_filter("status=running").unwrap(),
+            LsFilter::Status(StatusFilter::Running)
+        );
+        assert_eq!(
+            parse_ls_filter("status=exited").unwrap(),
+            LsFilter::Status(StatusFilter::Exited)
+        );
+    }
+
+    #[test]
+    fn parse_ls_filter_reads_a_name_substring() {
+        assert_eq!(
+            parse_ls_filter("name=review").unwrap(),
+            LsFilter::Name("review".into())
+        );
+    }
+
+    #[test]
+    fn parse_ls_filter_rejects_an_empty_name_value() {
+        let err = parse_ls_filter("name=").unwrap_err();
+        assert!(err.contains("needs a value"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_ls_filter_rejects_an_unknown_status_value() {
+        let err = parse_ls_filter("status=paused").unwrap_err();
+        assert!(err.contains("running"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_ls_filter_rejects_an_unknown_key() {
+        let err = parse_ls_filter("label=team").unwrap_err();
+        assert!(err.contains("supported: status, name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_ls_filter_rejects_a_missing_equals() {
+        let err = parse_ls_filter("running").unwrap_err();
+        assert!(err.contains("KEY=VALUE"), "got: {err}");
+    }
+
+    #[test]
+    fn ls_filter_matches_with_no_filters_keeps_every_run() {
+        let run = summary_named("reviewer", lns_ipc::RunStatus::Running);
+        assert!(ls_filter_matches(&[], &run));
+    }
+
+    #[test]
+    fn ls_filter_matches_status_running_and_exited() {
+        let running = summary_named("reviewer", lns_ipc::RunStatus::Running);
+        let exited = summary_named("auditor", lns_ipc::RunStatus::Exited { code: 0 });
+        assert!(ls_filter_matches(
+            &[LsFilter::Status(StatusFilter::Running)],
+            &running
+        ));
+        assert!(!ls_filter_matches(
+            &[LsFilter::Status(StatusFilter::Running)],
+            &exited
+        ));
+        assert!(ls_filter_matches(
+            &[LsFilter::Status(StatusFilter::Exited)],
+            &exited
+        ));
+        assert!(!ls_filter_matches(
+            &[LsFilter::Status(StatusFilter::Exited)],
+            &running
+        ));
+    }
+
+    #[test]
+    fn ls_filter_matches_name_substring() {
+        let run = summary_named("amber_otter", lns_ipc::RunStatus::Running);
+        assert!(ls_filter_matches(&[LsFilter::Name("otter".into())], &run));
+        assert!(!ls_filter_matches(&[LsFilter::Name("falcon".into())], &run));
+    }
+
+    #[test]
+    fn ls_filter_matches_requires_every_filter_to_hold() {
+        let run = summary_named("reviewer", lns_ipc::RunStatus::Running);
+        let both = [
+            LsFilter::Status(StatusFilter::Running),
+            LsFilter::Name("view".into()),
+        ];
+        assert!(ls_filter_matches(&both, &run));
+        let conflicting = [
+            LsFilter::Status(StatusFilter::Exited),
+            LsFilter::Name("view".into()),
+        ];
+        assert!(!ls_filter_matches(&conflicting, &run));
     }
 
     #[test]

@@ -51,10 +51,11 @@ pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
     })
 }
 
-pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn ls_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
+        let args = crate::cli::LsArgs::from_arg_matches(matches)?;
         require_running().await;
-        ls().await?;
+        ls(&args).await?;
         Ok(0)
     })
 }
@@ -304,20 +305,19 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     }
 }
 
-pub async fn ls() -> Result<()> {
+pub async fn ls(args: &crate::cli::LsArgs) -> Result<()> {
     let socket = super::socket_path()?;
     let response = real::send_request(&socket, &Request::ListRuns)
         .await
         .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
-    let mut rows = match response {
+    let rows = match response {
         Response::RunList { runs } => runs,
         Response::Error { message } => anyhow::bail!("daemon error: {message}"),
         other => anyhow::bail!("unexpected response from daemon: {other:?}"),
     };
-    rows.sort_by(|a, b| b.started.cmp(&a.started));
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    super::render_ls_table(&mut out, &rows)?;
+    super::render_run_list(&mut out, &rows, args)?;
     Ok(())
 }
 

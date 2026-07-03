@@ -250,6 +250,12 @@ mod tests {
                     command: "sleep 30".into(),
                     status: crate::RunStatus::Running,
                     started: "2026-05-19T12:34:01Z".into(),
+                    published_ports: vec![crate::PortPublish {
+                        host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        host_port: 8080,
+                        container_port: 80,
+                        protocol: crate::Protocol::Tcp,
+                    }],
                 },
                 crate::RunSummary {
                     id: "5e6f7a8b0000000000000000000000bb".into(),
@@ -258,6 +264,7 @@ mod tests {
                     command: String::new(),
                     status: crate::RunStatus::Exited { code: 143 },
                     started: "2026-05-19T12:35:01Z".into(),
+                    published_ports: Vec::new(),
                 },
             ],
         };

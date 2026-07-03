@@ -7,7 +7,7 @@ use lns_ipc::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::cli::{DetachChord, ExecArgs, KillArgs, parse_detach_keys_arg};
+use crate::cli::{DetachChord, ExecArgs, KillArgs, LsArgs, parse_detach_keys_arg};
 use crate::command::{CommandSpec, subcommand};
 use crate::service::client::BoxFuture;
 
@@ -22,10 +22,10 @@ pub struct SandboxArgs {
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
     #[command(
-        visible_alias = "list",
-        about = "List active runs (`docker ps`-style)."
+        visible_aliases = ["list", "ps"],
+        about = "List runs (`docker ps`-style): running plus finished-until-removed. Narrow with --filter status=/name=, ids-only with -q, JSON with --format json."
     )]
-    Ls,
+    Ls(LsArgs),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
     Exec(ExecArgs),
     #[command(about = "Send a signal to a running run (`docker kill`-style).")]
@@ -183,7 +183,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
-        SandboxCommand::Ls => ls(svc, out).await,
+        SandboxCommand::Ls(args) => ls(svc, args, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
@@ -201,12 +201,15 @@ pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
 }
 
-async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+async fn ls<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &LsArgs,
+    out: &mut W,
+) -> Result<i32> {
     let response = svc.one_shot(Request::ListRuns).await?;
     match response {
-        Response::RunList { mut runs } => {
-            runs.sort_by(|a, b| b.started.cmp(&a.started));
-            crate::service::render_ls_table(out, &runs)?;
+        Response::RunList { runs } => {
+            crate::service::render_run_list(out, &runs, args)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -253,12 +256,9 @@ async fn stop<W: std::io::Write>(
             Ok(0)
         }
         Response::RunStopped { forced: true } => {
-            writeln!(
-                out,
-                "killed run {} after the {}s timeout",
-                run_label(&args.run),
-                args.timeout
-            )?;
+            let run = run_label(&args.run);
+            let secs = args.timeout;
+            writeln!(out, "killed run {run} after the {secs}s timeout")?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -299,12 +299,9 @@ async fn rename<W: std::io::Write>(
         .await?;
     match response {
         Response::Acknowledged => {
-            writeln!(
-                out,
-                "renamed run {} to {}",
-                run_label(&args.run),
-                args.new_name
-            )?;
+            let run = run_label(&args.run);
+            let new_name = &args.new_name;
+            writeln!(out, "renamed run {run} to {new_name}")?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -611,6 +608,15 @@ mod tests {
         }
     }
 
+    fn ls_args() -> LsArgs {
+        LsArgs {
+            all: false,
+            quiet: false,
+            filters: Vec::new(),
+            format: None,
+        }
+    }
+
     #[tokio::test]
     async fn run_with_writers_refuses_the_interactive_exec_verb() {
         let svc = CannedService::new(Response::Pong);
@@ -644,7 +650,7 @@ mod tests {
             message: "registry poisoned".into(),
         });
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
     }
 
@@ -652,7 +658,7 @@ mod tests {
     async fn ls_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -946,6 +952,7 @@ mod tests {
                     command: String::new(),
                     status: lns_ipc::RunStatus::Running,
                     started: "2026-01-01T00:00:00Z".into(),
+                    published_ports: Vec::new(),
                 },
                 config: lns_ipc::RunConfig {
                     policy_path: Some("/work/lns-policy.yaml".into()),

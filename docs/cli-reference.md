@@ -115,7 +115,7 @@ a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
 Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.
 
 ```bash
-lns sandbox ls
+lns sandbox ls [-a] [-q] [--filter <KEY=VALUE>]... [--format table|json]
 lns sandbox exec [OPTIONS] <RUN> -- <COMMAND...>
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
@@ -133,7 +133,7 @@ interchangeable everywhere a run is addressed.
 
 | Subcommand | Meaning |
 | ---------- | ------- |
-| `ls`       | List active runs (`docker ps`-style). |
+| `ls`       | List runs (`docker ps`-style; aliases `list`, `ps`): running plus finished-until-removed, one row per run with its published ports. `-q` prints ids only (e.g. `lns kill $(lns sandbox ls -q)`); `--filter status=running\|exited` or `--filter name=<substr>` narrows the list (repeatable, all must match); `--format json` emits a machine-readable array. `-a`/`--all` is accepted for `docker ps` muscle memory but is a no-op — lns already lists finished runs. |
 | `exec`     | Open a new session against a running run (`docker exec`-style). `-i`/`-t` and `--detach-keys` work as for `lns run`; detaching closes only the exec session. |
 | `kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
@@ -146,7 +146,8 @@ interchangeable everywhere a run is addressed.
 | `prune`    | Remove every finished run from the list at once (`docker container prune`-style); running runs are left untouched. |
 
 The pre-namespace spellings `lns ls`, `lns exec`, and `lns kill` keep working
-as hidden aliases; the `lns sandbox` forms are the documented ones.
+as hidden aliases; the `lns sandbox` forms are the documented ones. `lns ps`
+and `lns sandbox ps` are aliases of `ls` for `docker ps` muscle memory.
 
 ## `lns audit`
 

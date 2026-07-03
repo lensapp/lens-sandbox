@@ -297,7 +297,10 @@ cancelled. Use the chord — or start the run with `-d` — to step away safely.
 Everything you do to a run after starting it lives under `lns sandbox`:
 
 ```bash
-lns sandbox ls                 # list active runs
+lns sandbox ls                 # list runs: running + finished-until-removed, with ports (docker ps-style)
+lns sandbox ls -q              # ids only, e.g. lns sandbox kill $(lns sandbox ls -q)
+lns sandbox ls --filter status=running   # narrow by status; also --filter name=<substr>
+lns sandbox ls --format json   # machine-readable array
 lns sandbox exec 7 -- bash     # open another session inside a run
 lns sandbox kill 7             # send one signal (default SIGTERM)
 lns sandbox stop 7             # SIGTERM, wait up to 10s, then SIGKILL
@@ -314,7 +317,9 @@ lns sandbox prune              # drop every finished run from the list
 
 Every verb takes a run's **name** as readily as its numeric id — `lns sandbox
 stop reviewer` and `lns sandbox stop 7` are equivalent. The pre-namespace
-spellings `lns ls`, `lns exec`, and `lns kill` keep working as hidden aliases.
+spellings `lns ls`, `lns exec`, and `lns kill` keep working as hidden aliases,
+and `ls` also answers to `ps` (`lns ps`, `lns sandbox ps`) for `docker ps`
+muscle memory.
 
 ### Exec — another session inside a run
 

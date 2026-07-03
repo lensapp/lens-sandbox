@@ -167,6 +167,7 @@ impl ImageRig {
             command: String::new(),
             status: lns_ipc::RunStatus::Running,
             started: String::new(),
+            published_ports: Vec::new(),
         });
     }
 

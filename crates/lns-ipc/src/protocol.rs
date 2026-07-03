@@ -226,6 +226,8 @@ pub struct RunSummary {
     pub command: String,
     pub status: RunStatus,
     pub started: String,
+    #[serde(default)]
+    pub published_ports: Vec<PortPublish>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,6 +874,7 @@ mod tests {
                     command: "echo hi".into(),
                     status: RunStatus::Running,
                     started: "2026-01-01T00:00:00Z".into(),
+                    published_ports: Vec::new(),
                 },
                 config: RunConfig::from_run_args(&sample_run_args()),
             }),

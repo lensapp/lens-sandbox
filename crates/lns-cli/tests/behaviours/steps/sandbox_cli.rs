@@ -77,6 +77,7 @@ fn details_with(image: &str, config: RunConfig) -> Response {
                 command: "some-command".into(),
                 status: RunStatus::Running,
                 started: "2026-01-01T00:00:00Z".into(),
+                published_ports: Vec::new(),
             },
             config,
         }),
@@ -153,6 +154,53 @@ fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
             command: "some-command".into(),
             status: RunStatus::Running,
             started: "2026-01-01T00:00:00Z".into(),
+            published_ports: Vec::new(),
+        }],
+    });
+}
+
+#[given(regex = r#"^the service reports a running run "([^"]+)" and a finished run "([^"]+)"$"#)]
+fn canned_two_run_listing(w: &mut BehaviourWorld, running: String, finished: String) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![
+            RunSummary {
+                id: hexid(3),
+                name: running,
+                image: "some-image".into(),
+                command: "some-command".into(),
+                status: RunStatus::Running,
+                started: "2026-01-01T00:00:02Z".into(),
+                published_ports: Vec::new(),
+            },
+            RunSummary {
+                id: hexid(7),
+                name: finished,
+                image: "some-image".into(),
+                command: "some-command".into(),
+                status: RunStatus::Exited { code: 0 },
+                started: "2026-01-01T00:00:01Z".into(),
+                published_ports: Vec::new(),
+            },
+        ],
+    });
+}
+
+#[given(regex = r"^the service reports a run publishing host port (\d+) to container port (\d+)$")]
+fn canned_run_listing_with_ports(w: &mut BehaviourWorld, host_port: u16, container_port: u16) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: hexid(3),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+            published_ports: vec![lns_ipc::PortPublish {
+                host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                host_port,
+                container_port,
+                protocol: lns_ipc::Protocol::Tcp,
+            }],
         }],
     });
 }
@@ -372,6 +420,7 @@ fn canned_named_run_listing(w: &mut BehaviourWorld, run_id: u32, name: String, i
             command: "some-command".into(),
             status: RunStatus::Running,
             started: "2026-01-01T00:00:00Z".into(),
+            published_ports: Vec::new(),
         }],
     });
 }

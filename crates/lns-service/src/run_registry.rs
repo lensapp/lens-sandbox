@@ -250,6 +250,7 @@ fn summary_of(id: &str, h: &RunHandle) -> lns_ipc::RunSummary {
         command: h.command.clone(),
         status,
         started: h.started.clone(),
+        published_ports: h.config.published_ports.clone(),
     }
 }
 
@@ -932,6 +933,12 @@ mod tests {
         handle.image = "alpine:latest".to_string();
         handle.command = "sleep 1".to_string();
         handle.started = "2026-05-21 10:00:00".to_string();
+        handle.config.published_ports = vec![lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port: 8080,
+            container_port: 80,
+            protocol: lns_ipc::Protocol::Tcp,
+        }];
         register(id.clone(), handle);
 
         let row = snapshot()
@@ -942,6 +949,16 @@ mod tests {
         assert_eq!(row.command, "sleep 1");
         assert_eq!(row.started, "2026-05-21 10:00:00");
         assert_eq!(row.status, RunStatus::Running);
+        assert_eq!(
+            row.published_ports,
+            vec![lns_ipc::PortPublish {
+                host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                host_port: 8080,
+                container_port: 80,
+                protocol: lns_ipc::Protocol::Tcp,
+            }],
+            "the snapshot must carry the launch config's published ports",
+        );
 
         deregister(&id);
     }

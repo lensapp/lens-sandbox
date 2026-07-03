@@ -28,6 +28,8 @@ Feature: managing running sandboxes from the CLI
     Then the exit code is 0
     When I run "lns list"
     Then the exit code is 0
+    When I run "lns ps"
+    Then the exit code is 0
     When I run "lns kill 3"
     Then the exit code is 0
     When I run "lns exec 3 -- echo hi"
@@ -50,6 +52,57 @@ Feature: managing running sandboxes from the CLI
     And the output contains "some-image"
     And the output contains "running"
     And the service received a ListRuns request
+
+  Scenario: sandbox ps is an alias for sandbox ls
+    Given the service reports a run listing with run 3 of image "some-image" running
+    When the user runs sandbox command "ps"
+    Then the exit code is 0
+    And the output contains "ID"
+    And the output contains "some-image"
+    And the service received a ListRuns request
+
+  Scenario: ls shows a run's published ports
+    Given the service reports a run publishing host port 8080 to container port 80
+    When the user runs sandbox command "ls"
+    Then the exit code is 0
+    And the output contains "PORTS"
+    And the output contains "127.0.0.1:8080->80/tcp"
+
+  Scenario: ls -q prints run ids only
+    Given the service reports a running run "reviewer" and a finished run "auditor"
+    When the user runs sandbox command "ls -q"
+    Then the exit code is 0
+    And the output does not contain "IMAGE"
+    And the output does not contain "reviewer"
+
+  Scenario: ls --filter status=running hides finished runs
+    Given the service reports a running run "reviewer" and a finished run "auditor"
+    When the user runs sandbox command "ls --filter status=running"
+    Then the exit code is 0
+    And the output contains "reviewer"
+    And the output does not contain "auditor"
+
+  Scenario: ls --filter name matches on a substring
+    Given the service reports a running run "reviewer" and a finished run "auditor"
+    When the user runs sandbox command "ls --filter name=audit"
+    Then the exit code is 0
+    And the output contains "auditor"
+    And the output does not contain "reviewer"
+
+  Scenario: ls --format json emits a machine-readable array
+    Given the service reports a run publishing host port 8080 to container port 80
+    When the user runs sandbox command "ls --format json"
+    Then the exit code is 0
+    And the output contains "127.0.0.1:8080->80/tcp"
+    And the output contains "ports"
+    And the output does not contain "PORTS"
+
+  Scenario: ls -a is accepted as a docker-compatibility no-op
+    Given the service reports a running run "reviewer" and a finished run "auditor"
+    When the user runs sandbox command "ls -a"
+    Then the exit code is 0
+    And the output contains "reviewer"
+    And the output contains "auditor"
 
   Scenario: sandbox kill sends the requested signal
     Given the service will answer Acknowledged

@@ -60,7 +60,12 @@ pub const KILL_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_ls(app: clap::Command) -> clap::Command {
-    app.subcommand(clap::Command::new("ls").visible_alias("list").hide(true))
+    app.subcommand(
+        subcommand::<crate::cli::LsArgs>("ls")
+            .visible_alias("list")
+            .visible_alias("ps")
+            .hide(true),
+    )
 }
 
 pub const LS_SPEC: CommandSpec = CommandSpec {
@@ -248,10 +253,83 @@ pub(crate) fn parse_signal_name(name: &str) -> Result<SignalKind> {
         }
     })
 }
-pub(crate) fn render_ls_table<W: std::io::Write>(
+pub(crate) fn render_run_list<W: std::io::Write>(
     out: &mut W,
-    rows: &[RunSummary],
-) -> std::io::Result<()> {
+    runs: &[RunSummary],
+    args: &crate::cli::LsArgs,
+) -> Result<()> {
+    let mut rows: Vec<&RunSummary> = runs
+        .iter()
+        .filter(|run| crate::cli::ls_filter_matches(&args.filters, run))
+        .collect();
+    rows.sort_by(|a, b| b.started.cmp(&a.started));
+    if matches!(args.format, Some(crate::cli::LsFormat::Json)) {
+        render_ls_json(out, &rows)
+    } else if args.quiet {
+        render_ls_quiet(out, &rows)?;
+        Ok(())
+    } else {
+        render_ls_table(out, &rows)?;
+        Ok(())
+    }
+}
+
+fn render_ls_quiet<W: std::io::Write>(out: &mut W, rows: &[&RunSummary]) -> std::io::Result<()> {
+    for r in rows {
+        writeln!(out, "{}", lns_ipc::short_run_id(&r.id))?;
+    }
+    Ok(())
+}
+
+fn render_ls_json<W: std::io::Write>(out: &mut W, rows: &[&RunSummary]) -> Result<()> {
+    let items = rows
+        .iter()
+        .map(|&r| run_summary_json(r))
+        .collect::<Result<Vec<_>>>()?;
+    let rendered = serde_json::to_string_pretty(&serde_json::Value::Array(items))?;
+    writeln!(out, "{rendered}")?;
+    Ok(())
+}
+
+fn run_summary_json(run: &RunSummary) -> Result<serde_json::Value> {
+    let ports = run
+        .published_ports
+        .iter()
+        .map(|p| serde_json::Value::from(format_port(p)))
+        .collect();
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), run.id.clone().into());
+    obj.insert("name".into(), run.name.clone().into());
+    obj.insert("image".into(), run.image.clone().into());
+    obj.insert("command".into(), run.command.clone().into());
+    obj.insert("status".into(), serde_json::to_value(run.status)?);
+    obj.insert("started".into(), run.started.clone().into());
+    obj.insert("ports".into(), serde_json::Value::Array(ports));
+    Ok(serde_json::Value::Object(obj))
+}
+
+fn format_ports(ports: &[lns_ipc::PortPublish]) -> String {
+    ports.iter().map(format_port).collect::<Vec<_>>().join(", ")
+}
+
+fn format_port(p: &lns_ipc::PortPublish) -> String {
+    format!(
+        "{}:{}->{}/{}",
+        p.host_ip,
+        p.host_port,
+        p.container_port,
+        proto_str(p.protocol)
+    )
+}
+
+fn proto_str(protocol: lns_ipc::Protocol) -> &'static str {
+    match protocol {
+        lns_ipc::Protocol::Tcp => "tcp",
+        lns_ipc::Protocol::Udp => "udp",
+    }
+}
+
+fn render_ls_table<W: std::io::Write>(out: &mut W, rows: &[&RunSummary]) -> std::io::Result<()> {
     let status_str = |s: RunStatus| match s {
         RunStatus::Running => "running".to_string(),
         RunStatus::Exited { code } => format!("exited ({code})"),
@@ -278,36 +356,46 @@ pub(crate) fn render_ls_table<W: std::io::Write>(
     let cmd_w = "COMMAND"
         .len()
         .max(rows.iter().map(|r| r.command.len()).max().unwrap_or(0));
+    let ports_w = "PORTS".len().max(
+        rows.iter()
+            .map(|r| format_ports(&r.published_ports).len())
+            .max()
+            .unwrap_or(0),
+    );
 
     writeln!(
         out,
-        "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  STARTED",
+        "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {:<ports_w$}  STARTED",
         "ID",
         "NAME",
         "STATUS",
         "IMAGE",
         "COMMAND",
+        "PORTS",
         id_w = id_w,
         name_w = name_w,
         status_w = status_w,
         image_w = image_w,
         cmd_w = cmd_w,
+        ports_w = ports_w,
     )?;
     for r in rows {
         writeln!(
             out,
-            "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {}",
+            "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {:<ports_w$}  {}",
             lns_ipc::short_run_id(&r.id),
             r.name,
             status_str(r.status),
             r.image,
             r.command,
+            format_ports(&r.published_ports),
             friendly_started(&r.started),
             id_w = id_w,
             name_w = name_w,
             status_w = status_w,
             image_w = image_w,
             cmd_w = cmd_w,
+            ports_w = ports_w,
         )?;
     }
     Ok(())
@@ -654,20 +742,62 @@ exit 0
         assert!(!s.is_empty());
     }
 
+    fn port(
+        host_port: u16,
+        container_port: u16,
+        protocol: lns_ipc::Protocol,
+    ) -> lns_ipc::PortPublish {
+        lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port,
+            container_port,
+            protocol,
+        }
+    }
+
+    fn summary(
+        id: &str,
+        name: &str,
+        image: &str,
+        status: RunStatus,
+        ports: Vec<lns_ipc::PortPublish>,
+    ) -> RunSummary {
+        RunSummary {
+            id: id.to_string(),
+            name: name.into(),
+            image: image.into(),
+            command: "echo hi".into(),
+            status,
+            started: "2024-03-15T08:30:00Z".into(),
+            published_ports: ports,
+        }
+    }
+
+    fn ls_args() -> crate::cli::LsArgs {
+        crate::cli::LsArgs {
+            all: false,
+            quiet: false,
+            filters: Vec::new(),
+            format: None,
+        }
+    }
+
     #[test]
     fn render_ls_table_emits_header_and_one_row_per_run() {
-        let rows = vec![RunSummary {
-            id: "1a2b3c4d0000000000000000000000aa".to_string(),
-            name: "reviewer".into(),
-            image: "alpine:3.20".into(),
-            command: "echo hi".into(),
-            started: "2024-03-15T08:30:00Z".into(),
-            status: RunStatus::Running,
-        }];
+        let rows = [summary(
+            "1a2b3c4d0000000000000000000000aa",
+            "reviewer",
+            "alpine:3.20",
+            RunStatus::Running,
+            Vec::new(),
+        )];
+        let refs: Vec<&RunSummary> = rows.iter().collect();
         let mut buf: Vec<u8> = Vec::new();
-        render_ls_table(&mut buf, &rows).expect("render");
+        render_ls_table(&mut buf, &refs).expect("render");
         let out = String::from_utf8(buf).unwrap();
-        for tok in ["ID", "NAME", "STATUS", "STARTED", "IMAGE", "COMMAND"] {
+        for tok in [
+            "ID", "NAME", "STATUS", "STARTED", "IMAGE", "COMMAND", "PORTS",
+        ] {
             assert!(
                 out.contains(tok),
                 "expected header token {tok:?} in {out:?}"
@@ -688,21 +818,183 @@ exit 0
 
     #[test]
     fn render_ls_table_renders_exited_status_with_code() {
-        let rows = vec![RunSummary {
-            id: "5e6f7a8b0000000000000000000000bb".to_string(),
-            name: "auditor".into(),
-            image: "<imageless>".into(),
-            command: "true".into(),
-            started: "2024-03-15T08:30:00Z".into(),
-            status: RunStatus::Exited { code: 0 },
-        }];
+        let rows = [summary(
+            "5e6f7a8b0000000000000000000000bb",
+            "auditor",
+            "<imageless>",
+            RunStatus::Exited { code: 0 },
+            Vec::new(),
+        )];
+        let refs: Vec<&RunSummary> = rows.iter().collect();
         let mut buf: Vec<u8> = Vec::new();
-        render_ls_table(&mut buf, &rows).expect("render");
+        render_ls_table(&mut buf, &refs).expect("render");
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.to_lowercase().contains("exited") || out.contains('0'),
             "expected exited indicator in {out:?}"
         );
+    }
+
+    #[test]
+    fn format_port_renders_the_docker_style_mapping_for_tcp_and_udp() {
+        assert_eq!(
+            format_port(&port(8080, 80, lns_ipc::Protocol::Tcp)),
+            "127.0.0.1:8080->80/tcp"
+        );
+        assert_eq!(
+            format_port(&port(5353, 53, lns_ipc::Protocol::Udp)),
+            "127.0.0.1:5353->53/udp"
+        );
+    }
+
+    #[test]
+    fn format_ports_is_empty_for_none_and_comma_joins_many() {
+        assert_eq!(format_ports(&[]), "");
+        assert_eq!(
+            format_ports(&[
+                port(8080, 80, lns_ipc::Protocol::Tcp),
+                port(9090, 90, lns_ipc::Protocol::Tcp),
+            ]),
+            "127.0.0.1:8080->80/tcp, 127.0.0.1:9090->90/tcp"
+        );
+    }
+
+    #[test]
+    fn render_run_list_table_shows_the_published_ports_column() {
+        let runs = [summary(
+            "1a2b3c4d0000000000000000000000aa",
+            "reviewer",
+            "alpine:3.20",
+            RunStatus::Running,
+            vec![port(8080, 80, lns_ipc::Protocol::Tcp)],
+        )];
+        let mut buf: Vec<u8> = Vec::new();
+        render_run_list(&mut buf, &runs, &ls_args()).expect("render");
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("127.0.0.1:8080->80/tcp"),
+            "ports missing: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_run_list_quiet_prints_short_ids_only() {
+        let runs = [
+            summary(
+                "1a2b3c4d0000000000000000000000aa",
+                "reviewer",
+                "alpine:3.20",
+                RunStatus::Running,
+                Vec::new(),
+            ),
+            summary(
+                "5e6f7a8b0000000000000000000000bb",
+                "auditor",
+                "busybox",
+                RunStatus::Exited { code: 0 },
+                Vec::new(),
+            ),
+        ];
+        let args = crate::cli::LsArgs {
+            quiet: true,
+            ..ls_args()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        render_run_list(&mut buf, &runs, &args).expect("render");
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("1a2b3c4d0000"), "first id missing: {out:?}");
+        assert!(out.contains("5e6f7a8b0000"), "second id missing: {out:?}");
+        assert!(
+            !out.contains("IMAGE"),
+            "quiet must omit the header: {out:?}"
+        );
+        assert!(
+            !out.contains("alpine"),
+            "quiet must omit the image: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_run_list_json_emits_an_array_with_status_and_ports() {
+        let runs = [
+            summary(
+                "1a2b3c4d0000000000000000000000aa",
+                "reviewer",
+                "alpine:3.20",
+                RunStatus::Running,
+                vec![port(8080, 80, lns_ipc::Protocol::Tcp)],
+            ),
+            summary(
+                "5e6f7a8b0000000000000000000000bb",
+                "auditor",
+                "busybox",
+                RunStatus::Exited { code: 7 },
+                Vec::new(),
+            ),
+        ];
+        let args = crate::cli::LsArgs {
+            format: Some(crate::cli::LsFormat::Json),
+            ..ls_args()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        render_run_list(&mut buf, &runs, &args).expect("render");
+        let doc: serde_json::Value = serde_json::from_slice(&buf).expect("valid json");
+        let arr = doc.as_array().expect("top-level array");
+        assert_eq!(arr.len(), 2);
+        let running = arr
+            .iter()
+            .find(|r| r["name"] == "reviewer")
+            .expect("reviewer present");
+        assert_eq!(running["status"]["state"], "running");
+        assert_eq!(running["ports"][0], "127.0.0.1:8080->80/tcp");
+        let exited = arr
+            .iter()
+            .find(|r| r["name"] == "auditor")
+            .expect("auditor present");
+        assert_eq!(exited["status"]["state"], "exited");
+        assert_eq!(exited["status"]["code"], 7);
+        assert!(exited["ports"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn render_run_list_filters_by_status_and_name() {
+        let runs = [
+            summary(
+                "1a2b3c4d0000000000000000000000aa",
+                "reviewer",
+                "alpine:3.20",
+                RunStatus::Running,
+                Vec::new(),
+            ),
+            summary(
+                "5e6f7a8b0000000000000000000000bb",
+                "auditor",
+                "busybox",
+                RunStatus::Exited { code: 0 },
+                Vec::new(),
+            ),
+        ];
+        let running_only = crate::cli::LsArgs {
+            filters: vec![crate::cli::LsFilter::Status(
+                crate::cli::StatusFilter::Running,
+            )],
+            ..ls_args()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        render_run_list(&mut buf, &runs, &running_only).expect("render");
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("reviewer"), "running run kept: {out:?}");
+        assert!(!out.contains("auditor"), "exited run dropped: {out:?}");
+
+        let named = crate::cli::LsArgs {
+            filters: vec![crate::cli::LsFilter::Name("audit".into())],
+            ..ls_args()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        render_run_list(&mut buf, &runs, &named).expect("render");
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("auditor"), "name match kept: {out:?}");
+        assert!(!out.contains("reviewer"), "non-match dropped: {out:?}");
     }
 
     #[tokio::test]
