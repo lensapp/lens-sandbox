@@ -55,6 +55,8 @@ dev:
 	$(CARGO) build -p lns-cli -p lns-service
 
 # ── Shipping artifacts (not part of the gate) ─────────────────────────
+# The kernel caches a vnode's code signature, so cp over an already-executed
+# binary gets the next exec SIGKILLed on macOS; unlink before copying.
 
 build: build-lns build-lns-service
 
@@ -64,6 +66,7 @@ build-lns:
 		./crates/lns-cli/scripts/codesign-macos.sh "$(CARGO_TARGET_DIR)/release/lns" >/dev/null; \
 	fi
 	@mkdir -p bin
+	@rm -f bin/lns
 	@cp $(CARGO_TARGET_DIR)/release/lns bin/lns
 
 build-lns-service:
@@ -72,6 +75,7 @@ build-lns-service:
 		./crates/lns-cli/scripts/codesign-macos.sh "$(CARGO_TARGET_DIR)/release/lns-service" >/dev/null; \
 	fi
 	@mkdir -p bin
+	@rm -f bin/lns-service
 	@cp $(CARGO_TARGET_DIR)/release/lns-service bin/lns-service
 
 # ── Gate steps ────────────────────────────────────────────────────────
