@@ -313,13 +313,8 @@ fn format_ports(ports: &[lns_ipc::PortPublish]) -> String {
 }
 
 fn format_port(p: &lns_ipc::PortPublish) -> String {
-    format!(
-        "{}:{}->{}/{}",
-        p.host_ip,
-        p.host_port,
-        p.container_port,
-        proto_str(p.protocol)
-    )
+    let bind = std::net::SocketAddr::new(p.host_ip, p.host_port);
+    format!("{bind}->{}/{}", p.container_port, proto_str(p.protocol))
 }
 
 fn proto_str(protocol: lns_ipc::Protocol) -> &'static str {
@@ -845,6 +840,17 @@ exit 0
             format_port(&port(5353, 53, lns_ipc::Protocol::Udp)),
             "127.0.0.1:5353->53/udp"
         );
+    }
+
+    #[test]
+    fn format_port_brackets_an_ipv6_host_the_way_docker_does() {
+        let p = lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            host_port: 8080,
+            container_port: 80,
+            protocol: lns_ipc::Protocol::Tcp,
+        };
+        assert_eq!(format_port(&p), "[::1]:8080->80/tcp");
     }
 
     #[test]
