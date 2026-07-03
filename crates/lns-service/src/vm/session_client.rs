@@ -27,6 +27,7 @@ pub struct SessionParams {
     pub argv: Vec<String>,
     pub env: Vec<String>,
     pub cwd: Option<String>,
+    pub hostname: Option<String>,
     pub tty: bool,
     pub stdin: bool,
     pub initial_winsize: Option<Winsize>,

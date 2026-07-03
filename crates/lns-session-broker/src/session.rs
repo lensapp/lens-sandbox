@@ -26,6 +26,7 @@ pub(crate) struct WorkloadSpec {
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<String>,
     pub(crate) cwd: Option<String>,
+    pub(crate) hostname: Option<String>,
 }
 
 #[derive(Debug)]
@@ -180,6 +181,7 @@ mod tests {
             argv: vec!["/bin/sh".into()],
             env: vec!["A=1".into()],
             cwd: Some("/app".into()),
+            hostname: Some("demo".into()),
             tty: true,
             stdin: false,
             winsize: None,
@@ -193,6 +195,7 @@ mod tests {
             argv: Vec::new(),
             env: Vec::new(),
             cwd: None,
+            hostname: None,
             tty: false,
             stdin: false,
             winsize: None,
@@ -226,6 +229,7 @@ mod tests {
             argv: Vec::new(),
             env: Vec::new(),
             cwd: None,
+            hostname: None,
             tty: false,
             stdin: false,
             winsize: None,

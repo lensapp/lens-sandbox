@@ -40,6 +40,7 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
 
 pub(super) fn build_workload_argv(
     image_config: Option<&oci_client::config::ConfigFile>,
+    override_entrypoint: Option<&str>,
     override_cmd: &[String],
     supervised: bool,
 ) -> Vec<String> {
@@ -47,14 +48,17 @@ pub(super) fn build_workload_argv(
         return vec!["/.lens/bin/lns-supervisor".to_string()];
     }
     let joined = match image_config {
-        Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
-        None => crate::workload_argv::shell_quote_argv(override_cmd),
+        Some(cfg) => {
+            crate::workload_argv::from_image_config(cfg, override_entrypoint, override_cmd)
+        }
+        None => crate::workload_argv::from_imageless(override_entrypoint, override_cmd),
     };
     vec!["/bin/sh".to_string(), "-c".to_string(), joined]
 }
 
 pub(super) fn exec_env_strings(
     image_config: Option<&oci_client::config::ConfigFile>,
+    override_entrypoint: Option<&str>,
     override_cmd: &[String],
     user_env: &[String],
     supervised: bool,
@@ -62,8 +66,10 @@ pub(super) fn exec_env_strings(
     workdir: Option<&str>,
 ) -> crate::workload_env::WorkloadEnv {
     let agent_command = supervised.then(|| match image_config {
-        Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
-        None => crate::workload_argv::shell_quote_argv(override_cmd),
+        Some(cfg) => {
+            crate::workload_argv::from_image_config(cfg, override_entrypoint, override_cmd)
+        }
+        None => crate::workload_argv::from_imageless(override_entrypoint, override_cmd),
     });
     let image_env = image_config
         .and_then(|c| c.config.as_ref())
@@ -171,13 +177,13 @@ mod tests {
 
     #[test]
     fn build_workload_argv_supervised_returns_supervisor_wrapper() {
-        let argv = build_workload_argv(None, &["echo".into(), "hi".into()], true);
+        let argv = build_workload_argv(None, None, &["echo".into(), "hi".into()], true);
         assert_eq!(argv, vec!["/.lens/bin/lns-supervisor".to_string()]);
     }
 
     #[test]
     fn build_workload_argv_unsupervised_imageless_wraps_in_sh_dash_c() {
-        let argv = build_workload_argv(None, &["echo".into(), "hello world".into()], false);
+        let argv = build_workload_argv(None, None, &["echo".into(), "hello world".into()], false);
         assert_eq!(argv.len(), 3);
         assert_eq!(argv[0], "/bin/sh");
         assert_eq!(argv[1], "-c");
@@ -186,7 +192,15 @@ mod tests {
 
     #[test]
     fn exec_env_strings_supervised_derives_agent_command_from_the_override_cmd() {
-        let env = exec_env_strings(None, &["echo".into(), "hi".into()], &[], true, &[], None);
+        let env = exec_env_strings(
+            None,
+            None,
+            &["echo".into(), "hi".into()],
+            &[],
+            true,
+            &[],
+            None,
+        );
         assert!(
             env.env.contains(&"AGENT_COMMAND=echo hi".to_string()),
             "expected AGENT_COMMAND in supervised env, got: {env:?}"
@@ -196,6 +210,7 @@ mod tests {
     #[test]
     fn exec_env_strings_supervised_preserves_whitespace_and_quotes() {
         let env = exec_env_strings(
+            None,
             None,
             &[
                 "/bin/sh".into(),
@@ -222,6 +237,7 @@ mod tests {
     fn exec_env_strings_unsupervised_carries_user_env_without_supervisor_vars() {
         let env = exec_env_strings(
             None,
+            None,
             &["echo".into(), "hi".into()],
             &["FOO=bar".into()],
             false,
@@ -247,9 +263,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let argv = build_workload_argv(Some(&cfg), &[], false);
+        let argv = build_workload_argv(Some(&cfg), None, &[], false);
         assert_eq!(argv[2], "/entry default-arg");
-        let argv = build_workload_argv(Some(&cfg), &["override".into()], false);
+        let argv = build_workload_argv(Some(&cfg), None, &["override".into()], false);
         assert_eq!(argv[2], "override");
     }
 
@@ -265,7 +281,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &[], true, &[], None);
+        let env = exec_env_strings(Some(&cfg), None, &[], &[], true, &[], None);
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
@@ -280,7 +296,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), &[], &["PORT=4000".into()], true, &[], None);
+        let env = exec_env_strings(
+            Some(&cfg),
+            None,
+            &[],
+            &["PORT=4000".into()],
+            true,
+            &[],
+            None,
+        );
         assert!(
             env.env.contains(&"PORT=4000".to_string()),
             "user overrides image: {env:?}"

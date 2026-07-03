@@ -5,7 +5,8 @@ use lns_cli::log;
 #[tokio::main]
 async fn main() -> Result<()> {
     reset_sigpipe();
-    let matches = lns_cli::build_cli().get_matches();
+    let matches =
+        lns_cli::command::try_get_matches_from(std::env::args_os()).unwrap_or_else(|e| e.exit());
     let log_level = matches
         .get_one::<LogLevel>("log_level")
         .copied()

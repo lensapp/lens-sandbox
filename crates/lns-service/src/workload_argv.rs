@@ -1,18 +1,46 @@
 pub fn from_image_config(
     config: &oci_client::config::ConfigFile,
+    override_entrypoint: Option<&str>,
     override_cmd: &[String],
 ) -> String {
     let cfg = config.config.as_ref();
     let entrypoint = cfg.and_then(|c| c.entrypoint.clone()).unwrap_or_default();
     let image_cmd = cfg.and_then(|c| c.cmd.clone()).unwrap_or_default();
 
-    let argv: Vec<String> = if !override_cmd.is_empty() {
-        override_cmd.to_vec()
-    } else {
-        entrypoint.into_iter().chain(image_cmd).collect()
-    };
+    let argv = merged_argv(entrypoint, image_cmd, override_entrypoint, override_cmd);
 
     shell_quote_argv(&argv)
+}
+
+pub fn from_imageless(override_entrypoint: Option<&str>, override_cmd: &[String]) -> String {
+    let argv = merged_argv(Vec::new(), Vec::new(), override_entrypoint, override_cmd);
+    shell_quote_argv(&argv)
+}
+
+fn merged_argv(
+    image_entrypoint: Vec<String>,
+    image_cmd: Vec<String>,
+    override_entrypoint: Option<&str>,
+    override_cmd: &[String],
+) -> Vec<String> {
+    match override_entrypoint {
+        Some("") => {
+            if override_cmd.is_empty() {
+                image_cmd
+            } else {
+                override_cmd.to_vec()
+            }
+        }
+        Some(entrypoint) => std::iter::once(entrypoint.to_string())
+            .chain(if override_cmd.is_empty() {
+                image_cmd
+            } else {
+                override_cmd.to_vec()
+            })
+            .collect(),
+        None if !override_cmd.is_empty() => override_cmd.to_vec(),
+        None => image_entrypoint.into_iter().chain(image_cmd).collect(),
+    }
 }
 
 pub fn shell_quote_argv(argv: &[String]) -> String {
@@ -88,7 +116,7 @@ mod tests {
         };
         let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".into()];
         assert_eq!(
-            from_image_config(&config, &argv),
+            from_image_config(&config, None, &argv),
             "/bin/sh -c 'echo hi'",
             "non-empty override must shadow entrypoint+cmd entirely",
         );
@@ -107,7 +135,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            from_image_config(&config, &[]),
+            from_image_config(&config, None, &[]),
             "/entry --flag arg1 'arg with space'",
             "empty override should yield entrypoint ++ cmd",
         );
@@ -121,6 +149,83 @@ mod tests {
             config: None,
             ..Default::default()
         };
-        assert_eq!(from_image_config(&config, &[]), "sh");
+        assert_eq!(from_image_config(&config, None, &[]), "sh");
+    }
+
+    #[test]
+    fn from_image_config_uses_override_entrypoint_with_explicit_cmd() {
+        let config = oci_client::config::ConfigFile {
+            architecture: "arm64".into(),
+            os: "linux".into(),
+            config: Some(oci_client::config::Config {
+                entrypoint: Some(vec!["/entry".into()]),
+                cmd: Some(vec!["default".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            from_image_config(&config, Some("/bin/sh"), &["-c".into(), "echo hi".into()]),
+            "/bin/sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
+    fn from_image_config_uses_override_entrypoint_with_image_cmd_when_cmd_is_empty() {
+        let config = oci_client::config::ConfigFile {
+            architecture: "arm64".into(),
+            os: "linux".into(),
+            config: Some(oci_client::config::Config {
+                entrypoint: Some(vec!["/entry".into()]),
+                cmd: Some(vec!["default".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            from_image_config(&config, Some("/bin/sh"), &[]),
+            "/bin/sh default"
+        );
+    }
+
+    #[test]
+    fn from_image_config_clears_entrypoint_and_uses_image_cmd() {
+        let config = oci_client::config::ConfigFile {
+            architecture: "arm64".into(),
+            os: "linux".into(),
+            config: Some(oci_client::config::Config {
+                entrypoint: Some(vec!["/entry".into()]),
+                cmd: Some(vec!["default".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(from_image_config(&config, Some(""), &[]), "default");
+    }
+
+    #[test]
+    fn from_image_config_clears_entrypoint_and_uses_explicit_cmd() {
+        let config = oci_client::config::ConfigFile {
+            architecture: "arm64".into(),
+            os: "linux".into(),
+            config: Some(oci_client::config::Config {
+                entrypoint: Some(vec!["/entry".into()]),
+                cmd: Some(vec!["default".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            from_image_config(&config, Some(""), &["custom".into()]),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn from_imageless_prepends_override_entrypoint() {
+        assert_eq!(
+            from_imageless(Some("/bin/sh"), &["-c".into(), "echo hi".into()]),
+            "/bin/sh -c 'echo hi'"
+        );
     }
 }

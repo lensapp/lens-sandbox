@@ -457,6 +457,7 @@ pub(super) fn build_session_params(
         argv: args.argv,
         env: args.env,
         cwd: None,
+        hostname: None,
         tty: args.tty,
         stdin: args.stdin,
         initial_winsize: args
@@ -515,7 +516,7 @@ mod tests {
     #[should_panic(expected = "Request::RunImage must be dispatched via handle_run")]
     async fn run_image_via_handle_request_panics() {
         let _ = handle_request(
-            &Request::RunImage(lns_ipc::RunImageArgs {
+            &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
                 image: None,
                 name: None,
                 cpus: 1,
@@ -523,6 +524,9 @@ mod tests {
                 policy_path: None,
                 sandbox_user: None,
                 sandbox_uid: None,
+                entrypoint: None,
+                hostname: None,
+                pull: None,
                 cmd: vec![],
                 env: vec![],
                 workdir: None,
@@ -534,7 +538,8 @@ mod tests {
                 published_ports: vec![],
                 volumes: vec![],
                 binds: vec![],
-            }),
+                auto_remove: false,
+            })),
             Instant::now(),
         )
         .await;

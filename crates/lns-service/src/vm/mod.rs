@@ -114,11 +114,12 @@ impl ExecSpec {
         run_as: &RunAs,
         ws_url: &str,
         token: &str,
+        entrypoint: Option<&str>,
         cmd: &[String],
     ) -> Self {
         let agent_command = match image_config {
-            Some(cfg) => crate::workload_argv::from_image_config(cfg, cmd),
-            None => crate::workload_argv::shell_quote_argv(cmd),
+            Some(cfg) => crate::workload_argv::from_image_config(cfg, entrypoint, cmd),
+            None => crate::workload_argv::from_imageless(entrypoint, cmd),
         };
 
         let mut kernel_env = vec![
@@ -147,11 +148,12 @@ impl ExecSpec {
 
     pub fn from_image_config(
         image_config: Option<&oci_client::config::ConfigFile>,
+        entrypoint: Option<&str>,
         override_cmd: &[String],
     ) -> Self {
         let argv = match image_config {
-            Some(cfg) => crate::workload_argv::from_image_config(cfg, override_cmd),
-            None => crate::workload_argv::shell_quote_argv(override_cmd),
+            Some(cfg) => crate::workload_argv::from_image_config(cfg, entrypoint, override_cmd),
+            None => crate::workload_argv::from_imageless(entrypoint, override_cmd),
         };
 
         ExecSpec {
@@ -170,13 +172,21 @@ impl ExecSpec {
 
     pub fn for_run(
         run_as: &RunAs,
+        entrypoint: Option<&str>,
         cmd: &[String],
         image_config: Option<&oci_client::config::ConfigFile>,
         session: Option<&crate::supervisor::SupervisorSession>,
     ) -> Self {
         match session {
-            Some(s) => Self::server(image_config, run_as, &s.relay.url, &s.relay.token, cmd),
-            None => Self::from_image_config(image_config, cmd),
+            Some(s) => Self::server(
+                image_config,
+                run_as,
+                &s.relay.url,
+                &s.relay.token,
+                entrypoint,
+                cmd,
+            ),
+            None => Self::from_image_config(image_config, entrypoint, cmd),
         }
     }
 }
@@ -201,10 +211,17 @@ pub fn resolve_run_as(
     imageless: bool,
 ) -> RunAs {
     if explicit_user.is_some() || explicit_uid.is_some() {
+        let (user, group) = explicit_user
+            .map(split_user_group)
+            .unwrap_or((DEFAULT_SANDBOX_USER, None));
         return RunAs {
-            user: explicit_user.unwrap_or(DEFAULT_SANDBOX_USER).to_string(),
-            uid: Some(explicit_uid.unwrap_or(DEFAULT_SANDBOX_UID)),
-            group: None,
+            user: user.to_string(),
+            uid: Some(
+                explicit_uid
+                    .or_else(|| user.parse::<u32>().ok())
+                    .unwrap_or(DEFAULT_SANDBOX_UID),
+            ),
+            group: group.map(str::to_string),
         };
     }
     if imageless {
@@ -231,6 +248,13 @@ pub fn resolve_run_as(
                 group,
             }
         }
+    }
+}
+
+fn split_user_group(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once(':') {
+        Some((user, group)) => (user, (!group.is_empty()).then_some(group)),
+        None => (spec, None),
     }
 }
 
@@ -340,7 +364,7 @@ mod tests {
 
     #[test]
     fn from_image_config_emits_agent_command_b64_not_agent_command() {
-        let spec = ExecSpec::from_image_config(None, &["echo".into(), "hello".into()]);
+        let spec = ExecSpec::from_image_config(None, None, &["echo".into(), "hello".into()]);
         let keys: Vec<&str> = spec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
         assert!(!keys.contains(&"AGENT_COMMAND"));
@@ -348,7 +372,7 @@ mod tests {
 
     #[test]
     fn from_image_config_b64_value_round_trips_to_echo_hello() {
-        let spec = ExecSpec::from_image_config(None, &["echo".into(), "hello".into()]);
+        let spec = ExecSpec::from_image_config(None, None, &["echo".into(), "hello".into()]);
         let (_, b64) = spec
             .kernel_env
             .iter()
@@ -361,6 +385,7 @@ mod tests {
     #[test]
     fn from_image_config_b64_value_carries_quoted_args() {
         let spec = ExecSpec::from_image_config(
+            None,
             None,
             &["sh".into(), "-c".into(), "echo \"hi there\"".into()],
         );
@@ -375,7 +400,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_quiet_tokens_gated_on_debug() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let quiet = build_kernel_cmdline(
             &exec,
             "hvc0",
@@ -416,7 +441,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_pci_off_gated_on_pci_flag() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let with_pci = build_kernel_cmdline(
             &exec,
             "hvc0",
@@ -452,7 +477,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_emits_agent_command_b64_intact() {
-        let exec = ExecSpec::from_image_config(None, &["echo".into(), "hello".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["echo".into(), "hello".into()]);
         let cmdline = build_kernel_cmdline(
             &exec,
             "hvc0",
@@ -500,7 +525,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_no_volumes_emits_no_volume_keys() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let cmdline =
             build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &[]);
         assert!(
@@ -522,7 +547,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_emits_tag_target_ro_and_drops_per_bind() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let binds = [
             BindAttachment {
                 host_source: "/Users/me/proj".into(),
@@ -562,7 +587,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_emits_volume_dev_target_and_ro_per_volume() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let volumes = [
             VolumeAttachment {
                 host_image: "/store/a.img".into(),
@@ -633,7 +658,7 @@ mod tests {
 
     #[test]
     fn build_kernel_cmdline_points_repeated_volume_at_one_shared_device() {
-        let exec = ExecSpec::from_image_config(None, &["true".into()]);
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
         let volumes = [
             VolumeAttachment {
                 host_image: "/store/a.img".into(),
@@ -676,6 +701,7 @@ mod tests {
             &run_as("sandbox", Some(65534)),
             "vsock://host:1024/v1/sandbox",
             "token",
+            None,
             &["echo".into(), "hello".into()],
         );
         let keys: Vec<&str> = exec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
@@ -749,7 +775,13 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run(
+            &run_as("sandbox", Some(65534)),
+            None,
+            &cmd,
+            None,
+            Some(&session),
+        );
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert_eq!(
             env.get("LENS_SANDBOX_WS_URL").map(String::as_str),
@@ -783,7 +815,13 @@ mod tests {
         use std::collections::HashMap;
         let session = fake_session("vsock://host:1024/v1/sandbox", "test-token-123");
         let cmd = vec!["sh".to_string()];
-        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, Some(&session));
+        let exec = ExecSpec::for_run(
+            &run_as("sandbox", Some(65534)),
+            None,
+            &cmd,
+            None,
+            Some(&session),
+        );
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             !env.contains_key("RUST_LOG"),
@@ -797,7 +835,7 @@ mod tests {
     fn for_run_unsupervised_sets_agent_command_b64() {
         use std::collections::HashMap;
         let cmd = vec!["echo".to_string(), "hi".to_string()];
-        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), &cmd, None, None);
+        let exec = ExecSpec::for_run(&run_as("sandbox", Some(65534)), None, &cmd, None, None);
         let env: HashMap<_, _> = exec.kernel_env.iter().cloned().collect();
         assert!(
             env.contains_key("AGENT_COMMAND_B64"),
@@ -868,7 +906,7 @@ mod tests {
     #[test]
     fn from_image_config_with_some_uses_image_entrypoint() {
         let cfg = config_with_entrypoint();
-        let spec = ExecSpec::from_image_config(Some(&cfg), &[]);
+        let spec = ExecSpec::from_image_config(Some(&cfg), None, &[]);
         let b64 = spec
             .kernel_env
             .iter()
@@ -887,6 +925,7 @@ mod tests {
             &run_as("sandbox", Some(65534)),
             "vsock://host:1024/v1/sandbox",
             "token-xyz",
+            None,
             &[],
         );
         let b64 = spec
@@ -942,7 +981,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             console_fd: -1,
             debug: false,
-            exec: ExecSpec::from_image_config(None, &["true".into()]),
+            exec: ExecSpec::from_image_config(None, None, &["true".into()]),
         }
     }
 
@@ -1099,6 +1138,26 @@ mod tests {
     }
 
     #[test]
+    fn run_as_explicit_docker_user_parses_numeric_uid_and_group() {
+        assert_eq!(
+            resolve_run_as(Some("1000:1001"), Some(1000), None, false),
+            RunAs {
+                user: "1000".to_string(),
+                uid: Some(1000),
+                group: Some("1001".to_string()),
+            }
+        );
+        assert_eq!(
+            resolve_run_as(Some("node:staff"), None, None, false),
+            RunAs {
+                user: "node".to_string(),
+                uid: Some(65534),
+                group: Some("staff".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn run_as_imageless_runs_unprivileged_as_the_sandbox_user() {
         for image_user in [None, Some("ignored:when-imageless")] {
             assert_eq!(
@@ -1120,6 +1179,7 @@ mod tests {
             &run_as("www-data", None),
             "vsock://host:1024/v1/sandbox",
             "token",
+            None,
             &["true".into()],
         );
         let env: HashMap<_, _> = named.kernel_env.iter().cloned().collect();
@@ -1137,6 +1197,7 @@ mod tests {
             &run_as("1000", Some(1000)),
             "vsock://host:1024/v1/sandbox",
             "token",
+            None,
             &["true".into()],
         );
         let env: HashMap<_, _> = numeric.kernel_env.iter().cloned().collect();
@@ -1155,6 +1216,7 @@ mod tests {
             },
             "vsock://host:1024/v1/sandbox",
             "token",
+            None,
             &["true".into()],
         );
         let env: HashMap<_, _> = with_group.kernel_env.iter().cloned().collect();
@@ -1169,6 +1231,7 @@ mod tests {
             &run_as("sandbox", Some(65534)),
             "vsock://host:1024/v1/sandbox",
             "token",
+            None,
             &["true".into()],
         );
         let env: HashMap<_, _> = without_group.kernel_env.iter().cloned().collect();

@@ -224,7 +224,13 @@ async fn orchestrate(
             .and_then(|c| c.user.as_deref()),
         imageless,
     );
-    let exec = vm::ExecSpec::for_run(&run_as, &args.cmd, image.config.as_ref(), session.as_ref());
+    let exec = vm::ExecSpec::for_run(
+        &run_as,
+        args.entrypoint.as_deref(),
+        &args.cmd,
+        image.config.as_ref(),
+        session.as_ref(),
+    );
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -267,13 +273,19 @@ async fn orchestrate(
     let initial_winsize = args
         .initial_winsize
         .map(|(rows, cols)| lns_session::Winsize { rows, cols });
-    let argv = build_workload_argv(image.config.as_ref(), &args.cmd, session.is_some());
+    let argv = build_workload_argv(
+        image.config.as_ref(),
+        args.entrypoint.as_deref(),
+        &args.cmd,
+        session.is_some(),
+    );
     let workdir = crate::workload_cwd::resolve(
         args.workdir.as_deref(),
         crate::workload_cwd::image_workdir(image.config.as_ref()).as_deref(),
     );
     let composed = exec_env_strings(
         image.config.as_ref(),
+        args.entrypoint.as_deref(),
         &args.cmd,
         &args.env,
         session.is_some(),
@@ -298,6 +310,7 @@ async fn orchestrate(
         argv,
         env,
         cwd: workdir,
+        hostname: args.hostname,
         tty: args.tty,
         stdin: args.stdin,
         initial_winsize,

@@ -1,5 +1,3 @@
-use clap::ColorChoice;
-
 #[derive(Debug, Clone)]
 pub struct CliRun {
     pub exit_code: i32,
@@ -9,8 +7,7 @@ pub struct CliRun {
 pub fn run_lns(args: &[&str]) -> CliRun {
     let mut argv: Vec<&str> = vec!["lns"];
     argv.extend(args);
-    let cmd = lns_cli::build_cli().color(ColorChoice::Never);
-    match cmd.try_get_matches_from(argv) {
+    match lns_cli::command::try_get_matches_from(argv).map(|_| ()) {
         Ok(_matches) => CliRun {
             exit_code: 0,
             output: String::new(),
