@@ -23,7 +23,7 @@ pub struct SandboxArgs {
 pub enum SandboxCommand {
     #[command(
         visible_aliases = ["list", "ps"],
-        about = "List runs (`docker ps`-style): running plus finished-until-removed. Narrow with --filter status=/name=, ids-only with -q, JSON with --format json."
+        about = "List runs (`docker ps`-style): running plus finished-until-removed. Narrow with `--filter status=running|exited` or `--filter name=<substring>`, ids-only with -q, JSON with --format json."
     )]
     Ls(LsArgs),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
