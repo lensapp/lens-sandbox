@@ -110,7 +110,7 @@ where
     let raw: Vec<OsString> = argv.into_iter().map(Into::into).collect();
     match first_subcommand(app, &raw) {
         Some((idx, "run")) => normalize_run_argv(app, &raw, idx),
-        Some((idx, "exec")) => normalize_exec_argv(app, &raw, idx),
+        Some((idx, "exec")) => normalize_exec_argv(&raw, idx),
         _ => raw,
     }
 }
@@ -145,8 +145,7 @@ fn normalized_subcommand(arg: &str) -> Option<&'static str> {
     }
 }
 
-fn normalize_exec_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec<OsString> {
-    let consumes = options_consuming_next_value(app, "exec");
+fn normalize_exec_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
     let mut out = raw[..=idx].to_vec();
     let rest = &raw[idx + 1..];
     let mut i = 0;
@@ -156,20 +155,9 @@ fn normalize_exec_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec
             out.extend(rest[i..].iter().cloned());
             return out;
         }
-        if let Some(expanded) = expand_it(arg) {
-            out.extend(expanded);
-            i += 1;
-            continue;
-        }
-        out.push(arg.clone());
-        let s = arg.to_string_lossy();
-        if consumes.contains(s.as_ref())
-            && !s.contains('=')
-            && let Some(value) = rest.get(i + 1)
-        {
-            out.push(value.clone());
-            i += 2;
-            continue;
+        match expand_it(arg) {
+            Some(expanded) => out.extend(expanded),
+            None => out.push(arg.clone()),
         }
         i += 1;
     }
@@ -445,6 +433,26 @@ mod tests {
             parse_args(["lns", "exec", "demo", "--", "tool", "-ti"]).unwrap();
         assert_eq!(args.run, "demo");
         assert_eq!(args.cmd, ["tool", "-ti"]);
+    }
+
+    #[test]
+    fn exec_expands_a_leading_it_cluster_into_session_flags() {
+        let args: crate::cli::ExecArgs =
+            parse_args(["lns", "exec", "-it", "demo", "--", "sh"]).unwrap();
+        assert!(args.interactive);
+        assert!(args.tty);
+        assert_eq!(args.run, "demo");
+        assert_eq!(args.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn normalization_ignores_a_top_level_flag_with_no_subcommand() {
+        let raw = ["lns", "--help"];
+        let normalized = normalize_argv(&build_cli(), raw);
+        assert_eq!(
+            normalized,
+            raw.into_iter().map(OsString::from).collect::<Vec<_>>()
+        );
     }
 
     #[test]
