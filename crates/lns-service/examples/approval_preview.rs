@@ -250,6 +250,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(lds_visuals());
             quiet_debug_overlays(&cc.egui_ctx);
+            lns_service::ui::texture_delta_guard::install(&cc.egui_ctx);
             install_system_fonts(&cc.egui_ctx);
             install_icon_font(&cc.egui_ctx);
             Ok(Box::new(Preview {

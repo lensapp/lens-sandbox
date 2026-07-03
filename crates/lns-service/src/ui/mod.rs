@@ -1,6 +1,7 @@
 pub mod badge;
 pub mod button;
 pub mod card;
+pub mod texture_delta_guard;
 pub mod theme;
 
 pub use badge::badges;

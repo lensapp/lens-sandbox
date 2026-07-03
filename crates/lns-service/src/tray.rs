@@ -148,6 +148,7 @@ pub fn run_tray(
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(window::lds_visuals());
             window::quiet_debug_overlays(&cc.egui_ctx);
+            crate::ui::texture_delta_guard::install(&cc.egui_ctx);
             window::install_system_fonts(&cc.egui_ctx);
             window::install_icon_font(&cc.egui_ctx);
             window::install_ctx(cc.egui_ctx.clone());

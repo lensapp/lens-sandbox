@@ -187,6 +187,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             quiet_debug_overlays(&cc.egui_ctx);
+            lns_service::ui::texture_delta_guard::install(&cc.egui_ctx);
             install_system_fonts(&cc.egui_ctx);
             install_icon_font(&cc.egui_ctx);
             dashboard::style(&cc.egui_ctx);
