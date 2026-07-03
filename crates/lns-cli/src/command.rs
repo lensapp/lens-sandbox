@@ -446,6 +446,13 @@ mod tests {
     }
 
     #[test]
+    fn exec_without_a_separator_normalizes_to_the_run_name_only() {
+        let args: crate::cli::ExecArgs = parse_args(["lns", "exec", "demo"]).unwrap();
+        assert_eq!(args.run, "demo");
+        assert!(args.cmd.is_empty());
+    }
+
+    #[test]
     fn normalization_ignores_a_top_level_flag_with_no_subcommand() {
         let raw = ["lns", "--help"];
         let normalized = normalize_argv(&build_cli(), raw);
