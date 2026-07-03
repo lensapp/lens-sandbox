@@ -152,6 +152,9 @@ fn flags_line(args: &RunArgs) -> String {
     if args.detach {
         flags.push("-d");
     }
+    if args.auto_remove {
+        flags.push("--rm");
+    }
     if flags.is_empty() {
         "(none)".to_string()
     } else {
@@ -222,10 +225,15 @@ mod tests {
             cpus: None,
             mem: None,
             policy: None,
+            user: None,
             sandbox_user: None,
             sandbox_uid: None,
+            auto_remove: false,
+            pull: None,
             interactive: true,
             tty: true,
+            entrypoint: None,
+            hostname: None,
             detach: false,
             detach_keys: crate::cli::DetachChord(vec![0x10, 0x11]),
             workdir: None,
@@ -549,6 +557,19 @@ mod tests {
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     -d"), "flags line wrong: {s}");
+    }
+
+    #[test]
+    fn flags_line_includes_auto_remove_when_set() {
+        let mut args = run_args(Some("ubuntu"));
+        args.auto_remove = true;
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(s.contains("Flags:     -i -t --rm"), "flags line wrong: {s}");
     }
 
     #[test]

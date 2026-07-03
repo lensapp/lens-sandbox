@@ -163,15 +163,20 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         None
     };
     let detach_chord = args.detach_keys.0.clone();
+    let sandbox_user = args.effective_sandbox_user();
+    let sandbox_uid = args.effective_sandbox_uid();
 
-    let request = Request::RunImage(RunImageArgs {
+    let request = Request::RunImage(Box::new(RunImageArgs {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
         image: args.image,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
-        sandbox_user: args.sandbox_user,
-        sandbox_uid: args.sandbox_uid,
+        sandbox_user,
+        sandbox_uid,
+        entrypoint: args.entrypoint,
+        hostname: args.hostname,
+        pull: args.pull,
         cmd: args.cmd,
         env: args.env,
         workdir: args.workdir,
@@ -183,7 +188,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         published_ports: args.publish,
         volumes,
         binds,
-    });
+        auto_remove: args.auto_remove,
+    }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
         .write_all(&frame)

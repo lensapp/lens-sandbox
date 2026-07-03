@@ -147,7 +147,7 @@ async fn handle_connection(
     let request: Request = decode_frame(&mut &bytes[..])?;
 
     match request {
-        Request::RunImage(args) => handle_run(stream, args).await,
+        Request::RunImage(args) => handle_run(stream, *args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
         Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
         Request::AttachRun { run } => handle_attach(stream, run).await,
@@ -428,6 +428,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 
     let run_id = crate::run_registry::allocate_run_id();
     let detached = args.detached;
+    let auto_remove = args.auto_remove;
 
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
 
@@ -509,7 +510,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx, detach_rx).await?;
     match post_pump_action(&outcome, detached) {
         PostPumpAction::Retain => {
-            crate::run_registry::mark_exited_from_log(&run_id);
+            finish_run(&run_id, auto_remove);
         }
         PostPumpAction::BackgroundDrain => {
             if let PumpOutcome::WriteFailed(e) = &outcome {
@@ -517,7 +518,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             }
             tokio::spawn(async move {
                 while frame_rx.recv().await.is_some() {}
-                crate::run_registry::mark_exited_from_log(&run_id);
+                finish_run(&run_id, auto_remove);
             });
         }
         PostPumpAction::CancelAndDeregister => {
@@ -529,6 +530,13 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         }
     }
     Ok(())
+}
+
+fn finish_run(run_id: &str, auto_remove: bool) {
+    crate::run_registry::mark_exited_from_log(run_id);
+    if auto_remove {
+        let _ = crate::run_registry::remove_if_exited(run_id);
+    }
 }
 
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {

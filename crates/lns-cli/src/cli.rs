@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use lns_ipc::{PortPublish, Protocol};
+use lns_ipc::{PortPublish, Protocol, PullPolicy};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
@@ -72,6 +72,15 @@ pub struct RunArgs {
     pub policy: Option<PathBuf>,
 
     #[arg(
+        short = 'u',
+        long = "user",
+        value_name = "USER[:GROUP]",
+        conflicts_with_all = ["sandbox_user", "sandbox_uid"],
+        help = "Docker-compatible run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`."
+    )]
+    pub user: Option<String>,
+
+    #[arg(
         long,
         help = "Run-as user inside the sandbox. Defaults to the image's USER (root when the image sets none); imageless runs default to `sandbox`."
     )]
@@ -82,6 +91,21 @@ pub struct RunArgs {
         help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; imageless runs default to 65534."
     )]
     pub sandbox_uid: Option<u32>,
+
+    #[arg(
+        long = "rm",
+        default_value_t = false,
+        help = "Automatically remove the run record after the workload exits."
+    )]
+    pub auto_remove: bool,
+
+    #[arg(
+        long = "pull",
+        value_name = "POLICY",
+        value_parser = parse_pull_policy_arg,
+        help = "Docker-compatible pull policy accepted for tooling (`always`, `missing`, or `never`)."
+    )]
+    pub pull: Option<PullPolicy>,
 
     #[arg(
         short = 'i',
@@ -106,6 +130,22 @@ pub struct RunArgs {
         help = "Allocate a PTY in the broker; pipe mode is selected automatically when stdin is not a TTY. Pass `--tty=false` (or `-t=false`) to disable."
     )]
     pub tty: bool,
+
+    #[arg(
+        long,
+        value_name = "COMMAND",
+        help = "Override the image ENTRYPOINT while keeping command arguments after the image."
+    )]
+    pub entrypoint: Option<String>,
+
+    #[arg(
+        short = 'h',
+        long = "hostname",
+        value_name = "NAME",
+        value_parser = parse_hostname_arg,
+        help = "Set the guest hostname for this run."
+    )]
+    pub hostname: Option<String>,
 
     #[arg(
         short = 'd',
@@ -160,8 +200,9 @@ pub struct RunArgs {
     #[arg(
         short = 'v',
         long = "volume",
-        value_parser = lns_ipc::MountSpec::parse,
-        help = "Mount into the workload (Docker -v style): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files)."
+        visible_alias = "mount",
+        value_parser = parse_mount_arg,
+        help = "Mount into the workload: `name:/path[:ro]`, `/host/path:/path[:ro]`, or Docker `--mount type=...,source=...,target=...`."
     )]
     pub mounts: Vec<lns_ipc::MountSpec>,
 
@@ -190,6 +231,15 @@ impl RunArgs {
 
     pub fn effective_mem(&self) -> usize {
         self.mem.unwrap_or(DEFAULT_MEM_MIB)
+    }
+
+    pub fn effective_sandbox_user(&self) -> Option<String> {
+        self.user.clone().or_else(|| self.sandbox_user.clone())
+    }
+
+    pub fn effective_sandbox_uid(&self) -> Option<u32> {
+        self.sandbox_uid
+            .or_else(|| self.user.as_deref().and_then(user_spec_uid))
     }
 }
 
@@ -295,6 +345,35 @@ pub(crate) fn parse_env_kv(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
+pub(crate) fn parse_pull_policy_arg(s: &str) -> Result<PullPolicy, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "always" => Ok(PullPolicy::Always),
+        "missing" => Ok(PullPolicy::Missing),
+        "never" => Ok(PullPolicy::Never),
+        _ => Err(format!(
+            "invalid pull policy `{s}`: expected always, missing, or never"
+        )),
+    }
+}
+
+pub(crate) fn parse_hostname_arg(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("hostname must not be empty".to_string());
+    }
+    if s.len() > 63 {
+        return Err(format!("hostname `{s}` is longer than 63 bytes"));
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "hostname `{s}` may contain only ASCII letters, digits, hyphens, and dots"
+        ))
+    }
+}
+
 fn parse_workdir_arg(s: &str) -> Result<String, String> {
     if !s.starts_with('/') {
         return Err(format!(
@@ -302,6 +381,78 @@ fn parse_workdir_arg(s: &str) -> Result<String, String> {
         ));
     }
     Ok(s.to_string())
+}
+
+pub(crate) fn parse_mount_arg(s: &str) -> Result<lns_ipc::MountSpec, String> {
+    if s.contains('=') {
+        parse_docker_mount_arg(s)
+    } else {
+        lns_ipc::MountSpec::parse(s)
+    }
+}
+
+fn parse_docker_mount_arg(s: &str) -> Result<lns_ipc::MountSpec, String> {
+    let mut kind: Option<&str> = None;
+    let mut source: Option<&str> = None;
+    let mut target: Option<&str> = None;
+    let mut read_only = false;
+    for part in s.split(',') {
+        let part = part.trim();
+        match part.split_once('=') {
+            Some(("type", value)) => kind = Some(value),
+            Some(("source" | "src", value)) => source = Some(value),
+            Some(("target" | "destination" | "dst", value)) => target = Some(value),
+            Some(("readonly" | "ro", value)) => read_only = parse_mount_bool(value, s)?,
+            Some(("readwrite" | "rw", value)) => read_only = !parse_mount_bool(value, s)?,
+            None if matches!(part, "readonly" | "ro") => read_only = true,
+            None if matches!(part, "readwrite" | "rw") => read_only = false,
+            Some((key, _)) => {
+                return Err(format!(
+                    "invalid --mount spec `{s}`: unsupported field `{key}`"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "invalid --mount spec `{s}`: unsupported field `{part}`"
+                ));
+            }
+        }
+    }
+    let source = source.ok_or_else(|| format!("invalid --mount spec `{s}`: missing source"))?;
+    let target = target.ok_or_else(|| format!("invalid --mount spec `{s}`: missing target"))?;
+    let suffix = if read_only { ":ro" } else { "" };
+    match kind {
+        Some("bind") => lns_ipc::BindSpec::parse(&format!("{source}:{target}{suffix}"))
+            .map(lns_ipc::MountSpec::Bind),
+        Some("volume") => lns_ipc::VolumeMount::parse(&format!("{source}:{target}{suffix}"))
+            .map(lns_ipc::MountSpec::Named),
+        None if source.starts_with('/') => {
+            lns_ipc::BindSpec::parse(&format!("{source}:{target}{suffix}"))
+                .map(lns_ipc::MountSpec::Bind)
+        }
+        None => lns_ipc::VolumeMount::parse(&format!("{source}:{target}{suffix}"))
+            .map(lns_ipc::MountSpec::Named),
+        Some(other) => Err(format!(
+            "invalid --mount spec `{s}`: type must be bind or volume, got `{other}`"
+        )),
+    }
+}
+
+fn parse_mount_bool(value: &str, spec: &str) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!(
+            "invalid --mount spec `{spec}`: boolean value `{value}`"
+        )),
+    }
+}
+
+fn user_spec_uid(spec: &str) -> Option<u32> {
+    spec.split_once(':')
+        .map_or(spec, |(user, _)| user)
+        .parse::<u32>()
+        .ok()
 }
 
 const MIB: u128 = 1024 * 1024;
@@ -384,6 +535,7 @@ mod tests {
     use clap::Parser;
 
     #[derive(Parser)]
+    #[command(disable_help_flag = true)]
     struct RunHarness {
         #[command(flatten)]
         args: RunArgs,
@@ -461,6 +613,152 @@ mod tests {
             .err()
             .expect("explicit -i with -d should conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn run_accepts_docker_compat_flags_that_map_to_launch_config() {
+        let args = parse_run(&[
+            "--rm",
+            "--pull=always",
+            "-u",
+            "1000:1000",
+            "--entrypoint",
+            "/bin/sh",
+            "-h",
+            "demo-host",
+            "alpine:3.20",
+        ])
+        .expect("docker-compatible flags parse");
+        assert!(args.auto_remove);
+        assert_eq!(args.pull, Some(PullPolicy::Always));
+        assert_eq!(args.effective_sandbox_user().as_deref(), Some("1000:1000"));
+        assert_eq!(args.effective_sandbox_uid(), Some(1000));
+        assert_eq!(args.entrypoint.as_deref(), Some("/bin/sh"));
+        assert_eq!(args.hostname.as_deref(), Some("demo-host"));
+    }
+
+    #[test]
+    fn run_mount_accepts_docker_bind_syntax() {
+        let args = parse_run(&[
+            "--mount",
+            "type=bind,src=/Users/me/project,target=/work,readonly",
+            "alpine:3.20",
+        ])
+        .expect("docker --mount syntax parses");
+        let (volumes, binds) = split_mounts(&args.mounts);
+        assert!(volumes.is_empty());
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].host_source, "/Users/me/project");
+        assert_eq!(binds[0].target, "/work");
+        assert!(binds[0].read_only);
+    }
+
+    #[test]
+    fn run_mount_accepts_docker_volume_syntax() {
+        let args = parse_run(&[
+            "--mount",
+            "type=volume,source=cache,target=/cache",
+            "alpine:3.20",
+        ])
+        .expect("docker volume --mount syntax parses");
+        let (volumes, binds) = split_mounts(&args.mounts);
+        assert!(binds.is_empty());
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].name, "cache");
+        assert_eq!(volumes[0].target, "/cache");
+        assert!(!volumes[0].read_only);
+    }
+
+    #[test]
+    fn parse_pull_policy_arg_accepts_docker_values_and_rejects_unknowns() {
+        assert_eq!(parse_pull_policy_arg("missing"), Ok(PullPolicy::Missing));
+        assert_eq!(parse_pull_policy_arg("never"), Ok(PullPolicy::Never));
+        let err = parse_pull_policy_arg("sometimes").expect_err("unknown policy must fail");
+        assert!(err.contains("expected always, missing, or never"));
+    }
+
+    #[test]
+    fn parse_hostname_arg_rejects_empty_long_and_invalid_names() {
+        assert_eq!(
+            parse_hostname_arg("").expect_err("empty hostname must fail"),
+            "hostname must not be empty"
+        );
+        let long = "a".repeat(64);
+        assert!(
+            parse_hostname_arg(&long)
+                .expect_err("long hostname must fail")
+                .contains("longer than 63 bytes")
+        );
+        assert!(
+            parse_hostname_arg("bad_host")
+                .expect_err("underscore hostname must fail")
+                .contains("may contain only ASCII letters")
+        );
+    }
+
+    #[test]
+    fn parse_mount_arg_infers_bind_and_accepts_readonly_key() {
+        let mount = parse_mount_arg("source=/Users/me/project,target=/work,readonly=true")
+            .expect("inferred bind mount parses");
+        assert_eq!(
+            mount,
+            lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+                host_source: "/Users/me/project".into(),
+                target: "/work".into(),
+                read_only: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mount_arg_infers_volume_and_accepts_readwrite_controls() {
+        let writable = parse_mount_arg("source=cache,target=/cache,readwrite=true")
+            .expect("inferred writable volume parses");
+        assert_eq!(
+            writable,
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/cache".into(),
+                read_only: false,
+            })
+        );
+
+        let readonly = parse_mount_arg("source=cache,target=/cache,readwrite=false")
+            .expect("inferred readonly volume parses");
+        assert_eq!(
+            readonly,
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/cache".into(),
+                read_only: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mount_arg_accepts_bare_readwrite_marker() {
+        let mount =
+            parse_mount_arg("type=volume,source=cache,target=/cache,rw").expect("rw parses");
+        assert_eq!(
+            mount,
+            lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/cache".into(),
+                read_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mount_arg_rejects_unsupported_docker_mount_fields() {
+        for spec in [
+            "type=bind,source=/host,target=/work,unknown=value",
+            "type=bind,source=/host,target=/work,mystery",
+            "type=tmpfs,source=tmp,target=/tmp",
+            "type=bind,source=/host,target=/work,readonly=maybe",
+        ] {
+            assert!(parse_mount_arg(spec).is_err(), "{spec} should be rejected");
+        }
     }
 
     #[test]

@@ -66,6 +66,7 @@ pub fn handle_session(
         argv,
         env,
         cwd,
+        hostname,
         tty,
         stdin,
         winsize,
@@ -73,7 +74,12 @@ pub fn handle_session(
     else {
         unreachable!("validate_open_session guarantees OpenSession");
     };
-    let spec = WorkloadSpec { argv, env, cwd };
+    let spec = WorkloadSpec {
+        argv,
+        env,
+        cwd,
+        hostname,
+    };
     if tty {
         run_tty_session(conn, spec, winsize, stdin, pid_tx, forker)
     } else {
@@ -398,6 +404,7 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
         )
     };
     enter_workdir(spec.cwd.as_deref());
+    set_guest_hostname(spec.hostname.as_deref());
     for kv in &spec.env {
         if let Ok(c) = CString::new(kv.as_str()) {
             let raw = c.into_raw();
@@ -419,6 +426,22 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
         io::Error::last_os_error()
     ));
     child_exit(127);
+}
+
+fn set_guest_hostname(hostname: Option<&str>) {
+    let Some(hostname) = hostname else { return };
+    let Ok(c) = CString::new(hostname) else {
+        let _ = writeln_stderr("hostname contained interior NUL");
+        child_exit(126);
+    };
+    // SAFETY: c points to hostname bytes without the trailing NUL, and len matches the original byte length.
+    if unsafe { libc::sethostname(c.as_ptr(), hostname.len()) } < 0 {
+        let _ = writeln_stderr(&format!(
+            "sethostname({hostname:?}): {}",
+            io::Error::last_os_error()
+        ));
+        child_exit(126);
+    }
 }
 
 fn enter_workdir(cwd: Option<&str>) {
@@ -451,6 +474,7 @@ mod tests {
             argv,
             env: Vec::new(),
             cwd: None,
+            hostname: None,
             tty: false,
             stdin: false,
             winsize: None,

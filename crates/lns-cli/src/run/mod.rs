@@ -6,7 +6,17 @@ pub mod summary;
 use crate::command::{CommandSpec, subcommand};
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::cli::RunArgs>("run").about("Run an OCI image in a microVM."))
+    app.subcommand(
+        subcommand::<crate::cli::RunArgs>("run")
+            .about("Run an OCI image in a microVM.")
+            .disable_help_flag(true)
+            .arg(
+                clap::Arg::new("help")
+                    .long("help")
+                    .action(clap::ArgAction::Help)
+                    .help("Print help"),
+            ),
+    )
 }
 
 pub const RUN_SPEC: CommandSpec = CommandSpec {

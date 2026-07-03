@@ -11,7 +11,7 @@ pub enum Request {
     Unknown {
         method: String,
     },
-    RunImage(RunImageArgs),
+    RunImage(Box<RunImageArgs>),
     CancelRun {
         run_id: String,
     },
@@ -255,12 +255,20 @@ pub struct RunConfig {
     pub policy_path: Option<String>,
     pub sandbox_user: Option<String>,
     pub sandbox_uid: Option<u32>,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub pull: Option<PullPolicy>,
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub binds: Vec<BindMount>,
     pub detached: bool,
+    #[serde(default)]
+    pub auto_remove: bool,
 }
 
 impl RunConfig {
@@ -271,11 +279,15 @@ impl RunConfig {
             policy_path: args.policy_path.clone(),
             sandbox_user: args.sandbox_user.clone(),
             sandbox_uid: args.sandbox_uid,
+            entrypoint: args.entrypoint.clone(),
+            hostname: args.hostname.clone(),
+            pull: args.pull,
             env: args.env.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
             binds: args.binds.clone(),
             detached: args.detached,
+            auto_remove: args.auto_remove,
         }
     }
 }
@@ -314,6 +326,12 @@ pub struct RunImageArgs {
     pub sandbox_user: Option<String>,
     #[serde(default)]
     pub sandbox_uid: Option<u32>,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub pull: Option<PullPolicy>,
     pub cmd: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
@@ -334,6 +352,16 @@ pub struct RunImageArgs {
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub binds: Vec<BindMount>,
+    #[serde(default)]
+    pub auto_remove: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullPolicy {
+    Always,
+    Missing,
+    Never,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,7 +641,7 @@ mod tests {
             container_port: 3003,
             protocol: Protocol::Tcp,
         };
-        let req = Request::RunImage(RunImageArgs {
+        let req = Request::RunImage(Box::new(RunImageArgs {
             image: Some("prism".into()),
             name: None,
             cpus: 1,
@@ -621,6 +649,9 @@ mod tests {
             policy_path: None,
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
+            entrypoint: None,
+            hostname: None,
+            pull: None,
             cmd: Vec::new(),
             env: Vec::new(),
             workdir: None,
@@ -632,7 +663,8 @@ mod tests {
             published_ports: vec![mapping],
             volumes: Vec::new(),
             binds: Vec::new(),
-        });
+            auto_remove: false,
+        }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
@@ -648,6 +680,9 @@ mod tests {
             policy_path: None,
             sandbox_user: None,
             sandbox_uid: None,
+            entrypoint: None,
+            hostname: None,
+            pull: None,
             cmd: vec![],
             env: vec![],
             workdir: None,
@@ -669,6 +704,7 @@ mod tests {
                 dropped_paths: vec![".env".into()],
                 kept_paths: vec![".npmrc".into()],
             }],
+            auto_remove: false,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -768,6 +804,9 @@ mod tests {
             policy_path: Some("/work/lns-policy.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
+            entrypoint: Some("/bin/sh".into()),
+            hostname: Some("demo".into()),
+            pull: Some(PullPolicy::Always),
             cmd: vec!["echo".into(), "hi".into()],
             env: vec!["FOO=bar".into()],
             workdir: None,
@@ -794,6 +833,7 @@ mod tests {
                 dropped_paths: vec![],
                 kept_paths: vec![],
             }],
+            auto_remove: true,
         }
     }
 
@@ -805,6 +845,10 @@ mod tests {
         assert_eq!(config.mem_mib, 1024);
         assert_eq!(config.policy_path.as_deref(), Some("/work/lns-policy.yaml"));
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
+        assert_eq!(config.entrypoint.as_deref(), Some("/bin/sh"));
+        assert_eq!(config.hostname.as_deref(), Some("demo"));
+        assert_eq!(config.pull, Some(PullPolicy::Always));
+        assert!(config.auto_remove);
         assert_eq!(config.sandbox_uid, Some(65534));
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);
         assert_eq!(config.published_ports, args.published_ports);
