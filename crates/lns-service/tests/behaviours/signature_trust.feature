@@ -1,4 +1,3 @@
-@todo
 Feature: a bundle's signature is verified against trusted signers before it runs
   A configured agent is code, so lns refuses to run a tampered or
   unattributed bundle. Signatures are cosign-compatible, attached as OCI

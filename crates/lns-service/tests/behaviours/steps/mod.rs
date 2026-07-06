@@ -13,6 +13,7 @@ pub mod oauth_integration;
 pub mod pkce_integration;
 pub mod run_lifecycle;
 pub mod run_naming;
+pub mod signature_trust;
 pub mod volume_management;
 pub mod volumes;
 pub mod workdir;

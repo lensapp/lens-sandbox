@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 pub mod assembly;
 pub mod fetch;
 pub mod resolve;
+pub mod signature;
 pub mod spec;
 
 use spec::Kind;
