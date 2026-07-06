@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "apiVersion": {
+      "const": "lens.dev/v1alpha1"
+    },
+    "kind": {
+      "const": "Integration"
+    },
+    "metadata": {
+      "properties": {
+        "labels": {
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "mount": {
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)"
+          },
+          "pattern": "^/",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "properties": {
+        "authKind": {
+          "enum": [
+            "credential",
+            "oauth"
+          ]
+        },
+        "credential": {
+          "properties": {
+            "envVar": {
+              "type": "string"
+            },
+            "injections": {
+              "items": {
+                "properties": {
+                  "domain": {
+                    "type": "string"
+                  },
+                  "header": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "bearer_header",
+                      "token_header",
+                      "basic_x_access_token",
+                      "api_key_header",
+                      "uri_placeholder"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "placeholder": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "envVar",
+            "placeholder"
+          ],
+          "type": "object"
+        },
+        "oauth": {
+          "properties": {
+            "clientId": {
+              "type": "string"
+            },
+            "deviceAuthorizationEndpoint": {
+              "type": "string"
+            },
+            "envVar": {
+              "type": "string"
+            },
+            "injections": {
+              "items": {
+                "properties": {
+                  "domain": {
+                    "type": "string"
+                  },
+                  "header": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "bearer_header",
+                      "token_header",
+                      "basic_x_access_token",
+                      "api_key_header",
+                      "uri_placeholder"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "placeholder": {
+              "type": "string"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tokenEndpoint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "clientId",
+            "deviceAuthorizationEndpoint",
+            "tokenEndpoint"
+          ],
+          "type": "object"
+        },
+        "routes": {
+          "items": {
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "match": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "rules": {
+                "items": {
+                  "properties": {
+                    "method": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "scheme": {
+                "enum": [
+                  "http",
+                  "https"
+                ]
+              },
+              "tlsTerminate": {
+                "type": "boolean"
+              },
+              "transport": {
+                "enum": [
+                  "upstream",
+                  "direct"
+                ]
+              },
+              "verdict": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "ask"
+                ]
+              }
+            },
+            "required": [
+              "match",
+              "verdict"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "authKind"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "type": "object",
+  "$id": "https://lens.dev/schemas/integration.v1alpha1.json",
+  "title": "Lens integration artifact (v1alpha1)",
+  "x-lens-class": "runtime",
+  "x-lens-config-media-type": "application/vnd.lens.integration.config.v1+json",
+  "x-lens-artifact-type": "application/vnd.lens.integration.v1+json"
+}
