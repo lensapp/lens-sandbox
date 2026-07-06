@@ -6,6 +6,8 @@ use std::sync::Mutex;
 pub enum Canned {
     Present(FetchedComponent),
     NeedsLogin { host: String },
+    UnsupportedKind { media_type: String },
+    Invalid { reason: String },
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +40,12 @@ impl ComponentFetcher for FakeFetcher<'_> {
         match self.canned.get(reference) {
             Some(Canned::Present(component)) => Ok(component.clone()),
             Some(Canned::NeedsLogin { host }) => Err(FetchError::NeedsLogin { host: host.clone() }),
+            Some(Canned::UnsupportedKind { media_type }) => Err(FetchError::UnsupportedKind {
+                media_type: media_type.clone(),
+            }),
+            Some(Canned::Invalid { reason }) => Err(FetchError::Invalid {
+                reason: reason.clone(),
+            }),
             None => Err(FetchError::NotFound),
         }
     }

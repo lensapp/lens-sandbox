@@ -134,7 +134,23 @@ async fn missing_fileset(world: &mut BehaviourWorld, name: String) {
 async fn unsupported_kind(world: &mut BehaviourWorld, kind: String) {
     let rig = world.resolve();
     rig.components = vec![("comp".into(), "reg/comp:1".into())];
-    rig.canned.insert("reg/comp:1".into(), present(&kind));
+    // The fetcher, not a fabricated component, surfaces an unrecognized artifact type — matching what the real adapter does when a ref resolves to a type it can't map to a Kind.
+    rig.canned.insert(
+        "reg/comp:1".into(),
+        Canned::UnsupportedKind { media_type: kind },
+    );
+}
+
+#[given("a bundle referencing a component that is malformed")]
+async fn malformed_component(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![("comp".into(), "reg/comp:1".into())];
+    rig.canned.insert(
+        "reg/comp:1".into(),
+        Canned::Invalid {
+            reason: "baseImage is not digest-pinned".into(),
+        },
+    );
 }
 
 #[given("a bundle whose sandbox base image is built for a foreign architecture")]

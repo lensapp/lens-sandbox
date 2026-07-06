@@ -37,7 +37,7 @@ impl RealRegistry {
 }
 
 /// The stored login for `image`'s registry, or anonymous when none is recorded (or the reference / store is unreadable — the pull then fails with the registry's own auth error).
-fn registry_auth_for(image: &str) -> RegistryAuth {
+pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
     let Ok(reference) = image.parse::<Reference>() else {
         return RegistryAuth::Anonymous;
     };

@@ -1,6 +1,8 @@
-use crate::artifact::resolve::FetchedComponent;
+use crate::artifact::resolve::{FetchError, FetchedComponent};
 use crate::artifact::spec::{self, Kind};
+use crate::image::Registry;
 use anyhow::{Context, Result};
+use oci_client::Reference;
 
 // `arch` (base-image platform) and `references` (Policy integrations) are populated by the Layer-1 registry adapter, not here.
 pub fn to_fetched(
@@ -40,9 +42,125 @@ pub fn to_fetched(
     Ok(fetched)
 }
 
+fn classify_fetch_error(host: &str, err: &anyhow::Error) -> FetchError {
+    let msg = format!("{err:#}").to_lowercase();
+    if msg.contains("not found") || msg.contains("404") || msg.contains("manifest unknown") {
+        FetchError::NotFound
+    } else if msg.contains("401")
+        || msg.contains("403")
+        || msg.contains("unauthorized")
+        || msg.contains("denied")
+    {
+        FetchError::NeedsLogin {
+            host: host.to_string(),
+        }
+    } else {
+        FetchError::Invalid {
+            reason: format!("{err:#}"),
+        }
+    }
+}
+
+// arch (base-image platform) is intentionally left unset here; the base image's arch is re-checked when it is pulled as the rootfs in `ingest::run`.
+pub(crate) async fn fetch_component<R: Registry>(
+    registry: &R,
+    reference: &str,
+) -> std::result::Result<FetchedComponent, FetchError> {
+    let parsed: Reference = reference.parse().map_err(|e| FetchError::Invalid {
+        reason: format!("invalid reference {reference}: {e}"),
+    })?;
+    let (manifest, _digest, config_json) = match registry.pull_manifest_and_config(&parsed).await {
+        Ok(triple) => triple,
+        Err(e) => return Err(classify_fetch_error(parsed.registry(), &e)),
+    };
+    let artifact_type = manifest.artifact_type.as_deref();
+    let config_media_type = manifest.config.media_type.as_str();
+    if Kind::from_artifact_type(artifact_type.unwrap_or_default())
+        .or_else(|| Kind::from_config_media_type(config_media_type))
+        .is_none()
+    {
+        return Err(FetchError::UnsupportedKind {
+            media_type: artifact_type.unwrap_or(config_media_type).to_string(),
+        });
+    }
+    let mut fetched = to_fetched(
+        artifact_type,
+        Some(config_media_type),
+        config_json.as_bytes(),
+    )
+    .map_err(|e| FetchError::Invalid {
+        reason: format!("{e:#}"),
+    })?;
+    if fetched.kind == Kind::Policy.as_str() {
+        let policy =
+            spec::parse_policy(config_json.as_bytes()).map_err(|e| FetchError::Invalid {
+                reason: format!("{e:#}"),
+            })?;
+        fetched.references = policy
+            .spec
+            .integrations
+            .into_iter()
+            .map(|r| r.reference)
+            .collect();
+    }
+    Ok(fetched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oci_client::manifest::{OciDescriptor, OciImageManifest};
+
+    struct FakeReg {
+        artifact_type: Option<String>,
+        config_media_type: String,
+        config_json: String,
+        pull_error: Option<String>,
+    }
+
+    impl FakeReg {
+        fn lens(kind: Kind, config_json: &str) -> Self {
+            Self {
+                artifact_type: Some(kind.artifact_type()),
+                config_media_type: kind.config_media_type(),
+                config_json: config_json.to_string(),
+                pull_error: None,
+            }
+        }
+    }
+
+    impl Registry for FakeReg {
+        async fn pull_manifest_and_config(
+            &self,
+            _reference: &Reference,
+        ) -> Result<(OciImageManifest, String, String)> {
+            if let Some(e) = &self.pull_error {
+                anyhow::bail!("{e}");
+            }
+            let manifest = OciImageManifest {
+                config: OciDescriptor {
+                    media_type: self.config_media_type.clone(),
+                    ..Default::default()
+                },
+                artifact_type: self.artifact_type.clone(),
+                ..Default::default()
+            };
+            Ok((manifest, "sha256:whatever".into(), self.config_json.clone()))
+        }
+
+        async fn pull_blob(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<Vec<u8>> {
+            unreachable!("component fetch never pulls layer blobs")
+        }
+    }
+
+    async fn fetch(reg: &FakeReg) -> std::result::Result<FetchedComponent, FetchError> {
+        fetch_component(reg, "reg.example.test/some/comp:1").await
+    }
 
     fn sandbox_json() -> Vec<u8> {
         format!(
@@ -178,5 +296,106 @@ mod tests {
     fn rejects_a_media_type_whose_envelope_kind_disagrees() {
         let err = to_fetched(Some(&Kind::Sandbox.artifact_type()), None, agent_json()).unwrap_err();
         assert!(format!("{err:#}").contains("expected kind"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn fetch_component_maps_a_pulled_sandbox_to_its_base_image() {
+        let reg = FakeReg::lens(Kind::Sandbox, std::str::from_utf8(&sandbox_json()).unwrap());
+        let fetched = fetch(&reg).await.unwrap();
+        assert_eq!(fetched.kind, "Sandbox");
+        assert!(fetched.base_image.unwrap().contains("@sha256:"));
+        assert!(
+            fetched.arch.is_none(),
+            "arch is left to the ingest arch check"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_component_populates_policy_integration_references() {
+        let policy = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"integrations":[{"ref":"reg/some-integration:1"},{"ref":"reg/other:1"}]}}"#;
+        let reg = FakeReg::lens(Kind::Policy, policy);
+        let fetched = fetch(&reg).await.unwrap();
+        assert_eq!(fetched.kind, "Policy");
+        assert_eq!(
+            fetched.references,
+            vec![
+                "reg/some-integration:1".to_string(),
+                "reg/other:1".to_string()
+            ],
+            "resolve must be able to walk a policy's integration refs",
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_component_refuses_an_unrecognized_artifact_type() {
+        let reg = FakeReg {
+            artifact_type: Some("application/vnd.oci.image.config.v1+json".into()),
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+            config_json: "{}".into(),
+            pull_error: None,
+        };
+        match fetch(&reg).await.unwrap_err() {
+            FetchError::UnsupportedKind { media_type } => {
+                assert_eq!(media_type, "application/vnd.oci.image.config.v1+json")
+            }
+            other => panic!("expected UnsupportedKind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_component_maps_a_malformed_config_to_invalid() {
+        let floating = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm","baseImage":"reg/base:1"}}"#;
+        let reg = FakeReg::lens(Kind::Sandbox, floating);
+        match fetch(&reg).await.unwrap_err() {
+            FetchError::Invalid { reason } => assert!(reason.contains("digest-pinned")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_component_classifies_pull_failures() {
+        let not_found = FakeReg {
+            artifact_type: None,
+            config_media_type: String::new(),
+            config_json: String::new(),
+            pull_error: Some("manifest unknown: 404".into()),
+        };
+        assert!(matches!(fetch(&not_found).await, Err(FetchError::NotFound)));
+
+        let unauthorized = FakeReg {
+            artifact_type: None,
+            config_media_type: String::new(),
+            config_json: String::new(),
+            pull_error: Some("401 Unauthorized".into()),
+        };
+        match fetch(&unauthorized).await.unwrap_err() {
+            FetchError::NeedsLogin { host } => assert_eq!(host, "reg.example.test"),
+            other => panic!("expected NeedsLogin, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_component_rejects_an_unparseable_reference() {
+        let reg = FakeReg::lens(Kind::Sandbox, "{}");
+        match fetch_component(&reg, "::not a ref::").await.unwrap_err() {
+            FetchError::Invalid { reason } => assert!(reason.contains("invalid reference")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_fetch_error_maps_transport_failures_to_kinds() {
+        assert!(matches!(
+            classify_fetch_error("h", &anyhow::anyhow!("500 internal")),
+            FetchError::Invalid { .. }
+        ));
+        assert!(matches!(
+            classify_fetch_error("h", &anyhow::anyhow!("HTTP 404 not found")),
+            FetchError::NotFound
+        ));
+        assert!(matches!(
+            classify_fetch_error("h", &anyhow::anyhow!("access denied")),
+            FetchError::NeedsLogin { .. }
+        ));
     }
 }

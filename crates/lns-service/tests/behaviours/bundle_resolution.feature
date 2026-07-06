@@ -59,6 +59,12 @@ Feature: bundle resolution is atomic and fail-closed
     Then resolution is refused
     And the refusal names the unsupported kind "Workflow"
 
+  Scenario: A malformed component aborts the run
+    Given a bundle referencing a component that is malformed
+    When the bundle is resolved
+    Then resolution is refused
+    And the refusal mentions "malformed"
+
   Scenario: A base image built for another architecture aborts the run
     Given a bundle whose sandbox base image is built for a foreign architecture
     When the bundle is resolved

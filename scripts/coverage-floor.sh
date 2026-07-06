@@ -55,6 +55,7 @@ crates/lns-service/src/browser.rs                        process-spawn leaf (`op
 crates/lns-service/src/download/real.rs                  production wiring over reqwest + tokio::fs (RealFetcher/RealFs/set_mode); pinned by wiremock tests in kernel.rs and the FakeFs ensure_pinned tests in download/mod.rs
 crates/lns-service/src/download/traits.rs                trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/image/real.rs                     production wiring over oci_client::Client + linux/host-arch resolver; pinned by fake-Registry tests in image/mod.rs
+crates/lns-service/src/artifact/real.rs                  RealComponentFetcher wiring: builds a RealRegistry with per-ref auth and delegates to fetch_component; the fetch/classify/map logic is host-tested at 100% in artifact/fetch.rs via a fake Registry
 crates/lns-service/src/guest_tools/real.rs               production wiring over reqwest::get for dl-cdn.alpinelinux.org + cache::root() + current_exe() self-hash build id; pinned by fake-Fetcher tests in guest_tools/mod.rs
 crates/lns-service/src/supervisor/traits.rs              trait/type-level declarations; LLVM phantom DA on trait headers
 crates/lns-service/src/forward/real.rs                   host TCP listener/splice syscall leaf bridging to the guest FORWARD_PORT over the GuestTransport connector (Vz or Cloud Hypervisor); PortForwarder lifecycle + accept-error classification pinned by fake-forwarder and classify_accept_error tests in forward/mod.rs

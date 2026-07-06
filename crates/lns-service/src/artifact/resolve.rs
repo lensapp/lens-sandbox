@@ -25,6 +25,8 @@ pub struct FetchedComponent {
 pub enum FetchError {
     NotFound,
     NeedsLogin { host: String },
+    UnsupportedKind { media_type: String },
+    Invalid { reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,10 @@ pub enum ResolveError {
     UnsupportedKind {
         kind: String,
         reference: String,
+    },
+    Invalid {
+        reference: String,
+        reason: String,
     },
     NestedBundle(String),
     ArchMismatch {
@@ -96,6 +102,9 @@ impl std::fmt::Display for ResolveError {
             }
             ResolveError::UnsupportedKind { kind, reference } => {
                 write!(f, "unsupported component kind {kind} in {reference}")
+            }
+            ResolveError::Invalid { reference, reason } => {
+                write!(f, "component {reference} is malformed: {reason}")
             }
             ResolveError::NestedBundle(reference) => {
                 write!(f, "nested bundles are not allowed: {reference}")
@@ -225,6 +234,18 @@ impl<F: ComponentFetcher> Walk<'_, F> {
                 });
             }
             Err(FetchError::NeedsLogin { host }) => return Err(ResolveError::NeedsLogin { host }),
+            Err(FetchError::UnsupportedKind { media_type }) => {
+                return Err(ResolveError::UnsupportedKind {
+                    kind: media_type,
+                    reference: reference.to_string(),
+                });
+            }
+            Err(FetchError::Invalid { reason }) => {
+                return Err(ResolveError::Invalid {
+                    reference: reference.to_string(),
+                    reason,
+                });
+            }
         };
         match fetched.kind.as_str() {
             "Sandbox" | "Agent" | "FileSet" | "Policy" | "Integration" => {}
@@ -323,6 +344,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, ResolveError::MissingBaseImage);
         assert!(err.to_string().contains("no rootfs"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_fetcher_returning_an_unexpected_kind_string_fails_closed() {
+        let canned = HashMap::from([(
+            "reg/x:1".to_string(),
+            FetchedComponent {
+                kind: "Bogus".into(),
+                ..Default::default()
+            },
+        )]);
+        let bundle = BundleSpec {
+            components: vec![DeclaredComponent {
+                name: "x".into(),
+                reference: "reg/x:1".into(),
+            }],
+        };
+        let err = resolve(&bundle, &Canned(canned), "test-arch")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::UnsupportedKind {
+                kind: "Bogus".into(),
+                reference: "reg/x:1".into(),
+            }
+        );
     }
 
     #[tokio::test]
