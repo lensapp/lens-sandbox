@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 
 pub mod assembly;
 pub mod resolve;
+pub mod spec;
 
 pub const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.lens.bundle.v1+json";
 
