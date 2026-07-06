@@ -29,6 +29,7 @@ pub struct NetworkPolicy {
     #[serde(default)]
     pub allowed_routes: Vec<RouteRule>,
     pub default_verdict: Verdict,
+    #[serde(default, skip_serializing_if = "is_direct_transport")]
     pub default_transport: Transport,
 }
 
@@ -46,6 +47,10 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn is_direct_transport(transport: &Transport) -> bool {
+    *transport == Transport::Direct
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteRule {
@@ -53,6 +58,7 @@ pub struct RouteRule {
     #[serde(rename = "match")]
     pub match_pattern: String,
     pub verdict: Verdict,
+    #[serde(default, skip_serializing_if = "is_direct_transport")]
     pub transport: Transport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<Scheme>,
@@ -88,6 +94,12 @@ pub enum Transport {
     Direct,
 }
 
+impl Default for Transport {
+    fn default() -> Self {
+        Self::Direct
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scheme {
@@ -98,8 +110,12 @@ pub enum Scheme {
 impl Policy {
     pub fn load_or_default(path: &Path) -> io::Result<Self> {
         match fs::read_to_string(path) {
-            Ok(text) => serde_yaml::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Ok(text) => {
+                let policy: Self = serde_yaml::from_str(&text)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                policy.validate_local_transport()?;
+                Ok(policy)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
         }
@@ -136,6 +152,22 @@ impl Policy {
         let before = self.integrations.len();
         self.integrations.retain(|i| i != id);
         self.integrations.len() != before
+    }
+
+    fn validate_local_transport(&self) -> io::Result<()> {
+        let uses_upstream = self.network.default_transport == Transport::Upstream
+            || self
+                .network
+                .allowed_routes
+                .iter()
+                .any(|route| route.transport == Transport::Upstream);
+        if uses_upstream {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "upstream transport isn't supported in the local sandbox",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +239,13 @@ mod tests {
     }
 
     #[test]
+    fn default_policy_yaml_omits_direct_transport_fields() {
+        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
+        assert!(!yaml.contains("defaultTransport"), "got:\n{yaml}");
+        assert!(!yaml.contains("transport:"), "got:\n{yaml}");
+    }
+
+    #[test]
     fn policy_with_rules_yaml_roundtrip_is_lossless() {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("api.linear.app"));
@@ -244,7 +283,10 @@ mod tests {
     fn a_plain_route_omits_the_richness_keys() {
         let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.example.com")).unwrap();
         assert!(
-            !yaml.contains("scheme") && !yaml.contains("tlsTerminate") && !yaml.contains("rules"),
+            !yaml.contains("transport")
+                && !yaml.contains("scheme")
+                && !yaml.contains("tlsTerminate")
+                && !yaml.contains("rules"),
             "a plain allow rule must stay minimal:\n{yaml}"
         );
     }
@@ -326,15 +368,35 @@ network:
   allowedRoutes:
     - match: api.linear.app
       verdict: allow
-      transport: upstream
   defaultVerdict: ask
-  defaultTransport: upstream
 ";
         fs::write(&path, yaml).unwrap();
         let p = Policy::load_or_default(&path).unwrap();
         assert_eq!(p.network.allowed_routes.len(), 1);
         assert_eq!(p.network.allowed_routes[0].match_pattern, "api.linear.app");
         assert_eq!(p.network.allowed_routes[0].verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn load_or_default_rejects_upstream_transport_for_local_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
+  allowedRoutes:
+    - match: api.example.test
+      verdict: allow
+      transport: upstream
+  defaultVerdict: ask
+";
+        fs::write(&path, yaml).unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("upstream transport isn't supported in the local sandbox"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -530,7 +530,7 @@ mod tests {
         let policy_path = d.path().join("lns-policy.yaml");
         std::fs::write(
             &policy_path,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
         )
         .expect("policy");
 
