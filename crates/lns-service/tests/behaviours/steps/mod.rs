@@ -1,6 +1,7 @@
 pub mod approval_flow;
 pub mod artifact_dispatch;
 pub mod bundle_assembly;
+pub mod bundle_overrides;
 pub mod bundle_resolution;
 pub mod credential_flow;
 pub mod env_injection;

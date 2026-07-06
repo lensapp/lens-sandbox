@@ -1,4 +1,27 @@
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
+
+#[derive(Debug, Clone)]
+pub struct Override {
+    pub kind: String,
+    pub name: String,
+    pub mount_path: Option<String>,
+}
+
+pub fn apply_with(mut bundle: ResolvedBundle, overrides: &[Override]) -> Result<ResolvedBundle> {
+    for over in overrides {
+        match over.kind.as_str() {
+            "FileSet" => bundle.filesets.push(ResolvedFileset {
+                name: over.name.clone(),
+                paths: over.mount_path.clone().into_iter().collect(),
+            }),
+            other => bail!(
+                "--with override of kind {other} is unsupported; only FileSet overrides are allowed"
+            ),
+        }
+    }
+    Ok(bundle)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedBundle {
