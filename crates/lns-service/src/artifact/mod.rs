@@ -1,5 +1,7 @@
 use anyhow::{Result, bail};
 
+pub mod assembly;
+
 pub const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.lens.bundle.v1+json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
