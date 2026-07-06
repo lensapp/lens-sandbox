@@ -62,6 +62,15 @@ Feature: image cache lifecycle — list, remove, prune
     And layer "sha256:held" remains in the layer cache
     And the image prune reports 1000 reclaimed bytes
 
+  @todo
+  Scenario: Pruning spares the component blobs a cached bundle still references
+    Given a cached bundle references component blob "sha256:comp" of 2000 bytes
+    And image "registry.example.test/idle/image:1.0" is cached with layer "sha256:idle" of 1000 bytes
+    When the images are pruned
+    Then the prune removes only image "registry.example.test/idle/image:1.0"
+    And layer "sha256:comp" remains in the layer cache
+    And the image prune reports 1000 reclaimed bytes
+
   Scenario: Pruning an empty cache removes nothing
     When the images are pruned
     Then the prune removes no images

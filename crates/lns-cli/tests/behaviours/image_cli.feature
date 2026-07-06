@@ -49,6 +49,14 @@ Feature: managing cached images from the CLI
     Then the exit code is 0
     And the listed image row for "registry.example.test/some-image:1.0" ends with "-"
 
+  @todo
+  Scenario: listing shows each cached artifact's kind
+    Given the service reports a cached bundle "some-registry.example/some-agent:research" of 14680064 bytes
+    When the user runs image command "ls"
+    Then the exit code is 0
+    And the output contains "KIND"
+    And the output contains "AgentSystem"
+
   Scenario: removing an image confirms it and reports the space reclaimed
     Given the service confirms removing "registry.example.test/some-image:1.0" reclaims 3145728 bytes
     When the user runs image command "rm some-image:1.0"
