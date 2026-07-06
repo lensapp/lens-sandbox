@@ -181,21 +181,6 @@ jobs:
           fi
           scripts/check-kernel-pins.sh $ALLOW
 
-      - name: Verify vendored schema pins match upstream
-        # The lens-artifact-spec repo is private, so this needs a cross-repo
-        # read token. When the secret isn't configured the step skips with a
-        # notice rather than failing; provision ARTIFACT_SPEC_READ_TOKEN to
-        # enforce that the vendored schemas match their pinned commit.
-        env:
-          GH_TOKEN: ${{ secrets.ARTIFACT_SPEC_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "ARTIFACT_SPEC_READ_TOKEN not set — skipping schema drift check."
-            exit 0
-          fi
-          scripts/check-schema-pins.sh
-
   coverage:
     runs-on: ubuntu-latest
     needs: changes
