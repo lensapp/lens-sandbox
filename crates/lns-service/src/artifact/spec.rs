@@ -304,7 +304,14 @@ fn parse_doc(config_json: &[u8], expected: Kind) -> Result<Doc> {
 pub fn parse_bundle(config_json: &[u8]) -> Result<Bundle> {
     let doc = parse_doc(config_json, Kind::AgentSystem)?;
     let spec: BundleSpec = serde_json::from_value(doc.spec).context("parsing bundle spec")?;
-    for component in spec.components.all_refs() {
+    let c = &spec.components;
+    if c.model.is_some() || !c.tools.is_empty() || !c.knowledge.is_empty() || c.workflow.is_some() {
+        bail!(
+            "bundle references an unimplemented component kind \
+             (model/tool/knowledge/workflow); refusing to resolve it"
+        );
+    }
+    for component in c.all_refs() {
         component.validate()?;
     }
     Ok(Bundle {
@@ -328,9 +335,13 @@ pub fn parse_agent(config_json: &[u8]) -> Result<Agent> {
 pub fn parse_sandbox(config_json: &[u8]) -> Result<Sandbox> {
     let doc = parse_doc(config_json, Kind::Sandbox)?;
     let spec: SandboxSpec = serde_json::from_value(doc.spec).context("parsing sandbox spec")?;
-    if let Some(image) = &spec.base_image
-        && !is_digest_pinned_image(image)
-    {
+    if spec.isolation != Isolation::Microvm {
+        bail!("sandbox isolation must be microvm; lns runs workloads only inside a microVM");
+    }
+    let Some(image) = &spec.base_image else {
+        bail!("microvm sandbox must carry a baseImage; the workload rootfs lives on the sandbox");
+    };
+    if !is_digest_pinned_image(image) {
         bail!("sandbox baseImage {image} must be digest-pinned (…@sha256:<64 hex>)");
     }
     Ok(Sandbox {
@@ -339,11 +350,25 @@ pub fn parse_sandbox(config_json: &[u8]) -> Result<Sandbox> {
     })
 }
 
+pub fn validate_mount_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("mount path must not be empty");
+    }
+    if !path.starts_with('/') {
+        bail!("mount path {path} must be absolute (start with `/`)");
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        bail!("mount path {path} must not contain a `..` segment");
+    }
+    Ok(())
+}
+
 pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
     let doc = parse_doc(config_json, Kind::FileSet)?;
     let Some(mount) = doc.mount else {
         bail!("FileSet is an application-layer artifact and requires a mount");
     };
+    validate_mount_path(&mount.path)?;
     Ok(FileSet {
         metadata: doc.metadata,
         mount,
@@ -593,11 +618,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_sandbox_without_a_base_image_is_allowed() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"container"}}"#;
-        let sandbox = parse_sandbox(json).unwrap();
-        assert_eq!(sandbox.spec.isolation, Isolation::Container);
-        assert!(sandbox.spec.base_image.is_none());
+    fn parse_sandbox_rejects_a_non_microvm_isolation() {
+        let json = format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"container","baseImage":"reg/base@sha256:{}"}}}}"#,
+            "a".repeat(64)
+        );
+        let err = parse_sandbox(json.as_bytes()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("isolation must be microvm"),
+            "lns is microVM-only, so a container sandbox must be refused: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_sandbox_requires_a_base_image() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm"}}"#;
+        let err = parse_sandbox(json).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must carry a baseImage"),
+            "a rootless microvm sandbox has nothing to boot; got: {err:#}"
+        );
     }
 
     #[test]
@@ -610,6 +650,47 @@ mod tests {
         let no_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"spec":{}}"#;
         let err = parse_fileset(no_mount).unwrap_err();
         assert!(format!("{err:#}").contains("requires a mount"));
+    }
+
+    #[test]
+    fn parse_fileset_rejects_a_traversing_or_relative_mount_path() {
+        let escaping = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/../../etc"},"spec":{}}"#;
+        let err = parse_fileset(escaping).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("`..` segment"),
+            "a fileset must not mount a traversing path: {err:#}"
+        );
+        let relative = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"root/skills"},"spec":{}}"#;
+        let err = parse_fileset(relative).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must be absolute"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn validate_mount_path_rejects_empty_relative_and_traversing_paths() {
+        assert!(validate_mount_path("/root/.some-agent/skills").is_ok());
+        assert!(
+            format!("{:#}", validate_mount_path("").unwrap_err()).contains("must not be empty")
+        );
+        assert!(
+            format!("{:#}", validate_mount_path("relative").unwrap_err())
+                .contains("must be absolute")
+        );
+        assert!(
+            format!("{:#}", validate_mount_path("/a/../b").unwrap_err()).contains("`..` segment")
+        );
+    }
+
+    #[test]
+    fn parse_bundle_refuses_an_unimplemented_component_kind() {
+        let with_model = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{"name":"some-agent"},"spec":{"components":{"model":{"ref":"reg/model:1"}}}}"#;
+        let err = parse_bundle(with_model).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unimplemented component kind"),
+            "a bundle referencing model/tool/knowledge/workflow must be refused: {err:#}"
+        );
     }
 
     #[test]

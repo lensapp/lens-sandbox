@@ -44,3 +44,9 @@ Feature: --with overrides a bundle's mounted components at launch
     When the bundle is run with --with a fileset "override" carrying no mount path
     Then the run is refused because the override has no mount path
     And nothing is assembled
+
+  Scenario: A --with fileset override with a traversing mount path is refused
+    Given a bundle declaring a fileset "shipped" mounting "/x"
+    When the bundle is run with --with a fileset "escape" mounting "/root/../../etc"
+    Then the run is refused because the override mount path is unsafe
+    And nothing is assembled

@@ -66,6 +66,7 @@ pub enum ResolveError {
     DuplicateComponent {
         role: &'static str,
     },
+    MissingBaseImage,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -116,6 +117,10 @@ impl std::fmt::Display for ResolveError {
                     "bundle must compose exactly one {role}, but found more than one"
                 )
             }
+            ResolveError::MissingBaseImage => write!(
+                f,
+                "bundle sandbox declares no base image; a microVM run has no rootfs to boot"
+            ),
         }
     }
 }
@@ -183,19 +188,20 @@ fn compose(
             }
         }
     }
-    if sandboxes == 0 {
-        return Err(ResolveError::MissingComponent { role: "sandbox" });
-    }
-    if sandboxes > 1 {
-        return Err(ResolveError::DuplicateComponent { role: "sandbox" });
-    }
-    if agents == 0 {
-        return Err(ResolveError::MissingComponent { role: "agent" });
-    }
-    if agents > 1 {
-        return Err(ResolveError::DuplicateComponent { role: "agent" });
+    exactly_one(sandboxes, "sandbox")?;
+    exactly_one(agents, "agent")?;
+    if resolved.base_image.is_empty() {
+        return Err(ResolveError::MissingBaseImage);
     }
     Ok(resolved)
+}
+
+fn exactly_one(count: usize, role: &'static str) -> Result<(), ResolveError> {
+    match count {
+        1 => Ok(()),
+        0 => Err(ResolveError::MissingComponent { role }),
+        _ => Err(ResolveError::DuplicateComponent { role }),
+    }
 }
 
 impl<F: ComponentFetcher> Walk<'_, F> {
@@ -268,6 +274,55 @@ mod tests {
                 ..Default::default()
             })
         }
+    }
+
+    struct Canned(HashMap<String, FetchedComponent>);
+
+    impl ComponentFetcher for Canned {
+        async fn fetch(
+            &self,
+            reference: &str,
+        ) -> std::result::Result<FetchedComponent, FetchError> {
+            self.0.get(reference).cloned().ok_or(FetchError::NotFound)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_without_a_base_image_leaves_nothing_to_boot_and_is_refused() {
+        let canned = HashMap::from([
+            (
+                "reg/base:1".to_string(),
+                FetchedComponent {
+                    kind: "Sandbox".into(),
+                    base_image: None,
+                    ..Default::default()
+                },
+            ),
+            (
+                "reg/agent:1".to_string(),
+                FetchedComponent {
+                    kind: "Agent".into(),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let bundle = BundleSpec {
+            components: vec![
+                DeclaredComponent {
+                    name: "sandbox".into(),
+                    reference: "reg/base:1".into(),
+                },
+                DeclaredComponent {
+                    name: "agent".into(),
+                    reference: "reg/agent:1".into(),
+                },
+            ],
+        };
+        let err = resolve(&bundle, &Canned(canned), "test-arch")
+            .await
+            .unwrap_err();
+        assert_eq!(err, ResolveError::MissingBaseImage);
+        assert!(err.to_string().contains("no rootfs"), "got: {err}");
     }
 
     #[tokio::test]

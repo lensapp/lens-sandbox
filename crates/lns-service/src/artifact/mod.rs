@@ -19,9 +19,11 @@ pub enum RunPath {
 pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) -> Result<RunPath> {
     let artifact_type = artifact_type.filter(|t| !t.is_empty());
     let config_media_type = config_media_type.filter(|t| !t.is_empty());
-    let kind = artifact_type
-        .and_then(Kind::from_artifact_type)
-        .or_else(|| config_media_type.and_then(Kind::from_config_media_type));
+    // Fall back to the config-blob media type only when artifactType is absent (the oras case), never to second-guess a present-but-unrecognized one.
+    let kind = match artifact_type {
+        Some(t) => Kind::from_artifact_type(t),
+        None => config_media_type.and_then(Kind::from_config_media_type),
+    };
     match kind {
         Some(Kind::AgentSystem) => Ok(RunPath::AssembleBundle),
         Some(other) => bail!(
@@ -46,5 +48,18 @@ mod tests {
     #[test]
     fn an_empty_artifact_type_and_config_type_is_treated_as_a_plain_image() {
         assert_eq!(dispatch(Some(""), Some("")).unwrap(), RunPath::SingleImage);
+    }
+
+    #[test]
+    fn a_present_unknown_artifact_type_is_refused_even_with_a_bundle_config_media_type() {
+        let err = dispatch(
+            Some("application/vnd.oci.image.config.v1+json"),
+            Some("application/vnd.lens.bundle.config.v1+json"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unsupported artifact type"),
+            "a real artifactType we don't know must not be overridden by the config blob: {err:#}"
+        );
     }
 }

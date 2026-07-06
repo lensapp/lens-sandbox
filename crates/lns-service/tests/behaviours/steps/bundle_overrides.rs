@@ -124,6 +124,19 @@ async fn refused_no_mount(world: &mut BehaviourWorld) {
     );
 }
 
+#[then("the run is refused because the override mount path is unsafe")]
+async fn refused_unsafe_mount(world: &mut BehaviourWorld) {
+    let err = world
+        .artifact()
+        .override_error
+        .clone()
+        .expect("expected an override refusal");
+    assert!(
+        err.contains("`..` segment"),
+        "expected a traversal refusal, got: {err}",
+    );
+}
+
 #[then("nothing is assembled")]
 async fn nothing_assembled(world: &mut BehaviourWorld) {
     assert!(

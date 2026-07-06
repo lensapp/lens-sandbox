@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use crate::artifact::spec::validate_mount_path;
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub fn apply_with(mut bundle: ResolvedBundle, overrides: &[Override]) -> Result<
                 let Some(path) = over.mount_path.clone().filter(|p| !p.is_empty()) else {
                     bail!("--with FileSet override {} has no mount path", over.name);
                 };
+                validate_mount_path(&path)
+                    .with_context(|| format!("--with FileSet override {}", over.name))?;
                 bundle.filesets.push(ResolvedFileset {
                     name: over.name.clone(),
                     paths: vec![path],
