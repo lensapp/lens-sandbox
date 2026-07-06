@@ -144,13 +144,13 @@ async fn do_resolve(world: &mut BehaviourWorld) {
             .collect(),
     };
     let fetcher = FakeFetcher::new(&rig.canned);
-    let result = resolve(&spec, &fetcher, HOST_ARCH);
-    let calls = fetcher.calls.borrow().clone();
+    let result = resolve(&spec, &fetcher, HOST_ARCH).await;
+    let calls = fetcher.calls.lock().unwrap().clone();
     drop(fetcher);
     rig.fetched = calls;
     match result {
         Ok(()) => rig.ok = true,
-        Err(e) => rig.error = Some(format!("{e:#}")),
+        Err(e) => rig.error = Some(format!("{e}")),
     }
 }
 

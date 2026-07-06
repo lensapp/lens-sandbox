@@ -1,6 +1,6 @@
 use lns_service::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum Canned {
@@ -25,21 +25,21 @@ pub struct ResolveRig {
 
 pub struct FakeFetcher<'a> {
     pub canned: &'a HashMap<String, Canned>,
-    pub calls: RefCell<Vec<String>>,
+    pub calls: Mutex<Vec<String>>,
 }
 
 impl<'a> FakeFetcher<'a> {
     pub fn new(canned: &'a HashMap<String, Canned>) -> Self {
         Self {
             canned,
-            calls: RefCell::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl ComponentFetcher for FakeFetcher<'_> {
-    fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
-        self.calls.borrow_mut().push(reference.to_string());
+    async fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
+        self.calls.lock().unwrap().push(reference.to_string());
         match self.canned.get(reference) {
             Some(Canned::Present { kind, arch, refs }) => Ok(FetchedComponent {
                 kind: kind.clone(),
