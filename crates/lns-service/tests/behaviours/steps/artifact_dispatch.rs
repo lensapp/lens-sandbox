@@ -1,5 +1,6 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
+use lns_service::artifact::spec::Kind;
 use lns_service::artifact::{BUNDLE_ARTIFACT_TYPE, RunPath, dispatch};
 
 #[given("a pulled reference whose manifest has no artifact type")]
@@ -17,10 +18,22 @@ async fn explicit_artifact_type(world: &mut BehaviourWorld, artifact_type: Strin
     world.artifact().artifact_type = Some(artifact_type);
 }
 
+#[given("a pulled reference with no artifact type but a bundle config media type")]
+async fn bundle_by_config_media_type(world: &mut BehaviourWorld) {
+    world.artifact().artifact_type = None;
+    world.artifact().config_media_type = Some(Kind::AgentSystem.config_media_type());
+}
+
+#[given("a pulled reference whose manifest is a fileset artifact")]
+async fn fileset_artifact(world: &mut BehaviourWorld) {
+    world.artifact().artifact_type = Some(Kind::FileSet.artifact_type());
+}
+
 #[when("the run resolves the reference for launch")]
 async fn resolve_for_launch(world: &mut BehaviourWorld) {
     let artifact_type = world.artifact().artifact_type.clone();
-    match dispatch(artifact_type.as_deref()) {
+    let config_media_type = world.artifact().config_media_type.clone();
+    match dispatch(artifact_type.as_deref(), config_media_type.as_deref()) {
         Ok(path) => world.artifact().path = Some(path),
         Err(e) => world.artifact().error = Some(format!("{e:#}")),
     }
@@ -55,6 +68,19 @@ async fn refused_unsupported(world: &mut BehaviourWorld) {
         world.artifact().error.is_some(),
         "expected a refusal, got path {:?}",
         world.artifact().path,
+    );
+}
+
+#[then("the run is refused because the artifact is not directly runnable")]
+async fn refused_not_runnable(world: &mut BehaviourWorld) {
+    let err = world
+        .artifact()
+        .error
+        .clone()
+        .expect("expected a refusal error");
+    assert!(
+        err.contains("not directly runnable"),
+        "expected a not-runnable refusal, got: {err}",
     );
 }
 
