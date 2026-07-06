@@ -338,6 +338,11 @@ pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
     })
 }
 
+pub fn validate_envelope(config_json: &[u8], expected: Kind) -> Result<()> {
+    parse_doc(config_json, expected)?;
+    Ok(())
+}
+
 fn is_valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {

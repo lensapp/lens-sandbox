@@ -2,6 +2,7 @@ use crate::artifact::resolve::FetchedComponent;
 use crate::artifact::spec::{self, Kind};
 use anyhow::{Context, Result};
 
+// `arch` (base-image platform) and `references` (Policy integrations) are populated by the Layer-1 registry adapter, not here.
 pub fn to_fetched(
     artifact_type: Option<&str>,
     config_media_type: Option<&str>,
@@ -32,7 +33,9 @@ pub fn to_fetched(
             fetched.name = fileset.metadata.name;
             fetched.mount_path = Some(fileset.mount.path);
         }
-        Kind::AgentSystem | Kind::Policy | Kind::Integration => {}
+        Kind::AgentSystem | Kind::Policy | Kind::Integration => {
+            spec::validate_envelope(config_json, kind)?;
+        }
     }
     Ok(fetched)
 }
@@ -47,6 +50,14 @@ mod tests {
             "a".repeat(64)
         )
         .into_bytes()
+    }
+
+    fn agent_json() -> &'static [u8] {
+        br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"some-agent"},"spec":{"command":"agent --serve","env":{"MODE":"research"}}}"#
+    }
+
+    fn policy_json() -> &'static [u8] {
+        br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"ask"}}}"#
     }
 
     #[test]
@@ -65,9 +76,9 @@ mod tests {
 
     #[test]
     fn maps_an_agent_config_to_its_invocation() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"some-agent"},"spec":{"command":"agent --serve","env":{"MODE":"research"}}}"#;
-        let fetched = to_fetched(Some(&Kind::Agent.artifact_type()), None, json).unwrap();
+        let fetched = to_fetched(Some(&Kind::Agent.artifact_type()), None, agent_json()).unwrap();
         assert_eq!(fetched.kind, "Agent");
+        assert_eq!(fetched.name, "some-agent");
         assert_eq!(fetched.command.as_deref(), Some("agent --serve"));
         assert_eq!(
             fetched.env.get("MODE").map(String::as_str),
@@ -80,6 +91,7 @@ mod tests {
         let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills"},"spec":{}}"#;
         let fetched = to_fetched(Some(&Kind::FileSet.artifact_type()), None, json).unwrap();
         assert_eq!(fetched.kind, "FileSet");
+        assert_eq!(fetched.name, "skills");
         assert_eq!(
             fetched.mount_path.as_deref(),
             Some("/root/.some-agent/skills")
@@ -87,11 +99,32 @@ mod tests {
     }
 
     #[test]
-    fn carries_runtime_only_kinds_without_parsing_a_payload() {
-        for kind in [Kind::AgentSystem, Kind::Policy, Kind::Integration] {
-            let fetched = to_fetched(Some(&kind.artifact_type()), None, b"{}").unwrap();
-            assert_eq!(fetched.kind, kind.as_str());
-        }
+    fn a_runtime_only_kind_validates_its_envelope_but_surfaces_no_payload() {
+        let fetched = to_fetched(Some(&Kind::Policy.artifact_type()), None, policy_json()).unwrap();
+        assert_eq!(fetched.kind, "Policy");
+        assert_eq!(fetched.name, "");
+        assert!(fetched.base_image.is_none());
+        assert!(fetched.command.is_none());
+        assert!(fetched.env.is_empty());
+        assert!(fetched.mount_path.is_none());
+    }
+
+    #[test]
+    fn a_runtime_only_kind_with_a_mislabeled_body_is_rejected() {
+        let err = to_fetched(Some(&Kind::Policy.artifact_type()), None, agent_json()).unwrap_err();
+        assert!(format!("{err:#}").contains("expected kind"), "got: {err:#}");
+    }
+
+    #[test]
+    fn artifact_type_wins_over_a_disagreeing_config_media_type() {
+        let fetched = to_fetched(
+            Some(&Kind::Agent.artifact_type()),
+            Some(&Kind::Sandbox.config_media_type()),
+            agent_json(),
+        )
+        .unwrap();
+        assert_eq!(fetched.kind, "Agent");
+        assert_eq!(fetched.command.as_deref(), Some("agent --serve"));
     }
 
     #[test]
@@ -106,6 +139,14 @@ mod tests {
     }
 
     #[test]
+    fn arch_and_references_are_not_populated_by_the_mapping() {
+        let fetched =
+            to_fetched(Some(&Kind::Sandbox.artifact_type()), None, &sandbox_json()).unwrap();
+        assert!(fetched.arch.is_none());
+        assert!(fetched.references.is_empty());
+    }
+
+    #[test]
     fn rejects_a_component_that_is_not_a_lens_artifact() {
         let err = to_fetched(
             Some("application/vnd.oci.image.config.v1+json"),
@@ -117,9 +158,25 @@ mod tests {
     }
 
     #[test]
-    fn propagates_a_spec_parse_failure() {
+    fn propagates_a_sandbox_parse_failure() {
         let floating = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm","baseImage":"reg/base:1"}}"#;
         let err = to_fetched(Some(&Kind::Sandbox.artifact_type()), None, floating).unwrap_err();
         assert!(format!("{err:#}").contains("digest-pinned"));
+    }
+
+    #[test]
+    fn propagates_the_agent_image_rejection() {
+        let with_image = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"some-agent"},"spec":{"image":"reg/x:1"}}"#;
+        let err = to_fetched(Some(&Kind::Agent.artifact_type()), None, with_image).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not carry `image`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_media_type_whose_envelope_kind_disagrees() {
+        let err = to_fetched(Some(&Kind::Sandbox.artifact_type()), None, agent_json()).unwrap_err();
+        assert!(format!("{err:#}").contains("expected kind"), "got: {err:#}");
     }
 }
