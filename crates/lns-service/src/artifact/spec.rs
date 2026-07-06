@@ -244,10 +244,22 @@ pub struct Agent {
     pub spec: AgentSpec,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct PolicySpec {
+    #[serde(default)]
+    pub integrations: Vec<ArtifactRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSet {
     pub metadata: Metadata,
     pub mount: Mount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policy {
+    pub metadata: Metadata,
+    pub spec: PolicySpec,
 }
 
 #[derive(Deserialize)]
@@ -335,6 +347,18 @@ pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
     Ok(FileSet {
         metadata: doc.metadata,
         mount,
+    })
+}
+
+pub fn parse_policy(config_json: &[u8]) -> Result<Policy> {
+    let doc = parse_doc(config_json, Kind::Policy)?;
+    let spec: PolicySpec = serde_json::from_value(doc.spec).context("parsing policy spec")?;
+    for integration in &spec.integrations {
+        integration.validate()?;
+    }
+    Ok(Policy {
+        metadata: doc.metadata,
+        spec,
     })
 }
 
@@ -586,6 +610,39 @@ mod tests {
         let no_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"spec":{}}"#;
         let err = parse_fileset(no_mount).unwrap_err();
         assert!(format!("{err:#}").contains("requires a mount"));
+    }
+
+    #[test]
+    fn parse_policy_surfaces_the_integration_refs_it_declares() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"ask"},"integrations":[{"ref":"reg/some-integration:1"}]}}"#;
+        let policy = parse_policy(json).unwrap();
+        assert_eq!(policy.metadata.name, "some-policy");
+        assert_eq!(policy.spec.integrations.len(), 1);
+        assert_eq!(
+            policy.spec.integrations[0].reference,
+            "reg/some-integration:1"
+        );
+    }
+
+    #[test]
+    fn parse_policy_without_integrations_is_allowed() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"ask"}}}"#;
+        let policy = parse_policy(json).unwrap();
+        assert!(policy.spec.integrations.is_empty());
+    }
+
+    #[test]
+    fn parse_policy_rejects_an_integration_ref_with_a_bad_digest() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"integrations":[{"ref":"reg/some-integration:1","digest":"sha256:bad"}]}}"#;
+        let err = parse_policy(json).unwrap_err();
+        assert!(format!("{err:#}").contains("not a sha256 digest"));
+    }
+
+    #[test]
+    fn parse_policy_rejects_a_mislabeled_envelope() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"x"},"spec":{}}"#;
+        let err = parse_policy(json).unwrap_err();
+        assert!(format!("{err:#}").contains("expected kind"), "got: {err:#}");
     }
 
     #[test]
