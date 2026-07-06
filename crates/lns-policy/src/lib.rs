@@ -87,17 +87,12 @@ pub enum Verdict {
     Ask,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
     Upstream,
+    #[default]
     Direct,
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        Self::Direct
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
