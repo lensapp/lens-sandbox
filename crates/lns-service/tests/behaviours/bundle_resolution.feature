@@ -4,17 +4,48 @@ Feature: bundle resolution is atomic and fail-closed
   aborts the whole run with a clear, component-named error before the
   workload starts, so a half-resolved bundle can never launch.
 
-  Scenario: A well-formed bundle resolves all its components
+  Scenario: A well-formed bundle resolves into a composed workload
     Given a bundle whose sandbox, agent, and fileset are all present and supported
     When the bundle is resolved
     Then resolution succeeds
     And every declared component was fetched
+    And the resolved bundle's base image is "registry.example.test/base:1"
+    And the resolved bundle runs command "agent --serve"
+    And the resolved bundle includes fileset "skills"
 
   Scenario: A component shared by two parents is resolved only once
     Given a bundle whose sandbox and agent both reference the same fileset
     When the bundle is resolved
     Then resolution succeeds
     And the shared fileset was fetched exactly once
+
+  Scenario: A bundle with no sandbox is refused
+    Given a bundle with no sandbox
+    When the bundle is resolved
+    Then resolution is refused
+    And the refusal mentions "exactly one sandbox"
+    And the refusal mentions "found none"
+
+  Scenario: A bundle with more than one sandbox is refused
+    Given a bundle with two sandboxes
+    When the bundle is resolved
+    Then resolution is refused
+    And the refusal mentions "exactly one sandbox"
+    And the refusal mentions "found more than one"
+
+  Scenario: A bundle with no agent is refused
+    Given a bundle with no agent
+    When the bundle is resolved
+    Then resolution is refused
+    And the refusal mentions "exactly one agent"
+    And the refusal mentions "found none"
+
+  Scenario: A bundle with more than one agent is refused
+    Given a bundle with two agents
+    When the bundle is resolved
+    Then resolution is refused
+    And the refusal mentions "exactly one agent"
+    And the refusal mentions "found more than one"
 
   Scenario: A missing component aborts the run and names it
     Given a bundle referencing a fileset "skills" that is not present in the registry

@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use crate::artifact::assembly::{ResolvedBundle, ResolvedFileset};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 
 pub trait ComponentFetcher {
@@ -8,11 +9,16 @@ pub trait ComponentFetcher {
     ) -> impl Future<Output = std::result::Result<FetchedComponent, FetchError>> + Send;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FetchedComponent {
     pub kind: String,
+    pub name: String,
     pub arch: Option<String>,
     pub references: Vec<String>,
+    pub base_image: Option<String>,
+    pub command: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub mount_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -53,6 +59,12 @@ pub enum ResolveError {
         reference: String,
         image_arch: String,
         host_arch: String,
+    },
+    MissingComponent {
+        role: &'static str,
+    },
+    DuplicateComponent {
+        role: &'static str,
     },
 }
 
@@ -95,6 +107,15 @@ impl std::fmt::Display for ResolveError {
                 f,
                 "base image {reference} is built for architecture {image_arch} but this sandbox runs {host_arch}"
             ),
+            ResolveError::MissingComponent { role } => {
+                write!(f, "bundle must compose exactly one {role}, but found none")
+            }
+            ResolveError::DuplicateComponent { role } => {
+                write!(
+                    f,
+                    "bundle must compose exactly one {role}, but found more than one"
+                )
+            }
         }
     }
 }
@@ -107,7 +128,7 @@ struct Walk<'a, F: ComponentFetcher> {
     fetcher: &'a F,
     host_arch: &'a str,
     on_path: HashSet<String>,
-    resolved: HashSet<String>,
+    cache: HashMap<String, FetchedComponent>,
     budget: usize,
 }
 
@@ -115,7 +136,7 @@ pub async fn resolve<F: ComponentFetcher>(
     bundle: &BundleSpec,
     fetcher: &F,
     host_arch: &str,
-) -> Result<(), ResolveError> {
+) -> Result<ResolvedBundle, ResolveError> {
     let mut names = HashSet::new();
     for component in &bundle.components {
         if !names.insert(component.name.as_str()) {
@@ -126,18 +147,60 @@ pub async fn resolve<F: ComponentFetcher>(
         fetcher,
         host_arch,
         on_path: HashSet::new(),
-        resolved: HashSet::new(),
+        cache: HashMap::new(),
         budget: 0,
     };
     for component in &bundle.components {
         walk.visit(&component.name, &component.reference).await?;
     }
-    Ok(())
+    compose(&bundle.components, &walk.cache)
+}
+
+fn compose(
+    components: &[DeclaredComponent],
+    cache: &HashMap<String, FetchedComponent>,
+) -> Result<ResolvedBundle, ResolveError> {
+    let mut resolved = ResolvedBundle::default();
+    let mut sandboxes = 0;
+    let mut agents = 0;
+    for component in components {
+        if let Some(fetched) = cache.get(&component.reference) {
+            match fetched.kind.as_str() {
+                "Sandbox" => {
+                    sandboxes += 1;
+                    resolved.base_image = fetched.base_image.clone().unwrap_or_default();
+                }
+                "Agent" => {
+                    agents += 1;
+                    resolved.command = fetched.command.clone();
+                    resolved.env = fetched.env.clone();
+                }
+                "FileSet" => resolved.filesets.push(ResolvedFileset {
+                    name: fetched.name.clone(),
+                    paths: fetched.mount_path.clone().into_iter().collect(),
+                }),
+                _ => {}
+            }
+        }
+    }
+    if sandboxes == 0 {
+        return Err(ResolveError::MissingComponent { role: "sandbox" });
+    }
+    if sandboxes > 1 {
+        return Err(ResolveError::DuplicateComponent { role: "sandbox" });
+    }
+    if agents == 0 {
+        return Err(ResolveError::MissingComponent { role: "agent" });
+    }
+    if agents > 1 {
+        return Err(ResolveError::DuplicateComponent { role: "agent" });
+    }
+    Ok(resolved)
 }
 
 impl<F: ComponentFetcher> Walk<'_, F> {
     async fn visit(&mut self, name: &str, reference: &str) -> Result<(), ResolveError> {
-        if self.resolved.contains(reference) {
+        if self.cache.contains_key(reference) {
             return Ok(());
         }
         if !self.on_path.insert(reference.to_string()) {
@@ -182,7 +245,7 @@ impl<F: ComponentFetcher> Walk<'_, F> {
             Box::pin(self.visit(name, child)).await?;
         }
         self.on_path.remove(reference);
-        self.resolved.insert(reference.to_string());
+        self.cache.insert(reference.to_string(), fetched);
         Ok(())
     }
 }
@@ -201,8 +264,8 @@ mod tests {
             let n: usize = reference.trim_start_matches('r').parse().unwrap_or(0);
             Ok(FetchedComponent {
                 kind: "FileSet".into(),
-                arch: None,
                 references: vec![format!("r{}", n + 1)],
+                ..Default::default()
             })
         }
     }

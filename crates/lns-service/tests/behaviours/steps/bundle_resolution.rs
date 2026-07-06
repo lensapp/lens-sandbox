@@ -1,15 +1,38 @@
 use crate::resolve_rig::{Canned, FakeFetcher};
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_service::artifact::resolve::{BundleSpec, DeclaredComponent, resolve};
+use lns_service::artifact::resolve::{BundleSpec, DeclaredComponent, FetchedComponent, resolve};
 
 const HOST_ARCH: &str = "test-arch";
 
-fn present(kind: &str) -> Canned {
-    Canned::Present {
+fn component(kind: &str) -> FetchedComponent {
+    FetchedComponent {
         kind: kind.to_string(),
-        arch: None,
-        refs: Vec::new(),
+        ..Default::default()
+    }
+}
+
+fn present(kind: &str) -> Canned {
+    Canned::Present(component(kind))
+}
+
+fn sandbox_component() -> FetchedComponent {
+    FetchedComponent {
+        kind: "Sandbox".into(),
+        arch: Some(HOST_ARCH.into()),
+        base_image: Some("registry.example.test/base:1".into()),
+        ..Default::default()
+    }
+}
+
+fn agent_component() -> FetchedComponent {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("MODE".into(), "research".into());
+    FetchedComponent {
+        kind: "Agent".into(),
+        command: Some("agent --serve".into()),
+        env,
+        ..Default::default()
     }
 }
 
@@ -20,17 +43,18 @@ async fn well_formed(world: &mut BehaviourWorld) {
         ("sandbox".into(), "reg/base:1".into()),
         ("agent".into(), "reg/agent:1".into()),
         ("skills".into(), "reg/skills:1".into()),
+        ("policy".into(), "reg/policy:1".into()),
     ];
-    rig.canned.insert(
-        "reg/base:1".into(),
-        Canned::Present {
-            kind: "Sandbox".into(),
-            arch: Some(HOST_ARCH.into()),
-            refs: Vec::new(),
-        },
-    );
-    rig.canned.insert("reg/agent:1".into(), present("Agent"));
-    rig.canned.insert("reg/skills:1".into(), present("FileSet"));
+    let mut fileset = component("FileSet");
+    fileset.name = "skills".into();
+    fileset.mount_path = Some("/root/.some-agent/skills".into());
+    rig.canned
+        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+    rig.canned
+        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+    rig.canned
+        .insert("reg/skills:1".into(), Canned::Present(fileset));
+    rig.canned.insert("reg/policy:1".into(), present("Policy"));
 }
 
 #[given("a bundle whose sandbox and agent both reference the same fileset")]
@@ -40,23 +64,63 @@ async fn shared_fileset(world: &mut BehaviourWorld) {
         ("sandbox".into(), "reg/base:1".into()),
         ("agent".into(), "reg/agent:1".into()),
     ];
-    rig.canned.insert(
-        "reg/base:1".into(),
-        Canned::Present {
-            kind: "Sandbox".into(),
-            arch: Some(HOST_ARCH.into()),
-            refs: vec!["reg/shared:1".into()],
-        },
-    );
-    rig.canned.insert(
-        "reg/agent:1".into(),
-        Canned::Present {
-            kind: "Agent".into(),
-            arch: None,
-            refs: vec!["reg/shared:1".into()],
-        },
-    );
+    let mut sandbox = sandbox_component();
+    sandbox.references = vec!["reg/shared:1".into()];
+    let mut agent = agent_component();
+    agent.references = vec!["reg/shared:1".into()];
+    rig.canned
+        .insert("reg/base:1".into(), Canned::Present(sandbox));
+    rig.canned
+        .insert("reg/agent:1".into(), Canned::Present(agent));
     rig.canned.insert("reg/shared:1".into(), present("FileSet"));
+}
+
+#[given("a bundle with no sandbox")]
+async fn no_sandbox(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![("agent".into(), "reg/agent:1".into())];
+    rig.canned
+        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+}
+
+#[given("a bundle with two sandboxes")]
+async fn two_sandboxes(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![
+        ("sandbox-a".into(), "reg/base-a:1".into()),
+        ("sandbox-b".into(), "reg/base-b:1".into()),
+        ("agent".into(), "reg/agent:1".into()),
+    ];
+    rig.canned
+        .insert("reg/base-a:1".into(), Canned::Present(sandbox_component()));
+    rig.canned
+        .insert("reg/base-b:1".into(), Canned::Present(sandbox_component()));
+    rig.canned
+        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+}
+
+#[given("a bundle with no agent")]
+async fn no_agent(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![("sandbox".into(), "reg/base:1".into())];
+    rig.canned
+        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+}
+
+#[given("a bundle with two agents")]
+async fn two_agents(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![
+        ("sandbox".into(), "reg/base:1".into()),
+        ("agent-a".into(), "reg/agent-a:1".into()),
+        ("agent-b".into(), "reg/agent-b:1".into()),
+    ];
+    rig.canned
+        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+    rig.canned
+        .insert("reg/agent-a:1".into(), Canned::Present(agent_component()));
+    rig.canned
+        .insert("reg/agent-b:1".into(), Canned::Present(agent_component()));
 }
 
 #[given(
@@ -77,36 +141,24 @@ async fn unsupported_kind(world: &mut BehaviourWorld, kind: String) {
 async fn foreign_arch(world: &mut BehaviourWorld) {
     let rig = world.resolve();
     rig.components = vec![("sandbox".into(), "reg/base:1".into())];
-    rig.canned.insert(
-        "reg/base:1".into(),
-        Canned::Present {
-            kind: "Sandbox".into(),
-            arch: Some("other-arch".into()),
-            refs: Vec::new(),
-        },
-    );
+    let mut sandbox = sandbox_component();
+    sandbox.arch = Some("other-arch".into());
+    rig.canned
+        .insert("reg/base:1".into(), Canned::Present(sandbox));
 }
 
 #[given("a bundle whose component graph contains a reference cycle")]
 async fn reference_cycle(world: &mut BehaviourWorld) {
     let rig = world.resolve();
     rig.components = vec![("a".into(), "reg/a:1".into())];
-    rig.canned.insert(
-        "reg/a:1".into(),
-        Canned::Present {
-            kind: "Sandbox".into(),
-            arch: None,
-            refs: vec!["reg/b:1".into()],
-        },
-    );
-    rig.canned.insert(
-        "reg/b:1".into(),
-        Canned::Present {
-            kind: "FileSet".into(),
-            arch: None,
-            refs: vec!["reg/a:1".into()],
-        },
-    );
+    let mut sandbox = component("Sandbox");
+    sandbox.references = vec!["reg/b:1".into()];
+    let mut fileset = component("FileSet");
+    fileset.references = vec!["reg/a:1".into()];
+    rig.canned
+        .insert("reg/a:1".into(), Canned::Present(sandbox));
+    rig.canned
+        .insert("reg/b:1".into(), Canned::Present(fileset));
 }
 
 #[given(regex = r#"^a bundle declaring two components both named "([^"]+)"$"#)]
@@ -149,7 +201,10 @@ async fn do_resolve(world: &mut BehaviourWorld) {
     drop(fetcher);
     rig.fetched = calls;
     match result {
-        Ok(()) => rig.ok = true,
+        Ok(bundle) => {
+            rig.ok = true;
+            rig.resolved = Some(bundle);
+        }
         Err(e) => rig.error = Some(format!("{e}")),
     }
 }
@@ -183,6 +238,30 @@ async fn shared_fetched_once(world: &mut BehaviourWorld) {
     );
 }
 
+#[then(regex = r#"^the resolved bundle's base image is "([^"]+)"$"#)]
+async fn resolved_base_image(world: &mut BehaviourWorld, image: String) {
+    let rig = world.resolve();
+    let bundle = rig.resolved.as_ref().expect("a resolved bundle");
+    assert_eq!(bundle.base_image, image);
+}
+
+#[then(regex = r#"^the resolved bundle runs command "([^"]+)"$"#)]
+async fn resolved_command(world: &mut BehaviourWorld, command: String) {
+    let rig = world.resolve();
+    let bundle = rig.resolved.as_ref().expect("a resolved bundle");
+    assert_eq!(bundle.command.as_deref(), Some(command.as_str()));
+}
+
+#[then(regex = r#"^the resolved bundle includes fileset "([^"]+)"$"#)]
+async fn resolved_includes_fileset(world: &mut BehaviourWorld, name: String) {
+    let rig = world.resolve();
+    let bundle = rig.resolved.as_ref().expect("a resolved bundle");
+    assert!(
+        bundle.filesets.iter().any(|f| f.name == name),
+        "resolved bundle should include fileset {name}",
+    );
+}
+
 #[then("resolution is refused")]
 async fn refused(world: &mut BehaviourWorld) {
     assert!(
@@ -201,6 +280,11 @@ fn assert_refusal_contains(world: &mut BehaviourWorld, needle: &str) {
         err.contains(needle),
         "refusal should mention {needle}, got: {err}"
     );
+}
+
+#[then(regex = r#"^the refusal mentions "([^"]+)"$"#)]
+async fn refusal_mentions(world: &mut BehaviourWorld, text: String) {
+    assert_refusal_contains(world, &text);
 }
 
 #[then(regex = r#"^the refusal names the missing component "([^"]+)"$"#)]
