@@ -16,13 +16,31 @@ Feature: --with overrides a bundle's mounted components at launch
     Then "/root/.some-agent/settings.json" in the assembled workload comes from fileset "settings"
     And "/root/.some-agent/skills/extra.md" in the assembled workload comes from fileset "extra"
 
-  Scenario: Multiple --with overrides all apply, the last on top
+  Scenario: A --with fileset overrides a path the base image ships
+    Given a bundle whose sandbox base image ships "/root/.some-agent/settings.json"
+    When the bundle is run with --with a fileset "override" mounting "/root/.some-agent/settings.json"
+    Then "/root/.some-agent/settings.json" in the assembled workload comes from fileset "override"
+
+  Scenario: Multiple --with overrides are all applied, the last winning a collision
     Given a bundle declaring a fileset "shipped" mounting "/x"
-    When the bundle is run with --with a fileset "first" mounting "/x" and --with a fileset "second" mounting "/x"
-    Then "/x" in the assembled workload comes from fileset "second"
+    When the bundle is run with --with a fileset "first" mounting "/y" and --with a fileset "second" mounting "/x"
+    Then "/y" in the assembled workload comes from fileset "first"
+    And "/x" in the assembled workload comes from fileset "second"
 
   Scenario: A --with override of an unsupported kind is refused
     Given a bundle declaring a fileset "shipped" mounting "/x"
     When the bundle is run with --with an artifact of kind "Workflow"
     Then the run is refused because the override kind is unsupported
+    And nothing is assembled
+
+  Scenario: A valid override paired with an unsupported one assembles nothing
+    Given a bundle declaring a fileset "shipped" mounting "/x"
+    When the bundle is run with --with a fileset "good" mounting "/y" and --with an artifact of kind "Workflow"
+    Then the run is refused because the override kind is unsupported
+    And nothing is assembled
+
+  Scenario: A --with fileset override with no mount path is refused
+    Given a bundle declaring a fileset "shipped" mounting "/x"
+    When the bundle is run with --with a fileset "override" carrying no mount path
+    Then the run is refused because the override has no mount path
     And nothing is assembled

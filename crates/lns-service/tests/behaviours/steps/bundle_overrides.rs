@@ -60,6 +60,36 @@ async fn run_with_unsupported(world: &mut BehaviourWorld, kind: String) {
     run_with_overrides(world);
 }
 
+#[when(
+    regex = r#"^the bundle is run with --with a fileset "([^"]+)" mounting "([^"]+)" and --with an artifact of kind "([^"]+)"$"#
+)]
+async fn run_with_valid_then_unsupported(
+    world: &mut BehaviourWorld,
+    name: String,
+    path: String,
+    kind: String,
+) {
+    world.artifact().overrides = vec![
+        fileset_override(&name, &path),
+        Override {
+            kind,
+            name: "bad".into(),
+            mount_path: Some("/z".into()),
+        },
+    ];
+    run_with_overrides(world);
+}
+
+#[when(regex = r#"^the bundle is run with --with a fileset "([^"]+)" carrying no mount path$"#)]
+async fn run_with_no_mount(world: &mut BehaviourWorld, name: String) {
+    world.artifact().overrides = vec![Override {
+        kind: "FileSet".into(),
+        name,
+        mount_path: None,
+    }];
+    run_with_overrides(world);
+}
+
 #[then("the run is refused because the override kind is unsupported")]
 async fn refused_override_kind(world: &mut BehaviourWorld) {
     let err = world
@@ -70,6 +100,27 @@ async fn refused_override_kind(world: &mut BehaviourWorld) {
     assert!(
         err.contains("unsupported"),
         "expected an unsupported-kind refusal, got: {err}",
+    );
+    assert!(
+        err.contains("Workflow"),
+        "refusal should name the offending kind, got: {err}",
+    );
+    assert!(
+        err.contains("FileSet"),
+        "refusal should state only FileSet overrides are allowed, got: {err}",
+    );
+}
+
+#[then("the run is refused because the override has no mount path")]
+async fn refused_no_mount(world: &mut BehaviourWorld) {
+    let err = world
+        .artifact()
+        .override_error
+        .clone()
+        .expect("expected an override refusal");
+    assert!(
+        err.contains("no mount path"),
+        "expected a missing-mount-path refusal, got: {err}",
     );
 }
 

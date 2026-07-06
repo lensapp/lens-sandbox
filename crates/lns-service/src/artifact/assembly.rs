@@ -11,10 +11,15 @@ pub struct Override {
 pub fn apply_with(mut bundle: ResolvedBundle, overrides: &[Override]) -> Result<ResolvedBundle> {
     for over in overrides {
         match over.kind.as_str() {
-            "FileSet" => bundle.filesets.push(ResolvedFileset {
-                name: over.name.clone(),
-                paths: over.mount_path.clone().into_iter().collect(),
-            }),
+            "FileSet" => {
+                let Some(path) = over.mount_path.clone().filter(|p| !p.is_empty()) else {
+                    bail!("--with FileSet override {} has no mount path", over.name);
+                };
+                bundle.filesets.push(ResolvedFileset {
+                    name: over.name.clone(),
+                    paths: vec![path],
+                });
+            }
             other => bail!(
                 "--with override of kind {other} is unsupported; only FileSet overrides are allowed"
             ),
