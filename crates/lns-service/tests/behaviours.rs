@@ -1,5 +1,7 @@
 #[path = "behaviours/approval_rig.rs"]
 mod approval_rig;
+#[path = "behaviours/artifact_rig.rs"]
+mod artifact_rig;
 #[path = "behaviours/bind_rig.rs"]
 mod bind_rig;
 #[path = "behaviours/credential_rig.rs"]

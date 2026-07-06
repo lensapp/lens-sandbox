@@ -1,4 +1,5 @@
 pub mod approval_flow;
+pub mod artifact_dispatch;
 pub mod credential_flow;
 pub mod env_injection;
 pub mod forward;

@@ -1,4 +1,5 @@
 pub mod approval_flow;
+pub mod artifact;
 pub mod audit;
 mod base64;
 pub mod browser;

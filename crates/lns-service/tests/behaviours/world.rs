@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
+use crate::artifact_rig::ArtifactRig;
 use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
@@ -48,6 +49,8 @@ pub struct BehaviourWorld {
     pub bind: Option<BindRig>,
 
     pub image: Option<ImageRig>,
+
+    pub artifact: Option<ArtifactRig>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
@@ -106,5 +109,9 @@ impl BehaviourWorld {
             self.image = Some(ImageRig::new());
         }
         self.image.as_mut().expect("image rig must exist")
+    }
+
+    pub fn artifact(&mut self) -> &mut ArtifactRig {
+        self.artifact.get_or_insert_with(ArtifactRig::default)
     }
 }
