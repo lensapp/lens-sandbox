@@ -456,6 +456,8 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "a".repeat(64))],
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         let record = record_for(&pulled, 42);
         assert_eq!(record.reference, "docker.io/library/some-image:1.0");
@@ -904,6 +906,8 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "e".repeat(64))],
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         record(&pulled).await.unwrap();
 

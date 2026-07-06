@@ -185,6 +185,8 @@ pub struct PulledImage {
     pub layers: Vec<oci_client::client::ImageLayer>,
     pub config: oci_client::config::ConfigFile,
     pub layer_digests: Vec<String>,
+    pub artifact_type: Option<String>,
+    pub config_media_type: String,
 }
 
 #[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
@@ -359,6 +361,8 @@ pub(crate) async fn pull_inner<R: Registry>(
         layers,
         config,
         layer_digests,
+        artifact_type: manifest.artifact_type.clone(),
+        config_media_type: manifest.config.media_type.clone(),
     })
 }
 
@@ -927,6 +931,38 @@ mod tests {
         assert_eq!(calls[0], "manifest", "manifest fetch happens first");
         assert!(calls[1].starts_with("blob:"));
         assert!(calls[2].starts_with("blob:"));
+    }
+
+    #[tokio::test]
+    async fn pull_inner_threads_manifest_artifact_type_and_config_media_type() {
+        ensure_global_trace_subscriber();
+        let mut img = build_two_layer_image();
+        img.manifest.artifact_type = Some("application/vnd.lens.bundle.v1+json".into());
+        img.manifest.config.media_type = "application/vnd.lens.bundle.config.v1+json".into();
+        let registry = img.into_registry();
+        let (_dir, cache) = cache();
+        let pulled = pull_inner(&registry, "reg/bundle:1", &cache).await.unwrap();
+        assert_eq!(
+            pulled.artifact_type.as_deref(),
+            Some("application/vnd.lens.bundle.v1+json"),
+            "the manifest's artifactType must be carried on the pulled image so run can dispatch",
+        );
+        assert_eq!(
+            pulled.config_media_type, "application/vnd.lens.bundle.config.v1+json",
+            "the config descriptor's mediaType must be carried for the oras empty-artifactType fallback",
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_inner_reports_no_artifact_type_for_a_plain_image() {
+        ensure_global_trace_subscriber();
+        let registry = build_two_layer_image().into_registry();
+        let (_dir, cache) = cache();
+        let pulled = pull_inner(&registry, "alpine:3.20", &cache).await.unwrap();
+        assert!(
+            pulled.artifact_type.is_none(),
+            "a plain image manifest declares no artifactType",
+        );
     }
 
     #[tokio::test]
