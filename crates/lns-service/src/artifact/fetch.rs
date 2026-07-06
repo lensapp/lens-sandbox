@@ -154,7 +154,7 @@ mod tests {
             _descriptor: &OciDescriptor,
             _on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<Vec<u8>> {
-            unreachable!("component fetch never pulls layer blobs")
+            anyhow::bail!("a component fetch only reads the manifest+config, never layer blobs")
         }
     }
 
@@ -340,6 +340,26 @@ mod tests {
             }
             other => panic!("expected UnsupportedKind, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_component_maps_a_policy_with_a_bad_integration_ref_to_invalid() {
+        let policy = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"integrations":[{"ref":"reg/x:1","digest":"sha256:bad"}]}}"#;
+        let reg = FakeReg::lens(Kind::Policy, policy);
+        match fetch(&reg).await.unwrap_err() {
+            FetchError::Invalid { reason } => assert!(reason.contains("not a sha256 digest")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_component_registry_fake_never_serves_layer_blobs() {
+        let reg = FakeReg::lens(Kind::Sandbox, "{}");
+        let reference: Reference = "reg.example.test/x:1".parse().unwrap();
+        let err = reg
+            .pull_blob(&reference, &OciDescriptor::default(), &|_| {})
+            .await;
+        assert!(err.is_err(), "component fetch must not pull blobs");
     }
 
     #[tokio::test]

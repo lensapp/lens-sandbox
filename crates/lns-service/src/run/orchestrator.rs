@@ -75,6 +75,29 @@ async fn orchestrate(
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
+    // A bundle reference resolves its component graph and boots its sandbox base image; a plain image passes through unchanged.
+    let bundle = match args.image.as_deref() {
+        Some(image_ref) => {
+            crate::artifact::real::peek_and_plan(image_ref, &image::want_arch().to_string()).await?
+        }
+        None => None,
+    };
+    let launch = bundle
+        .as_ref()
+        .map(|workload| super::bundle_launch(workload, &args.cmd, &args.env));
+    let image_ref: Option<String> = match &launch {
+        Some(l) => Some(l.image.clone()),
+        None => args.image.clone(),
+    };
+    let cmd: Vec<String> = launch
+        .as_ref()
+        .map(|l| l.cmd.clone())
+        .unwrap_or_else(|| args.cmd.clone());
+    let env: Vec<String> = launch
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_else(|| args.env.clone());
+
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
@@ -96,8 +119,8 @@ async fn orchestrate(
     };
     let image_fut = async {
         let image = ingest::run(
-            args.image.as_deref(),
-            &args.cmd,
+            image_ref.as_deref(),
+            &cmd,
             &image::want_arch(),
             &layer_cache,
             image::pull,
@@ -233,7 +256,7 @@ async fn orchestrate(
     let exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
-        &args.cmd,
+        &cmd,
         image.config.as_ref(),
         session.as_ref(),
     );
@@ -282,7 +305,7 @@ async fn orchestrate(
     let argv = build_workload_argv(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
-        &args.cmd,
+        &cmd,
         session.is_some(),
     );
     let workdir = crate::workload_cwd::resolve(
@@ -292,8 +315,8 @@ async fn orchestrate(
     let composed = exec_env_strings(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
-        &args.cmd,
-        &args.env,
+        &cmd,
+        &env,
         session.is_some(),
         session
             .as_ref()

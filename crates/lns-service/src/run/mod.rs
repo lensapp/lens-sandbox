@@ -83,6 +83,41 @@ pub(super) fn exec_env_strings(
     )
 }
 
+/// The image ref, command, and env a bundle run boots with, once its components are resolved.
+pub(super) struct BundleLaunch {
+    pub image: String,
+    pub cmd: Vec<String>,
+    pub env: Vec<String>,
+}
+
+/// Merge a resolved bundle's workload with the user's run args: boot the sandbox base image, take the agent command unless the user gave one after `--`, and layer env base-image < bundle-agent < user `-e`.
+pub(super) fn bundle_launch(
+    workload: &crate::artifact::assembly::AssembledWorkload,
+    user_cmd: &[String],
+    user_env: &[String],
+) -> BundleLaunch {
+    let cmd = if user_cmd.is_empty() {
+        workload
+            .command
+            .as_deref()
+            .map(|c| c.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    } else {
+        user_cmd.to_vec()
+    };
+    let mut env: Vec<String> = workload
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    env.extend(user_env.iter().cloned());
+    BundleLaunch {
+        image: workload.base_image.clone(),
+        cmd,
+        env,
+    }
+}
+
 pub(super) fn vm_ended_before_connector(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> anyhow::Error {
@@ -360,6 +395,62 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "VM backend never produced a VsockConnector"
+        );
+    }
+
+    fn workload(
+        command: Option<&str>,
+        env: &[(&str, &str)],
+    ) -> crate::artifact::assembly::AssembledWorkload {
+        let resolved = crate::artifact::assembly::ResolvedBundle {
+            base_image: "registry.example.test/base@sha256:abc".into(),
+            command: command.map(str::to_string),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        crate::artifact::assembly::assemble(&resolved)
+    }
+
+    #[test]
+    fn bundle_launch_boots_the_base_image_with_the_agent_command() {
+        let w = workload(Some("agent --serve"), &[]);
+        let launch = bundle_launch(&w, &[], &[]);
+        assert_eq!(launch.image, "registry.example.test/base@sha256:abc");
+        assert_eq!(launch.cmd, vec!["agent".to_string(), "--serve".to_string()]);
+    }
+
+    #[test]
+    fn bundle_launch_lets_a_user_command_after_dashdash_override_the_agent() {
+        let w = workload(Some("agent --serve"), &[]);
+        let launch = bundle_launch(&w, &["bash".to_string()], &[]);
+        assert_eq!(launch.cmd, vec!["bash".to_string()]);
+    }
+
+    #[test]
+    fn bundle_launch_leaves_the_command_empty_when_the_agent_declares_none() {
+        let w = workload(None, &[]);
+        let launch = bundle_launch(&w, &[], &[]);
+        assert!(
+            launch.cmd.is_empty(),
+            "no agent command → fall back to image"
+        );
+    }
+
+    #[test]
+    fn bundle_launch_layers_user_env_after_the_agent_env_so_the_user_wins() {
+        let w = workload(Some("agent"), &[("MODE", "research"), ("PORT", "3003")]);
+        let launch = bundle_launch(&w, &[], &["PORT=4000".to_string()]);
+        assert_eq!(
+            launch.env,
+            vec![
+                "MODE=research".to_string(),
+                "PORT=3003".to_string(),
+                "PORT=4000".to_string(),
+            ],
+            "agent env first, user -e appended so last-wins env resolution prefers the user",
         );
     }
 }

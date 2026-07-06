@@ -133,6 +133,17 @@ mod tests {
         )
     }
 
+    fn policy(reference: &str) -> (String, FetchedComponent) {
+        (
+            reference.to_string(),
+            FetchedComponent {
+                kind: "Policy".into(),
+                name: "some-policy".into(),
+                ..Default::default()
+            },
+        )
+    }
+
     fn fileset(reference: &str, name: &str, path: &str) -> (String, FetchedComponent) {
         (
             reference.to_string(),
@@ -148,12 +159,13 @@ mod tests {
     #[tokio::test]
     async fn plan_bundle_resolves_a_config_into_a_composed_workload() {
         let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/skills:1"}]}"#,
+            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/skills:1"}],"policies":[{"ref":"reg/policy:1"}]}"#,
         );
         let fetcher = MapFetcher(HashMap::from([
             sandbox("reg/base:1"),
             agent("reg/agent:1"),
             fileset("reg/skills:1", "skills", "/root/.some-agent/skills"),
+            policy("reg/policy:1"),
         ]));
         let resolved = plan_bundle(&config, &fetcher, "test-arch", &[])
             .await
