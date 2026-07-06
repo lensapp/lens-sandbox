@@ -26,26 +26,12 @@ pub enum PolicyCommand {
     Remove(PolicyRemoveArgs),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-#[value(rename_all = "lower")]
-pub enum TransportArg {
-    Direct,
-    Upstream,
-}
-
 #[derive(clap::Args)]
 pub struct PolicyRuleArgs {
     #[arg(help = "Destination pattern: host, wildcard (*.example.com), CIDR, or host:port.")]
     pub pattern: String,
     #[arg(long, help = "Human-readable note stored alongside the rule.")]
     pub description: Option<String>,
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = TransportArg::Direct,
-        help = "Transport for an allowed connection; ignored for deny rules."
-    )]
-    pub transport: TransportArg,
     #[arg(
         long,
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
@@ -115,7 +101,7 @@ fn add_rule(
     policy.network.allowed_routes.push(RouteRule {
         match_pattern: args.pattern.clone(),
         verdict,
-        transport: transport_of(args.transport),
+        transport: Transport::Direct,
         scheme: None,
         description: args.description.clone(),
         tls_terminate: false,
@@ -186,13 +172,6 @@ fn remove_rule(args: &PolicyRemoveArgs, cwd: &Path, writer: &mut impl Write) -> 
     Ok(0)
 }
 
-fn transport_of(t: TransportArg) -> Transport {
-    match t {
-        TransportArg::Direct => Transport::Direct,
-        TransportArg::Upstream => Transport::Upstream,
-    }
-}
-
 fn verdict_word(v: Verdict) -> &'static str {
     match v {
         Verdict::Allow => "allow",
@@ -210,16 +189,29 @@ mod tests {
         PolicyRuleArgs {
             pattern: pattern.to_string(),
             description: None,
-            transport: TransportArg::Direct,
             policy: policy.map(Path::to_path_buf),
         }
     }
 
     #[test]
+    fn clap_rejects_transport_flag_for_allow_rules() {
+        let err = crate::command::build_cli()
+            .try_get_matches_from([
+                "lns",
+                "policy",
+                "allow",
+                "api.example.test",
+                "--transport",
+                "upstream",
+            ])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn allow_writes_an_allow_rule_with_the_requested_transport() {
         let dir = TempDir::new().unwrap();
-        let mut args = rule_args("api.acme.corp", None);
-        args.transport = TransportArg::Upstream;
+        let args = rule_args("api.acme.corp", None);
         let mut out = Vec::new();
         let code = add_rule(&args, Verdict::Allow, dir.path(), &mut out).unwrap();
         assert_eq!(code, 0);
@@ -228,7 +220,7 @@ mod tests {
         assert_eq!(policy.network.allowed_routes[0].verdict, Verdict::Allow);
         assert_eq!(
             policy.network.allowed_routes[0].transport,
-            Transport::Upstream
+            Transport::Direct
         );
     }
 

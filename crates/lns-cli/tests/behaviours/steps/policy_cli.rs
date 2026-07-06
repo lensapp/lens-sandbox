@@ -1,9 +1,7 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::policy::{
-    self, PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs, TransportArg,
-};
+use lns_cli::policy::{self, PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs};
 use lns_policy::{Policy, RouteRule, Verdict};
 use std::path::{Path, PathBuf};
 
@@ -35,7 +33,6 @@ fn rule_args(world: &mut BehaviourWorld, pattern: &str, policy: Option<PathBuf>)
     PolicyRuleArgs {
         pattern: pattern.to_string(),
         description: None,
-        transport: TransportArg::Direct,
         policy,
     }
 }

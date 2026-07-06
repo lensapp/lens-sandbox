@@ -65,7 +65,6 @@ resolves from the catalog at run time and the shareable policy stays small:
 network:
   allowedRoutes: []
   defaultVerdict: ask
-  defaultTransport: direct
 integrations:
   - gitlab
 ```

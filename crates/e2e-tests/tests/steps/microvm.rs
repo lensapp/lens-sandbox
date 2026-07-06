@@ -356,10 +356,7 @@ fn inspect_that_run(world: &mut E2eWorld) -> Result<(), String> {
 
 #[given("a network policy that denies all egress")]
 fn policy_deny_all(world: &mut E2eWorld) {
-    write_policy(
-        world,
-        "network:\n  defaultVerdict: deny\n  defaultTransport: direct\n",
-    );
+    write_policy(world, "network:\n  defaultVerdict: deny\n");
 }
 
 #[then(regex = r#"^volume "([^"]+)" is released$"#)]

@@ -19,7 +19,6 @@ const DEFAULT_POLICY_YAML: &str = "\
 network:
   allowedRoutes: []
   defaultVerdict: ask
-  defaultTransport: direct
 ";
 
 pub fn policy_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
@@ -707,7 +706,7 @@ mod tests {
         let preexisting = dir.path().join(DEFAULT_POLICY_FILENAME);
         std::fs::write(
             &preexisting,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
         )
         .unwrap();
         let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
@@ -723,6 +722,8 @@ mod tests {
         assert_eq!(source, PolicySource::AutoCreated);
         let body = std::fs::read_to_string(&resolved).unwrap();
         assert!(body.contains("defaultVerdict: ask"));
+        assert!(!body.contains("defaultTransport"), "got:\n{body}");
+        assert!(!body.contains("transport:"), "got:\n{body}");
     }
 
     #[test]
