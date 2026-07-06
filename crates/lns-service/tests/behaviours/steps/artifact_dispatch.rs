@@ -33,7 +33,15 @@ async fn launches_single_image(world: &mut BehaviourWorld) {
 
 #[then("no bundle assembly is performed")]
 async fn no_assembly(world: &mut BehaviourWorld) {
-    assert_ne!(world.artifact().path, Some(RunPath::AssembleBundle));
+    assert_eq!(
+        world.artifact().path,
+        Some(RunPath::SingleImage),
+        "a plain image must resolve to the single-image path, never assembly",
+    );
+    assert!(
+        world.artifact().error.is_none(),
+        "a plain image must not be refused"
+    );
 }
 
 #[then("the run assembles the bundle before launching")]

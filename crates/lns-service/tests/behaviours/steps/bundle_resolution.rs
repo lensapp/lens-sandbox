@@ -33,6 +33,32 @@ async fn well_formed(world: &mut BehaviourWorld) {
     rig.canned.insert("reg/skills:1".into(), present("FileSet"));
 }
 
+#[given("a bundle whose sandbox and agent both reference the same fileset")]
+async fn shared_fileset(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    rig.components = vec![
+        ("sandbox".into(), "reg/base:1".into()),
+        ("agent".into(), "reg/agent:1".into()),
+    ];
+    rig.canned.insert(
+        "reg/base:1".into(),
+        Canned::Present {
+            kind: "Sandbox".into(),
+            arch: Some(HOST_ARCH.into()),
+            refs: vec!["reg/shared:1".into()],
+        },
+    );
+    rig.canned.insert(
+        "reg/agent:1".into(),
+        Canned::Present {
+            kind: "Agent".into(),
+            arch: None,
+            refs: vec!["reg/shared:1".into()],
+        },
+    );
+    rig.canned.insert("reg/shared:1".into(), present("FileSet"));
+}
+
 #[given(
     regex = r#"^a bundle referencing a fileset "([^"]+)" that is not present in the registry$"#
 )]
@@ -117,10 +143,11 @@ async fn do_resolve(world: &mut BehaviourWorld) {
             })
             .collect(),
     };
-    let result = {
-        let fetcher = FakeFetcher(&rig.canned);
-        resolve(&spec, &fetcher, HOST_ARCH)
-    };
+    let fetcher = FakeFetcher::new(&rig.canned);
+    let result = resolve(&spec, &fetcher, HOST_ARCH);
+    let calls = fetcher.calls.borrow().clone();
+    drop(fetcher);
+    rig.fetched = calls;
     match result {
         Ok(()) => rig.ok = true,
         Err(e) => rig.error = Some(format!("{e:#}")),
@@ -131,6 +158,29 @@ async fn do_resolve(world: &mut BehaviourWorld) {
 async fn succeeds(world: &mut BehaviourWorld) {
     let rig = world.resolve();
     assert!(rig.ok, "expected success, got error: {:?}", rig.error);
+}
+
+#[then("every declared component was fetched")]
+async fn every_component_fetched(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    for (_, reference) in &rig.components {
+        assert!(
+            rig.fetched.contains(reference),
+            "component {reference} was never fetched; fetched: {:?}",
+            rig.fetched,
+        );
+    }
+}
+
+#[then("the shared fileset was fetched exactly once")]
+async fn shared_fetched_once(world: &mut BehaviourWorld) {
+    let rig = world.resolve();
+    let count = rig.fetched.iter().filter(|r| *r == "reg/shared:1").count();
+    assert_eq!(
+        count, 1,
+        "shared fileset should be fetched exactly once; fetched: {:?}",
+        rig.fetched,
+    );
 }
 
 #[then("resolution is refused")]
@@ -163,9 +213,10 @@ async fn names_unsupported_kind(world: &mut BehaviourWorld, kind: String) {
     assert_refusal_contains(world, &kind);
 }
 
-#[then("the refusal reports the architecture mismatch")]
-async fn reports_arch_mismatch(world: &mut BehaviourWorld) {
-    assert_refusal_contains(world, "architecture");
+#[then("the refusal reports both the image and host architectures")]
+async fn reports_both_arches(world: &mut BehaviourWorld) {
+    assert_refusal_contains(world, "other-arch");
+    assert_refusal_contains(world, "test-arch");
 }
 
 #[then("the refusal reports the reference cycle")]

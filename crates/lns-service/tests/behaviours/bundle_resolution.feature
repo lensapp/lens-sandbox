@@ -8,6 +8,13 @@ Feature: bundle resolution is atomic and fail-closed
     Given a bundle whose sandbox, agent, and fileset are all present and supported
     When the bundle is resolved
     Then resolution succeeds
+    And every declared component was fetched
+
+  Scenario: A component shared by two parents is resolved only once
+    Given a bundle whose sandbox and agent both reference the same fileset
+    When the bundle is resolved
+    Then resolution succeeds
+    And the shared fileset was fetched exactly once
 
   Scenario: A missing component aborts the run and names it
     Given a bundle referencing a fileset "skills" that is not present in the registry
@@ -25,7 +32,7 @@ Feature: bundle resolution is atomic and fail-closed
     Given a bundle whose sandbox base image is built for a foreign architecture
     When the bundle is resolved
     Then resolution is refused
-    And the refusal reports the architecture mismatch
+    And the refusal reports both the image and host architectures
 
   Scenario: A reference cycle in the component graph aborts the run
     Given a bundle whose component graph contains a reference cycle

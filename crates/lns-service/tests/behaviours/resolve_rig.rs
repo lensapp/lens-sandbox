@@ -1,4 +1,5 @@
 use lns_service::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -17,15 +18,29 @@ pub enum Canned {
 pub struct ResolveRig {
     pub components: Vec<(String, String)>,
     pub canned: HashMap<String, Canned>,
+    pub fetched: Vec<String>,
     pub error: Option<String>,
     pub ok: bool,
 }
 
-pub struct FakeFetcher<'a>(pub &'a HashMap<String, Canned>);
+pub struct FakeFetcher<'a> {
+    pub canned: &'a HashMap<String, Canned>,
+    pub calls: RefCell<Vec<String>>,
+}
+
+impl<'a> FakeFetcher<'a> {
+    pub fn new(canned: &'a HashMap<String, Canned>) -> Self {
+        Self {
+            canned,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
 
 impl ComponentFetcher for FakeFetcher<'_> {
     fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
-        match self.0.get(reference) {
+        self.calls.borrow_mut().push(reference.to_string());
+        match self.canned.get(reference) {
             Some(Canned::Present { kind, arch, refs }) => Ok(FetchedComponent {
                 kind: kind.clone(),
                 arch: arch.clone(),

@@ -13,17 +13,25 @@ Feature: a bundle assembles into a composed workload
     When the bundle is assembled
     Then the assembled workload runs from base image "registry.example.test/base:1"
 
+  Scenario: A path only the base image ships is owned by the base image
+    Given a bundle whose sandbox base image ships "/etc/motd"
+    And the bundle declares no filesets
+    When the bundle is assembled
+    Then "/etc/motd" in the assembled workload comes from the base image
+
   Scenario: A fileset is overlaid onto the base image at its mount path
     Given a bundle whose sandbox base image is "registry.example.test/base:1"
     And the bundle declares a fileset "settings" mounting "/root/.some-agent/settings.json"
     When the bundle is assembled
     Then "/root/.some-agent/settings.json" in the assembled workload comes from fileset "settings"
 
-  Scenario: A fileset overrides a path the base image ships
+  Scenario: A fileset overrides a path the base image ships, leaving sibling paths on the base
     Given a bundle whose sandbox base image ships "/root/.some-agent/settings.json"
+    And the base image also ships "/root/.some-agent/base-only"
     And the bundle declares a fileset "override" mounting "/root/.some-agent/settings.json"
     When the bundle is assembled
     Then "/root/.some-agent/settings.json" in the assembled workload comes from fileset "override"
+    And "/root/.some-agent/base-only" in the assembled workload comes from the base image
 
   Scenario: A later fileset wins a same-target collision with an earlier one
     Given a bundle whose sandbox base image is "registry.example.test/base:1"

@@ -25,6 +25,11 @@ async fn base_ships(world: &mut BehaviourWorld, path: String) {
     world.artifact().bundle.base_paths.push(path);
 }
 
+#[given(regex = r#"^the base image also ships "([^"]+)"$"#)]
+async fn base_also_ships(world: &mut BehaviourWorld, path: String) {
+    world.artifact().bundle.base_paths.push(path);
+}
+
 #[given(regex = r#"^a bundle whose agent invocation runs command "([^"]+)" with env "([^"]+)"$"#)]
 async fn agent_invocation(world: &mut BehaviourWorld, command: String, env: String) {
     let (key, value) = env.split_once('=').expect("env fixture must be KEY=VALUE");
@@ -63,6 +68,20 @@ async fn comes_from_fileset(world: &mut BehaviourWorld, path: String, name: Stri
         workload.source_of(&path),
         Some(&FileSource::Fileset(name.clone())),
         "path {path} should be owned by fileset {name}",
+    );
+}
+
+#[then(regex = r#"^"([^"]+)" in the assembled workload comes from the base image$"#)]
+async fn comes_from_base(world: &mut BehaviourWorld, path: String) {
+    let workload = world
+        .artifact()
+        .assembled
+        .as_ref()
+        .expect("assembled workload");
+    assert_eq!(
+        workload.source_of(&path),
+        Some(&FileSource::BaseImage),
+        "path {path} should be owned by the base image",
     );
 }
 
