@@ -9,6 +9,7 @@ use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
+use crate::resolve_rig::ResolveRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -51,6 +52,8 @@ pub struct BehaviourWorld {
     pub image: Option<ImageRig>,
 
     pub artifact: Option<ArtifactRig>,
+
+    pub resolve: Option<ResolveRig>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
@@ -113,5 +116,9 @@ impl BehaviourWorld {
 
     pub fn artifact(&mut self) -> &mut ArtifactRig {
         self.artifact.get_or_insert_with(ArtifactRig::default)
+    }
+
+    pub fn resolve(&mut self) -> &mut ResolveRig {
+        self.resolve.get_or_insert_with(ResolveRig::default)
     }
 }

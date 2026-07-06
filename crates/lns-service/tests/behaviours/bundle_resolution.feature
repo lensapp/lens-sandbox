@@ -1,9 +1,13 @@
-@todo
 Feature: bundle resolution is atomic and fail-closed
   The full component graph — the bundle, its sandbox and base image, its
   agent, and its filesets — is resolved and verified up front. Any failure
   aborts the whole run with a clear, component-named error before the
   workload starts, so a half-resolved bundle can never launch.
+
+  Scenario: A well-formed bundle resolves all its components
+    Given a bundle whose sandbox, agent, and fileset are all present and supported
+    When the bundle is resolved
+    Then resolution succeeds
 
   Scenario: A missing component aborts the run and names it
     Given a bundle referencing a fileset "skills" that is not present in the registry

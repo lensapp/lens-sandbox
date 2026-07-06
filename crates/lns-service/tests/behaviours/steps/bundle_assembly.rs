@@ -44,13 +44,21 @@ async fn assemble_bundle(world: &mut BehaviourWorld) {
 
 #[then(regex = r#"^the assembled workload runs from base image "([^"]+)"$"#)]
 async fn runs_from_base(world: &mut BehaviourWorld, image: String) {
-    let workload = world.artifact().assembled.as_ref().expect("assembled workload");
+    let workload = world
+        .artifact()
+        .assembled
+        .as_ref()
+        .expect("assembled workload");
     assert_eq!(workload.base_image, image);
 }
 
 #[then(regex = r#"^"([^"]+)" in the assembled workload comes from fileset "([^"]+)"$"#)]
 async fn comes_from_fileset(world: &mut BehaviourWorld, path: String, name: String) {
-    let workload = world.artifact().assembled.as_ref().expect("assembled workload");
+    let workload = world
+        .artifact()
+        .assembled
+        .as_ref()
+        .expect("assembled workload");
     assert_eq!(
         workload.source_of(&path),
         Some(&FileSource::Fileset(name.clone())),
@@ -60,13 +68,21 @@ async fn comes_from_fileset(world: &mut BehaviourWorld, path: String, name: Stri
 
 #[then(regex = r#"^the assembled workload launches command "([^"]+)"$"#)]
 async fn launches_command(world: &mut BehaviourWorld, command: String) {
-    let workload = world.artifact().assembled.as_ref().expect("assembled workload");
+    let workload = world
+        .artifact()
+        .assembled
+        .as_ref()
+        .expect("assembled workload");
     assert_eq!(workload.command.as_deref(), Some(command.as_str()));
 }
 
 #[then(regex = r#"^the assembled workload's environment carries "([^"]+)"$"#)]
 async fn env_carries(world: &mut BehaviourWorld, kv: String) {
     let (key, value) = kv.split_once('=').expect("env fixture must be KEY=VALUE");
-    let workload = world.artifact().assembled.as_ref().expect("assembled workload");
+    let workload = world
+        .artifact()
+        .assembled
+        .as_ref()
+        .expect("assembled workload");
     assert_eq!(workload.env.get(key).map(String::as_str), Some(value));
 }
