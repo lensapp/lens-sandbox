@@ -4,6 +4,8 @@ mod approval_rig;
 mod artifact_rig;
 #[path = "behaviours/bind_rig.rs"]
 mod bind_rig;
+#[path = "behaviours/cred_boot_rig.rs"]
+mod cred_boot_rig;
 #[path = "behaviours/credential_rig.rs"]
 mod credential_rig;
 #[path = "behaviours/forward_rig.rs"]

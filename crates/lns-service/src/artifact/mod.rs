@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 
 pub mod assembly;
+pub mod credential_boot;
 pub mod fetch;
 pub mod policy;
 pub mod real;

@@ -1,4 +1,3 @@
-@todo
 Feature: an agent's credential slots resolve at boot, before the workload starts
   A bundle's Agent declares credential slots — each naming an integration,
   the env var it injects into, and whether it is required. A bundle resolves

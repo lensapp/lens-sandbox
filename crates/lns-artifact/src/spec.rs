@@ -199,6 +199,8 @@ pub struct SandboxSpec {
 pub struct CredentialSlot {
     pub name: String,
     pub env: String,
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -635,8 +637,19 @@ mod tests {
             Some("research")
         );
         assert_eq!(agent.spec.credentials[0].env, "SOME_TOKEN");
+        assert!(
+            !agent.spec.credentials[0].required,
+            "a slot without an explicit `required` defaults to optional"
+        );
         assert_eq!(agent.spec.ports[0].container, 8080);
         assert_eq!(agent.spec.volumes[0].target, "/data");
+    }
+
+    #[test]
+    fn parse_agent_reads_a_required_credential_slot() {
+        let agent = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"some-agent"},"spec":{"credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}}"#;
+        let agent = parse_agent(agent).unwrap();
+        assert!(agent.spec.credentials[0].required);
     }
 
     #[test]

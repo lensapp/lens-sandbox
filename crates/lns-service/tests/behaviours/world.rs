@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::approval_rig::ApprovalRig;
 use crate::artifact_rig::ArtifactRig;
 use crate::bind_rig::BindRig;
+use crate::cred_boot_rig::CredBootRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
@@ -55,6 +56,8 @@ pub struct BehaviourWorld {
     pub artifact: Option<ArtifactRig>,
 
     pub policy: Option<PolicyRig>,
+
+    pub cred_boot: Option<CredBootRig>,
 
     pub resolve: Option<ResolveRig>,
 
@@ -123,6 +126,10 @@ impl BehaviourWorld {
 
     pub fn policy(&mut self) -> &mut PolicyRig {
         self.policy.get_or_insert_with(PolicyRig::default)
+    }
+
+    pub fn cred_boot(&mut self) -> &mut CredBootRig {
+        self.cred_boot.get_or_insert_with(CredBootRig::default)
     }
 
     pub fn resolve(&mut self) -> &mut ResolveRig {

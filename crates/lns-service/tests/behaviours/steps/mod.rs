@@ -3,6 +3,7 @@ pub mod artifact_dispatch;
 pub mod bundle_assembly;
 pub mod bundle_overrides;
 pub mod bundle_resolution;
+pub mod credential_at_boot;
 pub mod credential_flow;
 pub mod effective_policy;
 pub mod env_injection;
