@@ -15,13 +15,10 @@ it:
 network:
   allowedRoutes: []
   defaultVerdict: ask
-  defaultTransport: direct
 ```
 
-All three `network` keys are required when the section is present: `allowedRoutes`
-(the rule list, may be empty), `defaultVerdict`, and `defaultTransport` — keep the
-latter as `direct`. `lns run` writes this starter file for you, so you only deal
-with these by hand if you choose to edit the file directly.
+`lns run` writes this starter file for you, so you only deal with it by hand if you
+choose to edit the file directly.
 
 One directory, one policy file — it sits next to the project it governs. Point a
 run at a different file with `--policy <path>`:
@@ -49,25 +46,20 @@ Each entry in `allowedRoutes` is a rule:
 ```yaml
 network:
   defaultVerdict: ask
-  defaultTransport: direct
   allowedRoutes:
     - match: api.github.com
       verdict: allow
-      transport: direct
       description: GitHub REST API
     - match: "*.telemetry.example"
       verdict: deny
-      transport: direct
     - match: 10.0.0.0/8
       verdict: allow
-      transport: direct
 ```
 
 | Field         | Meaning                                                                 |
 | ------------- | ----------------------------------------------------------------------- |
 | `match`       | Destination pattern (see below).                                        |
 | `verdict`     | `allow`, `deny`, or `ask`.                                              |
-| `transport`   | Required on every rule; keep it `direct`.                               |
 | `description` | Optional human-readable note kept alongside the rule.                   |
 
 A `match` pattern can be:
