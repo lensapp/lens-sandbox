@@ -207,12 +207,11 @@ pub(crate) async fn pull_inner<R: Registry>(
         serde_json::from_str(&config_str).context("parsing image config")?;
 
     if let Some(expected) = reference.digest() {
-        let raw = manifest_bytes(&manifest)?;
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&raw)));
-        if !ct_digest_eq(&actual, expected) {
+        // Compare against the registry-reported content digest, not a re-serialization of the parsed manifest — serde's byte layout differs from the registry's, so re-hashing would false-mismatch every real digest-pinned pull.
+        if !ct_digest_eq(&manifest_digest, expected) {
             anyhow::bail!(
                 "manifest digest mismatch for {image} — expected {expected}, \
-                 received {actual}"
+                 received {manifest_digest}"
             );
         }
     }
@@ -387,10 +386,6 @@ fn short_digest(digest: &str) -> String {
     let hex_part = &digest[prefix_end..];
     let take = hex_part.len().min(10);
     format!("{}{}…", &digest[..prefix_end], &hex_part[..take])
-}
-
-fn manifest_bytes(manifest: &oci_client::manifest::OciImageManifest) -> Result<Vec<u8>> {
-    serde_json::to_vec(manifest).context("serializing manifest for digest check")
 }
 
 fn compute_diff_id(compressed: &[u8], media_type: &str) -> Result<String> {
@@ -625,7 +620,7 @@ mod tests {
         FakeImage {
             manifest,
             config_json: serde_json::to_string(&config).unwrap(),
-            manifest_digest: "sha256:not-used-unless-pull-by-digest".to_string(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
             blobs: vec![(layer_a_digest, layer_a_gz), (layer_b_digest, layer_b_gz)],
         }
     }
@@ -818,23 +813,6 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("image config for alpine:3.20"), "got: {msg}");
         assert!(msg.contains("over the"), "got: {msg}");
-    }
-
-    #[test]
-    fn manifest_bytes_round_trips_through_serde() {
-        let manifest = OciImageManifest {
-            layers: vec![OciDescriptor {
-                digest: "sha256:abcd".into(),
-                size: 7,
-                media_type: manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let bytes = manifest_bytes(&manifest).unwrap();
-        let back: OciImageManifest = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.layers.len(), 1);
-        assert_eq!(back.layers[0].digest, "sha256:abcd");
     }
 
     #[test]
@@ -1173,13 +1151,14 @@ mod tests {
 
     #[tokio::test]
     async fn pull_inner_verifies_manifest_digest_when_pinned_by_digest() {
+        // The pinned digest is checked against the registry-reported content digest, not a re-serialization of the parsed manifest (which would never match a real registry's byte layout).
         let image = build_two_layer_image();
-        let manifest_canonical = serde_json::to_vec(&image.manifest).unwrap();
-        let actual_digest = sha256_hex(&manifest_canonical);
+        let reported = image.manifest_digest.clone();
         let registry = image.into_registry();
         let (_dir, cache) = cache();
-        let by_digest = format!("alpine@{actual_digest}");
-        pull_inner(&registry, &by_digest, &cache).await.unwrap();
+        pull_inner(&registry, &format!("alpine@{reported}"), &cache)
+            .await
+            .unwrap();
         let wrong =
             "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let err = pull_inner(&registry, wrong, &cache).await.unwrap_err();
