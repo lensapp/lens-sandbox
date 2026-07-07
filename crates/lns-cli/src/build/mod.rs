@@ -2,6 +2,7 @@ use crate::command::{CommandSpec, subcommand};
 
 mod push;
 mod report;
+mod resolve;
 mod run;
 
 #[derive(clap::Args)]
@@ -34,6 +35,11 @@ pub struct BuildArgs {
         help = "Push the built artifact to its --tag ref, reusing the stored `lns login` credential (needs push scope)."
     )]
     pub push: bool,
+    #[arg(
+        long,
+        help = "Resolve a bundle's floating component tags to their current digests and pin them (implied by --push; a plain build stays offline and refuses floating tags)."
+    )]
+    pub pin: bool,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {

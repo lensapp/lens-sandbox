@@ -109,8 +109,12 @@ fn build_push_dir(world: &mut E2eWorld, dir: &str, mount: &str, tag: &str) -> St
         "lns build --push {tag} (fileset) failed:\nstdout={}\nstderr={}",
         result.stdout, result.stderr
     );
-    extract_digest(&format!("{}\n{}", result.stdout, result.stderr))
-        .unwrap_or_else(|| panic!("no digest in fileset build output for {tag}:\n{}", result.stdout))
+    extract_digest(&format!("{}\n{}", result.stdout, result.stderr)).unwrap_or_else(|| {
+        panic!(
+            "no digest in fileset build output for {tag}:\n{}",
+            result.stdout
+        )
+    })
 }
 
 fn fixture_dir_with_file(world: &mut E2eWorld, dir_name: &str, file: &str, body: &str) -> String {
@@ -154,6 +158,33 @@ async fn registry_with_fileset_bundle(world: &mut E2eWorld) {
     );
     let bundle_path = fixture_path(world, "fs-bundle.yaml", &bundle);
     let bundle_ref = format!("{host}/e2e-fs-bundle:1");
+    build_push(world, &bundle_path, &bundle_ref);
+    world.bundle_ref = Some(bundle_ref);
+}
+
+#[given("a local registry holding a bundle whose components are referenced by tag")]
+async fn registry_with_tag_bundle(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .get_or_insert_with(LocalRegistry::start)
+        .host();
+    let base_digest = base_image_platform_digest().await;
+
+    let sandbox = format!(
+        "apiVersion: lens.dev/v1alpha1\nkind: Sandbox\nmetadata:\n  name: e2e-tag-sandbox\nspec:\n  isolation: microvm\n  baseImage: alpine@{base_digest}\n"
+    );
+    let sandbox_path = fixture_path(world, "tag-sandbox.yaml", &sandbox);
+    build_push(world, &sandbox_path, &format!("{host}/e2e-tag-sandbox:1"));
+
+    let agent = "apiVersion: lens.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: e2e-tag-agent\nspec:\n  command: echo bundle-boot-ok\n";
+    let agent_path = fixture_path(world, "tag-agent.yaml", agent);
+    build_push(world, &agent_path, &format!("{host}/e2e-tag-agent:1"));
+
+    let bundle = format!(
+        "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\nmetadata:\n  name: e2e-tag-bundle\nspec:\n  components:\n    sandbox:\n      ref: {host}/e2e-tag-sandbox:1\n    agents:\n      - ref: {host}/e2e-tag-agent:1\n"
+    );
+    let bundle_path = fixture_path(world, "tag-bundle.yaml", &bundle);
+    let bundle_ref = format!("{host}/e2e-tag-bundle:1");
     build_push(world, &bundle_path, &bundle_ref);
     world.bundle_ref = Some(bundle_ref);
 }

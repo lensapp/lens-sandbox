@@ -4,8 +4,7 @@ use anyhow::{Context, Result};
 use clap::FromArgMatches;
 use lns_artifact::build::FileEntry;
 
-use super::report;
-use super::{BuildArgs, push};
+use super::{BuildArgs, push, report, resolve};
 use crate::command::{RunCtx, RunFuture};
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -42,6 +41,18 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
         if args.check {
             return report::check_and_report(&raw, &args.path, &mut out);
         }
+
+        let raw = if args.push || args.pin {
+            match resolve::resolve_and_pin(&raw).await {
+                Ok(pinned) => pinned,
+                Err(e) => {
+                    writeln!(out, "✖ {e:#}")?;
+                    return Ok(1);
+                }
+            }
+        } else {
+            raw
+        };
 
         let Some(built) = report::build_and_report(&raw, tag, &mut out)? else {
             return Ok(1);

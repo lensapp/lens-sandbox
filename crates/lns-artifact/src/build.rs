@@ -161,25 +161,29 @@ fn pinned_digest(reference: &spec::ArtifactRef) -> Option<String> {
         .filter(|d| d.starts_with("sha256:"))
 }
 
-/// Verify every component of an AgentSystem bundle is pinned to a digest, returning the pins; refuses a component left on a floating tag so a published bundle can never drift.
-pub fn bundle_component_pins(doc: &[u8]) -> Result<Vec<ComponentPin>> {
-    let bundle = spec::parse_bundle(doc).context("reading bundle components")?;
-    let components = &bundle.spec.components;
+fn declared_components(components: &spec::BundleComponents) -> Vec<(String, &spec::ArtifactRef)> {
     let mut declared: Vec<(String, &spec::ArtifactRef)> = Vec::new();
     if let Some(sandbox) = &components.sandbox {
         declared.push(("sandbox".to_string(), sandbox));
     }
-    for (i, agent) in components.agents.iter().enumerate() {
-        declared.push((format!("agent-{i}"), agent));
+    let indexed = [
+        ("agent", &components.agents),
+        ("fileset", &components.filesets),
+        ("policy", &components.policies),
+    ];
+    for (kind, refs) in indexed {
+        for (i, reference) in refs.iter().enumerate() {
+            declared.push((format!("{kind}-{i}"), reference));
+        }
     }
-    for (i, fileset) in components.filesets.iter().enumerate() {
-        declared.push((format!("fileset-{i}"), fileset));
-    }
-    for (i, policy) in components.policies.iter().enumerate() {
-        declared.push((format!("policy-{i}"), policy));
-    }
+    declared
+}
+
+/// Verify every component of an AgentSystem bundle is pinned to a digest, returning the pins; refuses a component left on a floating tag so a published bundle can never drift.
+pub fn bundle_component_pins(doc: &[u8]) -> Result<Vec<ComponentPin>> {
+    let bundle = spec::parse_bundle(doc).context("reading bundle components")?;
     let mut pins = Vec::new();
-    for (name, reference) in declared {
+    for (name, reference) in declared_components(&bundle.spec.components) {
         let Some(digest) = pinned_digest(reference) else {
             bail!(
                 "component {name} ({}) is left on a floating tag; pin it to a digest",
@@ -189,6 +193,65 @@ pub fn bundle_component_pins(doc: &[u8]) -> Result<Vec<ComponentPin>> {
         pins.push(ComponentPin { name, digest });
     }
     Ok(pins)
+}
+
+/// The refs of every bundle component still on a floating tag, in declaration order and de-duplicated — the set a producer resolves to pin.
+pub fn unpinned_component_refs(doc: &[u8]) -> Result<Vec<String>> {
+    let bundle = spec::parse_bundle(doc).context("reading bundle components")?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut refs = Vec::new();
+    for (_, reference) in declared_components(&bundle.spec.components) {
+        if pinned_digest(reference).is_none() && seen.insert(reference.reference.clone()) {
+            refs.push(reference.reference.clone());
+        }
+    }
+    Ok(refs)
+}
+
+fn pin_component_value(
+    component: &mut Value,
+    digests: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(object) = component.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("digest") {
+        return;
+    }
+    let Some(reference) = object
+        .get("ref")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Some(digest) = digests.get(&reference) {
+        object.insert("digest".to_string(), Value::String(digest.clone()));
+    }
+}
+
+/// Rewrite an AgentSystem bundle's config so every component whose ref appears in `digests` is pinned to it; a non-bundle doc and already-pinned components are returned unchanged.
+pub fn pin_bundle_components(
+    doc: &[u8],
+    digests: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let mut value: Value =
+        serde_json::from_slice(doc).context("parsing bundle for component pinning")?;
+    let Some(components) = value
+        .pointer_mut("/spec/components")
+        .and_then(Value::as_object_mut)
+    else {
+        return serde_json::to_vec(&value).context("serialising bundle");
+    };
+    for component in components.values_mut() {
+        match component {
+            Value::Array(entries) => entries
+                .iter_mut()
+                .for_each(|entry| pin_component_value(entry, digests)),
+            _ => pin_component_value(component, digests),
+        }
+    }
+    serde_json::to_vec(&value).context("serialising pinned bundle")
 }
 
 fn tar_layer(entries: &[FileEntry]) -> Result<Vec<u8>> {
@@ -397,5 +460,64 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("floating tag"), "got: {msg}");
         assert!(msg.contains("reg/base:1"), "got: {msg}");
+    }
+
+    #[test]
+    fn unpinned_component_refs_lists_only_the_floating_ones_across_every_kind() {
+        let pinned = format!("sha256:{}", "a".repeat(64));
+        let doc = bundle_json(&format!(
+            r#"{{"sandbox":{{"ref":"reg/base:1"}},"agents":[{{"ref":"reg/agent","digest":"{pinned}"}},{{"ref":"reg/other:2"}}],"filesets":[{{"ref":"reg/skills@{pinned}"}}],"policies":[{{"ref":"reg/policy:3"}}]}}"#
+        ));
+        let refs = unpinned_component_refs(&doc).unwrap();
+        assert_eq!(refs, ["reg/base:1", "reg/other:2", "reg/policy:3"]);
+    }
+
+    #[test]
+    fn unpinned_component_refs_de_duplicates_a_ref_declared_twice() {
+        let doc = bundle_json(r#"{"agents":[{"ref":"reg/agent:1"},{"ref":"reg/agent:1"}]}"#);
+        assert_eq!(unpinned_component_refs(&doc).unwrap(), ["reg/agent:1"]);
+    }
+
+    #[test]
+    fn pin_bundle_components_pins_the_resolved_refs_and_leaves_others_untouched() {
+        let pinned = format!("sha256:{}", "a".repeat(64));
+        let resolved = format!("sha256:{}", "b".repeat(64));
+        let doc = bundle_json(&format!(
+            r#"{{"sandbox":{{"ref":"reg/base:1"}},"agents":[{{"ref":"reg/agent","digest":"{pinned}"}}],"filesets":[{{"ref":"reg/skills:3"}}]}}"#
+        ));
+        let digests = std::collections::BTreeMap::from([
+            ("reg/base:1".to_string(), resolved.clone()),
+            ("reg/skills:3".to_string(), resolved.clone()),
+        ]);
+        let out = pin_bundle_components(&doc, &digests).unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        let components = &value["spec"]["components"];
+        assert_eq!(components["sandbox"]["digest"], resolved);
+        assert_eq!(components["filesets"][0]["digest"], resolved);
+        assert_eq!(
+            components["agents"][0]["digest"], pinned,
+            "an already-pinned component keeps its digest"
+        );
+    }
+
+    #[test]
+    fn pin_bundle_components_ignores_a_non_object_or_ref_less_component_entry() {
+        let doc = bundle_json(r#"{"sandbox":42,"agents":[{"name":"no-ref"}]}"#);
+        let out = pin_bundle_components(&doc, &std::collections::BTreeMap::new()).unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["spec"]["components"]["sandbox"], 42);
+        assert!(
+            value["spec"]["components"]["agents"][0]
+                .get("digest")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pin_bundle_components_returns_a_doc_without_components_unchanged() {
+        let doc = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"isolation":"microvm"}}"#;
+        let out = pin_bundle_components(doc, &std::collections::BTreeMap::new()).unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["kind"], "Sandbox");
     }
 }

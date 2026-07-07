@@ -22,3 +22,10 @@ Feature: a configured agent bundle boots from an OCI registry
     When the user runs the bundle reference
     Then the exit code is 0
     And the output contains "hello-from-fileset"
+
+  Scenario: building a bundle with --push auto-pins its floating component tags before boot
+    Given the Lens Sandbox service is running
+    And a local registry holding a bundle whose components are referenced by tag
+    When the user runs the bundle reference
+    Then the exit code is 0
+    And the output contains "bundle-boot-ok"
