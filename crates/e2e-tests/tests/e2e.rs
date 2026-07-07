@@ -1,3 +1,5 @@
+#[path = "support/registry.rs"]
+mod registry;
 mod specutil;
 mod steps;
 
@@ -19,6 +21,9 @@ pub struct E2eWorld {
     pub policy_dir: Option<TempDir>,
     pub policy_path: Option<PathBuf>,
     pub host_bind_dir: Option<TempDir>,
+    pub registry: Option<registry::LocalRegistry>,
+    pub fixture_dir: Option<TempDir>,
+    pub bundle_ref: Option<String>,
 }
 
 impl E2eWorld {
@@ -74,6 +79,10 @@ async fn main() {
     let features_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("features");
     let microvm_only = std::env::var_os("LNS_E2E_MICROVM").is_some();
 
+    // Optional dev filter: run only features whose name contains this substring.
+    let only_feature = std::env::var("LNS_E2E_FEATURE")
+        .ok()
+        .filter(|s| !s.is_empty());
     let mut runner = E2eWorld::cucumber().fail_on_skipped();
     if microvm_only {
         runner = runner.max_concurrent_scenarios(1);
@@ -83,6 +92,11 @@ async fn main() {
             let tagged =
                 |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
             if tagged("gui") {
+                return false;
+            }
+            if let Some(needle) = &only_feature
+                && !feat.name.contains(needle.as_str())
+            {
                 return false;
             }
             if microvm_only {
