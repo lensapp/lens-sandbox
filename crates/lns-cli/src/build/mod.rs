@@ -8,9 +8,15 @@ mod run;
 pub struct BuildArgs {
     #[arg(
         value_name = "PATH",
-        help = "Path to an artifact manifest (YAML or JSON)."
+        help = "An artifact manifest (YAML or JSON), or a directory to package as a FileSet (requires --mount)."
     )]
     pub path: std::path::PathBuf,
+    #[arg(
+        long = "mount",
+        value_name = "PATH",
+        help = "Mount path for a directory packaged as a FileSet, e.g. /root/.some-agent/skills."
+    )]
+    pub mount: Option<String>,
     #[arg(
         short = 't',
         long = "tag",

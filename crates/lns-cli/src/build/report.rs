@@ -66,6 +66,52 @@ pub(super) fn build_and_report(
     }
 }
 
+/// Pack a directory's collected files into a FileSet artifact mounting at `mount_path`, printing the digest. Returns the artifact for a subsequent push, or `None` when packing failed.
+pub(super) fn build_fileset_and_report(
+    name: &str,
+    mount_path: &str,
+    entries: &[lns_artifact::build::FileEntry],
+    tag: Option<&str>,
+    writer: &mut impl Write,
+) -> Result<Option<BuiltArtifact>> {
+    match lns_artifact::build::build_fileset(name, mount_path, entries) {
+        Ok(built) => {
+            let target = tag.unwrap_or("<untagged>");
+            writeln!(
+                writer,
+                "✔ built FileSet {target}@{} mounting {mount_path}",
+                built.manifest_digest
+            )?;
+            Ok(Some(built))
+        }
+        Err(e) => {
+            writeln!(writer, "✖ build failed: {e:#}")?;
+            Ok(None)
+        }
+    }
+}
+
+/// Turn a directory name into a valid FileSet `metadata.name` (lowercase alphanumerics and `-`, trimmed, ≤63 chars); falls back to `fileset` when nothing usable remains.
+pub(super) fn sanitize_name(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+    let trimmed = mapped.trim_matches('-');
+    if trimmed.is_empty() {
+        "fileset".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Validate that a `--push` invocation names a target ref, returning it.
 pub(super) fn push_target(tag: Option<&str>) -> Result<&str> {
     tag.context("--push requires a target ref: pass -t <ref>")
@@ -153,6 +199,55 @@ mod tests {
                 .unwrap()
                 .contains("not valid YAML or JSON")
         );
+    }
+
+    fn entry(path: &str, data: &str) -> lns_artifact::build::FileEntry {
+        lns_artifact::build::FileEntry {
+            path: path.into(),
+            data: data.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn fileset_build_reports_the_mount_digest_and_returns_the_artifact() {
+        let mut out: Vec<u8> = Vec::new();
+        let built = build_fileset_and_report(
+            "skills",
+            "/root/.some-agent/skills",
+            &[entry("deep.md", "research")],
+            Some("reg/skills:1"),
+            &mut out,
+        )
+        .unwrap()
+        .expect("a directory packs into a fileset");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("FileSet"), "got: {text}");
+        assert!(text.contains("/root/.some-agent/skills"), "got: {text}");
+        assert!(text.contains(&built.manifest_digest), "got: {text}");
+    }
+
+    #[test]
+    fn fileset_build_reports_a_bad_mount_and_returns_none() {
+        let mut out: Vec<u8> = Vec::new();
+        let built = build_fileset_and_report(
+            "skills",
+            "relative/path",
+            &[entry("a", "1")],
+            None,
+            &mut out,
+        )
+        .unwrap();
+        assert!(built.is_none());
+        assert!(String::from_utf8(out).unwrap().contains("build failed"));
+    }
+
+    #[test]
+    fn sanitize_name_lowercases_maps_and_trims_into_a_valid_metadata_name() {
+        assert_eq!(sanitize_name("deep-research"), "deep-research");
+        assert_eq!(sanitize_name("tmp.vDm6RD"), "tmp-vdm6rd");
+        assert_eq!(sanitize_name("_weird_.name_"), "weird--name");
+        assert_eq!(sanitize_name("...---"), "fileset");
+        assert_eq!(sanitize_name(&"a".repeat(80)).len(), 63);
     }
 
     #[test]
