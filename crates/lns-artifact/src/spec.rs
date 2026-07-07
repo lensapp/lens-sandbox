@@ -78,6 +78,10 @@ impl Kind {
             .into_iter()
             .find(|k| k.config_media_type() == media_type)
     }
+
+    pub fn from_kind_str(kind: &str) -> Option<Kind> {
+        ALL_KINDS.into_iter().find(|k| k.as_str() == kind)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -389,6 +393,41 @@ pub fn parse_policy(config_json: &[u8]) -> Result<Policy> {
 
 pub fn validate_envelope(config_json: &[u8], expected: Kind) -> Result<()> {
     parse_doc(config_json, expected)?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct KindOnly {
+    #[serde(default)]
+    kind: String,
+}
+
+/// Run the schema + cross-field guards for whatever kind the document declares.
+pub fn validate_any(config_json: &[u8]) -> Result<()> {
+    let KindOnly { kind } = serde_json::from_slice(config_json).context("parsing artifact kind")?;
+    let Some(kind) = Kind::from_kind_str(&kind) else {
+        bail!("unknown artifact kind {kind:?}");
+    };
+    match kind {
+        Kind::AgentSystem => {
+            parse_bundle(config_json)?;
+        }
+        Kind::Agent => {
+            parse_agent(config_json)?;
+        }
+        Kind::Sandbox => {
+            parse_sandbox(config_json)?;
+        }
+        Kind::FileSet => {
+            parse_fileset(config_json)?;
+        }
+        Kind::Policy => {
+            parse_policy(config_json)?;
+        }
+        Kind::Integration => {
+            validate_envelope(config_json, Kind::Integration)?;
+        }
+    }
     Ok(())
 }
 
@@ -727,10 +766,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_agent_media_type_matches_the_vendored_bundle_constant() {
+    fn agent_system_artifact_type_is_the_vendored_bundle_media_type() {
         assert_eq!(
             Kind::AgentSystem.artifact_type(),
-            super::super::BUNDLE_ARTIFACT_TYPE
+            "application/vnd.lens.bundle.v1+json"
+        );
+    }
+
+    #[test]
+    fn from_kind_str_round_trips_and_rejects_unknown() {
+        for kind in ALL_KINDS {
+            assert_eq!(Kind::from_kind_str(kind.as_str()), Some(kind));
+        }
+        assert_eq!(Kind::from_kind_str("Sorcery"), None);
+    }
+
+    #[test]
+    fn validate_any_dispatches_to_each_kind_parser() {
+        let base = format!("reg/base@sha256:{}", "a".repeat(64));
+        let sandbox = format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{base}"}}}}"#
+        );
+        validate_any(sandbox.as_bytes()).unwrap();
+        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{"name":"some-bundle"},"spec":{"components":{}}}"#).unwrap();
+        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{"name":"some-agent"},"spec":{"command":"agent"}}"#).unwrap();
+        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills"},"spec":{}}"#).unwrap();
+        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{}}"#).unwrap();
+        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Integration","metadata":{"name":"some-integration"},"spec":{"authKind":"credential"}}"#).unwrap();
+    }
+
+    #[test]
+    fn validate_any_rejects_an_unknown_kind_and_unparseable_json() {
+        let unknown = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sorcery","metadata":{"name":"x"},"spec":{}}"#;
+        assert!(
+            format!("{:#}", validate_any(unknown).unwrap_err()).contains("unknown artifact kind")
+        );
+        assert!(
+            format!("{:#}", validate_any(b"nope").unwrap_err()).contains("parsing artifact kind")
         );
     }
 }

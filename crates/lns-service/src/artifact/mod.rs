@@ -5,7 +5,8 @@ pub mod fetch;
 pub mod real;
 pub mod resolve;
 pub mod signature;
-pub mod spec;
+
+pub use lns_artifact::spec;
 
 use assembly::{Override, ResolvedBundle};
 use resolve::{BundleSpec, ComponentFetcher, DeclaredComponent};

@@ -30,7 +30,8 @@ name = "lns-service"
 path = "src/main.rs"
 
 [dependencies]
-lns-ipc     = { path = "../lns-ipc" }
+lns-ipc      = { path = "../lns-ipc" }
+lns-artifact = { path = "../lns-artifact" }
 lns-audit   = { path = "../lns-audit" }
 lns-ocsf    = { path = "../lns-ocsf" }
 lns-policy  = { path = "../lns-policy" }
