@@ -230,6 +230,23 @@ mod tests {
     }
 
     #[test]
+    fn build_refuses_a_real_secret_before_push() {
+        let agent = format!(
+            "apiVersion: lens.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: a\nspec:\n  command: agent\n  env:\n    GH_TOKEN: ghp_{}\n",
+            "a".repeat(36)
+        );
+        let mut out: Vec<u8> = Vec::new();
+        let built = build_and_report(agent.as_bytes(), Some("reg/a:1"), &mut out).unwrap();
+        assert!(
+            built.is_none(),
+            "a manifest carrying a real secret must not build"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("secret"), "got: {text}");
+        assert!(!text.contains("✔ built"), "must not report a build: {text}");
+    }
+
+    #[test]
     fn build_reports_the_digest_and_returns_the_artifact() {
         let mut out: Vec<u8> = Vec::new();
         let built = build_and_report(pinned().as_bytes(), Some("reg/some-sandbox:1"), &mut out)

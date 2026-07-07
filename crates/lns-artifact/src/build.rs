@@ -38,7 +38,12 @@ fn sha256_digest(bytes: &[u8]) -> String {
 
 /// Assemble a config-only OCI artifact (the standard shape for lens runtime kinds and bundles) from a validated manifest document.
 pub fn build_artifact(doc: &[u8]) -> Result<BuiltArtifact> {
-    spec::validate_any(doc).context("validating manifest before build")?;
+    if let Err(problems) = crate::validate::validate(doc) {
+        bail!(
+            "refusing to build an invalid manifest:\n  - {}",
+            problems.join("\n  - ")
+        );
+    }
     let kind = spec::read_kind(doc)?;
 
     let config_value: Value = serde_json::from_slice(doc).context("parsing manifest")?;
@@ -363,6 +368,19 @@ mod tests {
         let bundle = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{"name":"some-bundle"},"spec":{"components":{"sandbox":{"ref":"reg/base:1"}}}}"#;
         let built = build_artifact(bundle).unwrap();
         assert_eq!(built.artifact_type, "application/vnd.lens.bundle.v1+json");
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_manifest_carrying_a_real_secret() {
+        let agent = format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{{"name":"a"}},"spec":{{"command":"agent","env":{{"GH_TOKEN":"ghp_{}"}}}}}}"#,
+            "a".repeat(36)
+        );
+        let err = build_artifact(agent.as_bytes()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("secret"),
+            "a real secret must be refused before the artifact is assembled: {err:#}"
+        );
     }
 
     fn entry(path: &str, data: &str) -> FileEntry {

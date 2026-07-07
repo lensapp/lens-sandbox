@@ -5,7 +5,10 @@ pub fn is_loopback_registry(registry: &str) -> bool {
         _ => registry,
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -28,5 +31,13 @@ mod tests {
         assert!(!is_loopback_registry("registry.example.test:443"));
         assert!(!is_loopback_registry("docker.io"));
         assert!(!is_loopback_registry("127registry.example"));
+    }
+
+    #[test]
+    fn a_remote_host_masquerading_as_loopback_is_not_downgraded_to_http() {
+        assert!(!is_loopback_registry("127.0.0.1.evil.com"));
+        assert!(!is_loopback_registry("127.evil.com:443"));
+        assert!(!is_loopback_registry("localhost.evil.com"));
+        assert!(!is_loopback_registry("evil.com:127"));
     }
 }
