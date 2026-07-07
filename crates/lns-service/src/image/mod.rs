@@ -204,12 +204,11 @@ pub(crate) async fn pull_inner<R: Registry>(
         serde_json::from_str(&config_str).context("parsing image config")?;
 
     if let Some(expected) = reference.digest() {
-        let raw = manifest_bytes(&manifest)?;
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&raw)));
-        if !ct_digest_eq(&actual, expected) {
+        if !ct_digest_eq(&manifest_digest, expected) {
             anyhow::bail!(
-                "manifest digest mismatch for {image} — expected {expected}, \
-                 received {actual}"
+                "manifest digest mismatch for {image} — pinned {expected}, \
+                 resolved to {manifest_digest} (if you pinned an image-index digest, \
+                 pin the platform manifest digest instead, or use a tag)"
             );
         }
     }
@@ -382,10 +381,6 @@ fn short_digest(digest: &str) -> String {
     let hex_part = &digest[prefix_end..];
     let take = hex_part.len().min(10);
     format!("{}{}…", &digest[..prefix_end], &hex_part[..take])
-}
-
-fn manifest_bytes(manifest: &oci_client::manifest::OciImageManifest) -> Result<Vec<u8>> {
-    serde_json::to_vec(manifest).context("serializing manifest for digest check")
 }
 
 fn compute_diff_id(compressed: &[u8], media_type: &str) -> Result<String> {
@@ -816,23 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_bytes_round_trips_through_serde() {
-        let manifest = OciImageManifest {
-            layers: vec![OciDescriptor {
-                digest: "sha256:abcd".into(),
-                size: 7,
-                media_type: manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let bytes = manifest_bytes(&manifest).unwrap();
-        let back: OciImageManifest = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.layers.len(), 1);
-        assert_eq!(back.layers[0].digest, "sha256:abcd");
-    }
-
-    #[test]
     fn serialized_len_matches_a_full_serialization_without_allocating_it() {
         let manifest = OciImageManifest {
             layers: vec![OciDescriptor {
@@ -1135,21 +1113,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_inner_verifies_manifest_digest_when_pinned_by_digest() {
-        let image = build_two_layer_image();
-        let manifest_canonical = serde_json::to_vec(&image.manifest).unwrap();
-        let actual_digest = sha256_hex(&manifest_canonical);
+    async fn pull_inner_accepts_digest_pin_matching_resolved_manifest_digest() {
+        let mut image = build_two_layer_image();
+        let platform_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        image.manifest_digest = platform_digest.to_string();
         let registry = image.into_registry();
         let (_dir, cache) = cache();
-        let by_digest = format!("alpine@{actual_digest}");
+        let by_digest = format!("alpine@{platform_digest}");
         pull_inner(&registry, &by_digest, &cache).await.unwrap();
-        let wrong =
+    }
+
+    #[tokio::test]
+    async fn pull_inner_rejects_pinned_digest_that_differs_from_resolved_manifest_digest() {
+        let mut image = build_two_layer_image();
+        image.manifest_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let registry = image.into_registry();
+        let (_dir, cache) = cache();
+        let pinned =
             "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let err = pull_inner(&registry, wrong, &cache).await.unwrap_err();
+        let err = pull_inner(&registry, pinned, &cache).await.unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("manifest digest mismatch"),
-            "got: {err:#}"
+            msg.contains("manifest digest mismatch"),
+            "expected mismatch error, got: {msg}"
         );
+        assert!(
+            msg.contains("pin the platform manifest digest instead, or use a tag"),
+            "expected actionable guidance, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_inner_digest_verification_uses_manifest_digest_not_reserialization() {
+        let mut image = build_two_layer_image();
+        let serde_digest = sha256_hex(&serde_json::to_vec(&image.manifest).unwrap());
+        let different_platform_digest =
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        assert_ne!(serde_digest, different_platform_digest);
+        image.manifest_digest = different_platform_digest.to_string();
+        let registry = image.into_registry();
+        let (_dir, cache) = cache();
+        let by_digest = format!("alpine@{different_platform_digest}");
+        pull_inner(&registry, &by_digest, &cache)
+            .await
+            .expect("must pass: pinned digest matches manifest_digest even though it differs from re-serialized manifest hash");
     }
 
     #[tokio::test]
