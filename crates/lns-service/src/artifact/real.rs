@@ -11,7 +11,11 @@ pub struct RealComponentFetcher;
 
 impl ComponentFetcher for RealComponentFetcher {
     async fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
-        let registry = RealRegistry::with_auth(registry_auth_for(reference));
+        let auth = registry_auth_for(reference);
+        let registry = match reference.parse::<Reference>() {
+            Ok(parsed) => RealRegistry::for_reference(&parsed, auth),
+            Err(_) => RealRegistry::with_auth(auth),
+        };
         fetch_component(&registry, reference).await
     }
 }
@@ -26,7 +30,7 @@ pub(crate) async fn peek_and_plan(
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
-    let registry = RealRegistry::with_auth(registry_auth_for(image_ref));
+    let registry = RealRegistry::for_reference(&reference, registry_auth_for(image_ref));
     let (manifest, _digest, config_json) = registry
         .pull_manifest_and_config(&reference)
         .await

@@ -4,7 +4,11 @@ use lns_artifact::build::BuiltArtifact;
 use lns_policy::registry_auth::{
     JsonFileRegistryAuthStore, RegistryAuthStore, credential_for, default_registry_auth_path,
 };
-use oci_client::{Reference, RegistryOperation, client::ClientConfig, secrets::RegistryAuth};
+use oci_client::{
+    Reference, RegistryOperation,
+    client::{ClientConfig, ClientProtocol},
+    secrets::RegistryAuth,
+};
 
 /// The stored login for `reference`'s registry, or anonymous when none is recorded.
 fn registry_auth_for(reference: &Reference) -> RegistryAuth {
@@ -23,7 +27,15 @@ pub(super) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
     let reference: Reference = target
         .parse()
         .with_context(|| format!("invalid target ref {target}"))?;
-    let client = oci_client::Client::new(ClientConfig::default());
+    let protocol = if lns_artifact::is_loopback_registry(reference.registry()) {
+        ClientProtocol::Http
+    } else {
+        ClientProtocol::Https
+    };
+    let client = oci_client::Client::new(ClientConfig {
+        protocol,
+        ..Default::default()
+    });
     let auth = registry_auth_for(&reference);
     client
         .auth(&reference, &auth, RegistryOperation::Push)

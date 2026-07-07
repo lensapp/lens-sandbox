@@ -34,6 +34,21 @@ impl RealRegistry {
         });
         Self { client, auth }
     }
+
+    /// Like `with_auth`, but reaches a loopback registry over plaintext HTTP (as Docker treats `localhost:5000`) so a local test/dev registry works without TLS.
+    pub fn for_reference(reference: &Reference, auth: RegistryAuth) -> Self {
+        let protocol = if lns_artifact::is_loopback_registry(reference.registry()) {
+            oci_client::client::ClientProtocol::Http
+        } else {
+            oci_client::client::ClientProtocol::Https
+        };
+        let client = oci_client::Client::new(ClientConfig {
+            protocol,
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
+            ..Default::default()
+        });
+        Self { client, auth }
+    }
 }
 
 /// The stored login for `image`'s registry, or anonymous when none is recorded (or the reference / store is unreadable — the pull then fails with the registry's own auth error).
