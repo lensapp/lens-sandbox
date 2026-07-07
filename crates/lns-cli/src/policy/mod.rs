@@ -210,6 +210,7 @@ mod tests {
 
     #[test]
     fn allow_writes_an_allow_rule_with_direct_transport() {
+        let dir = TempDir::new().unwrap();
         let args = rule_args("api.acme.corp", None);
         let mut out = Vec::new();
         let code = add_rule(&args, Verdict::Allow, dir.path(), &mut out).unwrap();
