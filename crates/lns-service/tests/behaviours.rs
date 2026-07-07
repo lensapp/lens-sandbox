@@ -2,6 +2,8 @@
 mod approval_rig;
 #[path = "behaviours/artifact_rig.rs"]
 mod artifact_rig;
+#[path = "behaviours/audit_rig.rs"]
+mod audit_rig;
 #[path = "behaviours/bind_rig.rs"]
 mod bind_rig;
 #[path = "behaviours/cred_boot_rig.rs"]
@@ -16,6 +18,8 @@ mod image_rig;
 mod policy_rig;
 #[path = "behaviours/resolve_rig.rs"]
 mod resolve_rig;
+#[path = "behaviours/resource_rig.rs"]
+mod resource_rig;
 #[path = "behaviours/runner.rs"]
 mod runner;
 #[path = "behaviours/steps/mod.rs"]

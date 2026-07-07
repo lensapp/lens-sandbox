@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
 
 pub mod assembly;
+pub mod audit;
 pub mod credential_boot;
 pub mod fetch;
 pub mod policy;
 pub mod real;
 pub mod resolve;
+pub mod resources;
 pub mod signature;
 
 pub use lns_artifact::spec;

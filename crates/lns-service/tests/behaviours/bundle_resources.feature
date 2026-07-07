@@ -1,4 +1,3 @@
-@todo
 Feature: a bundle's sandbox resources govern the run by default
   Resource precedence mirrors policy: the bundle's Sandbox is authoritative
   by default, an explicit --cpus / -m overrides it, then config defaults,

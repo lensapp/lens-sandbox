@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
 use crate::artifact_rig::ArtifactRig;
+use crate::audit_rig::AuditRig;
 use crate::bind_rig::BindRig;
 use crate::cred_boot_rig::CredBootRig;
 use crate::credential_rig::CredentialRig;
@@ -12,6 +13,7 @@ use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
 use crate::policy_rig::PolicyRig;
 use crate::resolve_rig::ResolveRig;
+use crate::resource_rig::ResourceRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -55,9 +57,13 @@ pub struct BehaviourWorld {
 
     pub artifact: Option<ArtifactRig>,
 
+    pub audit: Option<AuditRig>,
+
     pub policy: Option<PolicyRig>,
 
     pub cred_boot: Option<CredBootRig>,
+
+    pub resource: Option<ResourceRig>,
 
     pub resolve: Option<ResolveRig>,
 
@@ -124,12 +130,20 @@ impl BehaviourWorld {
         self.artifact.get_or_insert_with(ArtifactRig::default)
     }
 
+    pub fn audit(&mut self) -> &mut AuditRig {
+        self.audit.get_or_insert_with(AuditRig::default)
+    }
+
     pub fn policy(&mut self) -> &mut PolicyRig {
         self.policy.get_or_insert_with(PolicyRig::default)
     }
 
     pub fn cred_boot(&mut self) -> &mut CredBootRig {
         self.cred_boot.get_or_insert_with(CredBootRig::default)
+    }
+
+    pub fn resource(&mut self) -> &mut ResourceRig {
+        self.resource.get_or_insert_with(ResourceRig::default)
     }
 
     pub fn resolve(&mut self) -> &mut ResolveRig {
