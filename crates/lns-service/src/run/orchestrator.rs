@@ -58,14 +58,17 @@ async fn orchestrate(
         &forward_specs,
     )?;
     for spec in &forward_specs {
+        let host_ip = spec.bind.ip().to_string();
         crate::audit::record_port_published(
             &run_id,
             &microvm,
-            &spec.bind.ip().to_string(),
-            spec.bind.port(),
-            spec.container_port,
-            protocol_word(spec.protocol),
-            !spec.bind.ip().is_loopback(),
+            &crate::audit::PortPublishAudit {
+                host_ip: &host_ip,
+                host_port: spec.bind.port(),
+                container_port: spec.container_port,
+                protocol: protocol_word(spec.protocol),
+                exposed: !spec.bind.ip().is_loopback(),
+            },
             &crate::oauth::RealClock,
         )?;
     }
