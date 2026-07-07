@@ -106,6 +106,13 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         let key = reference.whole();
 
         if self.pull_policy == PullPolicy::Always {
+            // A digest-pinned reference is immutable: the bytes behind
+            // `image@sha256:...` can never change, so a cache hit is always
+            // valid and re-pulling is pure waste (and breaks offline use).
+            // `Always` only forces a network refresh for mutable tag refs.
+            if !is_tag && let Some(c) = self.cache.get(&key) {
+                return Ok((c.manifest, c.manifest_digest, c.config));
+            }
             let (manifest, manifest_digest, config) =
                 self.inner.pull_manifest_and_config(reference).await?;
             let tag_digest = if is_tag {
@@ -765,24 +772,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_always_bypasses_cache_and_re_pulls_digest_ref() {
+    async fn policy_always_serves_a_pinned_digest_from_cache_without_network() {
+        // A digest-pinned reference is immutable, so even under policy=always
+        // a cache hit must be served with zero network calls. Re-pulling would
+        // be pure waste and would break offline use (issue #132).
         let d = tempfile::tempdir().unwrap();
         let cache = ManifestCache::new(d.path());
         cache
             .put(&PINNED.parse::<Reference>().unwrap().whole(), &entry())
             .unwrap();
-        let caching = CachingRegistry::new(
-            FakeRegistry::with_tag_digests(["sha256:x"]),
-            cache,
-            PullPolicy::Always,
-        );
+        let caching = CachingRegistry::new(FakeRegistry::new(), cache, PullPolicy::Always);
         let reference: Reference = PINNED.parse().unwrap();
         let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
         assert_eq!(digest, "sha256:manifest");
         assert_eq!(
             *caching.inner.manifest_calls.lock().unwrap(),
+            0,
+            "policy=always on a pinned digest must serve the cache, not re-pull"
+        );
+        assert_eq!(
+            *caching.inner.digest_calls.lock().unwrap(),
+            0,
+            "a pinned digest is immutable and must never be HEAD-revalidated"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_always_re_pulls_a_tag_even_when_cached() {
+        // A tag is mutable, so policy=always must ignore the cache and re-pull.
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        cache
+            .put("ghcr.io/x/y:latest", &tag_entry("sha256:old", 0))
+            .unwrap();
+        let caching = CachingRegistry::new(
+            FakeRegistry::with_tag_digests(["sha256:new"]),
+            cache,
+            PullPolicy::Always,
+        );
+        let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
+        let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:manifest");
+        assert_eq!(
+            *caching.inner.manifest_calls.lock().unwrap(),
             1,
-            "policy=always must hit the registry even when a cache entry exists"
+            "policy=always on a tag must re-pull even when a cache entry exists"
         );
     }
 
