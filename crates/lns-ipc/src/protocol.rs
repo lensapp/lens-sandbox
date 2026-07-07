@@ -302,6 +302,15 @@ pub struct PortPublish {
     pub protocol: Protocol,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullPolicy {
+    Always,
+    #[default]
+    Auto,
+    Never,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
@@ -328,6 +337,8 @@ pub struct RunImageArgs {
     pub initial_winsize: Option<(u16, u16)>,
     #[serde(default)]
     pub detached: bool,
+    #[serde(default)]
+    pub pull_policy: PullPolicy,
     #[serde(default)]
     pub published_ports: Vec<PortPublish>,
     #[serde(default)]
@@ -606,6 +617,34 @@ mod tests {
     }
 
     #[test]
+    fn run_image_args_pull_policy_defaults_to_auto_when_missing() {
+        let frame = serde_json::json!({
+            "image": "alpine",
+            "cpus": 1,
+            "mem": 512,
+            "policy_path": null,
+            "cmd": [],
+            "debug": false
+        });
+        let parsed: RunImageArgs = serde_json::from_value(frame).unwrap();
+        assert_eq!(parsed.pull_policy, PullPolicy::Auto);
+    }
+
+    #[test]
+    fn pull_policy_serializes_lowercase_and_round_trips() {
+        for (variant, expected_str) in [
+            (PullPolicy::Always, "\"always\""),
+            (PullPolicy::Auto, "\"auto\""),
+            (PullPolicy::Never, "\"never\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_str);
+            let back: PullPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
     fn port_publish_survives_a_request_round_trip() {
         let mapping = PortPublish {
             host_ip: "127.0.0.1".parse().unwrap(),
@@ -629,6 +668,7 @@ mod tests {
             stdin: true,
             initial_winsize: None,
             detached: false,
+            pull_policy: PullPolicy::Auto,
             published_ports: vec![mapping],
             volumes: Vec::new(),
             binds: Vec::new(),
@@ -656,6 +696,7 @@ mod tests {
             stdin: true,
             initial_winsize: None,
             detached: false,
+            pull_policy: PullPolicy::Auto,
             published_ports: vec![],
             volumes: vec![VolumeMount {
                 name: "prism-data".into(),
@@ -776,6 +817,7 @@ mod tests {
             stdin: false,
             initial_winsize: None,
             detached: true,
+            pull_policy: PullPolicy::Auto,
             published_ports: vec![PortPublish {
                 host_ip: "127.0.0.1".parse().unwrap(),
                 host_port: 8080,
