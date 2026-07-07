@@ -38,7 +38,7 @@ pub fn to_fetched(
         }
         Kind::Policy => {
             spec::validate_envelope(config_json, kind)?;
-            fetched.policy = parse_network_policy(config_json);
+            fetched.policy = parse_network_policy(config_json)?;
         }
         Kind::AgentSystem | Kind::Integration => {
             spec::validate_envelope(config_json, kind)?;
@@ -47,15 +47,19 @@ pub fn to_fetched(
     Ok(fetched)
 }
 
-/// Read a Policy component's `spec.network` into an `lns_policy::Policy`; integration refs are resolved separately, so this carries only the network rules.
-fn parse_network_policy(config_json: &[u8]) -> Option<lns_policy::Policy> {
-    let doc: serde_json::Value = serde_json::from_slice(config_json).ok()?;
-    let network = doc.get("spec")?.get("network")?;
-    let network: lns_policy::NetworkPolicy = serde_json::from_value(network.clone()).ok()?;
-    Some(lns_policy::Policy {
+/// Read a Policy component's `spec.network` into an `lns_policy::Policy`; integration refs are resolved separately, so this carries only the network rules. A missing `network` section is `Ok(None)`, but a present-but-malformed one is an error so a bundle's rules are never silently dropped (fail-closed).
+fn parse_network_policy(config_json: &[u8]) -> Result<Option<lns_policy::Policy>> {
+    let doc: serde_json::Value =
+        serde_json::from_slice(config_json).context("parsing policy config")?;
+    let Some(network) = doc.get("spec").and_then(|spec| spec.get("network")) else {
+        return Ok(None);
+    };
+    let network: lns_policy::NetworkPolicy = serde_json::from_value(network.clone())
+        .context("policy component has a malformed network section")?;
+    Ok(Some(lns_policy::Policy {
         network,
         integrations: Vec::new(),
-    })
+    }))
 }
 
 fn classify_fetch_error(host: &str, err: &anyhow::Error) -> FetchError {
@@ -232,6 +236,30 @@ mod tests {
         let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{}}"#;
         let fetched = to_fetched(Some(&Kind::Policy.artifact_type()), None, json).unwrap();
         assert!(fetched.policy.is_none());
+    }
+
+    #[test]
+    fn a_policy_with_a_malformed_network_section_is_refused_not_silently_dropped() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"maybe"}}}"#;
+        let err = to_fetched(Some(&Kind::Policy.artifact_type()), None, json).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("malformed network section"),
+            "a bundle's policy must fail closed, not vanish: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_network_policy_distinguishes_absent_from_malformed_from_unparseable() {
+        assert!(parse_network_policy(b"not json").is_err());
+        assert!(
+            parse_network_policy(br#"{"spec":{"network":{"defaultVerdict":"nope"}}}"#).is_err()
+        );
+        assert!(parse_network_policy(br#"{"spec":{}}"#).unwrap().is_none());
+        assert!(
+            parse_network_policy(br#"{"spec":{"network":{"defaultVerdict":"deny"}}}"#)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

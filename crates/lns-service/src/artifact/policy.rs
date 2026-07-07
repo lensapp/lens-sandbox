@@ -170,6 +170,7 @@ impl LayeredPolicy {
 }
 
 /// Merge a bundle's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: every layer's denies are ordered first so a first-match gate stays deny-dominant, `defaultVerdict` never exceeds `ask` (a permissive bundle default is backstopped, a `deny` default is honored), and connected integrations union.
+// Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
     let mut routes: Vec<RouteRule> = Vec::new();

@@ -179,6 +179,7 @@ fn compose(
     let mut resolved = ResolvedBundle::default();
     let mut sandboxes = 0;
     let mut agents = 0;
+    let mut policies = 0;
     for component in components {
         if let Some(fetched) = cache.get(&component.reference) {
             match fetched.kind.as_str() {
@@ -196,13 +197,19 @@ fn compose(
                     name: fetched.name.clone(),
                     paths: fetched.mount_path.clone().into_iter().collect(),
                 }),
-                "Policy" => resolved.policy = fetched.policy.clone(),
+                "Policy" => {
+                    policies += 1;
+                    resolved.policy = fetched.policy.clone();
+                }
                 _ => {}
             }
         }
     }
     exactly_one(sandboxes, "sandbox")?;
     exactly_one(agents, "agent")?;
+    if policies > 1 {
+        return Err(ResolveError::DuplicateComponent { role: "policy" });
+    }
     if resolved.base_image.is_empty() {
         return Err(ResolveError::MissingBaseImage);
     }

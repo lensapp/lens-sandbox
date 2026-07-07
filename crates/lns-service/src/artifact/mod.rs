@@ -270,6 +270,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_bundle_refuses_a_bundle_shipping_more_than_one_policy() {
+        let config = bundle_json(
+            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"policies":[{"ref":"reg/p1:1"},{"ref":"reg/p2:1"}]}"#,
+        );
+        let fetcher = MapFetcher(HashMap::from([
+            sandbox("reg/base:1"),
+            agent("reg/agent:1"),
+            policy("reg/p1:1"),
+            policy("reg/p2:1"),
+        ]));
+        let err = plan_bundle(&config, &fetcher, "test-arch", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exactly one policy"),
+            "a bundle must not ship an ambiguous second policy: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn plan_bundle_propagates_a_parse_refusal() {
         let config = bundle_json(r#"{"model":{"ref":"reg/model:1"}}"#);
         let fetcher = MapFetcher(HashMap::new());
