@@ -1,12 +1,20 @@
-use crate::artifact::assembly::{self, AssembledWorkload, Override};
+use crate::artifact::assembly::{self, AssembledWorkload, Override, ResolvedBundle};
 use crate::artifact::fetch::fetch_component;
+use crate::artifact::fileset::fileset_runtime_specs;
 use crate::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
 use crate::artifact::signature::{self, SignatureStatus, Verdict};
 use crate::artifact::{RunPath, dispatch, plan_bundle};
 use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
+use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
 use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, SignatureView};
 use oci_client::Reference;
+
+/// A resolved bundle ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
+pub(crate) struct BundlePlan {
+    pub workload: AssembledWorkload,
+    pub fileset_specs: Vec<RuntimeFileSpec>,
+}
 
 pub struct RealComponentFetcher;
 
@@ -29,7 +37,7 @@ pub(crate) async fn peek_and_plan(
     insecure: bool,
     run_id: &str,
     microvm: &str,
-) -> Result<Option<AssembledWorkload>> {
+) -> Result<Option<BundlePlan>> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -53,15 +61,41 @@ pub(crate) async fn peek_and_plan(
             )
             .await?;
             record_bundle_run(run_id, microvm, image_ref, overrides, &verdict);
-            for fileset in &resolved.filesets {
-                crate::log::warn!(
-                    "bundle fileset {} is resolved but not yet mounted into the guest",
-                    fileset.name
-                );
-            }
-            Ok(Some(assembly::assemble(&resolved)))
+            let fileset_specs = materialize_filesets(&resolved).await?;
+            Ok(Some(BundlePlan {
+                workload: assembly::assemble(&resolved),
+                fileset_specs,
+            }))
         }
     }
+}
+
+/// Pull each resolved fileset's content layer and expand it into guest-write specs, so the bundle's filesets land in the microVM at their mount paths.
+async fn materialize_filesets(resolved: &ResolvedBundle) -> Result<Vec<RuntimeFileSpec>> {
+    let mut specs = Vec::new();
+    for fileset in &resolved.filesets {
+        let Some(mount) = fileset.paths.first() else {
+            continue;
+        };
+        let layer = pull_fileset_layer(&fileset.reference)
+            .await
+            .with_context(|| format!("materializing fileset {}", fileset.name))?;
+        specs.extend(fileset_runtime_specs(mount, &layer)?);
+    }
+    Ok(specs)
+}
+
+async fn pull_fileset_layer(reference: &str) -> Result<Vec<u8>> {
+    let parsed: Reference = reference
+        .parse()
+        .with_context(|| format!("invalid fileset reference {reference}"))?;
+    let registry = RealRegistry::for_reference(&parsed, registry_auth_for(reference));
+    let (manifest, _digest, _config) = registry.pull_manifest_and_config(&parsed).await?;
+    let layer = manifest
+        .layers
+        .first()
+        .context("fileset manifest has no content layer")?;
+    registry.pull_blob(&parsed, layer, &|_| {}).await
 }
 
 /// Append a bundle-run event to the audit chain; a recording failure is logged, never fatal to the launch.

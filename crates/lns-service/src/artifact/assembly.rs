@@ -21,6 +21,8 @@ pub struct ResolvedBundle {
 pub struct ResolvedFileset {
     pub name: String,
     pub paths: Vec<String>,
+    /// The digest-pinned OCI reference the fileset's content layer is pulled from at materialization.
+    pub reference: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

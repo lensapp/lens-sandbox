@@ -301,6 +301,7 @@ pub fn for_run(
     content_store: &crate::content_store::ContentStore,
     guest_tools: &crate::guest_tools::GuestTools,
     assets: Option<&crate::supervisor::SupervisorAssets>,
+    fileset_specs: &[RuntimeFileSpec],
 ) -> Result<Option<RuntimeLayer>> {
     let runtime_label = format!("lns-runtime-v1+{}", env!("CARGO_PKG_VERSION"));
     if let Some(a) = assets {
@@ -308,6 +309,7 @@ pub fn for_run(
         if imageless {
             specs.extend(crate::supervisor::imageless_runtime_extras());
         }
+        specs.extend_from_slice(fileset_specs);
         let label = if imageless {
             format!("{runtime_label}+imageless")
         } else {
@@ -317,13 +319,15 @@ pub fn for_run(
             RuntimeLayerBuilder::new(&label).build(content_store, &specs)?,
         ))
     } else if imageless {
-        let specs = crate::supervisor::guest_tools_only_specs(&guest_tools.root)?;
+        let mut specs = crate::supervisor::guest_tools_only_specs(&guest_tools.root)?;
+        specs.extend_from_slice(fileset_specs);
         Ok(Some(
             RuntimeLayerBuilder::new(format!("{runtime_label}+imageless"))
                 .build(content_store, &specs)?,
         ))
     } else {
-        let specs = crate::supervisor::guest_tools_tree_specs(&guest_tools.root)?;
+        let mut specs = crate::supervisor::guest_tools_tree_specs(&guest_tools.root)?;
+        specs.extend_from_slice(fileset_specs);
         Ok(Some(
             RuntimeLayerBuilder::new(&runtime_label).build(content_store, &specs)?,
         ))
@@ -808,7 +812,9 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         let assets = fake_assets(&d);
-        let layer = for_run(false, &s, &gt, Some(&assets)).unwrap().unwrap();
+        let layer = for_run(false, &s, &gt, Some(&assets), &[])
+            .unwrap()
+            .unwrap();
         let p = paths(&layer);
         assert!(p.contains(&".lens/bin/lns-supervisor"));
         assert!(!p.contains(&".lens/bin/supervisor.real"));
@@ -825,7 +831,7 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         let assets = fake_assets(&d);
-        let layer = for_run(true, &s, &gt, Some(&assets)).unwrap().unwrap();
+        let layer = for_run(true, &s, &gt, Some(&assets), &[]).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&".lens/bin/lns-supervisor"));
         assert!(
@@ -841,7 +847,7 @@ mod tests {
         let s = store(&d);
         let gt = fake_guest_tools(&d);
         std::fs::write(gt.root.join("marker"), b"x").unwrap();
-        let layer = for_run(false, &s, &gt, None).unwrap().unwrap();
+        let layer = for_run(false, &s, &gt, None, &[]).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&"marker"));
         assert!(!p.contains(&"bin/sh"));
@@ -854,10 +860,27 @@ mod tests {
         let d = tempdir();
         let s = store(&d);
         let gt = fake_guest_tools(&d);
-        let layer = for_run(true, &s, &gt, None).unwrap().unwrap();
+        let layer = for_run(true, &s, &gt, None, &[]).unwrap().unwrap();
         let p = paths(&layer);
         assert!(p.contains(&"bin/sh"));
         assert!(!p.contains(&".lens/bin/supervisor.real"));
         assert!(layer.manifest.label.ends_with("+imageless"));
+    }
+
+    #[test]
+    fn for_run_materializes_a_bundles_fileset_files_into_the_layer() {
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let fileset = vec![RuntimeFileSpec {
+            guest_path: "/root/.some-agent/skills/deep.md".into(),
+            mode: 0o644,
+            source: RuntimeSource::Bytes(b"research".to_vec()),
+        }];
+        let layer = for_run(false, &s, &gt, None, &fileset).unwrap().unwrap();
+        assert!(
+            paths(&layer).contains(&"root/.some-agent/skills/deep.md"),
+            "a bundle's fileset file must land in the runtime layer"
+        );
     }
 }

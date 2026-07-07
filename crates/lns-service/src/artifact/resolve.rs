@@ -196,6 +196,7 @@ fn compose(
                 "FileSet" => resolved.filesets.push(ResolvedFileset {
                     name: fetched.name.clone(),
                     paths: fetched.mount_path.clone().into_iter().collect(),
+                    reference: component.reference.clone(),
                 }),
                 "Policy" => {
                     policies += 1;

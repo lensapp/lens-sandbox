@@ -15,3 +15,10 @@ Feature: a configured agent bundle boots from an OCI registry
     When the user runs the bundle reference
     Then the exit code is 0
     And the output contains "bundle-boot-ok"
+
+  Scenario: a bundle's fileset is materialized into the sandbox before the agent runs
+    Given the Lens Sandbox service is running
+    And a local registry holding a bundle whose fileset the agent reads
+    When the user runs the bundle reference
+    Then the exit code is 0
+    And the output contains "hello-from-fileset"

@@ -93,7 +93,7 @@ async fn orchestrate(
     };
     let launch = bundle
         .as_ref()
-        .map(|workload| super::bundle_launch(workload, &args.cmd, &args.env));
+        .map(|plan| super::bundle_launch(&plan.workload, &args.cmd, &args.env));
     let image_ref: Option<String> = match &launch {
         Some(l) => Some(l.image.clone()),
         None => args.image.clone(),
@@ -115,7 +115,7 @@ async fn orchestrate(
                 run_id.clone(),
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
-                bundle.as_ref().and_then(|b| b.policy.as_ref()),
+                bundle.as_ref().and_then(|p| p.workload.policy.as_ref()),
                 guest_tools.root.clone(),
                 args.env.clone(),
             ),
@@ -208,11 +208,16 @@ async fn orchestrate(
     }
 
     let imageless = args.image.is_none();
+    let fileset_specs: &[runtime_layer::RuntimeFileSpec] = bundle
+        .as_ref()
+        .map(|p| p.fileset_specs.as_slice())
+        .unwrap_or_default();
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
+        fileset_specs,
     )?;
 
     let layers = std::mem::take(&mut image.bytes);
@@ -284,7 +289,7 @@ async fn orchestrate(
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
     let (cpus, memory_mib) = super::bundle_vm_size(
-        bundle.as_ref().and_then(|b| b.resources.as_ref()),
+        bundle.as_ref().and_then(|p| p.workload.resources.as_ref()),
         args.cpus,
         args.mem,
     );

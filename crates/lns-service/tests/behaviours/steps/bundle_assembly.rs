@@ -17,6 +17,7 @@ async fn declare_fileset(world: &mut BehaviourWorld, name: String, path: String)
     world.artifact().bundle.filesets.push(ResolvedFileset {
         name,
         paths: vec![path],
+        reference: String::new(),
     });
 }
 
