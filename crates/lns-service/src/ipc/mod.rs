@@ -1966,6 +1966,8 @@ mod tests {
                     manifest,
                     manifest_digest: manifest_digest.clone(),
                     config,
+                    tag_digest: None,
+                    cached_at: None,
                 },
             )
             .unwrap();

@@ -24,6 +24,11 @@ pub(crate) trait Registry: Send + Sync {
         descriptor: &OciDescriptor,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+
+    fn fetch_tag_digest(
+        &self,
+        reference: &Reference,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
 pub(crate) struct CountingSink<'a> {
@@ -681,6 +686,10 @@ mod tests {
             on_chunk(mid as u64);
             on_chunk((blob.len() - mid) as u64);
             Ok(blob)
+        }
+
+        async fn fetch_tag_digest(&self, _reference: &Reference) -> Result<String> {
+            Ok(self.manifest_digest.clone())
         }
     }
 

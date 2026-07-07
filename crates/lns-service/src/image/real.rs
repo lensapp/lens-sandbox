@@ -106,6 +106,13 @@ impl Registry for RealRegistry {
             .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
         Ok(out.into_bytes())
     }
+
+    async fn fetch_tag_digest(&self, reference: &Reference) -> Result<String> {
+        self.client
+            .fetch_manifest_digest(reference, &self.auth)
+            .await
+            .with_context(|| format!("HEAD request for {reference} digest"))
+    }
 }
 
 pub async fn pull(
