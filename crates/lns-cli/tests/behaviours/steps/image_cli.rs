@@ -37,6 +37,7 @@ struct FakeImageService {
     pull_result: Option<ImageInfo>,
     remove_result: Option<(String, u64)>,
     prune_plan: Option<(Vec<String>, u64)>,
+    inspect_result: Option<lns_ipc::ArtifactInspection>,
     refuse_message: Option<String>,
     unreachable: bool,
     requests: Arc<Mutex<Vec<Request>>>,
@@ -49,6 +50,7 @@ impl FakeImageService {
             pull_result: world.image.pull_result.clone(),
             remove_result: world.image.remove_result.clone(),
             prune_plan: world.image.prune_plan.clone(),
+            inspect_result: world.image.inspect_result.clone(),
             refuse_message: world.image.refuse_message.clone(),
             unreachable: world.image.unreachable,
             requests: world.image.requests.clone(),
@@ -91,6 +93,12 @@ impl FakeImageService {
                     reclaimed_bytes,
                 }
             }
+            Request::InspectImage { .. } => Response::ImageInspected {
+                inspection: self
+                    .inspect_result
+                    .clone()
+                    .expect("fixture has no inspect result"),
+            },
             other => panic!("unexpected image request {other:?}"),
         })
     }

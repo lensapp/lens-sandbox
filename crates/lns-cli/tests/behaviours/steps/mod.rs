@@ -3,6 +3,7 @@ pub mod config_cli;
 pub mod env_file;
 pub mod host_bind;
 pub mod image_cli;
+pub mod image_inspect_cli;
 pub mod integration_cli;
 pub mod policy_cli;
 pub mod publish;

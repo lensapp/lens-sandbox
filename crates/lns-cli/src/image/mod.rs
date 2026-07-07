@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::{Result, bail};
-use lns_ipc::{ImageInfo, Request, Response};
+use lns_ipc::{ArtifactInspection, BundleView, ImageInfo, Request, Response, SignatureView};
 
 use crate::command::{CommandSpec, subcommand};
 use crate::integration::LocalBoxFuture;
@@ -26,6 +26,10 @@ pub enum ImageCommand {
     Rm(ImageRefArg),
     #[command(about = "Remove every cached image not used by a running sandbox.")]
     Prune(ImagePruneArgs),
+    #[command(
+        about = "Inspect a typed artifact before running it: its kind and, for a bundle, what it composes."
+    )]
+    Inspect(ImageRefArg),
 }
 
 #[derive(clap::Args)]
@@ -77,6 +81,7 @@ pub async fn run(
         ImageCommand::Ls => ls(svc, writer).await,
         ImageCommand::Rm(args) => rm(svc, &args.image, writer).await,
         ImageCommand::Prune(args) => prune(svc, args.force, input, writer).await,
+        ImageCommand::Inspect(args) => inspect(svc, &args.image, writer).await,
     }
 }
 
@@ -188,6 +193,67 @@ async fn prune(
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn inspect(svc: &dyn ImageService, image: &str, writer: &mut impl Write) -> Result<i32> {
+    let req = Request::InspectImage {
+        image: image.to_string(),
+    };
+    match send(svc, req).await? {
+        Response::ImageInspected { inspection } => {
+            render_inspection(writer, &inspection)?;
+            Ok(0)
+        }
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+fn render_inspection<W: Write>(
+    out: &mut W,
+    inspection: &ArtifactInspection,
+) -> std::io::Result<()> {
+    match inspection {
+        ArtifactInspection::Image(view) => {
+            writeln!(out, "Kind: Image")?;
+            writeln!(out, "Reference: {}", view.reference)?;
+            writeln!(out, "Digest: {}", view.digest)?;
+        }
+        ArtifactInspection::Bundle(bundle) => render_bundle(out, bundle)?,
+    }
+    Ok(())
+}
+
+fn render_bundle<W: Write>(out: &mut W, bundle: &BundleView) -> std::io::Result<()> {
+    writeln!(out, "Kind: AgentSystem")?;
+    writeln!(out, "Reference: {}", bundle.reference)?;
+    if let Some(base) = &bundle.sandbox_base_image {
+        writeln!(out, "Sandbox base image: {base}")?;
+    }
+    if !bundle.filesets.is_empty() {
+        writeln!(out, "Filesets:")?;
+        for fileset in &bundle.filesets {
+            writeln!(out, "  {} -> {}", fileset.name, fileset.mount_path)?;
+        }
+    }
+    if !bundle.integrations.is_empty() {
+        writeln!(out, "Integrations:")?;
+        for id in &bundle.integrations {
+            writeln!(out, "  {id}")?;
+        }
+    }
+    writeln!(out, "Signature: {}", signature_label(bundle.signature))?;
+    for flag in &bundle.policy_flags {
+        writeln!(out, "⚠ {flag}")?;
+    }
+    Ok(())
+}
+
+fn signature_label(signature: SignatureView) -> &'static str {
+    match signature {
+        SignatureView::Unsigned => "unsigned",
+        SignatureView::SignedTrusted => "signed (trusted)",
+        SignatureView::SignedUntrusted => "signed (untrusted signer)",
     }
 }
 
@@ -333,6 +399,7 @@ mod tests {
             ImageCommand::Ls,
             ImageCommand::Rm(ref_arg("some-image:1.0")),
             ImageCommand::Prune(ImagePruneArgs { force: true }),
+            ImageCommand::Inspect(ref_arg("some-image:1.0")),
         ] {
             let svc = CannedService::with([Some(Response::Pong)]);
             let err = run_cmd(&cmd, &svc).await.unwrap_err().to_string();
@@ -534,6 +601,94 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no response from lns-service"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn inspect_labels_a_plain_image() {
+        let svc = CannedService::with([Some(Response::ImageInspected {
+            inspection: ArtifactInspection::Image(lns_ipc::ImageView {
+                reference: "registry.example.test/some-image:1.0".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }),
+        })]);
+        let (code, out) = run_cmd(&ImageCommand::Inspect(ref_arg("some-image:1.0")), &svc)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("Kind: Image"), "got: {out}");
+        assert!(
+            out.contains("registry.example.test/some-image:1.0"),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_lists_what_a_signed_bundle_composes_and_flags_an_over_broad_policy() {
+        let svc = CannedService::with([Some(Response::ImageInspected {
+            inspection: ArtifactInspection::Bundle(BundleView {
+                reference: "some-registry.example/some-agent:research".into(),
+                sandbox_base_image: Some("registry.example.test/base:1".into()),
+                filesets: vec![lns_ipc::FilesetView {
+                    name: "settings".into(),
+                    mount_path: "/root/.some-agent/settings.json".into(),
+                }],
+                integrations: vec!["some-provider".into()],
+                signature: SignatureView::SignedTrusted,
+                policy_flags: vec![
+                    "permissive defaultVerdict: allow — the sandbox is open by default".into(),
+                ],
+            }),
+        })]);
+        let (code, out) = run_cmd(&ImageCommand::Inspect(ref_arg("some-agent:research")), &svc)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("Kind: AgentSystem"), "got: {out}");
+        assert!(out.contains("registry.example.test/base:1"), "got: {out}");
+        assert!(
+            out.contains("/root/.some-agent/settings.json"),
+            "got: {out}"
+        );
+        assert!(out.contains("some-provider"), "got: {out}");
+        assert!(
+            out.contains("signed") && out.contains("trusted"),
+            "got: {out}"
+        );
+        assert!(out.contains("defaultVerdict: allow"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn inspect_renders_a_bare_unsigned_bundle_without_optional_sections() {
+        let svc = CannedService::with([Some(Response::ImageInspected {
+            inspection: ArtifactInspection::Bundle(BundleView {
+                reference: "some-registry.example/some-agent:research".into(),
+                sandbox_base_image: None,
+                filesets: Vec::new(),
+                integrations: Vec::new(),
+                signature: SignatureView::Unsigned,
+                policy_flags: Vec::new(),
+            }),
+        })]);
+        let (_, out) = run_cmd(&ImageCommand::Inspect(ref_arg("some-agent:research")), &svc)
+            .await
+            .unwrap();
+        assert!(out.contains("Signature: unsigned"), "got: {out}");
+        assert!(!out.contains("Filesets:"), "got: {out}");
+        assert!(!out.contains("Integrations:"), "got: {out}");
+        assert!(!out.contains("Sandbox base image:"), "got: {out}");
+    }
+
+    #[test]
+    fn signature_label_names_each_trust_state() {
+        assert_eq!(signature_label(SignatureView::Unsigned), "unsigned");
+        assert_eq!(
+            signature_label(SignatureView::SignedTrusted),
+            "signed (trusted)"
+        );
+        assert_eq!(
+            signature_label(SignatureView::SignedUntrusted),
+            "signed (untrusted signer)"
+        );
     }
 
     #[test]

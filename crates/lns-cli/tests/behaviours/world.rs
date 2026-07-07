@@ -81,6 +81,7 @@ pub struct ImageCliRig {
     pub pull_result: Option<lns_ipc::ImageInfo>,
     pub remove_result: Option<(String, u64)>,
     pub prune_plan: Option<(Vec<String>, u64)>,
+    pub inspect_result: Option<lns_ipc::ArtifactInspection>,
     pub refuse_message: Option<String>,
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,

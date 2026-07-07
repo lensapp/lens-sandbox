@@ -1,4 +1,3 @@
-@todo
 Feature: inspecting a typed artifact before running it
   `lns image inspect <ref>` is the type-aware, pre-run view: it names the
   kind, and for a bundle it lists what the bundle composes — the sandbox

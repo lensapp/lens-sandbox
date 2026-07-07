@@ -3,8 +3,9 @@ use crate::artifact::fetch::fetch_component;
 use crate::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
 use crate::artifact::signature::{self, SignatureStatus, Verdict};
 use crate::artifact::{RunPath, dispatch, plan_bundle};
-use crate::image::{RealRegistry, Registry, registry_auth_for};
+use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
 use anyhow::{Context, Result};
+use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, SignatureView};
 use oci_client::Reference;
 
 pub struct RealComponentFetcher;
@@ -56,6 +57,51 @@ pub(crate) async fn peek_and_plan(
                 );
             }
             Ok(Some(assembly::assemble(&resolved)))
+        }
+    }
+}
+
+/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image and filesets; integrations, signature trust, and over-broad-policy flags await the policy-resolution and signature-verification follow-ups.
+pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
+    let reference: Reference = image_ref
+        .parse()
+        .with_context(|| format!("invalid image reference {image_ref}"))?;
+    let registry = RealRegistry::for_reference(&reference, registry_auth_for(image_ref));
+    let (manifest, digest, config_json) = registry
+        .pull_manifest_and_config(&reference)
+        .await
+        .with_context(|| format!("inspecting {image_ref}"))?;
+    match dispatch(
+        manifest.artifact_type.as_deref(),
+        Some(manifest.config.media_type.as_str()),
+    )? {
+        RunPath::SingleImage => Ok(ArtifactInspection::Image(ImageView {
+            reference: image_ref.to_string(),
+            digest,
+        })),
+        RunPath::AssembleBundle => {
+            let resolved = plan_bundle(
+                config_json.as_bytes(),
+                &RealComponentFetcher,
+                &want_arch().to_string(),
+                &[],
+            )
+            .await?;
+            Ok(ArtifactInspection::Bundle(BundleView {
+                reference: image_ref.to_string(),
+                sandbox_base_image: Some(resolved.base_image.clone()),
+                filesets: resolved
+                    .filesets
+                    .iter()
+                    .map(|f| FilesetView {
+                        name: f.name.clone(),
+                        mount_path: f.paths.first().cloned().unwrap_or_default(),
+                    })
+                    .collect(),
+                integrations: Vec::new(),
+                signature: SignatureView::Unsigned,
+                policy_flags: Vec::new(),
+            }))
         }
     }
 }

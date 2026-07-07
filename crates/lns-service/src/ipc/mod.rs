@@ -203,6 +203,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
+        Request::InspectImage { image } => image_response(
+            crate::artifact::real::inspect(image)
+                .await
+                .map(|inspection| Response::ImageInspected { inspection }),
+        ),
         Request::RegistryLogin {
             registry,
             username,
@@ -1859,6 +1864,25 @@ mod tests {
         let resp = as_json(
             handle_request(
                 &Request::PullImage {
+                    image: "###".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(
+            message.contains("invalid image reference"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_inspect_of_an_invalid_reference_surfaces_the_parse_error() {
+        let resp = as_json(
+            handle_request(
+                &Request::InspectImage {
                     image: "###".into(),
                 },
                 Instant::now(),

@@ -84,6 +84,9 @@ pub enum Request {
         image: String,
     },
     PruneImages,
+    InspectImage {
+        image: String,
+    },
     RegistryLogin {
         registry: String,
         username: String,
@@ -184,6 +187,9 @@ pub enum Response {
         removed: Vec<String>,
         reclaimed_bytes: u64,
     },
+    ImageInspected {
+        inspection: ArtifactInspection,
+    },
     RunProgress {
         verb: String,
         message: String,
@@ -216,6 +222,42 @@ pub struct ImageInfo {
     pub layers: u32,
     pub pulled: String,
     pub in_use_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ArtifactInspection {
+    Image(ImageView),
+    Bundle(BundleView),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageView {
+    pub reference: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleView {
+    pub reference: String,
+    pub sandbox_base_image: Option<String>,
+    pub filesets: Vec<FilesetView>,
+    pub integrations: Vec<String>,
+    pub signature: SignatureView,
+    pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesetView {
+    pub name: String,
+    pub mount_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureView {
+    Unsigned,
+    SignedTrusted,
+    SignedUntrusted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,10 +563,9 @@ pub enum MountSpec {
 impl MountSpec {
     pub fn parse(spec: &str) -> Result<Self, String> {
         if Self::source_is_path(spec) {
-            BindSpec::parse(spec).map(MountSpec::Bind)
-        } else {
-            VolumeMount::parse(spec).map(MountSpec::Named)
+            return BindSpec::parse(spec).map(MountSpec::Bind);
         }
+        VolumeMount::parse(spec).map(MountSpec::Named)
     }
 
     fn source_is_path(spec: &str) -> bool {
