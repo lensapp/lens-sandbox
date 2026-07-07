@@ -230,7 +230,7 @@ pub async fn pull_with<F: Fs>(
 
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let pulled = crate::image::pull(image, &layer_cache).await?;
+    let pulled = crate::image::pull(image, &layer_cache, lns_ipc::PullPolicy::Always).await?;
     pull_with(
         &real::RealFs,
         &images_root()?,

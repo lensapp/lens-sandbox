@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use lns_ipc::PullPolicy;
 use oci_client::{Reference, manifest::OciImageManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,11 +53,16 @@ impl ManifestCache {
 pub(crate) struct CachingRegistry<R: Registry> {
     inner: R,
     cache: ManifestCache,
+    pull_policy: PullPolicy,
 }
 
 impl<R: Registry> CachingRegistry<R> {
-    pub fn new(inner: R, cache: ManifestCache) -> Self {
-        Self { inner, cache }
+    pub fn new(inner: R, cache: ManifestCache, pull_policy: PullPolicy) -> Self {
+        Self {
+            inner,
+            cache,
+            pull_policy,
+        }
     }
 }
 
@@ -65,24 +71,35 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         &self,
         reference: &Reference,
     ) -> Result<(OciImageManifest, String, String)> {
-        // Only digest-pinned references are immutable; caching a tag would freeze it past upstream republishes.
-        if reference.digest().is_none() {
+        let is_tag = reference.digest().is_none();
+        let key = reference.whole();
+
+        if self.pull_policy == PullPolicy::Always {
+            let (manifest, manifest_digest, config) =
+                self.inner.pull_manifest_and_config(reference).await?;
+            if !is_tag {
+                self.write_cache(&key, &manifest, &manifest_digest, &config);
+            }
+            return Ok((manifest, manifest_digest, config));
+        }
+
+        if is_tag {
             return self.inner.pull_manifest_and_config(reference).await;
         }
-        let key = reference.whole();
+
         if let Some(c) = self.cache.get(&key) {
             return Ok((c.manifest, c.manifest_digest, c.config));
         }
+
+        if self.pull_policy == PullPolicy::Never {
+            anyhow::bail!(
+                "manifest for {key} is not cached and pull policy is `never`"
+            );
+        }
+
         let (manifest, manifest_digest, config) =
             self.inner.pull_manifest_and_config(reference).await?;
-        let entry = CachedManifest {
-            manifest: manifest.clone(),
-            manifest_digest: manifest_digest.clone(),
-            config: config.clone(),
-        };
-        if let Err(e) = self.cache.put(&key, &entry) {
-            crate::log::warn!("manifest cache write failed for {key} ({e:#}); continuing");
-        }
+        self.write_cache(&key, &manifest, &manifest_digest, &config);
         Ok((manifest, manifest_digest, config))
     }
 
@@ -93,6 +110,25 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<Vec<u8>> {
         self.inner.pull_blob(reference, descriptor, on_chunk).await
+    }
+}
+
+impl<R: Registry> CachingRegistry<R> {
+    fn write_cache(
+        &self,
+        key: &str,
+        manifest: &OciImageManifest,
+        manifest_digest: &str,
+        config: &str,
+    ) {
+        let entry = CachedManifest {
+            manifest: manifest.clone(),
+            manifest_digest: manifest_digest.to_string(),
+            config: config.to_string(),
+        };
+        if let Err(e) = self.cache.put(key, &entry) {
+            crate::log::warn!("manifest cache write failed for {key} ({e:#}); continuing");
+        }
     }
 }
 
@@ -227,7 +263,7 @@ mod tests {
         let inner = CountingRegistry {
             manifest_calls: Mutex::new(0),
         };
-        let caching = CachingRegistry::new(inner, ManifestCache::new(d.path()));
+        let caching = CachingRegistry::new(inner, ManifestCache::new(d.path()), PullPolicy::Auto);
         let reference: Reference = PINNED.parse().unwrap();
 
         let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
@@ -251,6 +287,7 @@ mod tests {
                 manifest_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
+            PullPolicy::Auto,
         );
         let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
 
@@ -277,6 +314,7 @@ mod tests {
                 manifest_calls: Mutex::new(0),
             },
             ManifestCache::new(&blocked),
+            PullPolicy::Auto,
         );
         let reference: Reference = PINNED.parse().unwrap();
         let (_, digest, _) = caching
@@ -294,6 +332,7 @@ mod tests {
                 manifest_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
+            PullPolicy::Auto,
         );
         let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
         let descriptor = OciDescriptor {
@@ -306,6 +345,97 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_never_bails_when_digest_ref_is_not_cached() {
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            ManifestCache::new(d.path()),
+            PullPolicy::Never,
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        let err = caching
+            .pull_manifest_and_config(&reference)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not cached") && msg.contains("never"),
+            "expected a `not cached` + `never` error, got: {msg}"
+        );
+        assert_eq!(
+            *caching.inner.manifest_calls.lock().unwrap(),
+            0,
+            "policy=never must not hit the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_never_serves_a_cached_digest_ref() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        cache.put(&PINNED.parse::<Reference>().unwrap().whole(), &entry()).unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            cache,
+            PullPolicy::Never,
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:manifest");
+        assert_eq!(
+            *caching.inner.manifest_calls.lock().unwrap(),
+            0,
+            "policy=never with warm cache must not hit the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_always_bypasses_cache_and_re_pulls_digest_ref() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = ManifestCache::new(d.path());
+        cache.put(&PINNED.parse::<Reference>().unwrap().whole(), &entry()).unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            cache,
+            PullPolicy::Always,
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:manifest");
+        assert_eq!(
+            *caching.inner.manifest_calls.lock().unwrap(),
+            1,
+            "policy=always must hit the registry even when a cache entry exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_always_re_pulls_tag_ref() {
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            ManifestCache::new(d.path()),
+            PullPolicy::Always,
+        );
+        let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
+        caching.pull_manifest_and_config(&reference).await.unwrap();
+        caching.pull_manifest_and_config(&reference).await.unwrap();
+        assert_eq!(
+            *caching.inner.manifest_calls.lock().unwrap(),
+            2,
+            "policy=always must hit the registry every time for tags"
         );
     }
 }

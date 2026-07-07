@@ -88,13 +88,16 @@ async fn orchestrate(
         );
         Ok::<_, anyhow::Error>((guest_tools, session, initrd))
     };
+    let pull_policy = args.pull_policy;
     let image_fut = async {
         let image = ingest::run(
             args.image.as_deref(),
             &args.cmd,
             &image::want_arch(),
             &layer_cache,
-            image::pull,
+            async |img: &str, cache: &oci_layer_cache::LayerCache| {
+                image::pull(img, cache, pull_policy).await
+            },
         )
         .await?;
         log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
