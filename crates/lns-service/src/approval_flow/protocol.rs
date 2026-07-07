@@ -133,7 +133,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(v["type"], "policy");
         assert_eq!(v["network"]["defaultVerdict"], "ask");
-        assert_eq!(v["network"]["defaultTransport"], "direct");
+        assert!(v["network"].get("defaultTransport").is_none());
         assert_eq!(v["network"]["allowedRoutes"], json!([]));
     }
 
