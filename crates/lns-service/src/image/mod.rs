@@ -203,14 +203,14 @@ pub(crate) async fn pull_inner<R: Registry>(
     let config: oci_client::config::ConfigFile =
         serde_json::from_str(&config_str).context("parsing image config")?;
 
-    if let Some(expected) = reference.digest() {
-        if !ct_digest_eq(&manifest_digest, expected) {
-            anyhow::bail!(
-                "manifest digest mismatch for {image} — pinned {expected}, \
-                 resolved to {manifest_digest} (if you pinned an image-index digest, \
-                 pin the platform manifest digest instead, or use a tag)"
-            );
-        }
+    if let Some(expected) = reference.digest()
+        && !ct_digest_eq(&manifest_digest, expected)
+    {
+        anyhow::bail!(
+            "manifest digest mismatch for {image} — pinned {expected}, \
+             resolved to {manifest_digest} (if you pinned an image-index digest, \
+             pin the platform manifest digest instead, or use a tag)"
+        );
     }
 
     if config.rootfs.diff_ids.len() != manifest.layers.len() {
