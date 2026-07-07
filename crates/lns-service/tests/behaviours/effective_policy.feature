@@ -1,4 +1,3 @@
-@todo
 Feature: the effective policy in force is disclosed
   What governs a run must never be a mystery. For a bundle, the shipped
   Policy is the baseline and the current directory's lns-policy.yaml is a

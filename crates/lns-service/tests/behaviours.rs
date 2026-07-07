@@ -10,6 +10,8 @@ mod credential_rig;
 mod forward_rig;
 #[path = "behaviours/image_rig.rs"]
 mod image_rig;
+#[path = "behaviours/policy_rig.rs"]
+mod policy_rig;
 #[path = "behaviours/resolve_rig.rs"]
 mod resolve_rig;
 #[path = "behaviours/runner.rs"]

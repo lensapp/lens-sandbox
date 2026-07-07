@@ -1,4 +1,3 @@
-@todo
 Feature: bundle policy layers under a deny-dominant local overlay
   A bundle ships its own Policy as the baseline, and the current
   directory's lns-policy.yaml is a local overlay that is also where

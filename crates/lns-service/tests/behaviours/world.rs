@@ -9,6 +9,7 @@ use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
+use crate::policy_rig::PolicyRig;
 use crate::resolve_rig::ResolveRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
@@ -52,6 +53,8 @@ pub struct BehaviourWorld {
     pub image: Option<ImageRig>,
 
     pub artifact: Option<ArtifactRig>,
+
+    pub policy: Option<PolicyRig>,
 
     pub resolve: Option<ResolveRig>,
 
@@ -116,6 +119,10 @@ impl BehaviourWorld {
 
     pub fn artifact(&mut self) -> &mut ArtifactRig {
         self.artifact.get_or_insert_with(ArtifactRig::default)
+    }
+
+    pub fn policy(&mut self) -> &mut PolicyRig {
+        self.policy.get_or_insert_with(PolicyRig::default)
     }
 
     pub fn resolve(&mut self) -> &mut ResolveRig {
