@@ -233,6 +233,7 @@ mod tests {
             env_file: Vec::new(),
             publish: Vec::new(),
             mounts: Vec::new(),
+            pull: lns_ipc::PullPolicy::Auto,
             quiet: false,
             cmd: Vec::new(),
         }

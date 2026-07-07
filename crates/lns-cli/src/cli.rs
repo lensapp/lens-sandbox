@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use lns_ipc::{PortPublish, Protocol};
+use lns_ipc::{PortPublish, Protocol, PullPolicy};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
@@ -166,6 +166,14 @@ pub struct RunArgs {
     pub mounts: Vec<lns_ipc::MountSpec>,
 
     #[arg(
+        long = "pull",
+        value_parser = parse_pull_policy,
+        default_value = "auto",
+        help = "When to pull the image: `always` (skip cache), `auto` (serve cache if fresh, revalidate if stale), `never` (fail if not cached)."
+    )]
+    pub pull: PullPolicy,
+
+    #[arg(
         short = 'q',
         long = "quiet",
         default_value_t = false,
@@ -293,6 +301,17 @@ pub(crate) fn parse_env_kv(s: &str) -> Result<String, String> {
         return Err(format!("empty variable name in `{s}`"));
     }
     Ok(s.to_string())
+}
+
+fn parse_pull_policy(s: &str) -> Result<PullPolicy, String> {
+    match s {
+        "always" => Ok(PullPolicy::Always),
+        "auto" => Ok(PullPolicy::Auto),
+        "never" => Ok(PullPolicy::Never),
+        _ => Err(format!(
+            "invalid pull policy `{s}`: expected `always`, `auto`, or `never`"
+        )),
+    }
 }
 
 fn parse_workdir_arg(s: &str) -> Result<String, String> {

@@ -531,6 +531,7 @@ mod tests {
                 stdin: true,
                 initial_winsize: None,
                 detached: false,
+                pull_policy: lns_ipc::PullPolicy::Auto,
                 published_ports: vec![],
                 volumes: vec![],
                 binds: vec![],

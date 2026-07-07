@@ -180,6 +180,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         stdin,
         initial_winsize,
         detached,
+        pull_policy: args.pull,
         published_ports: args.publish,
         volumes,
         binds,
