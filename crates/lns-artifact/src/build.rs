@@ -1,5 +1,5 @@
 use crate::spec;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -141,6 +141,54 @@ pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Res
             },
         ],
     })
+}
+
+/// The digest a bundle component is pinned to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentPin {
+    pub name: String,
+    pub digest: String,
+}
+
+fn pinned_digest(reference: &spec::ArtifactRef) -> Option<String> {
+    if let Some(digest) = &reference.digest {
+        return Some(digest.clone());
+    }
+    reference
+        .reference
+        .split_once('@')
+        .map(|(_, digest)| digest.to_string())
+        .filter(|d| d.starts_with("sha256:"))
+}
+
+/// Verify every component of an AgentSystem bundle is pinned to a digest, returning the pins; refuses a component left on a floating tag so a published bundle can never drift.
+pub fn bundle_component_pins(doc: &[u8]) -> Result<Vec<ComponentPin>> {
+    let bundle = spec::parse_bundle(doc).context("reading bundle components")?;
+    let components = &bundle.spec.components;
+    let mut declared: Vec<(String, &spec::ArtifactRef)> = Vec::new();
+    if let Some(sandbox) = &components.sandbox {
+        declared.push(("sandbox".to_string(), sandbox));
+    }
+    for (i, agent) in components.agents.iter().enumerate() {
+        declared.push((format!("agent-{i}"), agent));
+    }
+    for (i, fileset) in components.filesets.iter().enumerate() {
+        declared.push((format!("fileset-{i}"), fileset));
+    }
+    for (i, policy) in components.policies.iter().enumerate() {
+        declared.push((format!("policy-{i}"), policy));
+    }
+    let mut pins = Vec::new();
+    for (name, reference) in declared {
+        let Some(digest) = pinned_digest(reference) else {
+            bail!(
+                "component {name} ({}) is left on a floating tag; pin it to a digest",
+                reference.reference
+            );
+        };
+        pins.push(ComponentPin { name, digest });
+    }
+    Ok(pins)
 }
 
 fn tar_layer(entries: &[FileEntry]) -> Result<Vec<u8>> {
@@ -320,5 +368,34 @@ mod tests {
     fn build_fileset_rejects_a_traversing_mount_path() {
         let err = build_fileset("s", "/root/../etc", &[entry("a", "1")]).unwrap_err();
         assert!(format!("{err:#}").contains("`..` segment"), "got: {err:#}");
+    }
+
+    fn bundle_json(components: &str) -> Vec<u8> {
+        format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{{"name":"some-bundle"}},"spec":{{"components":{components}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn bundle_component_pins_reports_a_digest_for_each_pinned_component() {
+        let pinned = format!("sha256:{}", "a".repeat(64));
+        let doc = bundle_json(&format!(
+            r#"{{"sandbox":{{"ref":"reg/base","digest":"{pinned}"}},"agents":[{{"ref":"reg/agent@{pinned}"}}],"filesets":[{{"ref":"reg/skills@{pinned}"}}],"policies":[{{"ref":"reg/policy","digest":"{pinned}"}}]}}"#
+        ));
+        let pins = bundle_component_pins(&doc).unwrap();
+        assert_eq!(pins.len(), 4);
+        assert!(pins.iter().all(|p| p.digest == pinned));
+        let names: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["sandbox", "agent-0", "fileset-0", "policy-0"]);
+    }
+
+    #[test]
+    fn bundle_component_pins_refuses_a_component_left_on_a_floating_tag() {
+        let doc = bundle_json(r#"{"sandbox":{"ref":"reg/base:1"}}"#);
+        let err = bundle_component_pins(&doc).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("floating tag"), "got: {msg}");
+        assert!(msg.contains("reg/base:1"), "got: {msg}");
     }
 }

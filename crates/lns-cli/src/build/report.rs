@@ -51,18 +51,38 @@ pub(super) fn build_and_report(
     };
     match lns_artifact::build::build_artifact(&json) {
         Ok(built) => {
+            let pins = match bundle_pins(&json) {
+                Ok(pins) => pins,
+                Err(message) => {
+                    writeln!(writer, "✖ {message}")?;
+                    return Ok(None);
+                }
+            };
             let target = tag.unwrap_or("<untagged>");
             writeln!(
                 writer,
                 "✔ built {} {target}@{}",
                 built.artifact_type, built.manifest_digest
             )?;
+            for pin in &pins {
+                writeln!(writer, "  pinned {} → {}", pin.name, pin.digest)?;
+            }
             Ok(Some(built))
         }
         Err(e) => {
             writeln!(writer, "✖ build failed: {e:#}")?;
             Ok(None)
         }
+    }
+}
+
+/// For an AgentSystem bundle, the digest each component is pinned to; empty for a leaf artifact. `Err` names a component left on a floating tag.
+fn bundle_pins(json: &[u8]) -> std::result::Result<Vec<lns_artifact::build::ComponentPin>, String> {
+    match lns_artifact::spec::read_kind(json) {
+        Ok(lns_artifact::spec::Kind::AgentSystem) => {
+            lns_artifact::build::bundle_component_pins(json).map_err(|e| format!("{e:#}"))
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -239,6 +259,41 @@ mod tests {
         .unwrap();
         assert!(built.is_none());
         assert!(String::from_utf8(out).unwrap().contains("build failed"));
+    }
+
+    fn bundle_yaml(components: &str) -> String {
+        format!(
+            "apiVersion: lens.dev/v1alpha1\nkind: AgentSystem\nmetadata:\n  name: some-bundle\nspec:\n  components:\n{components}"
+        )
+    }
+
+    #[test]
+    fn build_reports_the_digests_a_bundle_pins_its_components_to() {
+        let pinned = format!("sha256:{}", "a".repeat(64));
+        let yaml = bundle_yaml(&format!(
+            "    sandbox:\n      ref: reg/base\n      digest: {pinned}\n"
+        ));
+        let mut out: Vec<u8> = Vec::new();
+        build_and_report(yaml.as_bytes(), Some("reg/some-bundle:1"), &mut out)
+            .unwrap()
+            .expect("a pinned bundle builds");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("pinned sandbox"), "got: {text}");
+        assert!(text.contains(&pinned), "got: {text}");
+    }
+
+    #[test]
+    fn build_refuses_a_bundle_component_left_on_a_floating_tag() {
+        let yaml = bundle_yaml("    sandbox:\n      ref: reg/base:1\n");
+        let mut out: Vec<u8> = Vec::new();
+        let built = build_and_report(yaml.as_bytes(), Some("reg/some-bundle:1"), &mut out).unwrap();
+        assert!(
+            built.is_none(),
+            "a floating component must refuse the build"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("floating tag"), "got: {text}");
+        assert!(!text.contains("✔ built"), "must not report a build: {text}");
     }
 
     #[test]
