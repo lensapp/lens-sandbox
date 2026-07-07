@@ -26,6 +26,10 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
             else {
                 return Ok(1);
             };
+            if let Some(reference) = tag {
+                cache_built(reference, &built)?;
+                writeln!(out, "  cached for push: {reference}")?;
+            }
             if !args.push {
                 return Ok(0);
             }
@@ -57,6 +61,10 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
         let Some(built) = report::build_and_report(&raw, tag, &mut out)? else {
             return Ok(1);
         };
+        if let Some(reference) = tag {
+            cache_built(reference, &built)?;
+            writeln!(out, "  cached for push: {reference}")?;
+        }
         if !args.push {
             return Ok(0);
         }
@@ -65,6 +73,16 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
         writeln!(out, "✔ pushed {target}@{}", built.manifest_digest)?;
         Ok(0)
     })
+}
+
+fn cache_built(reference: &str, built: &lns_artifact::build::BuiltArtifact) -> Result<()> {
+    let root = lns_ipc::build_cache_root().context("resolving the build cache root")?;
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    for file in super::cache::plan_writes(&root, reference, built)? {
+        std::fs::write(&file.path, &file.bytes)
+            .with_context(|| format!("writing {}", file.path.display()))?;
+    }
+    Ok(())
 }
 
 fn fileset_name(path: &Path) -> String {

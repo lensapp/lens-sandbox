@@ -3242,6 +3242,7 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "futures-util",
+ "hex",
  "http 1.4.1",
  "httpmock",
  "libc",

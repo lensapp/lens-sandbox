@@ -24,6 +24,8 @@ pub struct E2eWorld {
     pub registry: Option<registry::LocalRegistry>,
     pub fixture_dir: Option<TempDir>,
     pub bundle_ref: Option<String>,
+    pub pushed_ref: Option<String>,
+    pub pushed_digest: Option<String>,
 }
 
 impl E2eWorld {

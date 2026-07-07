@@ -9,6 +9,7 @@ pub mod integration;
 pub mod log;
 pub mod login;
 pub mod policy;
+pub mod push;
 pub mod raw_mode;
 pub mod run;
 pub mod sandbox;

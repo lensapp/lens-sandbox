@@ -1,6 +1,7 @@
 use crate::command::{CommandSpec, subcommand};
 
-mod push;
+pub(crate) mod cache;
+pub(crate) mod push;
 mod report;
 mod resolve;
 mod run;

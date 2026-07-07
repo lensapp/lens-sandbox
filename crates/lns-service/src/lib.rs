@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod audit;
 mod base64;
 pub mod browser;
+pub mod build_cache;
 pub mod cache;
 pub mod composefs;
 pub mod content_store;

@@ -23,7 +23,7 @@ fn registry_auth_for(reference: &Reference) -> RegistryAuth {
 }
 
 /// Upload a built artifact's blobs and then its exact manifest bytes to `target`, reusing the stored `lns login` credential (which must carry push scope).
-pub(super) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result<()> {
+pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result<()> {
     let reference: Reference = target
         .parse()
         .with_context(|| format!("invalid target ref {target}"))?;

@@ -263,13 +263,16 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
 
 pub async fn prune() -> Result<PruneReport> {
     let _exclusive = cache_lock().write().await;
-    prune_with(
+    let mut report = prune_with(
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
         &images_root()?,
         &crate::run_registry::snapshot(),
     )
-    .await
+    .await?;
+    report.reclaimed_bytes +=
+        crate::build_cache::sweep_with(&real::RealFs, &lns_ipc::build_cache_root()?).await?;
+    Ok(report)
 }
 
 #[cfg(test)]
