@@ -917,6 +917,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fake_registry_fetch_tag_digest_returns_the_manifest_digest() {
+        let registry = build_two_layer_image().into_registry();
+        let reference: Reference = "alpine:3.20".parse().unwrap();
+        let digest = registry.fetch_tag_digest(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:not-used-unless-pull-by-digest");
+    }
+
+    #[tokio::test]
     async fn pull_inner_handles_single_layer_image_with_singular_log_phrasing() {
         ensure_global_trace_subscriber();
         let layer_raw = b"only-layer-bytes".to_vec();

@@ -821,6 +821,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_always_cold_pinned_digest_pulls_and_caches_without_a_tag_digest() {
+        // Always + digest-pin + empty cache: pull once, and since a pinned
+        // digest is not a tag, no tag_digest is recorded and fetch_tag_digest
+        // is never called.
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            FakeRegistry::new(),
+            ManifestCache::new(d.path()),
+            PullPolicy::Always,
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        let (_, digest, _) = caching.pull_manifest_and_config(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:manifest");
+        assert_eq!(*caching.inner.manifest_calls.lock().unwrap(), 1);
+        assert_eq!(
+            *caching.inner.digest_calls.lock().unwrap(),
+            0,
+            "a pinned digest is not a tag, so no HEAD is issued"
+        );
+        let cached = caching.cache.get(&reference.whole()).unwrap();
+        assert!(
+            cached.tag_digest.is_none(),
+            "pinned digests carry no tag_digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_tag_digest_forwards_to_the_inner_registry() {
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            FakeRegistry::with_tag_digests(["sha256:forwarded"]),
+            ManifestCache::new(d.path()),
+            PullPolicy::Auto,
+        );
+        let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
+        let digest = caching.fetch_tag_digest(&reference).await.unwrap();
+        assert_eq!(digest, "sha256:forwarded");
+        assert_eq!(*caching.inner.digest_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn a_cache_write_failure_does_not_break_the_pull() {
         let d = tempfile::tempdir().unwrap();
         let blocked = d.path().join("blocked");
