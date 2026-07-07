@@ -102,6 +102,20 @@ pub fn volume_event(cx: &OcsfCtx, name: &str, target: &str) -> Map<String, Value
     into_object(lns_ocsf::volume_mount(&cx.ctx(), name, target))
 }
 
+pub fn bundle_run_event(
+    cx: &OcsfCtx,
+    bundle_ref: &str,
+    overrides: &[String],
+    signature_verdict: &str,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::bundle_run(
+        &cx.ctx(),
+        bundle_ref,
+        overrides,
+        signature_verdict,
+    ))
+}
+
 pub fn bind_event(
     cx: &OcsfCtx,
     source: &str,

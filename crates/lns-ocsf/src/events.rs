@@ -371,6 +371,33 @@ pub fn bind_mount(
     ev.build()
 }
 
+pub fn bundle_run(
+    ctx: &Context,
+    bundle_ref: &str,
+    overrides: &[String],
+    signature_verdict: &str,
+) -> Value {
+    let mut ev = Event::new(
+        "bundle_run",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set("message", format!("ran bundle {bundle_ref}").into())
+    .set("process", json!({"uid": ctx.run, "name": "bundle"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_bundle", bundle_ref.into())
+    .note("lns_signature", signature_verdict.into());
+    if !overrides.is_empty() {
+        ev = ev.note("lns_overrides", json!(overrides));
+    }
+    ev.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +619,37 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_kind"], "launch");
         assert_eq!(ev["unmapped"]["lns_image"], "alpine:latest");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
+    }
+
+    #[test]
+    fn bundle_run_records_the_bundle_reference_and_signature_verdict() {
+        let ev = bundle_run(
+            &ctx(),
+            "some-registry.example/some-agent:research",
+            &["some-registry.example/skills/deep@sha256:abcd".into()],
+            "unverified",
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["unmapped"]["lns_kind"], "bundle_run");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
+        assert_eq!(
+            ev["unmapped"]["lns_bundle"],
+            "some-registry.example/some-agent:research"
+        );
+        assert_eq!(ev["unmapped"]["lns_signature"], "unverified");
+        assert_eq!(
+            ev["unmapped"]["lns_overrides"][0],
+            "some-registry.example/skills/deep@sha256:abcd"
+        );
+    }
+
+    #[test]
+    fn bundle_run_omits_the_overrides_note_when_there_are_none() {
+        let ev = bundle_run(&ctx(), "reg/some-agent:1", &[], "verified");
+        assert_schema_valid(&ev);
+        assert!(ev["unmapped"].get("lns_overrides").is_none());
+        assert_eq!(ev["unmapped"]["lns_signature"], "verified");
     }
 
     #[test]

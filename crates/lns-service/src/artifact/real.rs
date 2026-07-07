@@ -27,6 +27,8 @@ pub(crate) async fn peek_and_plan(
     host_arch: &str,
     overrides: &[Override],
     insecure: bool,
+    run_id: &str,
+    microvm: &str,
 ) -> Result<Option<AssembledWorkload>> {
     let reference: Reference = image_ref
         .parse()
@@ -42,7 +44,7 @@ pub(crate) async fn peek_and_plan(
     )? {
         RunPath::SingleImage => Ok(None),
         RunPath::AssembleBundle => {
-            enforce_signature(image_ref, insecure)?;
+            let verdict = enforce_signature(image_ref, insecure)?;
             let resolved = plan_bundle(
                 config_json.as_bytes(),
                 &RealComponentFetcher,
@@ -50,6 +52,7 @@ pub(crate) async fn peek_and_plan(
                 overrides,
             )
             .await?;
+            record_bundle_run(run_id, microvm, image_ref, overrides, &verdict);
             for fileset in &resolved.filesets {
                 crate::log::warn!(
                     "bundle fileset {} is resolved but not yet mounted into the guest",
@@ -58,6 +61,27 @@ pub(crate) async fn peek_and_plan(
             }
             Ok(Some(assembly::assemble(&resolved)))
         }
+    }
+}
+
+/// Append a bundle-run event to the audit chain; a recording failure is logged, never fatal to the launch.
+fn record_bundle_run(
+    run_id: &str,
+    microvm: &str,
+    image_ref: &str,
+    overrides: &[Override],
+    verdict: &Verdict,
+) {
+    let override_refs: Vec<String> = overrides.iter().map(|o| o.reference.clone()).collect();
+    if let Err(e) = crate::audit::record_bundle_run(
+        run_id,
+        microvm,
+        image_ref,
+        &override_refs,
+        &crate::artifact::audit::verdict_label(verdict),
+        &crate::oauth::RealClock,
+    ) {
+        crate::log::warn!("failed to record bundle-run audit event: {e:#}");
     }
 }
 
@@ -107,14 +131,12 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
 }
 
 /// Consult the signature-trust gate before running a bundle. Reading the trusted-signer set from `lns config` and verifying the cosign referrer are Layer-1 follow-ups; until they land no key is configured, so an unsigned bundle proceeds with a warning and `--insecure` short-circuits.
-fn enforce_signature(image_ref: &str, insecure: bool) -> Result<()> {
+fn enforce_signature(image_ref: &str, insecure: bool) -> Result<Verdict> {
     let trusted_keys_configured = false;
-    match signature::gate(insecure, trusted_keys_configured, SignatureStatus::Unsigned) {
-        Verdict::Verified | Verdict::Skipped => Ok(()),
-        Verdict::ProceedUnverified { warning } => {
-            crate::log::warn!("{warning}");
-            Ok(())
-        }
+    let verdict = signature::gate(insecure, trusted_keys_configured, SignatureStatus::Unsigned);
+    match &verdict {
+        Verdict::Verified | Verdict::Skipped => {}
+        Verdict::ProceedUnverified { warning } => crate::log::warn!("{warning}"),
         Verdict::Refused(reason) => {
             anyhow::bail!(
                 "refusing to run bundle {image_ref}: {}",
@@ -122,4 +144,5 @@ fn enforce_signature(image_ref: &str, insecure: bool) -> Result<()> {
             )
         }
     }
+    Ok(verdict)
 }
