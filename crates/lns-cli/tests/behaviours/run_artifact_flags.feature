@@ -1,4 +1,3 @@
-@todo
 Feature: run flags for typed artifacts
   `lns run` gains three artifact-aware levers that stay out of the way for
   a plain image run: --with adds or overrides a mounted component at launch

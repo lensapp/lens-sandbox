@@ -1,34 +1,9 @@
-use crate::artifact::spec::validate_mount_path;
-use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 
+/// A launch-time `--with` override addressed by OCI reference; it resolves through the component graph like any bundle component, landing last so it overlays the base image and bundle filesets.
 #[derive(Debug, Clone)]
 pub struct Override {
-    pub kind: String,
-    pub name: String,
-    pub mount_path: Option<String>,
-}
-
-pub fn apply_with(mut bundle: ResolvedBundle, overrides: &[Override]) -> Result<ResolvedBundle> {
-    for over in overrides {
-        match over.kind.as_str() {
-            "FileSet" => {
-                let Some(path) = over.mount_path.clone().filter(|p| !p.is_empty()) else {
-                    bail!("--with FileSet override {} has no mount path", over.name);
-                };
-                validate_mount_path(&path)
-                    .with_context(|| format!("--with FileSet override {}", over.name))?;
-                bundle.filesets.push(ResolvedFileset {
-                    name: over.name.clone(),
-                    paths: vec![path],
-                });
-            }
-            other => bail!(
-                "--with override of kind {other} is unsupported; only FileSet overrides are allowed"
-            ),
-        }
-    }
-    Ok(bundle)
+    pub reference: String,
 }
 
 #[derive(Debug, Default, Clone)]

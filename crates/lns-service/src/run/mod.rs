@@ -90,15 +90,13 @@ pub(super) struct BundleLaunch {
     pub env: Vec<String>,
 }
 
-/// Map the wire `--with` overrides onto assembly overrides; only FileSet overrides are expressible from the CLI today.
+/// Map the wire `--with` overrides onto assembly overrides; each carries a component reference that resolves through the graph.
 pub(super) fn bundle_overrides(
     with: &[lns_ipc::WithOverride],
 ) -> Vec<crate::artifact::assembly::Override> {
     with.iter()
         .map(|w| crate::artifact::assembly::Override {
-            kind: "FileSet".to_string(),
-            name: w.name.clone(),
-            mount_path: Some(w.mount_path.clone()),
+            reference: w.reference.clone(),
         })
         .collect()
 }
@@ -428,25 +426,22 @@ mod tests {
     }
 
     #[test]
-    fn bundle_overrides_maps_wire_withs_to_fileset_overrides() {
+    fn bundle_overrides_maps_wire_withs_to_reference_overrides() {
         let with = vec![
             lns_ipc::WithOverride {
-                name: "skills".into(),
-                mount_path: "/root/.some-agent/skills".into(),
+                reference: "some-registry.example/skills/deep@sha256:abcd".into(),
             },
             lns_ipc::WithOverride {
-                name: "settings".into(),
-                mount_path: "/root/.some-agent/settings.json".into(),
+                reference: "some-registry.example/settings:1".into(),
             },
         ];
         let overrides = bundle_overrides(&with);
         assert_eq!(overrides.len(), 2);
-        assert!(overrides.iter().all(|o| o.kind == "FileSet"));
-        assert_eq!(overrides[0].name, "skills");
         assert_eq!(
-            overrides[0].mount_path.as_deref(),
-            Some("/root/.some-agent/skills")
+            overrides[0].reference,
+            "some-registry.example/skills/deep@sha256:abcd"
         );
+        assert_eq!(overrides[1].reference, "some-registry.example/settings:1");
     }
 
     #[test]

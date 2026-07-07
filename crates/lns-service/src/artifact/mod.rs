@@ -83,11 +83,16 @@ pub async fn plan_bundle<F: ComponentFetcher>(
     overrides: &[Override],
 ) -> Result<ResolvedBundle> {
     let bundle = spec::parse_bundle(config_json)?;
-    let spec = flatten(&bundle.spec.components);
-    let resolved = resolve::resolve(&spec, fetcher, host_arch)
+    let mut spec = flatten(&bundle.spec.components);
+    for (i, over) in overrides.iter().enumerate() {
+        spec.components.push(DeclaredComponent {
+            name: format!("with-{i}"),
+            reference: over.reference.clone(),
+        });
+    }
+    resolve::resolve(&spec, fetcher, host_arch)
         .await
-        .with_context(|| format!("resolving bundle {}", bundle.metadata.name))?;
-    assembly::apply_with(resolved, overrides)
+        .with_context(|| format!("resolving bundle {}", bundle.metadata.name))
 }
 
 #[cfg(test)]
@@ -216,19 +221,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_bundle_applies_a_with_override() {
-        let config =
-            bundle_json(r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}]}"#);
-        let fetcher = MapFetcher(HashMap::from([sandbox("reg/base:1"), agent("reg/agent:1")]));
+    async fn plan_bundle_folds_a_with_override_ref_in_as_a_trailing_fileset() {
+        let config = bundle_json(
+            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/shipped:1"}]}"#,
+        );
+        let fetcher = MapFetcher(HashMap::from([
+            sandbox("reg/base:1"),
+            agent("reg/agent:1"),
+            fileset("reg/shipped:1", "shipped", "/shared"),
+            fileset("reg/override:1", "override", "/shared"),
+        ]));
         let over = Override {
-            kind: "FileSet".into(),
-            name: "extra".into(),
-            mount_path: Some("/root/.some-agent/extra".into()),
+            reference: "reg/override:1".into(),
         };
         let resolved = plan_bundle(&config, &fetcher, "test-arch", std::slice::from_ref(&over))
             .await
             .unwrap();
-        assert!(resolved.filesets.iter().any(|f| f.name == "extra"));
+        let last = resolved.filesets.last().expect("a resolved fileset");
+        assert_eq!(
+            last.name, "override",
+            "the --with override must land last so it overlays the bundle fileset"
+        );
+        assert_eq!(
+            assembly::assemble(&resolved).source_of("/shared"),
+            Some(&assembly::FileSource::Fileset("override".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_bundle_refuses_a_with_override_that_is_not_a_mountable_component() {
+        let config =
+            bundle_json(r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}]}"#);
+        let fetcher = MapFetcher(HashMap::from([
+            sandbox("reg/base:1"),
+            agent("reg/agent:1"),
+            sandbox("reg/second-sandbox:1"),
+        ]));
+        let over = Override {
+            reference: "reg/second-sandbox:1".into(),
+        };
+        let err = plan_bundle(&config, &fetcher, "test-arch", std::slice::from_ref(&over))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("sandbox"),
+            "a non-mountable --with override must be refused: {err:#}"
+        );
     }
 
     #[tokio::test]

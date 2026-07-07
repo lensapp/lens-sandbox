@@ -397,30 +397,26 @@ pub struct RunImageArgs {
     pub insecure: bool,
 }
 
-/// A launch-time `--with` component override; only FileSet overrides are expressible today.
+/// A launch-time `--with` component override, addressed by OCI reference; its mount path comes from the referenced FileSet's manifest at resolve time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WithOverride {
-    pub name: String,
-    pub mount_path: String,
+    pub reference: String,
 }
 
 impl WithOverride {
-    /// Parse a `--with NAME=/mount/path` flag value.
+    /// Parse a `--with <component-ref>` flag value.
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let (name, mount_path) = spec
-            .split_once('=')
-            .ok_or_else(|| format!("invalid --with {spec:?}: expected NAME=/mount/path"))?;
-        if name.is_empty() {
-            return Err(format!("invalid --with {spec:?}: empty component name"));
+        let reference = spec.trim();
+        if reference.is_empty() {
+            return Err("invalid --with: empty component reference".to_string());
         }
-        if !mount_path.starts_with('/') {
+        if reference.split_whitespace().count() != 1 {
             return Err(format!(
-                "invalid --with {spec:?}: mount path must be absolute (start with `/`)"
+                "invalid --with {spec:?}: a component reference has no spaces"
             ));
         }
         Ok(Self {
-            name: name.to_string(),
-            mount_path: mount_path.to_string(),
+            reference: reference.to_string(),
         })
     }
 }
@@ -459,9 +455,8 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
         ));
     }
     if target.chars().any(cmdline_unsafe_char) {
-        return Err(format!(
-            "invalid volume target {target:?}: must not contain whitespace, quotes, or control characters"
-        ));
+        let reason = "must not contain whitespace, quotes, or control characters";
+        return Err(format!("invalid volume target {target:?}: {reason}"));
     }
     if target.split('/').any(|seg| seg == "." || seg == "..") {
         return Err(format!(
@@ -1233,32 +1228,22 @@ mod tests {
     }
 
     #[test]
-    fn with_override_parse_splits_name_and_absolute_mount() {
+    fn with_override_parse_takes_a_component_reference() {
         assert_eq!(
-            WithOverride::parse("skills=/root/.some-agent/skills").unwrap(),
+            WithOverride::parse("some-registry.example/skills/deep@sha256:abcd").unwrap(),
             WithOverride {
-                name: "skills".into(),
-                mount_path: "/root/.some-agent/skills".into(),
+                reference: "some-registry.example/skills/deep@sha256:abcd".into(),
             }
         );
     }
 
     #[test]
-    fn with_override_parse_rejects_missing_equals_empty_name_and_relative_mount() {
+    fn with_override_parse_rejects_an_empty_or_spaced_reference() {
+        assert!(WithOverride::parse("   ").unwrap_err().contains("empty"));
         assert!(
-            WithOverride::parse("noeq")
+            WithOverride::parse("reg/a reg/b")
                 .unwrap_err()
-                .contains("NAME=/mount")
-        );
-        assert!(
-            WithOverride::parse("=/x")
-                .unwrap_err()
-                .contains("empty component name")
-        );
-        assert!(
-            WithOverride::parse("skills=relative")
-                .unwrap_err()
-                .contains("must be absolute")
+                .contains("no spaces")
         );
     }
 

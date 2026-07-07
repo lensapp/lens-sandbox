@@ -1,36 +1,92 @@
+use crate::resolve_rig::{Canned, FakeFetcher};
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_service::artifact::assembly::{Override, ResolvedFileset, apply_with, assemble};
+use lns_service::artifact::assembly::{Override, assemble};
+use lns_service::artifact::plan_bundle;
+use lns_service::artifact::resolve::FetchedComponent;
 
-#[given(regex = r#"^a bundle declaring a fileset "([^"]+)" mounting "([^"]+)"$"#)]
-async fn declaring_fileset(world: &mut BehaviourWorld, name: String, path: String) {
-    world.artifact().bundle.filesets.push(ResolvedFileset {
-        name,
-        paths: vec![path],
-    });
-}
+const SANDBOX_REF: &str = "reg/sandbox:1";
+const AGENT_REF: &str = "reg/agent:1";
 
-fn fileset_override(name: &str, path: &str) -> Override {
-    Override {
+fn fileset_component(name: &str, path: &str) -> FetchedComponent {
+    FetchedComponent {
         kind: "FileSet".into(),
         name: name.into(),
         mount_path: Some(path.into()),
+        ..Default::default()
     }
 }
 
-fn run_with_overrides(world: &mut BehaviourWorld) {
-    let bundle = world.artifact().bundle.clone();
-    let overrides = world.artifact().overrides.clone();
-    match apply_with(bundle, &overrides) {
+fn present(world: &mut BehaviourWorld, reference: &str, component: FetchedComponent) {
+    world
+        .artifact()
+        .canned
+        .insert(reference.to_string(), Canned::Present(component));
+}
+
+#[given(regex = r#"^a bundle declaring a fileset "([^"]+)" mounting "([^"]+)"$"#)]
+async fn declaring_fileset(world: &mut BehaviourWorld, name: String, path: String) {
+    let reference = format!("reg/{name}:1");
+    present(world, &reference, fileset_component(&name, &path));
+    world.artifact().bundle_fileset_refs.push(reference);
+}
+
+async fn run_with_overrides(world: &mut BehaviourWorld) {
+    present(
+        world,
+        SANDBOX_REF,
+        FetchedComponent {
+            kind: "Sandbox".into(),
+            name: "some-sandbox".into(),
+            base_image: Some("registry.example.test/base@sha256:abc".into()),
+            ..Default::default()
+        },
+    );
+    present(
+        world,
+        AGENT_REF,
+        FetchedComponent {
+            kind: "Agent".into(),
+            name: "some-agent".into(),
+            command: Some("agent --serve".into()),
+            ..Default::default()
+        },
+    );
+    let fileset_refs = world.artifact().bundle_fileset_refs.clone();
+    let filesets = fileset_refs
+        .iter()
+        .map(|r| format!(r#"{{"ref":"{r}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let config = format!(
+        r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{{"name":"some-bundle"}},"spec":{{"components":{{"sandbox":{{"ref":"{SANDBOX_REF}"}},"agents":[{{"ref":"{AGENT_REF}"}}],"filesets":[{filesets}]}}}}}}"#
+    );
+    let overrides: Vec<Override> = world
+        .artifact()
+        .with_refs
+        .iter()
+        .map(|r| Override {
+            reference: r.clone(),
+        })
+        .collect();
+    let canned = world.artifact().canned.clone();
+    let fetcher = FakeFetcher::new(&canned);
+    match plan_bundle(config.as_bytes(), &fetcher, "test-arch", &overrides).await {
         Ok(resolved) => world.artifact().assembled = Some(assemble(&resolved)),
         Err(e) => world.artifact().override_error = Some(format!("{e:#}")),
     }
 }
 
+fn override_fileset(world: &mut BehaviourWorld, name: &str, path: &str) {
+    let reference = format!("reg/with-{name}:1");
+    present(world, &reference, fileset_component(name, path));
+    world.artifact().with_refs.push(reference);
+}
+
 #[when(regex = r#"^the bundle is run with --with a fileset "([^"]+)" mounting "([^"]+)"$"#)]
 async fn run_with_one(world: &mut BehaviourWorld, name: String, path: String) {
-    world.artifact().overrides = vec![fileset_override(&name, &path)];
-    run_with_overrides(world);
+    override_fileset(world, &name, &path);
+    run_with_overrides(world).await;
 }
 
 #[when(
@@ -43,97 +99,34 @@ async fn run_with_two(
     name_b: String,
     path_b: String,
 ) {
-    world.artifact().overrides = vec![
-        fileset_override(&name_a, &path_a),
-        fileset_override(&name_b, &path_b),
-    ];
-    run_with_overrides(world);
+    override_fileset(world, &name_a, &path_a);
+    override_fileset(world, &name_b, &path_b);
+    run_with_overrides(world).await;
 }
 
 #[when(regex = r#"^the bundle is run with --with an artifact of kind "([^"]+)"$"#)]
 async fn run_with_unsupported(world: &mut BehaviourWorld, kind: String) {
-    world.artifact().overrides = vec![Override {
-        kind,
-        name: "override".into(),
-        mount_path: Some("/x".into()),
-    }];
-    run_with_overrides(world);
-}
-
-#[when(
-    regex = r#"^the bundle is run with --with a fileset "([^"]+)" mounting "([^"]+)" and --with an artifact of kind "([^"]+)"$"#
-)]
-async fn run_with_valid_then_unsupported(
-    world: &mut BehaviourWorld,
-    name: String,
-    path: String,
-    kind: String,
-) {
-    world.artifact().overrides = vec![
-        fileset_override(&name, &path),
-        Override {
-            kind,
-            name: "bad".into(),
-            mount_path: Some("/z".into()),
+    let reference = "reg/unsupported:1".to_string();
+    world.artifact().canned.insert(
+        reference.clone(),
+        Canned::UnsupportedKind {
+            media_type: format!("application/vnd.lens.{}.v1+json", kind.to_lowercase()),
         },
-    ];
-    run_with_overrides(world);
+    );
+    world.artifact().with_refs.push(reference);
+    run_with_overrides(world).await;
 }
 
-#[when(regex = r#"^the bundle is run with --with a fileset "([^"]+)" carrying no mount path$"#)]
-async fn run_with_no_mount(world: &mut BehaviourWorld, name: String) {
-    world.artifact().overrides = vec![Override {
-        kind: "FileSet".into(),
-        name,
-        mount_path: None,
-    }];
-    run_with_overrides(world);
-}
-
-#[then("the run is refused because the override kind is unsupported")]
-async fn refused_override_kind(world: &mut BehaviourWorld) {
+#[then("the run is refused because the override is not a mountable component")]
+async fn refused_not_mountable(world: &mut BehaviourWorld) {
     let err = world
         .artifact()
         .override_error
         .clone()
         .expect("expected an override refusal");
     assert!(
-        err.contains("unsupported"),
-        "expected an unsupported-kind refusal, got: {err}",
-    );
-    assert!(
-        err.contains("Workflow"),
-        "refusal should name the offending kind, got: {err}",
-    );
-    assert!(
-        err.contains("FileSet"),
-        "refusal should state only FileSet overrides are allowed, got: {err}",
-    );
-}
-
-#[then("the run is refused because the override has no mount path")]
-async fn refused_no_mount(world: &mut BehaviourWorld) {
-    let err = world
-        .artifact()
-        .override_error
-        .clone()
-        .expect("expected an override refusal");
-    assert!(
-        err.contains("no mount path"),
-        "expected a missing-mount-path refusal, got: {err}",
-    );
-}
-
-#[then("the run is refused because the override mount path is unsafe")]
-async fn refused_unsafe_mount(world: &mut BehaviourWorld) {
-    let err = world
-        .artifact()
-        .override_error
-        .clone()
-        .expect("expected an override refusal");
-    assert!(
-        err.contains("`..` segment"),
-        "expected a traversal refusal, got: {err}",
+        err.contains("unsupported component kind"),
+        "expected a non-mountable-component refusal, got: {err}",
     );
 }
 
