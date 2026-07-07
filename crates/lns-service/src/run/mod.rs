@@ -90,6 +90,19 @@ pub(super) struct BundleLaunch {
     pub env: Vec<String>,
 }
 
+/// Map the wire `--with` overrides onto assembly overrides; only FileSet overrides are expressible from the CLI today.
+pub(super) fn bundle_overrides(
+    with: &[lns_ipc::WithOverride],
+) -> Vec<crate::artifact::assembly::Override> {
+    with.iter()
+        .map(|w| crate::artifact::assembly::Override {
+            kind: "FileSet".to_string(),
+            name: w.name.clone(),
+            mount_path: Some(w.mount_path.clone()),
+        })
+        .collect()
+}
+
 /// Merge a resolved bundle's workload with the user's run args: boot the sandbox base image, take the agent command unless the user gave one after `--`, and layer env base-image < bundle-agent < user `-e`.
 pub(super) fn bundle_launch(
     workload: &crate::artifact::assembly::AssembledWorkload,
@@ -412,6 +425,28 @@ mod tests {
             ..Default::default()
         };
         crate::artifact::assembly::assemble(&resolved)
+    }
+
+    #[test]
+    fn bundle_overrides_maps_wire_withs_to_fileset_overrides() {
+        let with = vec![
+            lns_ipc::WithOverride {
+                name: "skills".into(),
+                mount_path: "/root/.some-agent/skills".into(),
+            },
+            lns_ipc::WithOverride {
+                name: "settings".into(),
+                mount_path: "/root/.some-agent/settings.json".into(),
+            },
+        ];
+        let overrides = bundle_overrides(&with);
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides.iter().all(|o| o.kind == "FileSet"));
+        assert_eq!(overrides[0].name, "skills");
+        assert_eq!(
+            overrides[0].mount_path.as_deref(),
+            Some("/root/.some-agent/skills")
+        );
     }
 
     #[test]

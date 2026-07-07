@@ -538,6 +538,8 @@ mod tests {
                 volumes: vec![],
                 binds: vec![],
                 auto_remove: false,
+                with: vec![],
+                insecure: false,
             })),
             Instant::now(),
         )

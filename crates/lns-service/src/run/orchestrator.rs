@@ -76,9 +76,16 @@ async fn orchestrate(
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
     // A bundle reference resolves its component graph and boots its sandbox base image; a plain image passes through unchanged.
+    let overrides = super::bundle_overrides(&args.with);
     let bundle = match args.image.as_deref() {
         Some(image_ref) => {
-            crate::artifact::real::peek_and_plan(image_ref, &image::want_arch().to_string()).await?
+            crate::artifact::real::peek_and_plan(
+                image_ref,
+                &image::want_arch().to_string(),
+                &overrides,
+                args.insecure,
+            )
+            .await?
         }
         None => None,
     };

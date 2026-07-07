@@ -349,6 +349,38 @@ pub struct RunImageArgs {
     pub binds: Vec<BindMount>,
     #[serde(default)]
     pub auto_remove: bool,
+    #[serde(default)]
+    pub with: Vec<WithOverride>,
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+/// A launch-time `--with` component override; only FileSet overrides are expressible today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithOverride {
+    pub name: String,
+    pub mount_path: String,
+}
+
+impl WithOverride {
+    /// Parse a `--with NAME=/mount/path` flag value.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let (name, mount_path) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --with {spec:?}: expected NAME=/mount/path"))?;
+        if name.is_empty() {
+            return Err(format!("invalid --with {spec:?}: empty component name"));
+        }
+        if !mount_path.starts_with('/') {
+            return Err(format!(
+                "invalid --with {spec:?}: mount path must be absolute (start with `/`)"
+            ));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            mount_path: mount_path.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,6 +682,8 @@ mod tests {
             volumes: Vec::new(),
             binds: Vec::new(),
             auto_remove: false,
+            with: Vec::new(),
+            insecure: false,
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -690,6 +724,8 @@ mod tests {
                 kept_paths: vec![".npmrc".into()],
             }],
             auto_remove: false,
+            with: Vec::new(),
+            insecure: false,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -818,6 +854,8 @@ mod tests {
                 kept_paths: vec![],
             }],
             auto_remove: true,
+            with: Vec::new(),
+            insecure: false,
         }
     }
 
@@ -1151,6 +1189,36 @@ mod tests {
     fn volume_mount_parse_honors_ro_and_rw_suffixes() {
         assert!(VolumeMount::parse("v:/data:ro").unwrap().read_only);
         assert!(!VolumeMount::parse("v:/data:rw").unwrap().read_only);
+    }
+
+    #[test]
+    fn with_override_parse_splits_name_and_absolute_mount() {
+        assert_eq!(
+            WithOverride::parse("skills=/root/.some-agent/skills").unwrap(),
+            WithOverride {
+                name: "skills".into(),
+                mount_path: "/root/.some-agent/skills".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn with_override_parse_rejects_missing_equals_empty_name_and_relative_mount() {
+        assert!(
+            WithOverride::parse("noeq")
+                .unwrap_err()
+                .contains("NAME=/mount")
+        );
+        assert!(
+            WithOverride::parse("=/x")
+                .unwrap_err()
+                .contains("empty component name")
+        );
+        assert!(
+            WithOverride::parse("skills=relative")
+                .unwrap_err()
+                .contains("must be absolute")
+        );
     }
 
     #[test]

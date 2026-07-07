@@ -207,6 +207,21 @@ pub struct RunArgs {
     pub quiet: bool,
 
     #[arg(
+        long = "with",
+        value_name = "NAME=/mount/path",
+        value_parser = lns_ipc::WithOverride::parse,
+        help = "Override a bundle's mounted FileSet at launch (repeatable): NAME=/mount/path lands last, on top of the base image and bundle filesets."
+    )]
+    pub with: Vec<lns_ipc::WithOverride>,
+
+    #[arg(
+        long = "insecure",
+        default_value_t = false,
+        help = "Skip bundle signature verification for this run. Only affects signed-bundle enforcement; plain images are unaffected."
+    )]
+    pub insecure: bool,
+
+    #[arg(
         last = true,
         help = "Command to run in the workload; replaces the image CMD but keeps its ENTRYPOINT (use `--entrypoint` to override or clear that). Accepted after the image or after `--`."
     )]

@@ -188,6 +188,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         volumes,
         binds,
         auto_remove: args.auto_remove,
+        with: args.with,
+        insecure: args.insecure,
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
