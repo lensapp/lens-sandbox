@@ -19,6 +19,7 @@ pub struct FetchedComponent {
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
     pub mount_path: Option<String>,
+    pub resources: Option<crate::artifact::spec::Resources>,
 }
 
 #[derive(Debug)]
@@ -183,6 +184,7 @@ fn compose(
                 "Sandbox" => {
                     sandboxes += 1;
                     resolved.base_image = fetched.base_image.clone().unwrap_or_default();
+                    resolved.resources = fetched.resources.clone();
                 }
                 "Agent" => {
                     agents += 1;

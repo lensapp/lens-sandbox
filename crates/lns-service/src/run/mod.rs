@@ -101,6 +101,30 @@ pub(super) fn bundle_overrides(
         .collect()
 }
 
+/// Size a bundle run's VM: the bundle's Sandbox resources are authoritative unless the user requested a non-default `--cpus`/`-m`. The defaults mirror the CLI's requested-size fallback, so a request equal to them reads as "unset, let the bundle decide".
+pub(super) fn bundle_vm_size(
+    resources: Option<&lns_artifact::spec::Resources>,
+    requested_cpus: u8,
+    requested_mem_mib: usize,
+) -> (u8, usize) {
+    use crate::artifact::resources::{ResourceOverrides, VmSize, resolve_size};
+    const DEFAULT_CPUS: u8 = 1;
+    const DEFAULT_MEM_MIB: usize = 512;
+    let overrides = ResourceOverrides {
+        cpus: (requested_cpus != DEFAULT_CPUS).then_some(requested_cpus),
+        mem_mib: (requested_mem_mib != DEFAULT_MEM_MIB).then_some(requested_mem_mib),
+    };
+    let size = resolve_size(
+        resources,
+        &overrides,
+        VmSize {
+            cpus: DEFAULT_CPUS,
+            mem_mib: DEFAULT_MEM_MIB,
+        },
+    );
+    (size.cpus, size.mem_mib)
+}
+
 /// Merge a resolved bundle's workload with the user's run args: boot the sandbox base image, take the agent command unless the user gave one after `--`, and layer env base-image < bundle-agent < user `-e`.
 pub(super) fn bundle_launch(
     workload: &crate::artifact::assembly::AssembledWorkload,
@@ -148,6 +172,31 @@ mod tests {
     use super::*;
     use lns_ipc::LogLevel;
     use tokio::sync::mpsc;
+
+    fn resources(cpu: i64, mem_mib: i64) -> lns_artifact::spec::Resources {
+        lns_artifact::spec::Resources {
+            cpu: Some(lns_artifact::spec::Quantity::Int(cpu)),
+            memory: Some(lns_artifact::spec::Quantity::Int(mem_mib)),
+        }
+    }
+
+    #[test]
+    fn bundle_vm_size_uses_the_sandbox_resources_when_no_flag_overrides() {
+        let res = resources(4, 2048);
+        assert_eq!(bundle_vm_size(Some(&res), 1, 512), (4, 2048));
+    }
+
+    #[test]
+    fn bundle_vm_size_lets_a_non_default_request_override_the_bundle() {
+        let res = resources(4, 2048);
+        assert_eq!(bundle_vm_size(Some(&res), 2, 1024), (2, 1024));
+    }
+
+    #[test]
+    fn bundle_vm_size_falls_back_to_the_request_when_the_bundle_is_silent() {
+        assert_eq!(bundle_vm_size(None, 1, 512), (1, 512));
+        assert_eq!(bundle_vm_size(None, 8, 4096), (8, 4096));
+    }
 
     #[tokio::test]
     async fn emit_completion_ok_zero_sends_only_run_exit_zero() {

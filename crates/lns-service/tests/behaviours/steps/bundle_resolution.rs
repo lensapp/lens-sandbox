@@ -13,7 +13,7 @@ fn component(kind: &str) -> FetchedComponent {
 }
 
 fn present(kind: &str) -> Canned {
-    Canned::Present(component(kind))
+    Canned::present(component(kind))
 }
 
 fn sandbox_component() -> FetchedComponent {
@@ -49,11 +49,11 @@ async fn well_formed(world: &mut BehaviourWorld) {
     fileset.name = "skills".into();
     fileset.mount_path = Some("/root/.some-agent/skills".into());
     rig.canned
-        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+        .insert("reg/base:1".into(), Canned::present(sandbox_component()));
     rig.canned
-        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+        .insert("reg/agent:1".into(), Canned::present(agent_component()));
     rig.canned
-        .insert("reg/skills:1".into(), Canned::Present(fileset));
+        .insert("reg/skills:1".into(), Canned::present(fileset));
     rig.canned.insert("reg/policy:1".into(), present("Policy"));
 }
 
@@ -69,9 +69,9 @@ async fn shared_fileset(world: &mut BehaviourWorld) {
     let mut agent = agent_component();
     agent.references = vec!["reg/shared:1".into()];
     rig.canned
-        .insert("reg/base:1".into(), Canned::Present(sandbox));
+        .insert("reg/base:1".into(), Canned::present(sandbox));
     rig.canned
-        .insert("reg/agent:1".into(), Canned::Present(agent));
+        .insert("reg/agent:1".into(), Canned::present(agent));
     rig.canned.insert("reg/shared:1".into(), present("FileSet"));
 }
 
@@ -80,7 +80,7 @@ async fn no_sandbox(world: &mut BehaviourWorld) {
     let rig = world.resolve();
     rig.components = vec![("agent".into(), "reg/agent:1".into())];
     rig.canned
-        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+        .insert("reg/agent:1".into(), Canned::present(agent_component()));
 }
 
 #[given("a bundle with two sandboxes")]
@@ -92,11 +92,11 @@ async fn two_sandboxes(world: &mut BehaviourWorld) {
         ("agent".into(), "reg/agent:1".into()),
     ];
     rig.canned
-        .insert("reg/base-a:1".into(), Canned::Present(sandbox_component()));
+        .insert("reg/base-a:1".into(), Canned::present(sandbox_component()));
     rig.canned
-        .insert("reg/base-b:1".into(), Canned::Present(sandbox_component()));
+        .insert("reg/base-b:1".into(), Canned::present(sandbox_component()));
     rig.canned
-        .insert("reg/agent:1".into(), Canned::Present(agent_component()));
+        .insert("reg/agent:1".into(), Canned::present(agent_component()));
 }
 
 #[given("a bundle with no agent")]
@@ -104,7 +104,7 @@ async fn no_agent(world: &mut BehaviourWorld) {
     let rig = world.resolve();
     rig.components = vec![("sandbox".into(), "reg/base:1".into())];
     rig.canned
-        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+        .insert("reg/base:1".into(), Canned::present(sandbox_component()));
 }
 
 #[given("a bundle with two agents")]
@@ -116,11 +116,11 @@ async fn two_agents(world: &mut BehaviourWorld) {
         ("agent-b".into(), "reg/agent-b:1".into()),
     ];
     rig.canned
-        .insert("reg/base:1".into(), Canned::Present(sandbox_component()));
+        .insert("reg/base:1".into(), Canned::present(sandbox_component()));
     rig.canned
-        .insert("reg/agent-a:1".into(), Canned::Present(agent_component()));
+        .insert("reg/agent-a:1".into(), Canned::present(agent_component()));
     rig.canned
-        .insert("reg/agent-b:1".into(), Canned::Present(agent_component()));
+        .insert("reg/agent-b:1".into(), Canned::present(agent_component()));
 }
 
 #[given(
@@ -160,7 +160,7 @@ async fn foreign_arch(world: &mut BehaviourWorld) {
     let mut sandbox = sandbox_component();
     sandbox.arch = Some("other-arch".into());
     rig.canned
-        .insert("reg/base:1".into(), Canned::Present(sandbox));
+        .insert("reg/base:1".into(), Canned::present(sandbox));
 }
 
 #[given("a bundle whose component graph contains a reference cycle")]
@@ -172,9 +172,9 @@ async fn reference_cycle(world: &mut BehaviourWorld) {
     let mut fileset = component("FileSet");
     fileset.references = vec!["reg/a:1".into()];
     rig.canned
-        .insert("reg/a:1".into(), Canned::Present(sandbox));
+        .insert("reg/a:1".into(), Canned::present(sandbox));
     rig.canned
-        .insert("reg/b:1".into(), Canned::Present(fileset));
+        .insert("reg/b:1".into(), Canned::present(fileset));
 }
 
 #[given(regex = r#"^a bundle declaring two components both named "([^"]+)"$"#)]

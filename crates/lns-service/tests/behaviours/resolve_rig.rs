@@ -4,10 +4,16 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum Canned {
-    Present(FetchedComponent),
+    Present(Box<FetchedComponent>),
     NeedsLogin { host: String },
     UnsupportedKind { media_type: String },
     Invalid { reason: String },
+}
+
+impl Canned {
+    pub fn present(component: FetchedComponent) -> Self {
+        Self::Present(Box::new(component))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -38,7 +44,7 @@ impl ComponentFetcher for FakeFetcher<'_> {
     async fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
         self.calls.lock().unwrap().push(reference.to_string());
         match self.canned.get(reference) {
-            Some(Canned::Present(component)) => Ok(component.clone()),
+            Some(Canned::Present(component)) => Ok(component.as_ref().clone()),
             Some(Canned::NeedsLogin { host }) => Err(FetchError::NeedsLogin { host: host.clone() }),
             Some(Canned::UnsupportedKind { media_type }) => Err(FetchError::UnsupportedKind {
                 media_type: media_type.clone(),

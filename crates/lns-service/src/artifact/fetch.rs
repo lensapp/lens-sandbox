@@ -23,6 +23,7 @@ pub fn to_fetched(
             let sandbox = spec::parse_sandbox(config_json)?;
             fetched.name = sandbox.metadata.name;
             fetched.base_image = sandbox.spec.base_image;
+            fetched.resources = sandbox.spec.resources;
         }
         Kind::Agent => {
             let agent = spec::parse_agent(config_json)?;

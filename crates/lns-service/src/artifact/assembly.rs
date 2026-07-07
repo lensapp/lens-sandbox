@@ -13,6 +13,7 @@ pub struct ResolvedBundle {
     pub filesets: Vec<ResolvedFileset>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    pub resources: Option<crate::artifact::spec::Resources>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ pub struct AssembledWorkload {
     pub base_image: String,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    pub resources: Option<crate::artifact::spec::Resources>,
     ownership: BTreeMap<String, FileSource>,
 }
 
@@ -55,6 +57,7 @@ pub fn assemble(bundle: &ResolvedBundle) -> AssembledWorkload {
         base_image: bundle.base_image.clone(),
         command: bundle.command.clone(),
         env: bundle.env.clone(),
+        resources: bundle.resources.clone(),
         ownership,
     }
 }

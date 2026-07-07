@@ -21,7 +21,7 @@ fn present(world: &mut BehaviourWorld, reference: &str, component: FetchedCompon
     world
         .artifact()
         .canned
-        .insert(reference.to_string(), Canned::Present(component));
+        .insert(reference.to_string(), Canned::present(component));
 }
 
 #[given(regex = r#"^a bundle declaring a fileset "([^"]+)" mounting "([^"]+)"$"#)]

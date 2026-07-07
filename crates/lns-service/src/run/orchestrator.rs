@@ -280,10 +280,17 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
+    let (cpus, memory_mib) = super::bundle_vm_size(
+        bundle.as_ref().and_then(|b| b.resources.as_ref()),
+        args.cpus,
+        args.mem,
+    );
+    crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
+
     let spec = vm::VmSpec {
         run_id: run_id.clone(),
-        cpus: args.cpus,
-        memory_mib: args.mem,
+        cpus,
+        memory_mib,
         kernel: kernel_path,
         initrd,
         composefs_descriptor: descriptor.path.clone(),
