@@ -430,7 +430,6 @@ pub struct VolumeMount {
 
 impl VolumeMount {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let read_only = spec.ends_with(":ro");
         let body = spec
             .strip_suffix(":ro")
             .or_else(|| spec.strip_suffix(":rw"))
@@ -443,7 +442,7 @@ impl VolumeMount {
         Ok(Self {
             name: name.to_string(),
             target: target.to_string(),
-            read_only,
+            read_only: spec.ends_with(":ro"),
         })
     }
 }

@@ -21,19 +21,32 @@ pub(super) fn check_and_report(raw: &[u8], path: &Path, writer: &mut impl Write)
             return Ok(1);
         }
     };
-    match lns_artifact::validate::validate(&json) {
-        Ok(()) => {
-            writeln!(writer, "✔ {display}: valid")?;
-            Ok(0)
+    let mut problems = lns_artifact::validate::validate(&json)
+        .err()
+        .unwrap_or_default();
+    problems.extend(policy_network_problem(&json));
+    if problems.is_empty() {
+        writeln!(writer, "✔ {display}: valid")?;
+        Ok(0)
+    } else {
+        writeln!(writer, "✖ {display}: {} problem(s)", problems.len())?;
+        for problem in &problems {
+            writeln!(writer, "  - {problem}")?;
         }
-        Err(problems) => {
-            writeln!(writer, "✖ {display}: {} problem(s)", problems.len())?;
-            for problem in &problems {
-                writeln!(writer, "  - {problem}")?;
-            }
-            Ok(1)
-        }
+        Ok(1)
     }
+}
+
+/// A Policy manifest's network rules aren't modelled by the shared schema validator, so check them here at build (fail-closed before push) against the runtime policy type. Returns a problem only for a Policy whose `spec.network` is present but malformed.
+fn policy_network_problem(json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    if value.get("kind").and_then(|k| k.as_str()) != Some("Policy") {
+        return None;
+    }
+    let network = value.get("spec").and_then(|spec| spec.get("network"))?;
+    serde_json::from_value::<lns_policy::NetworkPolicy>(network.clone())
+        .err()
+        .map(|e| format!("malformed policy network: {e}"))
 }
 
 /// Build (validate + assemble) a manifest into an OCI artifact, printing the digest. Returns the artifact for a subsequent push, or `None` when the build failed.
@@ -49,6 +62,10 @@ pub(super) fn build_and_report(
             return Ok(None);
         }
     };
+    if let Some(problem) = policy_network_problem(&json) {
+        writeln!(writer, "✖ {problem}")?;
+        return Ok(None);
+    }
     match lns_artifact::build::build_artifact(&json) {
         Ok(built) => {
             let pins = match bundle_pins(&json) {
@@ -177,6 +194,39 @@ mod tests {
         let (code, out) = check(b": : not : yaml :");
         assert_eq!(code, 1);
         assert!(out.contains("not valid YAML or JSON"), "got: {out}");
+    }
+
+    fn policy_yaml(default_verdict: &str) -> String {
+        format!(
+            "apiVersion: lens.dev/v1alpha1\nkind: Policy\nmetadata:\n  name: some-policy\nspec:\n  network:\n    defaultVerdict: {default_verdict}\n"
+        )
+    }
+
+    #[test]
+    fn check_flags_a_malformed_policy_network_the_shared_validator_misses() {
+        let (code, out) = check(policy_yaml("maybe").as_bytes());
+        assert_eq!(code, 1);
+        assert!(out.contains("malformed policy network"), "got: {out}");
+    }
+
+    #[test]
+    fn check_passes_a_well_formed_policy_network() {
+        let (code, out) = check(policy_yaml("ask").as_bytes());
+        assert_eq!(code, 0, "got: {out}");
+        assert!(out.contains("valid"), "got: {out}");
+    }
+
+    #[test]
+    fn build_refuses_a_malformed_policy_network_before_push() {
+        let mut out: Vec<u8> = Vec::new();
+        let built = build_and_report(policy_yaml("maybe").as_bytes(), None, &mut out).unwrap();
+        assert!(built.is_none(), "a malformed policy must not build");
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("malformed policy network"),
+            "must be refused at build, before push"
+        );
     }
 
     #[test]
