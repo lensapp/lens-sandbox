@@ -108,6 +108,22 @@ mod tests {
     }
 
     #[test]
+    fn a_port_event_surfaces_as_a_per_run_port_row() {
+        let row = read(&obj(&lns_ocsf::port_publish(
+            &octx("r"),
+            "127.0.0.1",
+            3000,
+            3000,
+            "tcp",
+            false,
+        )))
+        .unwrap();
+        assert_eq!(row.kind, "port");
+        assert_eq!(row.detail, "published 127.0.0.1:3000 → guest:3000/tcp");
+        assert!(row.integration.is_none());
+    }
+
+    #[test]
     fn microvm_reads_the_device_name_for_scope_resolution() {
         assert_eq!(
             microvm(&obj(&lns_ocsf::volume_mount(&octx("r"), "d", "/d"))),

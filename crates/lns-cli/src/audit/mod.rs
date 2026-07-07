@@ -27,6 +27,7 @@ pub enum KindArg {
     Env,
     Volume,
     Bind,
+    Port,
     Approval,
     Connection,
     Credential,
@@ -40,6 +41,7 @@ impl KindArg {
             KindArg::Env => "env",
             KindArg::Volume => "volume",
             KindArg::Bind => "bind",
+            KindArg::Port => "port",
             KindArg::Approval => "approval",
             KindArg::Connection => "connection",
             KindArg::Credential => "credential",
@@ -183,6 +185,7 @@ mod tests {
         assert_eq!(KindArg::Env.label(), "env");
         assert_eq!(KindArg::Volume.label(), "volume");
         assert_eq!(KindArg::Bind.label(), "bind");
+        assert_eq!(KindArg::Port.label(), "port");
         assert_eq!(KindArg::Approval.label(), "approval");
         assert_eq!(KindArg::Connection.label(), "connection");
         assert_eq!(KindArg::Credential.label(), "credential");

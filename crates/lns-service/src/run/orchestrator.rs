@@ -52,10 +52,23 @@ async fn orchestrate(
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
+    let forward_specs = crate::forward::plan(&args.published_ports);
     let forwards = crate::forward::establish(
         std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id.clone())),
-        &crate::forward::plan(&args.published_ports),
+        &forward_specs,
     )?;
+    for spec in &forward_specs {
+        crate::audit::record_port_published(
+            &run_id,
+            &microvm,
+            &spec.bind.ip().to_string(),
+            spec.bind.port(),
+            spec.container_port,
+            protocol_word(spec.protocol),
+            !spec.bind.ip().is_loopback(),
+            &crate::oauth::RealClock,
+        )?;
+    }
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
@@ -359,4 +372,11 @@ async fn orchestrate(
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
+}
+
+fn protocol_word(protocol: lns_ipc::Protocol) -> &'static str {
+    match protocol {
+        lns_ipc::Protocol::Tcp => "tcp",
+        lns_ipc::Protocol::Udp => "udp",
+    }
 }
