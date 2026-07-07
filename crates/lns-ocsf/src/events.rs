@@ -384,8 +384,10 @@ pub fn port_publish(
     } else {
         severity::INFORMATIONAL
     };
-    let bind = format!("{host_ip}:{host_port}");
-    let mut message = format!("published {bind} → guest:{container_port}/{protocol}");
+    let bind = match host_ip.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, host_port).to_string(),
+        Err(_) => format!("{host_ip}:{host_port}"),
+    };
     if exposed {
         message.push_str(" (exposed: non-loopback bind)");
     }
