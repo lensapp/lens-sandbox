@@ -705,4 +705,18 @@ mod tests {
             assert!(err.contains("invalid -p spec"), "{spec:?} -> {err}");
         }
     }
+
+    #[test]
+    fn parse_pull_policy_accepts_each_known_value() {
+        assert_eq!(parse_pull_policy("always").unwrap(), PullPolicy::Always);
+        assert_eq!(parse_pull_policy("auto").unwrap(), PullPolicy::Auto);
+        assert_eq!(parse_pull_policy("never").unwrap(), PullPolicy::Never);
+    }
+
+    #[test]
+    fn parse_pull_policy_rejects_an_unknown_value() {
+        let err = parse_pull_policy("sometimes").unwrap_err();
+        assert!(err.contains("invalid pull policy `sometimes`"), "{err}");
+        assert!(err.contains("`always`, `auto`, or `never`"), "{err}");
+    }
 }
