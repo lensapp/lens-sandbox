@@ -28,9 +28,18 @@ pub struct Policy {
 pub struct NetworkPolicy {
     #[serde(default)]
     pub allowed_routes: Vec<RouteRule>,
+    #[serde(default = "default_ask")]
     pub default_verdict: Verdict,
-    #[serde(default, skip_serializing_if = "is_direct_transport")]
+    #[serde(default = "default_direct")]
     pub default_transport: Transport,
+}
+
+fn default_ask() -> Verdict {
+    Verdict::Ask
+}
+
+fn default_direct() -> Transport {
+    Transport::Direct
 }
 
 impl Default for NetworkPolicy {
@@ -223,6 +232,13 @@ mod tests {
         assert_eq!(p.network.default_verdict, Verdict::Ask);
         assert_eq!(p.network.default_transport, Transport::Direct);
         assert!(p.network.allowed_routes.is_empty());
+    }
+
+    #[test]
+    fn a_network_section_omitting_the_defaults_parses_to_ask_and_direct() {
+        let net: NetworkPolicy = serde_yaml::from_str("allowedRoutes: []\n").unwrap();
+        assert_eq!(net.default_verdict, Verdict::Ask);
+        assert_eq!(net.default_transport, Transport::Direct);
     }
 
     #[test]

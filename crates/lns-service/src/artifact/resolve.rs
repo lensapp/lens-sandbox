@@ -20,6 +20,7 @@ pub struct FetchedComponent {
     pub env: BTreeMap<String, String>,
     pub mount_path: Option<String>,
     pub resources: Option<crate::artifact::spec::Resources>,
+    pub policy: Option<lns_policy::Policy>,
 }
 
 #[derive(Debug)]
@@ -195,6 +196,7 @@ fn compose(
                     name: fetched.name.clone(),
                     paths: fetched.mount_path.clone().into_iter().collect(),
                 }),
+                "Policy" => resolved.policy = fetched.policy.clone(),
                 _ => {}
             }
         }

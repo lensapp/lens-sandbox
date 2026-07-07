@@ -36,11 +36,26 @@ pub fn to_fetched(
             fetched.name = fileset.metadata.name;
             fetched.mount_path = Some(fileset.mount.path);
         }
-        Kind::AgentSystem | Kind::Policy | Kind::Integration => {
+        Kind::Policy => {
+            spec::validate_envelope(config_json, kind)?;
+            fetched.policy = parse_network_policy(config_json);
+        }
+        Kind::AgentSystem | Kind::Integration => {
             spec::validate_envelope(config_json, kind)?;
         }
     }
     Ok(fetched)
+}
+
+/// Read a Policy component's `spec.network` into an `lns_policy::Policy`; integration refs are resolved separately, so this carries only the network rules.
+fn parse_network_policy(config_json: &[u8]) -> Option<lns_policy::Policy> {
+    let doc: serde_json::Value = serde_json::from_slice(config_json).ok()?;
+    let network = doc.get("spec")?.get("network")?;
+    let network: lns_policy::NetworkPolicy = serde_json::from_value(network.clone()).ok()?;
+    Some(lns_policy::Policy {
+        network,
+        integrations: Vec::new(),
+    })
 }
 
 fn classify_fetch_error(host: &str, err: &anyhow::Error) -> FetchError {
@@ -191,6 +206,41 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!("@sha256:{}", "a".repeat(64)))
         );
+    }
+
+    #[test]
+    fn maps_a_policy_config_to_its_network_rules() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"allowedRoutes":[{"match":"api.example.test","verdict":"deny","transport":"direct"}],"defaultVerdict":"ask"}}}"#;
+        let fetched = to_fetched(Some(&Kind::Policy.artifact_type()), None, json).unwrap();
+        assert_eq!(fetched.kind, "Policy");
+        let policy = fetched
+            .policy
+            .expect("a Policy component carries its network rules");
+        assert_eq!(policy.network.allowed_routes.len(), 1);
+        assert_eq!(
+            policy.network.allowed_routes[0].match_pattern,
+            "api.example.test"
+        );
+        assert_eq!(
+            policy.network.allowed_routes[0].verdict,
+            lns_policy::Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn a_policy_config_without_a_network_section_carries_no_rules() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{}}"#;
+        let fetched = to_fetched(Some(&Kind::Policy.artifact_type()), None, json).unwrap();
+        assert!(fetched.policy.is_none());
+    }
+
+    #[test]
+    fn maps_an_integration_config_by_validating_its_envelope_only() {
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Integration","metadata":{"name":"some-integration"},"spec":{}}"#;
+        let fetched = to_fetched(Some(&Kind::Integration.artifact_type()), None, json).unwrap();
+        assert_eq!(fetched.kind, "Integration");
+        assert!(fetched.policy.is_none());
+        assert!(fetched.base_image.is_none());
     }
 
     #[test]

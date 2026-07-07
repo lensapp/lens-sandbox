@@ -1,4 +1,4 @@
-use lns_policy::{Policy, Verdict};
+use lns_policy::{NetworkPolicy, Policy, RouteRule, Verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySource {
@@ -169,10 +169,56 @@ impl LayeredPolicy {
     }
 }
 
+/// Merge a bundle's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: every layer's denies are ordered first so a first-match gate stays deny-dominant, `defaultVerdict` never exceeds `ask` (a permissive bundle default is backstopped, a `deny` default is honored), and connected integrations union.
+pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
+    let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
+    let mut routes: Vec<RouteRule> = Vec::new();
+    let mut push_unique = |rule: &RouteRule| {
+        if !routes.contains(rule) {
+            routes.push(rule.clone());
+        }
+    };
+    for layer in &layers {
+        for rule in &layer.network.allowed_routes {
+            if rule.verdict == Verdict::Deny {
+                push_unique(rule);
+            }
+        }
+    }
+    for layer in &layers {
+        for rule in &layer.network.allowed_routes {
+            if rule.verdict != Verdict::Deny {
+                push_unique(rule);
+            }
+        }
+    }
+    let default_verdict = if layers
+        .iter()
+        .any(|l| l.network.default_verdict == Verdict::Deny)
+    {
+        Verdict::Deny
+    } else {
+        Verdict::Ask
+    };
+    let mut integrations = overlay.integrations.clone();
+    for id in baseline.into_iter().flat_map(|b| &b.integrations) {
+        if !integrations.contains(id) {
+            integrations.push(id.clone());
+        }
+    }
+    Policy {
+        network: NetworkPolicy {
+            allowed_routes: routes,
+            default_verdict,
+            default_transport: overlay.network.default_transport,
+        },
+        integrations,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::RouteRule;
 
     fn allow(host: &str) -> Policy {
         let mut p = Policy::default();
@@ -254,5 +300,73 @@ mod tests {
             overlay: Some(allow("*")),
         };
         assert_eq!(layered.decide("api.example.test"), LayeredDecision::Allowed);
+    }
+
+    fn deny(host: &str) -> Policy {
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::deny_host(host));
+        p
+    }
+
+    #[test]
+    fn merge_orders_every_layers_denies_before_allows() {
+        let baseline = allow("api.example.test");
+        let overlay = deny("api.example.test");
+        let merged = merge_effective(Some(&baseline), &overlay);
+        let routes = &merged.network.allowed_routes;
+        let deny_idx = routes.iter().position(|r| r.verdict == Verdict::Deny);
+        let allow_idx = routes.iter().position(|r| r.verdict == Verdict::Allow);
+        assert!(
+            deny_idx < allow_idx,
+            "a first-match gate must see the deny first: {routes:?}"
+        );
+        assert_eq!(merged.network.default_verdict, Verdict::Ask);
+    }
+
+    #[test]
+    fn merge_backstops_a_permissive_bundle_default_to_ask() {
+        let mut baseline = Policy::default();
+        baseline.network.default_verdict = Verdict::Allow;
+        let merged = merge_effective(Some(&baseline), &Policy::default());
+        assert_eq!(
+            merged.network.default_verdict,
+            Verdict::Ask,
+            "a bundle's allow-by-default must never survive the merge"
+        );
+    }
+
+    #[test]
+    fn merge_honors_a_deny_default_and_unions_integrations() {
+        let mut overlay = Policy::default();
+        overlay.network.default_verdict = Verdict::Deny;
+        overlay.connect("some-overlay-integration");
+        let mut baseline = Policy::default();
+        baseline.connect("some-bundle-integration");
+        let merged = merge_effective(Some(&baseline), &overlay);
+        assert_eq!(merged.network.default_verdict, Verdict::Deny);
+        assert!(
+            merged
+                .integrations
+                .contains(&"some-overlay-integration".to_string())
+        );
+        assert!(
+            merged
+                .integrations
+                .contains(&"some-bundle-integration".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_of_a_plain_overlay_with_no_baseline_keeps_the_overlay_rules() {
+        let overlay = allow("api.example.test");
+        let merged = merge_effective(None, &overlay);
+        assert!(
+            merged
+                .network
+                .allowed_routes
+                .iter()
+                .any(|r| r.match_pattern == "api.example.test")
+        );
+        assert_eq!(merged.network.default_verdict, Verdict::Ask);
     }
 }

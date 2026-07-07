@@ -74,6 +74,7 @@ impl SupervisorSession {
         run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
+        bundle_policy: Option<&lns_policy::Policy>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
     ) -> Result<Option<Self>> {
@@ -84,6 +85,7 @@ impl SupervisorSession {
             run_id,
             microvm_name,
             policy_path,
+            bundle_policy,
             guest_tools_root,
             user_env,
         )
@@ -287,6 +289,7 @@ mod tests {
         let result = SupervisorSession::start_if_policy(
             "aa42".to_string(),
             "vm-42".into(),
+            None,
             None,
             PathBuf::from("/tmp"),
             vec![],
@@ -538,12 +541,49 @@ mod tests {
             "deadbeef00000000000000000000aa99".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
+            None,
             d.path().to_path_buf(),
             vec![],
         )
         .await
         .expect("start_if_policy");
         let session = result.expect("Some(session) with policy set");
+        assert_eq!(session.assets.supervisor_bin, supervisor_bin);
+        drop(session);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn start_if_policy_merges_a_bundle_policy_floor_under_the_local_overlay() {
+        use crate::approval_flow::window::{self, WindowState};
+        use crate::test_env::EnvVarGuard;
+        window::install(WindowState::new());
+        let d = tempfile::TempDir::new().expect("tempdir");
+        let _home = EnvVarGuard::set("HOME", d.path());
+        let supervisor_bin = d.path().join("supervisor.real");
+        std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
+        let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
+        let policy_path = d.path().join("lns-policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+        )
+        .expect("policy");
+        let mut bundle_policy = lns_policy::Policy::default();
+        bundle_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
+
+        let result = SupervisorSession::start_if_policy(
+            "deadbeef00000000000000000000aa98".to_string(),
+            "calm-finch".into(),
+            Some(&policy_path),
+            Some(&bundle_policy),
+            d.path().to_path_buf(),
+            vec![],
+        )
+        .await
+        .expect("start_if_policy");
+        let session = result.expect("Some(session) with a bundle policy floor");
         assert_eq!(session.assets.supervisor_bin, supervisor_bin);
         drop(session);
         tokio::task::yield_now().await;

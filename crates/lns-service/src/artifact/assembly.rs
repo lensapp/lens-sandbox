@@ -14,6 +14,7 @@ pub struct ResolvedBundle {
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
+    pub policy: Option<lns_policy::Policy>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,7 @@ pub struct AssembledWorkload {
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
+    pub policy: Option<lns_policy::Policy>,
     ownership: BTreeMap<String, FileSource>,
 }
 
@@ -58,6 +60,7 @@ pub fn assemble(bundle: &ResolvedBundle) -> AssembledWorkload {
         command: bundle.command.clone(),
         env: bundle.env.clone(),
         resources: bundle.resources.clone(),
+        policy: bundle.policy.clone(),
         ownership,
     }
 }

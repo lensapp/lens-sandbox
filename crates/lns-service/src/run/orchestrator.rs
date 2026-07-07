@@ -115,6 +115,7 @@ async fn orchestrate(
                 run_id.clone(),
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
+                bundle.as_ref().and_then(|b| b.policy.as_ref()),
                 guest_tools.root.clone(),
                 args.env.clone(),
             ),

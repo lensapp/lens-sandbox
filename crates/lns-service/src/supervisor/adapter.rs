@@ -464,15 +464,25 @@ async fn start_credential_subsystem(
     Ok((credential_session, credential_watcher))
 }
 
+/// The run's initial running policy: the local overlay file, with a bundle's shipped policy merged under it as the deny-dominant baseline. Approvals still persist to the local file only.
+fn effective_running_policy(policy_path: &Path, bundle_policy: Option<&Policy>) -> Result<Policy> {
+    let overlay = Policy::load_or_default(policy_path)
+        .with_context(|| format!("loading policy {}", policy_path.display()))?;
+    Ok(match bundle_policy {
+        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &overlay),
+        None => overlay,
+    })
+}
+
 pub(super) async fn start(
     run_id: String,
     microvm_name: String,
     policy_path: &Path,
+    bundle_policy: Option<&Policy>,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
-    let mut policy = Policy::load_or_default(policy_path)
-        .with_context(|| format!("loading policy {}", policy_path.display()))?;
+    let mut policy = effective_running_policy(policy_path, bundle_policy)?;
     // Applied integrations resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
@@ -512,6 +522,9 @@ pub(super) async fn start(
     );
 
     session.set_integration_route_deriver(make_integration_route_deriver(catalog.clone()));
+    if let Some(baseline) = bundle_policy {
+        session.set_policy_floor(baseline.clone());
+    }
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
