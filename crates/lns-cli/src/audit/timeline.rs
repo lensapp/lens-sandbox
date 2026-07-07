@@ -197,6 +197,10 @@ mod tests {
         lns_ocsf::volume_mount(&octx(run, ts), name, target).to_string()
     }
 
+    fn port(run: &str, ts: &str) -> String {
+        lns_ocsf::port_publish(&octx(run, ts), "127.0.0.1", 3000, 3000, "tcp", false).to_string()
+    }
+
     impl Fixture {
         fn new() -> Self {
             let home = tempfile::TempDir::new().unwrap();
@@ -286,6 +290,7 @@ mod tests {
             RUN,
             &[
                 run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"]),
+                port(RUN, "2026-06-29T13:10:00Z"),
                 egress(
                     RUN,
                     "2026-06-29T13:30:00Z",
@@ -301,6 +306,10 @@ mod tests {
         let text = fix.render(&args());
         assert!(text.contains("WHEN") && text.contains("DETAIL"), "{text}");
         assert!(text.contains("injected: FOO"), "{text}");
+        assert!(
+            text.contains("published 127.0.0.1:3000 → guest:3000/tcp"),
+            "{text}"
+        );
         assert!(
             text.contains("GET api.example.test:443 — allowed once"),
             "{text}"
@@ -506,6 +515,19 @@ mod tests {
         let rows = fix.collect(&filtered).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "credential");
+    }
+
+    #[test]
+    fn the_kind_filter_accepts_port_for_published_port_events() {
+        let fix = Fixture::new();
+        fix.write_run(RUN, &[port(RUN, "2026-06-29T13:10:00Z")]);
+        let filtered = AuditArgs {
+            kind: Some(KindArg::Port),
+            ..args()
+        };
+        let rows = fix.collect(&filtered).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "port");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use lns_ipc::PortPublish;
+use lns_ipc::{PortPublish, Protocol};
 
 pub mod real;
 
@@ -9,6 +9,7 @@ pub mod real;
 pub struct ForwardSpec {
     pub bind: SocketAddr,
     pub container_port: u16,
+    pub protocol: Protocol,
 }
 
 pub fn plan(published: &[PortPublish]) -> Vec<ForwardSpec> {
@@ -17,6 +18,7 @@ pub fn plan(published: &[PortPublish]) -> Vec<ForwardSpec> {
         .map(|p| ForwardSpec {
             bind: SocketAddr::new(p.host_ip, p.host_port),
             container_port: p.container_port,
+            protocol: p.protocol,
         })
         .collect()
 }
@@ -185,6 +187,7 @@ mod tests {
             vec![ForwardSpec {
                 bind: addr("127.0.0.1", 8080),
                 container_port: 3003,
+                protocol: Protocol::Tcp,
             }]
         );
     }

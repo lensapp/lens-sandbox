@@ -7,6 +7,7 @@ const CLOUD_PROVIDER: &str = "lens-sandbox";
 
 pub mod class {
     pub const AUTHENTICATION: u32 = 3002;
+    pub const NETWORK_ACTIVITY: u32 = 4001;
     pub const HTTP_ACTIVITY: u32 = 4002;
     pub const PROCESS_ACTIVITY: u32 = 1007;
     pub const FILE_ACTIVITY: u32 = 1001;
@@ -23,6 +24,8 @@ pub mod category {
 pub mod activity {
     pub const LOGON: u16 = 1;
     pub const FINDING_CREATE: u16 = 1;
+    pub const NETWORK_OPEN: u16 = 1;
+    pub const NETWORK_CLOSE: u16 = 2;
     pub const PROCESS_LAUNCH: u16 = 1;
     pub const FILE_MOUNT: u16 = 12;
 }
@@ -71,6 +74,7 @@ fn class_name(class_uid: u32) -> &'static str {
         class::PROCESS_ACTIVITY => "Process Activity",
         class::DETECTION_FINDING => "Detection Finding",
         class::AUTHENTICATION => "Authentication",
+        class::NETWORK_ACTIVITY => "Network Activity",
         class::HTTP_ACTIVITY => "HTTP Activity",
         _ => "Unknown",
     }
@@ -92,6 +96,8 @@ fn activity_name(class_uid: u32, activity_id: u16) -> &'static str {
         (class::DETECTION_FINDING, activity::FINDING_CREATE) => "Create",
         (class::PROCESS_ACTIVITY, activity::PROCESS_LAUNCH) => "Launch",
         (class::FILE_ACTIVITY, activity::FILE_MOUNT) => "Mount",
+        (class::NETWORK_ACTIVITY, activity::NETWORK_OPEN) => "Open",
+        (class::NETWORK_ACTIVITY, activity::NETWORK_CLOSE) => "Close",
         (class::HTTP_ACTIVITY, id) => http_activity_name(id),
         _ => "Unknown",
     }
@@ -291,6 +297,7 @@ mod tests {
         assert_eq!(class_name(class::PROCESS_ACTIVITY), "Process Activity");
         assert_eq!(class_name(class::DETECTION_FINDING), "Detection Finding");
         assert_eq!(class_name(class::AUTHENTICATION), "Authentication");
+        assert_eq!(class_name(class::NETWORK_ACTIVITY), "Network Activity");
         assert_eq!(class_name(class::HTTP_ACTIVITY), "HTTP Activity");
         assert_eq!(class_name(9999), "Unknown");
 
@@ -318,6 +325,14 @@ mod tests {
         assert_eq!(
             activity_name(class::FILE_ACTIVITY, activity::FILE_MOUNT),
             "Mount"
+        );
+        assert_eq!(
+            activity_name(class::NETWORK_ACTIVITY, activity::NETWORK_OPEN),
+            "Open"
+        );
+        assert_eq!(
+            activity_name(class::NETWORK_ACTIVITY, activity::NETWORK_CLOSE),
+            "Close"
         );
         assert_eq!(activity_name(class::HTTP_ACTIVITY, 3), "Get");
         assert_eq!(activity_name(9999, 0), "Unknown");

@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 
 use super::{AcceptAction, ForwardError, ForwardSpec, PortForwarder, classify_accept_error};
 use crate::run_registry;
+use lns_ipc::Protocol;
 use lns_session::{FORWARD_PORT, ForwardHeader, encode_frame};
 
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(20);
@@ -31,6 +32,11 @@ impl VsockForwarder {
 
 impl PortForwarder for VsockForwarder {
     fn bind(&self, spec: &ForwardSpec) -> Result<(), ForwardError> {
+        if spec.protocol != Protocol::Tcp {
+            return Err(ForwardError::Other(
+                "udp publishing is not yet supported".into(),
+            ));
+        }
         let std_listener = std::net::TcpListener::bind(spec.bind).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 ForwardError::AddrInUse(spec.bind)

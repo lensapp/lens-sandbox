@@ -400,6 +400,45 @@ pub fn sandbox_run(
     ev.build()
 }
 
+pub fn port_publish(
+    ctx: &Context,
+    host_ip: &str,
+    host_port: u16,
+    container_port: u16,
+    protocol: &str,
+    exposed: bool,
+) -> Value {
+    let sev = if exposed {
+        severity::MEDIUM
+    } else {
+        severity::INFORMATIONAL
+    };
+    let bind = format!("{host_ip}:{host_port}");
+    let mut message = format!("published {bind} → guest:{container_port}/{protocol}");
+    if exposed {
+        message.push_str(" (exposed: non-loopback bind)");
+    }
+    Event::new(
+        "port",
+        class::NETWORK_ACTIVITY,
+        category::NETWORK,
+        activity::NETWORK_OPEN,
+        sev,
+        ctx,
+    )
+    .set("message", message.into())
+    .set("src_endpoint", json!({"ip": host_ip, "port": host_port}))
+    .set("dst_endpoint", json!({"port": container_port}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_bind", bind.into())
+    .note("lns_container_port", container_port.into())
+    .note("lns_protocol", protocol.into())
+    .note("lns_exposed", exposed.into())
+    .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,6 +749,40 @@ mod tests {
         assert_eq!(ev["message"], "/src → /work");
         assert!(ev["unmapped"].get("lns_exposed_secrets").is_none());
         assert!(ev["unmapped"].get("lns_dropped_secrets").is_none());
+    }
+
+    #[test]
+    fn a_loopback_port_publish_is_an_informational_network_open() {
+        let ev = port_publish(&ctx(), "127.0.0.1", 3000, 3000, "tcp", false);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 4001);
+        assert_eq!(ev["category_uid"], 4);
+        assert_eq!(ev["activity_id"], 1);
+        assert_eq!(ev["type_uid"], 400101);
+        assert_eq!(ev["severity_id"], 1);
+        assert_eq!(ev["message"], "published 127.0.0.1:3000 → guest:3000/tcp");
+        assert_eq!(ev["src_endpoint"], json!({"ip": "127.0.0.1", "port": 3000}));
+        assert_eq!(ev["dst_endpoint"], json!({"port": 3000}));
+        assert_eq!(ev["device"]["name"], "calm-finch");
+        assert_eq!(ev["actor"]["app_name"], "lns");
+        assert_eq!(ev["unmapped"]["lns_kind"], "port");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
+        assert_eq!(ev["unmapped"]["lns_bind"], "127.0.0.1:3000");
+        assert_eq!(ev["unmapped"]["lns_container_port"], 3000);
+        assert_eq!(ev["unmapped"]["lns_protocol"], "tcp");
+        assert_eq!(ev["unmapped"]["lns_exposed"], false);
+    }
+
+    #[test]
+    fn an_exposed_port_publish_raises_severity() {
+        let ev = port_publish(&ctx(), "0.0.0.0", 3000, 3000, "tcp", true);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["severity_id"], 3);
+        assert_eq!(
+            ev["message"],
+            "published 0.0.0.0:3000 → guest:3000/tcp (exposed: non-loopback bind)"
+        );
+        assert_eq!(ev["unmapped"]["lns_exposed"], true);
     }
 
     #[test]

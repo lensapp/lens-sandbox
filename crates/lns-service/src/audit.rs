@@ -340,6 +340,42 @@ pub fn record_bind_attached(
     )
 }
 
+pub fn record_port_published_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    host_ip: &str,
+    host_port: u16,
+    container_port: u16,
+    protocol: &str,
+    exposed: bool,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::port_event(cx, host_ip, host_port, container_port, protocol, exposed),
+    )
+}
+
+pub fn record_port_published(
+    run_id: &str,
+    microvm: &str,
+    host_ip: &str,
+    host_port: u16,
+    container_port: u16,
+    protocol: &str,
+    exposed: bool,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_port_published_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        host_ip,
+        host_port,
+        container_port,
+        protocol,
+        exposed,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +562,24 @@ mod tests {
             serde_json::json!([".npmrc", ".ssh"]),
             "and the secrets it masked"
         );
+    }
+
+    #[test]
+    fn record_port_published_writes_host_bind_and_guest_port() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_port_published_at(&path, &cx(), "0.0.0.0", 3000, 3000, "tcp", true).unwrap();
+
+        let line: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(line["class_uid"], 4001);
+        assert_eq!(line["severity_id"], 3);
+        assert_eq!(line["unmapped"]["lns_kind"], "port");
+        assert_eq!(line["unmapped"]["lns_origin"], "host");
+        assert_eq!(line["unmapped"]["lns_bind"], "0.0.0.0:3000");
+        assert_eq!(line["unmapped"]["lns_container_port"], 3000);
+        assert_eq!(line["unmapped"]["lns_protocol"], "tcp");
+        assert_eq!(line["unmapped"]["lns_exposed"], true);
     }
 
     #[tokio::test]

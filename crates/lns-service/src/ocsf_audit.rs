@@ -134,6 +134,24 @@ pub fn bind_event(
     ))
 }
 
+pub fn port_event(
+    cx: &OcsfCtx,
+    host_ip: &str,
+    host_port: u16,
+    container_port: u16,
+    protocol: &str,
+    exposed: bool,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::port_publish(
+        &cx.ctx(),
+        host_ip,
+        host_port,
+        container_port,
+        protocol,
+        exposed,
+    ))
+}
+
 pub fn egress_event(
     cx: &OcsfCtx,
     method: &str,
@@ -302,6 +320,11 @@ mod tests {
         let bind = bind_event(&cx, "/src", "/work", &[".env".into()], &[]);
         assert_eq!(bind["unmapped"]["lns_kind"], "bind");
         assert_eq!(bind["severity_id"], 3, "an exposed secret raises severity");
+
+        let port = port_event(&cx, "127.0.0.1", 3000, 3000, "tcp", false);
+        assert_eq!(port["class_uid"], 4001);
+        assert_eq!(port["unmapped"]["lns_kind"], "port");
+        assert_eq!(port["unmapped"]["lns_bind"], "127.0.0.1:3000");
 
         let egress = egress_event(
             &cx,
