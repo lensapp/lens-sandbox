@@ -229,6 +229,14 @@ fn run_ctx(run: &str, microvm: &str, clock: &dyn Clock) -> crate::ocsf_audit::Oc
     crate::ocsf_audit::OcsfCtx::at_unix(run.to_string(), microvm.to_string(), clock.now_unix())
 }
 
+pub struct PortPublishAudit<'a> {
+    pub host_ip: &'a str,
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: &'a str,
+    pub exposed: bool,
+}
+
 pub fn record_run_launched_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
@@ -343,37 +351,28 @@ pub fn record_bind_attached(
 pub fn record_port_published_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
-    host_ip: &str,
-    host_port: u16,
-    container_port: u16,
-    protocol: &str,
-    exposed: bool,
+    port: &PortPublishAudit<'_>,
 ) -> Result<()> {
     append_ocsf_at(
         path,
-        crate::ocsf_audit::port_event(cx, host_ip, host_port, container_port, protocol, exposed),
+        crate::ocsf_audit::port_event(
+            cx,
+            port.host_ip,
+            port.host_port,
+            port.container_port,
+            port.protocol,
+            port.exposed,
+        ),
     )
 }
 
 pub fn record_port_published(
     run_id: &str,
     microvm: &str,
-    host_ip: &str,
-    host_port: u16,
-    container_port: u16,
-    protocol: &str,
-    exposed: bool,
+    port: &PortPublishAudit<'_>,
     clock: &dyn Clock,
 ) -> Result<()> {
-    record_port_published_at(
-        &audit_path(run_id)?,
-        &run_ctx(run_id, microvm, clock),
-        host_ip,
-        host_port,
-        container_port,
-        protocol,
-        exposed,
-    )
+    record_port_published_at(&audit_path(run_id)?, &run_ctx(run_id, microvm, clock), port)
 }
 
 #[cfg(test)]
@@ -568,7 +567,18 @@ mod tests {
     fn record_port_published_writes_host_bind_and_guest_port() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_port_published_at(&path, &cx(), "0.0.0.0", 3000, 3000, "tcp", true).unwrap();
+        record_port_published_at(
+            &path,
+            &cx(),
+            &PortPublishAudit {
+                host_ip: "0.0.0.0",
+                host_port: 3000,
+                container_port: 3000,
+                protocol: "tcp",
+                exposed: true,
+            },
+        )
+        .unwrap();
 
         let line: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
