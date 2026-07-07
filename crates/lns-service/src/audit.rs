@@ -538,6 +538,34 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn record_port_published_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_port_published(
+            "aa123",
+            "calm-finch",
+            &PortPublishAudit {
+                host_ip: "127.0.0.1",
+                host_port: 3000,
+                container_port: 3000,
+                protocol: "tcp",
+                exposed: false,
+            },
+            &CLOCK,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
+        assert!(content.contains("\"lns_kind\":\"port\""), "{content}");
+        assert!(
+            content.contains("\"lns_bind\":\"127.0.0.1:3000\""),
+            "{content}"
+        );
+    }
+
+    #[test]
     fn successive_events_form_a_valid_hash_chain() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
