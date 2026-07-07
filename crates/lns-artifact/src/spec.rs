@@ -402,13 +402,15 @@ struct KindOnly {
     kind: String,
 }
 
+/// The kind a document declares, mapped to `Kind` (errors on an unknown or unparseable kind).
+pub fn read_kind(config_json: &[u8]) -> Result<Kind> {
+    let KindOnly { kind } = serde_json::from_slice(config_json).context("parsing artifact kind")?;
+    Kind::from_kind_str(&kind).ok_or_else(|| anyhow::anyhow!("unknown artifact kind {kind:?}"))
+}
+
 /// Run the schema + cross-field guards for whatever kind the document declares.
 pub fn validate_any(config_json: &[u8]) -> Result<()> {
-    let KindOnly { kind } = serde_json::from_slice(config_json).context("parsing artifact kind")?;
-    let Some(kind) = Kind::from_kind_str(&kind) else {
-        bail!("unknown artifact kind {kind:?}");
-    };
-    match kind {
+    match read_kind(config_json)? {
         Kind::AgentSystem => {
             parse_bundle(config_json)?;
         }

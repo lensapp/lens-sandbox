@@ -3205,9 +3205,11 @@ name = "lns-artifact"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3234,6 +3236,7 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "futures-util",
+ "http 1.4.1",
  "httpmock",
  "libc",
  "lns-artifact",
@@ -3241,6 +3244,7 @@ dependencies = [
  "lns-ipc",
  "lns-ocsf",
  "lns-policy",
+ "oci-client",
  "regex",
  "reqwest 0.12.28",
  "serde",
