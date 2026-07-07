@@ -526,6 +526,8 @@ mod tests {
                 name: None,
                 cpus: 1,
                 mem: 0,
+                cpus_explicit: false,
+                mem_explicit: false,
                 policy_path: None,
                 sandbox_user: None,
                 sandbox_uid: None,

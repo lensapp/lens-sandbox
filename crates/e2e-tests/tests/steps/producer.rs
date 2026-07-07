@@ -20,7 +20,10 @@ fn cache_env(world: &mut E2eWorld) -> Vec<(String, String)> {
         .home
         .get_or_insert_with(|| tempfile::TempDir::new().expect("home tempdir"));
     vec![
-        ("HOME".to_string(), home.path().to_string_lossy().into_owned()),
+        (
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        ),
         (
             "XDG_CACHE_HOME".to_string(),
             home.path().join(".cache").to_string_lossy().into_owned(),

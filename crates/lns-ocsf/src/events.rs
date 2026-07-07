@@ -371,10 +371,14 @@ pub fn bind_mount(
     ev.build()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn bundle_run(
     ctx: &Context,
     bundle_ref: &str,
+    bundle_digest: &str,
     overrides: &[String],
+    integrations: &[String],
+    policy_hash: &str,
     signature_verdict: &str,
 ) -> Value {
     let mut ev = Event::new(
@@ -391,9 +395,14 @@ pub fn bundle_run(
     .set("actor", lns_actor())
     .note("lns_origin", "host".into())
     .note("lns_bundle", bundle_ref.into())
+    .note("lns_bundle_digest", bundle_digest.into())
+    .note("lns_policy_hash", policy_hash.into())
     .note("lns_signature", signature_verdict.into());
     if !overrides.is_empty() {
         ev = ev.note("lns_overrides", json!(overrides));
+    }
+    if !integrations.is_empty() {
+        ev = ev.note("lns_integrations", json!(integrations));
     }
     ev.build()
 }
@@ -622,11 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn bundle_run_records_the_bundle_reference_and_signature_verdict() {
+    fn bundle_run_records_the_reference_resolved_digest_integrations_and_verdict() {
         let ev = bundle_run(
             &ctx(),
             "some-registry.example/some-agent:research",
+            "sha256:beef",
             &["some-registry.example/skills/deep@sha256:abcd".into()],
+            &["some-integration".into()],
+            "sha256:po1icy",
             "unverified",
         );
         assert_schema_valid(&ev);
@@ -637,6 +649,12 @@ mod tests {
             ev["unmapped"]["lns_bundle"],
             "some-registry.example/some-agent:research"
         );
+        assert_eq!(
+            ev["unmapped"]["lns_bundle_digest"], "sha256:beef",
+            "the audit must pin which bytes actually ran, not just the mutable tag"
+        );
+        assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
+        assert_eq!(ev["unmapped"]["lns_integrations"][0], "some-integration");
         assert_eq!(ev["unmapped"]["lns_signature"], "unverified");
         assert_eq!(
             ev["unmapped"]["lns_overrides"][0],
@@ -645,10 +663,19 @@ mod tests {
     }
 
     #[test]
-    fn bundle_run_omits_the_overrides_note_when_there_are_none() {
-        let ev = bundle_run(&ctx(), "reg/some-agent:1", &[], "verified");
+    fn bundle_run_omits_the_overrides_and_integrations_notes_when_there_are_none() {
+        let ev = bundle_run(
+            &ctx(),
+            "reg/some-agent:1",
+            "sha256:beef",
+            &[],
+            &[],
+            "sha256:p",
+            "verified",
+        );
         assert_schema_valid(&ev);
         assert!(ev["unmapped"].get("lns_overrides").is_none());
+        assert!(ev["unmapped"].get("lns_integrations").is_none());
         assert_eq!(ev["unmapped"]["lns_signature"], "verified");
     }
 

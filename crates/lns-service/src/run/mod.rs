@@ -101,18 +101,20 @@ pub(super) fn bundle_overrides(
         .collect()
 }
 
-/// Size a bundle run's VM: the bundle's Sandbox resources are authoritative unless the user requested a non-default `--cpus`/`-m`. The defaults mirror the CLI's requested-size fallback, so a request equal to them reads as "unset, let the bundle decide".
+/// Size a bundle run's VM: the bundle's Sandbox resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
 pub(super) fn bundle_vm_size(
     resources: Option<&lns_artifact::spec::Resources>,
     requested_cpus: u8,
+    cpus_explicit: bool,
     requested_mem_mib: usize,
+    mem_explicit: bool,
 ) -> (u8, usize) {
     use crate::artifact::resources::{ResourceOverrides, VmSize, resolve_size};
     const DEFAULT_CPUS: u8 = 1;
     const DEFAULT_MEM_MIB: usize = 512;
     let overrides = ResourceOverrides {
-        cpus: (requested_cpus != DEFAULT_CPUS).then_some(requested_cpus),
-        mem_mib: (requested_mem_mib != DEFAULT_MEM_MIB).then_some(requested_mem_mib),
+        cpus: cpus_explicit.then_some(requested_cpus),
+        mem_mib: mem_explicit.then_some(requested_mem_mib),
     };
     let size = resolve_size(
         resources,
@@ -135,7 +137,7 @@ pub(super) fn bundle_launch(
         workload
             .command
             .as_deref()
-            .map(|c| c.split_whitespace().map(str::to_string).collect())
+            .map(shell_split)
             .unwrap_or_default()
     } else {
         user_cmd.to_vec()
@@ -151,6 +153,12 @@ pub(super) fn bundle_launch(
         cmd,
         env,
     }
+}
+
+/// Split an agent command string into argv with shell quoting honored, so `agent --prompt "hello world"` stays one argument; an unbalanced-quote string falls back to whitespace splitting rather than dropping the command.
+fn shell_split(command: &str) -> Vec<String> {
+    shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect())
 }
 
 pub(super) fn vm_ended_before_connector(
@@ -181,21 +189,31 @@ mod tests {
     }
 
     #[test]
-    fn bundle_vm_size_uses_the_sandbox_resources_when_no_flag_overrides() {
+    fn bundle_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
-        assert_eq!(bundle_vm_size(Some(&res), 1, 512), (4, 2048));
+        assert_eq!(bundle_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
     }
 
     #[test]
-    fn bundle_vm_size_lets_a_non_default_request_override_the_bundle() {
+    fn bundle_vm_size_lets_an_explicit_request_override_the_bundle() {
         let res = resources(4, 2048);
-        assert_eq!(bundle_vm_size(Some(&res), 2, 1024), (2, 1024));
+        assert_eq!(bundle_vm_size(Some(&res), 2, true, 1024, true), (2, 1024));
+    }
+
+    #[test]
+    fn bundle_vm_size_honors_an_explicit_request_that_equals_the_builtin_default() {
+        let res = resources(4, 2048);
+        assert_eq!(
+            bundle_vm_size(Some(&res), 1, true, 512, true),
+            (1, 512),
+            "a user who explicitly asks for the default size must be able to constrain a greedy bundle"
+        );
     }
 
     #[test]
     fn bundle_vm_size_falls_back_to_the_request_when_the_bundle_is_silent() {
-        assert_eq!(bundle_vm_size(None, 1, 512), (1, 512));
-        assert_eq!(bundle_vm_size(None, 8, 4096), (8, 4096));
+        assert_eq!(bundle_vm_size(None, 1, false, 512, false), (1, 512));
+        assert_eq!(bundle_vm_size(None, 8, true, 4096, true), (8, 4096));
     }
 
     #[tokio::test]
@@ -499,6 +517,32 @@ mod tests {
         let launch = bundle_launch(&w, &[], &[]);
         assert_eq!(launch.image, "registry.example.test/base@sha256:abc");
         assert_eq!(launch.cmd, vec!["agent".to_string(), "--serve".to_string()]);
+    }
+
+    #[test]
+    fn bundle_launch_keeps_a_quoted_agent_argument_as_one_token() {
+        let w = workload(Some(r#"agent --prompt "hello world" --flag"#), &[]);
+        let launch = bundle_launch(&w, &[], &[]);
+        assert_eq!(
+            launch.cmd,
+            vec![
+                "agent".to_string(),
+                "--prompt".to_string(),
+                "hello world".to_string(),
+                "--flag".to_string()
+            ],
+            "a quoted argument must survive as a single argv entry, not be split on the space"
+        );
+    }
+
+    #[test]
+    fn bundle_launch_falls_back_to_whitespace_on_an_unbalanced_quote() {
+        let w = workload(Some(r#"agent "unclosed"#), &[]);
+        let launch = bundle_launch(&w, &[], &[]);
+        assert_eq!(
+            launch.cmd,
+            vec!["agent".to_string(), "\"unclosed".to_string()]
+        );
     }
 
     #[test]

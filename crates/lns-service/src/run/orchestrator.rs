@@ -291,7 +291,9 @@ async fn orchestrate(
     let (cpus, memory_mib) = super::bundle_vm_size(
         bundle.as_ref().and_then(|p| p.workload.resources.as_ref()),
         args.cpus,
+        args.cpus_explicit,
         args.mem,
+        args.mem_explicit,
     );
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 

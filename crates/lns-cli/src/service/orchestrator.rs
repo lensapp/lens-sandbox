@@ -169,6 +169,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let request = Request::RunImage(Box::new(RunImageArgs {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
+        cpus_explicit: args.cpus.is_some(),
+        mem_explicit: args.mem.is_some(),
         image: args.image,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),

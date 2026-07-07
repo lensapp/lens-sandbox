@@ -37,10 +37,15 @@ async fn resolve_digest(reference: &str) -> Result<String> {
         protocol,
         ..Default::default()
     });
-    let (_, digest) = client
+    let (manifest, digest) = client
         .pull_manifest(&parsed, &registry_auth_for(&parsed))
         .await
         .map_err(|e| anyhow::anyhow!("resolving {reference} to a digest: {e}"))?;
+    if matches!(manifest, oci_client::manifest::OciManifest::ImageIndex(_)) {
+        anyhow::bail!(
+            "component {reference} resolves to a multi-arch index; pin it to a single-platform digest"
+        );
+    }
     Ok(digest)
 }
 

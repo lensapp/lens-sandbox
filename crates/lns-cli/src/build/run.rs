@@ -1,11 +1,37 @@
+use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::FromArgMatches;
-use lns_artifact::build::FileEntry;
 
+use super::collect::{self, DirTree, Entry};
 use super::{BuildArgs, push, report, resolve};
 use crate::command::{RunCtx, RunFuture};
+
+struct RealDirTree;
+
+impl DirTree for RealDirTree {
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<Entry>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            out.push(if file_type.is_dir() {
+                Entry::Dir(path)
+            } else if file_type.is_file() {
+                Entry::File(path)
+            } else {
+                Entry::Other
+            });
+        }
+        Ok(out)
+    }
+
+    fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+}
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
@@ -19,8 +45,8 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
                 writeln!(out, "✖ a directory PATH requires --mount <path>")?;
                 return Ok(1);
             };
-            let name = fileset_name(&args.path);
-            let entries = collect_dir(&path)?;
+            let name = collect::fileset_name(&args.path);
+            let entries = collect::collect_dir(&RealDirTree, &path)?;
             let Some(built) =
                 report::build_fileset_and_report(&name, mount, &entries, tag, &mut out)?
             else {
@@ -81,38 +107,6 @@ fn cache_built(reference: &str, built: &lns_artifact::build::BuiltArtifact) -> R
     for file in super::cache::plan_writes(&root, reference, built)? {
         std::fs::write(&file.path, &file.bytes)
             .with_context(|| format!("writing {}", file.path.display()))?;
-    }
-    Ok(())
-}
-
-fn fileset_name(path: &Path) -> String {
-    let raw = path.file_name().map(|n| n.to_string_lossy());
-    report::sanitize_name(raw.as_deref().unwrap_or("fileset"))
-}
-
-fn collect_dir(root: &Path) -> Result<Vec<FileEntry>> {
-    let mut entries = Vec::new();
-    walk_dir(root, root, &mut entries)?;
-    Ok(entries)
-}
-
-fn walk_dir(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            walk_dir(root, &path, out)?;
-        } else if file_type.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .expect("walked path is under root")
-                .to_string_lossy()
-                .into_owned();
-            let data =
-                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            out.push(FileEntry { path: rel, data });
-        }
     }
     Ok(())
 }

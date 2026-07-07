@@ -360,6 +360,11 @@ pub struct RunImageArgs {
     pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
+    /// True when the user set `--cpus`/`-m` explicitly, so a bundle's Sandbox size can't silently override an explicit request that happens to equal the built-in default.
+    #[serde(default)]
+    pub cpus_explicit: bool,
+    #[serde(default)]
+    pub mem_explicit: bool,
     pub policy_path: Option<String>,
     #[serde(default)]
     pub sandbox_user: Option<String>,
@@ -700,6 +705,8 @@ mod tests {
             name: None,
             cpus: 1,
             mem: 512,
+            cpus_explicit: false,
+            mem_explicit: false,
             policy_path: None,
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
@@ -732,6 +739,8 @@ mod tests {
             name: None,
             cpus: 1,
             mem: 512,
+            cpus_explicit: false,
+            mem_explicit: false,
             policy_path: None,
             sandbox_user: None,
             sandbox_uid: None,
@@ -857,6 +866,8 @@ mod tests {
             name: None,
             cpus: 2,
             mem: 1024,
+            cpus_explicit: true,
+            mem_explicit: true,
             policy_path: Some("/work/lns-policy.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),

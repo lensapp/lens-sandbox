@@ -9,6 +9,12 @@ Feature: an agent's credential slots resolve at boot, before the workload starts
   cannot quietly redirect a token. Real credential material never enters the
   artifact or the workload — only the boundary sees it.
 
+  NOTE: these scenarios pin the boot-gate DECISION logic (plan_slot / boot_gate
+  / resolve_connect) in isolation. Proactive at-boot resolution is not yet wired
+  into the live launch path — the shipping credential flow is reactive (an unbound
+  credential is prompted when the workload first uses it), which covers the
+  functional case; the proactive prompt-before-fork gate is a tracked follow-up.
+
   Scenario: A slot already bound in the store resolves at boot without prompting
     Given a bundle whose agent declares a credential slot for integration "some-provider" injected as "SOME_TOKEN"
     And the per-machine credential store has a bound value for "some-provider"

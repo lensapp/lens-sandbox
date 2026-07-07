@@ -42,7 +42,7 @@ pub(crate) async fn peek_and_plan(
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
     let registry = RealRegistry::for_reference(&reference, registry_auth_for(image_ref));
-    let (manifest, _digest, config_json) = registry
+    let (manifest, digest, config_json) = registry
         .pull_manifest_and_config(&reference)
         .await
         .with_context(|| format!("peeking manifest for {image_ref}"))?;
@@ -60,7 +60,10 @@ pub(crate) async fn peek_and_plan(
                 overrides,
             )
             .await?;
-            record_bundle_run(run_id, microvm, image_ref, overrides, &verdict);
+            record_bundle_run(
+                run_id, microvm, image_ref, &digest, overrides, &resolved, &verdict,
+            );
+            disclose_effective_policy(resolved.policy.as_ref());
             let fileset_specs = materialize_filesets(&resolved).await?;
             Ok(Some(BundlePlan {
                 workload: assembly::assemble(&resolved),
@@ -77,41 +80,67 @@ async fn materialize_filesets(resolved: &ResolvedBundle) -> Result<Vec<RuntimeFi
         let Some(mount) = fileset.paths.first() else {
             continue;
         };
-        let layer = pull_fileset_layer(&fileset.reference)
+        let layers = pull_fileset_layers(&fileset.reference)
             .await
             .with_context(|| format!("materializing fileset {}", fileset.name))?;
-        specs.extend(fileset_runtime_specs(mount, &layer)?);
+        for layer in &layers {
+            specs.extend(fileset_runtime_specs(mount, layer)?);
+        }
     }
     Ok(specs)
 }
 
-async fn pull_fileset_layer(reference: &str) -> Result<Vec<u8>> {
+/// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the OCI empty/config layer is skipped and a fileset with no content layer is refused.
+async fn pull_fileset_layers(reference: &str) -> Result<Vec<Vec<u8>>> {
     let parsed: Reference = reference
         .parse()
         .with_context(|| format!("invalid fileset reference {reference}"))?;
     let registry = RealRegistry::for_reference(&parsed, registry_auth_for(reference));
     let (manifest, _digest, _config) = registry.pull_manifest_and_config(&parsed).await?;
-    let layer = manifest
+    let content: Vec<_> = manifest
         .layers
-        .first()
-        .context("fileset manifest has no content layer")?;
-    registry.pull_blob(&parsed, layer, &|_| {}).await
+        .iter()
+        .filter(|layer| layer.media_type.contains("tar"))
+        .collect();
+    if content.is_empty() {
+        anyhow::bail!("fileset {reference} has no content layer");
+    }
+    let mut blobs = Vec::with_capacity(content.len());
+    for layer in content {
+        blobs.push(registry.pull_blob(&parsed, layer, &|_| {}).await?);
+    }
+    Ok(blobs)
 }
 
-/// Append a bundle-run event to the audit chain; a recording failure is logged, never fatal to the launch.
+/// Append a bundle-run event to the audit chain, pinning the resolved bundle digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
 fn record_bundle_run(
     run_id: &str,
     microvm: &str,
     image_ref: &str,
+    bundle_digest: &str,
     overrides: &[Override],
+    resolved: &ResolvedBundle,
     verdict: &Verdict,
 ) {
     let override_refs: Vec<String> = overrides.iter().map(|o| o.reference.clone()).collect();
+    let integrations = resolved
+        .policy
+        .as_ref()
+        .map(|p| p.integrations.clone())
+        .unwrap_or_default();
+    let policy_hash = resolved
+        .policy
+        .as_ref()
+        .map(crate::artifact::audit::policy_hash)
+        .unwrap_or_else(|| "none".to_string());
     if let Err(e) = crate::audit::record_bundle_run(
         run_id,
         microvm,
         image_ref,
+        bundle_digest,
         &override_refs,
+        &integrations,
+        &policy_hash,
         &crate::artifact::audit::verdict_label(verdict),
         &crate::oauth::RealClock,
     ) {
@@ -119,7 +148,23 @@ fn record_bundle_run(
     }
 }
 
-/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image and filesets; integrations, signature trust, and over-broad-policy flags await the policy-resolution and signature-verification follow-ups.
+/// Disclose the bundle's shipped network policy at boot: name it as the deny-dominant baseline under the local overlay, and warn prominently if it is over-broad (permissive default / wildcard / broad CIDR).
+fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
+    let Some(policy) = policy else {
+        return;
+    };
+    crate::log::info!(
+        "policy",
+        "this bundle ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
+    );
+    let summary =
+        crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));
+    if !summary.is_empty() {
+        crate::log::warn!("{summary}");
+    }
+}
+
+/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image, filesets, declared integrations, and any over-broad-policy flags; signature trust awaits the verification follow-up.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
@@ -156,9 +201,22 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
                         mount_path: f.paths.first().cloned().unwrap_or_default(),
                     })
                     .collect(),
-                integrations: Vec::new(),
+                integrations: resolved
+                    .policy
+                    .as_ref()
+                    .map(|p| p.integrations.clone())
+                    .unwrap_or_default(),
                 signature: SignatureView::Unsigned,
-                policy_flags: Vec::new(),
+                policy_flags: resolved
+                    .policy
+                    .as_ref()
+                    .map(|p| {
+                        crate::artifact::policy::guardrail_flags(p)
+                            .iter()
+                            .map(|f| f.message().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }))
         }
     }

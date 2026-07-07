@@ -17,6 +17,13 @@ async fn allows_cidr(world: &mut BehaviourWorld, cidr: String) {
     rig.bundle_policy.add_rule(RouteRule::allow_host(cidr));
 }
 
+#[given(regex = r#"^a bundle whose policy allows "([^"]+)"$"#)]
+async fn allows_host(world: &mut BehaviourWorld, host: String) {
+    let rig = world.policy();
+    rig.bundle_ships_policy = true;
+    rig.bundle_policy.add_rule(RouteRule::allow_host(host));
+}
+
 #[when("the first-run summary is produced")]
 async fn first_run_summary(world: &mut BehaviourWorld) {
     let rig = world.policy();
