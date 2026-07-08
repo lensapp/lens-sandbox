@@ -266,7 +266,7 @@ mod tests {
         let argv = build_workload_argv(Some(&cfg), None, &[], false);
         assert_eq!(argv[2], "/entry default-arg");
         let argv = build_workload_argv(Some(&cfg), None, &["override".into()], false);
-        assert_eq!(argv[2], "override");
+        assert_eq!(argv[2], "/entry override");
     }
 
     #[test]

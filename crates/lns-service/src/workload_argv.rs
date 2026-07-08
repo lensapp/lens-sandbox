@@ -38,7 +38,10 @@ fn merged_argv(
                 override_cmd.to_vec()
             })
             .collect(),
-        None if !override_cmd.is_empty() => override_cmd.to_vec(),
+        None if !override_cmd.is_empty() => image_entrypoint
+            .into_iter()
+            .chain(override_cmd.iter().cloned())
+            .collect(),
         None => image_entrypoint.into_iter().chain(image_cmd).collect(),
     }
 }
@@ -103,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn from_image_config_uses_override_when_present() {
+    fn from_image_config_keeps_image_entrypoint_when_command_overrides_cmd() {
         let config = oci_client::config::ConfigFile {
             architecture: "arm64".into(),
             os: "linux".into(),
@@ -117,8 +120,8 @@ mod tests {
         let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".into()];
         assert_eq!(
             from_image_config(&config, None, &argv),
-            "/bin/sh -c 'echo hi'",
-            "non-empty override must shadow entrypoint+cmd entirely",
+            "/entry /bin/sh -c 'echo hi'",
+            "a command with no --entrypoint replaces CMD but keeps the image ENTRYPOINT (Docker semantics)",
         );
     }
 
