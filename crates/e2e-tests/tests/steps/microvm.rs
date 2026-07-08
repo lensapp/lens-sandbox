@@ -23,14 +23,18 @@ fn parse_run_id(text: &str) -> Option<String> {
 }
 
 fn run_microvm(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
+    run_args.push("--".to_string());
+    run_args.extend(split_args(cmd_line));
+    run_lns_microvm(world, run_args);
+}
+
+fn run_lns_microvm(world: &mut E2eWorld, tail: Vec<String>) {
     let mut args = vec!["run".to_string()];
     if let Some(policy) = &world.policy_path {
         args.push("--policy".to_string());
         args.push(policy.to_string_lossy().into_owned());
     }
-    args.append(&mut run_args);
-    args.push("--".to_string());
-    args.extend(split_args(cmd_line));
+    args.extend(tail);
     let result = run_cli_with_timeout(args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
@@ -352,6 +356,34 @@ fn run_command_with_env(world: &mut E2eWorld, cmd_line: String, env: String) {
 #[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)"$"#)]
 fn run_image_command(world: &mut E2eWorld, image: String, cmd_line: String) {
     run_microvm(world, vec![image], &cmd_line);
+}
+
+#[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)" and no separator$"#)]
+fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line: String) {
+    let mut tail = vec![image];
+    tail.extend(split_args(&cmd_line));
+    run_lns_microvm(world, tail);
+}
+
+#[when(
+    regex = r#"^the user runs image "([^"]+)" with entrypoint "([^"]+)" and command "([^"]*)"$"#
+)]
+fn run_image_with_entrypoint(
+    world: &mut E2eWorld,
+    image: String,
+    entrypoint: String,
+    cmd_line: String,
+) {
+    run_microvm(
+        world,
+        vec!["--entrypoint".into(), entrypoint, image],
+        &cmd_line,
+    );
+}
+
+#[when(regex = r#"^the user runs image "([^"]+)" as user "([^"]+)" with command "([^"]*)"$"#)]
+fn run_image_as_user(world: &mut E2eWorld, image: String, user: String, cmd_line: String) {
+    run_microvm(world, vec!["-u".into(), user, image], &cmd_line);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with (\d+) vCPUs$"#)]
