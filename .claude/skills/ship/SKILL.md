@@ -1,13 +1,10 @@
 ---
 name: ship
 description: >
-  Pipeline dispatcher — detect where the current work stands (intake →
-  spec/plan → implement slices → self-review → PR → respond to review) from
-  observable state and drive it forward by invoking the right skill
-  (/problem-first, /problem-first-impl, /green, /code-review, /create-pr,
-  /review-comments), pausing at every human gate. Use when the user runs
-  `/ship`, optionally with an issue number or a one-line idea. Do NOT
-  auto-invoke.
+  Drive the problem-first pipeline forward — detect the current phase
+  (intake, plan, implement, review, PR) from observable state and invoke the
+  right skill, pausing at every human gate. Use only when the user runs
+  `/ship`, optionally with an issue number or a one-line idea.
 ---
 
 # Ship — pipeline dispatcher
