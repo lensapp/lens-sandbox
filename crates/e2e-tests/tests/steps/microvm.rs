@@ -82,6 +82,49 @@ fn run_command_as_user(world: &mut E2eWorld, cmd_line: String, user: String) {
     run_microvm(world, vec!["-u".into(), user], &cmd_line);
 }
 
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" with auto-remove$"#)]
+fn run_command_auto_remove(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec!["--rm".into()], &cmd_line);
+}
+
+#[then("that run is no longer listed")]
+fn run_no_longer_listed(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let listing = world.run_with_service_env(&["sandbox", "ls"]);
+        let listed = listing
+            .stdout
+            .lines()
+            .any(|line| line.split_whitespace().any(|tok| tok == id));
+        if !listed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "run {id} was still listed after 30s:\n{}",
+                listing.stdout
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[when(regex = r#"^the user execs "([^"]*)" into that run without a separator$"#)]
+fn exec_without_separator(world: &mut E2eWorld, cmd_line: String) -> Result<(), String> {
+    let id = last_run(world)?;
+    let mut argv = vec![
+        "exec".to_string(),
+        "-i=false".to_string(),
+        "-t=false".to_string(),
+        id,
+    ];
+    argv.extend(split_args(&cmd_line));
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    world.result = Some(world.run_with_service_env(&borrowed));
+    Ok(())
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with volume "([^"]+)" at "([^"]+)"$"#)]
 fn run_command_with_volume(world: &mut E2eWorld, cmd_line: String, name: String, path: String) {
     track_volume(world, &name);
