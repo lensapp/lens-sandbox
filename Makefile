@@ -1,4 +1,4 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean clean-guard coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks
+.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks
 
 CARGO ?= cargo
 
@@ -95,22 +95,6 @@ build-lns-service:
 # disk here (cargo never prunes them), so the gates opt out while
 # `make dev` and raw cargo iteration keep incremental speed.
 lint test complexity coverage-data: export CARGO_INCREMENTAL := 0
-
-# Repeated gate cycles accumulate stale artifacts that cargo never
-# GCs; on a space-limited host that wedges the loop mid-run. Reset
-# target/ once it crosses the cap — a full rebuild beats a full disk.
-# Pinned to $(WORKSPACE_ROOT)/target (not $(CARGO_TARGET_DIR)):
-# coverage-data's target-specific CARGO_TARGET_DIR export propagates
-# to prerequisites and would narrow the guard to the coverage subdir.
-LNS_TARGET_MAX_GB ?= 20
-lint test complexity coverage-data: clean-guard
-clean-guard:
-	@size_kb=$$(du -sk $(WORKSPACE_ROOT)/target 2>/dev/null | cut -f1); \
-	limit_kb=$$(( $(LNS_TARGET_MAX_GB) * 1024 * 1024 )); \
-	if [ -n "$$size_kb" ] && [ "$$size_kb" -gt "$$limit_kb" ]; then \
-		echo "target/ at $$(( size_kb / 1024 / 1024 ))GiB exceeds $(LNS_TARGET_MAX_GB)GiB cap — removing"; \
-		rm -rf $(WORKSPACE_ROOT)/target; \
-	fi
 
 lint: export LNS_INIT_BIN := skip
 lint: export LNS_SESSION_BROKER_BIN := skip
