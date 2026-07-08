@@ -33,8 +33,10 @@ whatever code is here gets proven or reported, regardless of how it was made.
 Run from the workspace root, cheapest first. **Any repair restarts the ladder
 from step 1** — a coverage fix can break fmt.
 
-0. **Disk guard**: `du -sg target/ 2>/dev/null` — if target/ exceeds ~30 GiB,
-   run `cargo clean` before proceeding (this host has wedged at 59 GiB before).
+0. Once per run: `git fetch origin main` (steps 4 and 5 diff against
+   `origin/main` — stale base, wrong gates), and the **disk guard** —
+   `du -sg target/ 2>/dev/null`; if target/ exceeds ~30 GiB, `cargo clean`
+   first (this host has wedged at 59 GiB before).
 1. `make fmt` — auto-fix; if it changed files, that was a repair.
 2. `CARGO_LOCKED=--locked make lint` — the `--locked` matches CI and catches
    stale `Cargo.lock` locally instead of on the PR.
@@ -42,10 +44,8 @@ from step 1** — a coverage fix can break fmt.
 4. If the branch touches `Cargo.toml` / `Cargo.lock`
    (`git diff origin/main...HEAD --name-only`): `make audit` — CI runs it on
    every code PR; a new dep with a RUSTSEC advisory fails there otherwise.
-5. `git fetch origin main`, then `make coverage-affected` — the affected set
-   is computed against `origin/main`, so refresh it first (the pre-push hook
-   does the same). Never full `make coverage` unless the user explicitly
-   asks (release prep).
+5. `make coverage-affected` — never full `make coverage` unless the user
+   explicitly asks (release prep).
 
 Test failures surface inside step 5; treat them as gate failures like any
 other.
