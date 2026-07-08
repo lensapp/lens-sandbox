@@ -88,7 +88,7 @@ tick the Self-review and Open PR boxes yourself when those phases complete.
 ## State detection
 
 Gather (in parallel, cheaply): current branch; existence and contents of
-`.claude/plans/<branch>.md`; remaining `@todo` scenarios
+`<main-root>/.claude/plans/<branch>.md`; remaining `@todo` scenarios
 (`grep -rl '@todo' crates/*/tests/behaviours/ 2>/dev/null`); `git status` and
 `git log origin/main..HEAD --oneline`; `gh pr view --json state,reviews`
 (optional — if `gh` fails or is offline, GitHub phases are simply skipped).
