@@ -11,6 +11,7 @@ use oci_client::{
 
 use crate::oci_layer_cache::LayerCache;
 
+use super::client_pool::{ClientPool, pool_key};
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
     CountingSink, PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver,
@@ -23,17 +24,23 @@ pub struct RealRegistry {
 }
 
 impl RealRegistry {
-    pub fn new() -> Self {
-        Self::with_auth(RegistryAuth::Anonymous)
-    }
-
-    pub fn with_auth(auth: RegistryAuth) -> Self {
-        let client = oci_client::Client::new(ClientConfig {
-            platform_resolver: Some(Box::new(linux_platform_resolver)),
-            ..Default::default()
-        });
+    fn with_client(client: oci_client::Client, auth: RegistryAuth) -> Self {
         Self { client, auth }
     }
+}
+
+fn new_client() -> oci_client::Client {
+    oci_client::Client::new(ClientConfig {
+        platform_resolver: Some(Box::new(linux_platform_resolver)),
+        ..Default::default()
+    })
+}
+
+/// Reuse one registry client per (registry, credential) across pulls so the bearer token and connection pool survive — a fresh client re-runs the registry auth handshake on every pull, the dominant cost of a warm tag-image boot.
+fn pooled_client(registry: &str, auth: &RegistryAuth) -> oci_client::Client {
+    static POOL: std::sync::OnceLock<ClientPool<oci_client::Client>> = std::sync::OnceLock::new();
+    POOL.get_or_init(ClientPool::new)
+        .get_or_create(pool_key(registry, auth), new_client)
 }
 
 /// The stored login for `image`'s registry, or anonymous when none is recorded (or the reference / store is unreadable — the pull then fails with the registry's own auth error).
@@ -58,22 +65,13 @@ pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Resul
     let reference: Reference = format!("{registry}/{LOGIN_PROBE_REPOSITORY}")
         .parse()
         .with_context(|| format!("invalid registry {registry:?}"))?;
-    let client = oci_client::Client::new(ClientConfig {
-        platform_resolver: Some(Box::new(linux_platform_resolver)),
-        ..Default::default()
-    });
+    let client = new_client();
     let auth = RegistryAuth::Basic(username.to_string(), secret.to_string());
     client
         .auth(&reference, &auth, RegistryOperation::Pull)
         .await
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-impl Default for RealRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Registry for RealRegistry {
@@ -110,8 +108,12 @@ pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> 
     let _shared = crate::image_store::lock_shared().await;
     let manifests = crate::cache::root()?.join("manifests");
     let auth = registry_auth_for(image);
+    let client = match image.parse::<Reference>() {
+        Ok(reference) => pooled_client(reference.resolve_registry(), &auth),
+        Err(_) => new_client(),
+    };
     let registry =
-        CachingRegistry::new(RealRegistry::with_auth(auth), ManifestCache::new(manifests));
+        CachingRegistry::new(RealRegistry::with_client(client, auth), ManifestCache::new(manifests));
     let pulled = pull_inner(&registry, image, layer_cache).await?;
     if let Err(e) = crate::image_store::record(&pulled).await {
         crate::log::warn!("image index write failed for {image} ({e:#}); continuing");

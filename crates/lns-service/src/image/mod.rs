@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::log;
 use crate::oci_layer_cache::LayerCache;
 
+mod client_pool;
 pub(crate) mod manifest_cache;
 mod real;
 pub use real::{pull, verify_login};
