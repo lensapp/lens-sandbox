@@ -105,9 +105,11 @@ which needs your call."
 
 1. Commit the repairs as **new commits** (never amend), conventional types
    (`fix:`, `test:`, `refactor:`), scoped messages. Push.
-2. If `.claude/plans/<current-branch>.md` exists, tick the checkbox of the
-   step this run closed (the step named in context, else the first unchecked
-   implementation step).
+2. If `<main-root>/.claude/plans/<current-branch>.md` exists, tick the
+   checkbox of the step this run closed (the step named in context, else the
+   first unchecked implementation step). `<main-root>` is the first entry of
+   `git worktree list` — the plan lives in the main checkout even when you
+   are running inside a `.ship/` worktree.
 3. Report in one line, plus a state-aware suggestion: more unchecked plan
    steps → "next: continue the plan"; plan done, no self-review yet →
    "next: `/code-review`"; review done, no PR → "next: `/create-pr`".
