@@ -1,6 +1,5 @@
 node_modules
 target
-target-cov
 dist
 .DS_Store
 coverage

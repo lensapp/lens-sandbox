@@ -13,12 +13,16 @@ CARGO_TARGET_DIR = $(shell $(CARGO) metadata --format-version 1 --no-deps | \
 	(jq -r .target_directory 2>/dev/null || \
 	 sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'))
 
-# Coverage isolates instrumented builds from `target/`: cargo-llvm-cov
-# injects -Cinstrument-coverage via RUSTC_WRAPPER which cargo's
-# fingerprint doesn't track. Sharing target/ with `make test`'s
-# non-instrumented artifacts silently reuses them, emits no profraw,
-# and the report step fails with "not found *.profraw files".
-COVERAGE_TARGET_DIR = $(WORKSPACE_ROOT)/target-cov
+# Coverage isolates instrumented builds from `make test`'s artifacts:
+# cargo-llvm-cov injects -Cinstrument-coverage via RUSTC_WRAPPER which
+# cargo's fingerprint doesn't track — sharing the artifact dir silently
+# reuses non-instrumented builds, emits no profraw, and the report step
+# fails with "not found *.profraw files". Nesting inside target/
+# (cargo-llvm-cov's own default layout) keeps the isolation while
+# letting `cargo clean` sweep it. Derived from WORKSPACE_ROOT, not
+# CARGO_TARGET_DIR — the coverage recipes' target-specific
+# `export CARGO_TARGET_DIR` would shadow it into double-nesting.
+COVERAGE_TARGET_DIR = $(WORKSPACE_ROOT)/target/llvm-cov-target
 
 # Crates whose code is enforced by the per-crate `complexity` gate,
 # which iterates this list with `cd crates/<crate> && cargo …` so each
@@ -247,7 +251,6 @@ audit:
 clean:
 	rm -rf bin/
 	$(CARGO) clean
-	rm -rf $(COVERAGE_TARGET_DIR)
 
 # One-time setup per checkout: point git at the in-tree hooks dir so
 # pre-push runs the gate automatically.

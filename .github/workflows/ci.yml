@@ -205,10 +205,10 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
-          # Coverage uses target-cov/ — Makefile owns the path
-          # (COVERAGE_TARGET_DIR). Cache key matches its layout.
+          # Coverage uses target/llvm-cov-target/ — Makefile owns the
+          # path (COVERAGE_TARGET_DIR). Cache key matches its layout.
           cache-workspaces: |
-            . -> target-cov
+            . -> target/llvm-cov-target
           cache-on-failure: true
           cache-shared-key: lns-ci-coverage
 
@@ -253,7 +253,6 @@ jobs:
         if: github.event_name != 'pull_request' || steps.affected.outputs.skip != 'true'
         run: make coverage
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target-cov
           # Empty on push: main and on __FULL__ PRs => Makefile runs full
           # workspace. Non-empty on per-crate PRs => Makefile narrows the
           # cargo invocation and the floor loop. See COVERAGE_CRATES in
