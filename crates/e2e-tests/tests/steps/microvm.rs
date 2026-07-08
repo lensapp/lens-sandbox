@@ -272,6 +272,54 @@ fn run_command_with_ro_host_bind(world: &mut E2eWorld, cmd_line: String, target:
     );
 }
 
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" with a keyed bind at "([^"]+)"$"#)]
+fn run_command_with_keyed_bind(world: &mut E2eWorld, cmd_line: String, target: String) {
+    let src = host_bind_source(world);
+    run_microvm(
+        world,
+        vec![
+            "--mount".into(),
+            format!("type=bind,source={src},target={target}"),
+        ],
+        &cmd_line,
+    );
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" with a read-only keyed bind at "([^"]+)"$"#
+)]
+fn run_command_with_ro_keyed_bind(world: &mut E2eWorld, cmd_line: String, target: String) {
+    let src = host_bind_source(world);
+    run_microvm(
+        world,
+        vec![
+            "--mount".into(),
+            format!("type=bind,source={src},target={target},readonly"),
+        ],
+        &cmd_line,
+    );
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" with keyed volume "([^"]+)" at "([^"]+)"$"#
+)]
+fn run_command_with_keyed_volume(
+    world: &mut E2eWorld,
+    cmd_line: String,
+    name: String,
+    path: String,
+) {
+    track_volume(world, &name);
+    run_microvm(
+        world,
+        vec![
+            "--mount".into(),
+            format!("type=volume,source={name},target={path}"),
+        ],
+        &cmd_line,
+    );
+}
+
 #[then(regex = r#"^the host bind directory has a file "([^"]+)" containing "([^"]*)"$"#)]
 fn host_bind_has_file(world: &mut E2eWorld, name: String, expected: String) -> Result<(), String> {
     let dir = world
@@ -322,6 +370,11 @@ fn start_detached(world: &mut E2eWorld, cmd_line: String) {
     if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
+}
+
+#[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with auto-remove$"#)]
+fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec!["-d".into(), "--rm".into()], &cmd_line);
 }
 
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" publishing port (\d+)$"#)]
