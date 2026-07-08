@@ -29,12 +29,40 @@ state, never from conversation memory.
   (`/problem-first-impl` Mode B).
 - Free text — a new idea; start at intake with it as the problem seed.
 
+## Isolated worktree
+
+Do NOT run the pipeline in the user's working directory — they may be in the
+middle of something else, and `/ship` can start from a one-line idea while
+they sit on `main`. When the Spec + plan phase creates the feature branch,
+create a worktree for it (same pattern as `/code-review`):
+
+```bash
+MAIN_ROOT="$(git worktree list | head -1 | awk '{print $1}')"
+SHIP_DIR="$MAIN_ROOT/.ship/<branch>"
+mkdir -p "$MAIN_ROOT/.ship"
+git worktree add "$SHIP_DIR" -b <branch> origin/main
+```
+
+Ensure `.ship/` is listed in `.git/info/exclude`. Every subsequent phase —
+implementation, `/green`, `make e2e`, `/code-review`, `/create-pr` — runs
+inside `$SHIP_DIR`. On resume, if the plan file names a branch whose worktree
+is missing, re-add it (`git worktree add "$SHIP_DIR" <branch>`).
+
+Two host cautions:
+- The worktree builds its own `target/` — real disk on this host. `/green`'s
+  disk guard applies per-worktree.
+- At the Done phase, clean up: `git worktree remove "$SHIP_DIR"` (after
+  confirming the branch is pushed), which also reclaims its `target/`.
+
 ## The plan file
 
-The durable plan lives at `.claude/plans/<current-branch>.md` — local,
-per-checkout, no GitHub required. Before writing it the first time, ensure
-`.claude/plans/` is listed in `.git/info/exclude` (append the line if
-missing; never touch the repo's `.gitignore` for this).
+The durable plan lives in the **main checkout** at
+`<main-root>/.claude/plans/<branch>.md` (resolve `<main-root>` via
+`git worktree list | head -1` so the path is the same from inside a `.ship/`
+worktree) — local, no GitHub required, and it survives worktree removal.
+Before writing it the first time, ensure `.claude/plans/` is listed in
+`.git/info/exclude` (shared by all worktrees; never touch the repo's
+`.gitignore` for this).
 
 Format:
 
@@ -59,12 +87,16 @@ Gather (in parallel, cheaply): current branch; existence and contents of
 `git log origin/main..HEAD --oneline`; `gh pr view --json state,reviews`
 (optional — if `gh` fails or is offline, GitHub phases are simply skipped).
 
+When invoked from `main`, first look for in-flight work: plan files under
+`<main-root>/.claude/plans/` with unchecked boxes. Exactly one → resume that
+branch's worktree. Several → ask which. None → this is new work.
+
 First matching row wins:
 
 | Observable state | Phase | Action |
 |---|---|---|
 | Free-text args, or no plan file + no agreed problem in conversation + no issue arg | Intake | Invoke `/problem-first`. When intake concludes and the user is NOT implementing now, suggest `/problem-first-issue` (GitHub only) and stop. |
-| Issue arg given, or intake agreed and proceeding; no plan file for this branch | Spec + plan | Invoke `/problem-first-impl` (Mode B when driven from an issue). After the plan is approved: if on `main`, create a feature branch named for the scope; then write the plan file from the approved plan. |
+| Issue arg given, or intake agreed and proceeding; no plan file for this branch | Spec + plan | Invoke `/problem-first-impl` (Mode B when driven from an issue). After the plan is approved: create the feature branch **in a `.ship/` worktree** (see Isolated worktree), write the plan file, and run all further phases inside it. |
 | Plan file has unchecked implementation boxes | Implement | For the first unchecked step: failing-test-first per the repo Workflow (activate the step's scenarios, watch them fail, implement), then invoke `/green`. On green (box ticked), continue to the next unchecked step without pausing. Stop only when `/green` escalates or reports stuck. |
 | All implementation boxes ticked; Self-review box unchecked | Review | Run `make e2e` once (Layer 1 wiring — CI's test job runs it, `/green` deliberately doesn't); fix failures via `/green`. Then invoke `/code-review` (self-review mode). If it produces fixes, apply them and invoke `/green` after. On "Ship it" / all findings resolved, tick the box. If the branch touches VM/session plumbing, remind the user of the manual checks: `make e2e-microvm` (virt-capable host) and the `lns run -it` smoke test (`expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`). |
 | Self-review ticked; Open PR box present and unchecked; `gh` available | Package | Invoke `/create-pr`. Tick the box. |
