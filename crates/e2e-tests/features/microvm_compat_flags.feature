@@ -54,6 +54,12 @@ Feature: Docker-compat run/exec flags take effect against a real microVM
     Then the exit code is 0
     And the output contains "vol-ok"
 
+  Scenario: the -it cluster expands and the workload runs
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/.lens/guest-tools/bin/busybox echo it-ok" with the -it cluster
+    Then the exit code is 0
+    And the output contains "it-ok"
+
   Scenario: exec runs a command in a running sandbox without an explicit separator
     Given the Lens Sandbox service is running
     When the user starts a detached microVM command "/.lens/guest-tools/bin/busybox sleep 60"

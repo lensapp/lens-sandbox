@@ -86,6 +86,11 @@ fn run_command_as_user(world: &mut E2eWorld, cmd_line: String, user: String) {
     run_microvm(world, vec!["-u".into(), user], &cmd_line);
 }
 
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" with the -it cluster$"#)]
+fn run_command_with_it_cluster(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec!["-it".into()], &cmd_line);
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with auto-remove$"#)]
 fn run_command_auto_remove(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["--rm".into()], &cmd_line);
