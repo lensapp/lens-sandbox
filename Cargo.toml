@@ -42,6 +42,12 @@ default-members = [
 lto = true
 strip = true
 
+# Same trade as [profile.test] below, applied to dev builds — which is
+# where all *dependencies* compile, and full DWARF on deps is the bulk
+# of target/'s multi-GiB footprint. Panics still show file:line.
+[profile.dev]
+debug = "line-tables-only"
+
 # Test builds drop full DWARF in favour of `line-tables-only`. Panics
 # still show file:line; `cargo test` gets noticeably faster — the
 # linker has far less debug info to chew through.
