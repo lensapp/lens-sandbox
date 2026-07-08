@@ -1,9 +1,9 @@
 ---
 name: green
 description: >
-  Gate-repair loop — run the repo verification gates (fmt → lint →
-  complexity → coverage-affected), auto-repair failures under a strict
-  policy, and stop only on green, an escalation, no-progress, or the
+  Gate-repair loop — run the repo verification gates (make fmt → make lint →
+  make complexity → make coverage-affected), auto-repair failures under a
+  strict policy, and stop only on green, an escalation, no-progress, or the
   attempt cap. Use when the user runs `/green`, asks to "run the gates",
   "make the gates pass", or to close out an implemented slice. Do NOT
   auto-invoke during UI iteration or mid-experiment — only when the user
@@ -38,7 +38,7 @@ from step 1** — a coverage fix can break fmt.
 
 0. **Disk guard**: `du -sg target/ 2>/dev/null` — if target/ exceeds ~30 GiB,
    run `cargo clean` before proceeding (this host has wedged at 59 GiB before).
-1. `cargo fmt --all` — auto-fix; if it changed files, that was a repair.
+1. `make fmt` — auto-fix; if it changed files, that was a repair.
 2. `make lint`
 3. `make complexity`
 4. `make coverage-affected` — never full `make coverage` unless the user
