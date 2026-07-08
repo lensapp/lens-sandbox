@@ -72,6 +72,16 @@ fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
 }
 
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" with hostname "([^"]+)"$"#)]
+fn run_command_with_hostname(world: &mut E2eWorld, cmd_line: String, hostname: String) {
+    run_microvm(world, vec!["-h".into(), hostname], &cmd_line);
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" as user "([^"]+)"$"#)]
+fn run_command_as_user(world: &mut E2eWorld, cmd_line: String, user: String) {
+    run_microvm(world, vec!["-u".into(), user], &cmd_line);
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with volume "([^"]+)" at "([^"]+)"$"#)]
 fn run_command_with_volume(world: &mut E2eWorld, cmd_line: String, name: String, path: String) {
     track_volume(world, &name);
