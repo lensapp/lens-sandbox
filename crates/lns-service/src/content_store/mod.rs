@@ -341,6 +341,31 @@ mod tests {
     }
 
     #[test]
+    fn install_from_reader_returns_cached_blob_when_already_present() {
+        let d = tempdir();
+        let store = ContentStore::new(d.path());
+        let bytes = b"streamed twice, stored once";
+        let first = store
+            .install_from_reader(std::io::Cursor::new(&bytes[..]))
+            .unwrap();
+        let second = store
+            .install_from_reader(std::io::Cursor::new(&bytes[..]))
+            .unwrap();
+        assert_eq!(first, second, "second stream returns the cached blob");
+        let dir = d.path().join("sha256");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "identical content is stored once"
+        );
+        let stray_tmp = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_str().is_some_and(|s| s.contains(".tmp.")));
+        assert!(!stray_tmp, "cache-hit path removes its temp file");
+    }
+
+    #[test]
     fn install_is_idempotent_for_same_bytes() {
         let d = tempdir();
         let store = ContentStore::new(d.path());

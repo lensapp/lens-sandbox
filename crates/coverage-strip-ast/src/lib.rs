@@ -250,6 +250,50 @@ impl<'a> ExecutableLineCollector<'a> {
         }
     }
 
+    /// Macro tokens are opaque to syn, so only the invocation line carries a real counter; the arg lines below it are LLVM phantoms, so mark the invocation and drop the interior.
+    fn note_macro_interior_phantom(&mut self, m: &syn::Macro) {
+        let open_line = m.path.span().start().line;
+        self.mark_line(open_line);
+        let close_line = match &m.delimiter {
+            syn::MacroDelimiter::Paren(d) => d.span.close().end().line,
+            syn::MacroDelimiter::Brace(d) => d.span.close().end().line,
+            syn::MacroDelimiter::Bracket(d) => d.span.close().end().line,
+        };
+        for line in (open_line + 1)..=close_line {
+            self.phantom_entry_lines.insert(line);
+        }
+    }
+
+    /// A plain `} else {` line is a connector with no condition; LLVM maps the else region's counter to the body's first line, so drop the connector when the body starts lower.
+    fn note_plain_else_connector_phantom(&mut self, node: &syn::ExprIf) {
+        let Some((else_token, else_branch)) = &node.else_branch else {
+            return;
+        };
+        let syn::Expr::Block(b) = &**else_branch else {
+            return;
+        };
+        let else_line = else_token.span().start().line;
+        if b.block
+            .stmts
+            .first()
+            .is_some_and(|s| s.span().start().line > else_line)
+        {
+            self.phantom_entry_lines.insert(else_line);
+        }
+    }
+
+    /// A multi-line struct's `..base` update line carries no independent counter — LLVM maps it to the field body — so drop it while the field-value lines keep the real signal.
+    fn note_struct_rest_phantom(&mut self, node: &syn::ExprStruct) {
+        let Some(rest) = &node.rest else {
+            return;
+        };
+        let open_line = node.brace_token.span.open().start().line;
+        let rest_line = rest.span().start().line;
+        if rest_line > open_line {
+            self.phantom_entry_lines.insert(rest_line);
+        }
+    }
+
     fn mark_line(&mut self, line: usize) {
         if line == 0 {
             return;
@@ -270,7 +314,7 @@ impl<'a> ExecutableLineCollector<'a> {
         }
         if trimmed
             .chars()
-            .all(|c| matches!(c, '}' | ')' | ']' | ';' | ',' | '?' | ' ' | '\t'))
+            .all(|c| matches!(c, '}' | ')' | '(' | ']' | ';' | ',' | '?' | ' ' | '\t'))
         {
             return;
         }
@@ -326,9 +370,22 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'ast syn::Expr) {
-        let span = expr.span();
-        self.mark_span(span.start(), span.end());
+        // A macro's arg lines are opaque tokens LLVM never counts; visit_macro marks the one line that carries the counter.
+        if !matches!(expr, syn::Expr::Macro(_)) {
+            let span = expr.span();
+            self.mark_span(span.start(), span.end());
+        }
         syn::visit::visit_expr(self, expr);
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.note_plain_else_connector_phantom(node);
+        syn::visit::visit_expr_if(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        self.note_struct_rest_phantom(node);
+        syn::visit::visit_expr_struct(self, node);
     }
 
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
@@ -336,15 +393,7 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
         if is_macro_rules_path(&m.path) {
             return;
         }
-        let path_start = m.path.span().start();
-        let tail_end = m
-            .tokens
-            .clone()
-            .into_iter()
-            .last()
-            .map(|t| t.span().end())
-            .unwrap_or_else(|| m.path.span().end());
-        self.mark_span(path_start, tail_end);
+        self.note_macro_interior_phantom(m);
         syn::visit::visit_macro(self, m);
     }
 
@@ -774,5 +823,126 @@ mod tests {
         assert!(is_macro_rules_path(&mac.mac.path));
         let other: syn::ItemMacro = syn::parse_str("other! { x }").unwrap();
         assert!(!is_macro_rules_path(&other.mac.path));
+    }
+
+    #[test]
+    fn collector_skips_closure_invocation_closer() {
+        let src = "fn f() {\n    let r = (|| {\n        work();\n        Ok::<(), ()>(())\n    })();\n    let _ = r;\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(c.lines.contains(&3), "closure body stmt kept");
+        assert!(
+            !c.lines.contains(&5),
+            "closer line is pure invocation punctuation"
+        );
+    }
+
+    #[test]
+    fn collector_drops_plain_else_connector_but_keeps_body() {
+        let src =
+            "fn f(n: u32) {\n    if n > 0 {\n        a();\n    } else {\n        b();\n    }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(c.lines.contains(&2), "if header kept");
+        assert!(c.lines.contains(&3), "then body kept");
+        assert!(!c.lines.contains(&4), "else connector line dropped");
+        assert!(
+            c.lines.contains(&5),
+            "else body kept — a never-taken else still shows 0"
+        );
+    }
+
+    #[test]
+    fn collector_keeps_else_if_connector_line() {
+        let src = "fn f(n: u32) {\n    if n > 2 {\n        a();\n    } else if n > 0 {\n        b();\n    }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&4),
+            "else-if header carries a condition — kept"
+        );
+        assert!(c.lines.contains(&5), "else-if body kept");
+    }
+
+    #[test]
+    fn collector_keeps_single_line_else() {
+        let src = "fn f(n: u32) -> u32 {\n    if n > 0 { 1 } else { 2 }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&2),
+            "single-line if/else kept (body shares the line)"
+        );
+    }
+
+    #[test]
+    fn collector_drops_multiline_struct_rest_but_keeps_field_values() {
+        let src = "fn f() -> S {\n    S {\n        a: compute(),\n        ..Default::default()\n    }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&3),
+            "field value expr kept — a never-built struct still shows 0 here"
+        );
+        assert!(
+            !c.lines.contains(&4),
+            "`..Default::default()` struct-update line dropped"
+        );
+    }
+
+    #[test]
+    fn collector_leaves_struct_without_base_update_untouched() {
+        let src = "fn f() -> S {\n    S {\n        a: 1,\n        b: 2,\n    }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(c.lines.contains(&3), "field value line kept");
+        assert!(c.lines.contains(&4), "field value line kept");
+    }
+
+    #[test]
+    fn collector_keeps_single_line_struct_rest() {
+        let src = "fn f() -> S {\n    S { a: 1, ..d() }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&2),
+            "single-line struct-update line kept (fields share the line)"
+        );
+    }
+
+    #[test]
+    fn collector_marks_only_macro_invocation_line_not_arg_lines() {
+        let src = "fn f() {\n    assert_eq!(\n        got(),\n        want(),\n        \"msg {:?}\",\n        detail(),\n    );\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&2),
+            "macro invocation line kept — a never-run assert shows 0 here"
+        );
+        assert!(!c.lines.contains(&3), "macro arg line dropped");
+        assert!(!c.lines.contains(&5), "macro format-string line dropped");
+        assert!(!c.lines.contains(&6), "macro arg continuation line dropped");
+    }
+
+    #[test]
+    fn collector_skips_interior_of_expr_position_macro() {
+        let src = "fn f() {\n    let v = vec![\n        Item { a: 1 },\n        Item { a: 2 },\n    ];\n    let _ = v;\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(c.lines.contains(&2), "let-with-vec! invocation line kept");
+        assert!(
+            !c.lines.contains(&3),
+            "vec! interior line dropped (opaque macro tokens)"
+        );
+        assert!(!c.lines.contains(&4), "vec! interior line dropped");
     }
 }
