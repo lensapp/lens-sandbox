@@ -9,7 +9,7 @@ The background service must be running first (`lns service start`).
 ## `lns run`
 
 ```bash
-lns run [OPTIONS] [IMAGE] [-- COMMAND...]
+lns run [OPTIONS] [IMAGE] [COMMAND...]
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
@@ -59,10 +59,19 @@ the next `lns run` simply pulls it again.
 
 ### Overriding the command
 
-Anything after `--` replaces the image's entrypoint and command:
+A command after the image replaces the image's default command (Docker-style); an
+explicit `--` separator is still accepted:
 
 ```bash
+lns run alpine:3.20 sh -c 'echo hello && uname -a'
 lns run alpine:3.20 -- sh -c 'echo hello && uname -a'
+```
+
+To replace the image's `ENTRYPOINT` as well, pass `--entrypoint`; the command after
+the image becomes its arguments (`--entrypoint ""` clears the entrypoint entirely):
+
+```bash
+lns run --entrypoint /bin/sh alpine:3.20 -c 'echo hi'
 ```
 
 ### Imageless runs
@@ -72,6 +81,15 @@ Omit the image to boot a minimal guest and run a command directly. A command aft
 
 ```bash
 lns run -- /bin/sh
+```
+
+### Setting the run user and hostname
+
+`-u`/`--user` picks the run-as user or uid (`USER[:GROUP]`, Docker-style; a numeric
+segment is used as the uid), and `-h`/`--hostname` sets the guest hostname:
+
+```bash
+lns run -u 1000:1000 -h build-box alpine:3.20
 ```
 
 ### Resources

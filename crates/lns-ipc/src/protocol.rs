@@ -259,8 +259,6 @@ pub struct RunConfig {
     pub entrypoint: Option<String>,
     #[serde(default)]
     pub hostname: Option<String>,
-    #[serde(default)]
-    pub pull: Option<PullPolicy>,
     pub env: Vec<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
@@ -281,7 +279,6 @@ impl RunConfig {
             sandbox_uid: args.sandbox_uid,
             entrypoint: args.entrypoint.clone(),
             hostname: args.hostname.clone(),
-            pull: args.pull,
             env: args.env.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
@@ -330,8 +327,6 @@ pub struct RunImageArgs {
     pub entrypoint: Option<String>,
     #[serde(default)]
     pub hostname: Option<String>,
-    #[serde(default)]
-    pub pull: Option<PullPolicy>,
     pub cmd: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
@@ -354,14 +349,6 @@ pub struct RunImageArgs {
     pub binds: Vec<BindMount>,
     #[serde(default)]
     pub auto_remove: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PullPolicy {
-    Always,
-    Missing,
-    Never,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -651,7 +638,6 @@ mod tests {
             sandbox_uid: Some(65534),
             entrypoint: None,
             hostname: None,
-            pull: None,
             cmd: Vec::new(),
             env: Vec::new(),
             workdir: None,
@@ -682,7 +668,6 @@ mod tests {
             sandbox_uid: None,
             entrypoint: None,
             hostname: None,
-            pull: None,
             cmd: vec![],
             env: vec![],
             workdir: None,
@@ -806,7 +791,6 @@ mod tests {
             sandbox_uid: Some(65534),
             entrypoint: Some("/bin/sh".into()),
             hostname: Some("demo".into()),
-            pull: Some(PullPolicy::Always),
             cmd: vec!["echo".into(), "hi".into()],
             env: vec!["FOO=bar".into()],
             workdir: None,
@@ -847,7 +831,6 @@ mod tests {
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
         assert_eq!(config.entrypoint.as_deref(), Some("/bin/sh"));
         assert_eq!(config.hostname.as_deref(), Some("demo"));
-        assert_eq!(config.pull, Some(PullPolicy::Always));
         assert!(config.auto_remove);
         assert_eq!(config.sandbox_uid, Some(65534));
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);

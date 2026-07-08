@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use lns_ipc::{PortPublish, Protocol, PullPolicy};
+use lns_ipc::{PortPublish, Protocol};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
@@ -98,14 +98,6 @@ pub struct RunArgs {
         help = "Automatically remove the run record after the workload exits."
     )]
     pub auto_remove: bool,
-
-    #[arg(
-        long = "pull",
-        value_name = "POLICY",
-        value_parser = parse_pull_policy_arg,
-        help = "Pull policy accepted for tooling (`always`, `missing`, or `never`)."
-    )]
-    pub pull: Option<PullPolicy>,
 
     #[arg(
         short = 'i',
@@ -343,17 +335,6 @@ pub(crate) fn parse_env_kv(s: &str) -> Result<String, String> {
         return Err(format!("empty variable name in `{s}`"));
     }
     Ok(s.to_string())
-}
-
-pub(crate) fn parse_pull_policy_arg(s: &str) -> Result<PullPolicy, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "always" => Ok(PullPolicy::Always),
-        "missing" => Ok(PullPolicy::Missing),
-        "never" => Ok(PullPolicy::Never),
-        _ => Err(format!(
-            "invalid pull policy `{s}`: expected always, missing, or never"
-        )),
-    }
 }
 
 pub(crate) fn parse_hostname_arg(s: &str) -> Result<String, String> {
@@ -641,7 +622,6 @@ mod tests {
     fn run_accepts_compat_flags_that_map_to_launch_config() {
         let args = parse_run(&[
             "--rm",
-            "--pull=always",
             "-u",
             "1000:1000",
             "--entrypoint",
@@ -652,7 +632,6 @@ mod tests {
         ])
         .expect("compat flags parse");
         assert!(args.auto_remove);
-        assert_eq!(args.pull, Some(PullPolicy::Always));
         assert_eq!(args.effective_sandbox_user().as_deref(), Some("1000:1000"));
         assert_eq!(args.effective_sandbox_uid(), Some(1000));
         assert_eq!(args.entrypoint.as_deref(), Some("/bin/sh"));
@@ -689,14 +668,6 @@ mod tests {
         assert_eq!(volumes[0].name, "cache");
         assert_eq!(volumes[0].target, "/cache");
         assert!(!volumes[0].read_only);
-    }
-
-    #[test]
-    fn parse_pull_policy_arg_accepts_known_values_and_rejects_unknowns() {
-        assert_eq!(parse_pull_policy_arg("missing"), Ok(PullPolicy::Missing));
-        assert_eq!(parse_pull_policy_arg("never"), Ok(PullPolicy::Never));
-        let err = parse_pull_policy_arg("sometimes").expect_err("unknown policy must fail");
-        assert!(err.contains("expected always, missing, or never"));
     }
 
     #[test]

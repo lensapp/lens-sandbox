@@ -229,7 +229,6 @@ mod tests {
             sandbox_user: None,
             sandbox_uid: None,
             auto_remove: false,
-            pull: None,
             interactive: true,
             tty: true,
             entrypoint: None,

@@ -526,7 +526,6 @@ mod tests {
                 sandbox_uid: None,
                 entrypoint: None,
                 hostname: None,
-                pull: None,
                 cmd: vec![],
                 env: vec![],
                 workdir: None,
