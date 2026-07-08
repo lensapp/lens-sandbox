@@ -55,17 +55,19 @@ mod tests {
     fn get_or_create_runs_the_factory_once_per_key() {
         let pool: ClientPool<u32> = ClientPool::new();
         let calls = AtomicU32::new(0);
-        let a = pool.get_or_create("k".into(), || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            42
-        });
-        let b = pool.get_or_create("k".into(), || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            99
-        });
-        assert_eq!(a, 42);
-        assert_eq!(b, 42, "a warm key returns the cached client, not a new one");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "factory runs only on the miss");
+        // fetch_add returns the pre-increment count, so the factory both records that it ran and yields 0 on the miss vs 1 if the hit wrongly re-ran it.
+        let a = pool.get_or_create("k".into(), || calls.fetch_add(1, Ordering::SeqCst));
+        let b = pool.get_or_create("k".into(), || calls.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(a, 0, "the miss runs the factory");
+        assert_eq!(
+            b, 0,
+            "the hit returns the cached client, not a fresh factory run (which would be 1)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the factory runs only on the miss"
+        );
     }
 
     #[test]
@@ -73,7 +75,11 @@ mod tests {
         let pool: ClientPool<u32> = ClientPool::new();
         assert_eq!(pool.get_or_create("a".into(), || 1), 1);
         assert_eq!(pool.get_or_create("b".into(), || 2), 2);
-        assert_eq!(pool.get_or_create("a".into(), || 3), 1, "key a still cached");
+        assert_eq!(
+            pool.get_or_create("a".into(), || 3),
+            1,
+            "key a still cached"
+        );
     }
 
     #[test]
@@ -98,7 +104,10 @@ mod tests {
         let other_user = auth_fingerprint(&RegistryAuth::Basic("bob".into(), "s1".into()));
         let other_secret = auth_fingerprint(&RegistryAuth::Basic("alice".into(), "s2".into()));
         assert_ne!(base, other_user, "a different user re-keys the client");
-        assert_ne!(base, other_secret, "a re-login with a new secret re-keys the client");
+        assert_ne!(
+            base, other_secret,
+            "a re-login with a new secret re-keys the client"
+        );
     }
 
     #[test]
@@ -107,7 +116,10 @@ mod tests {
         let fp = auth_fingerprint(&RegistryAuth::Bearer(token.into()));
         assert!(fp.starts_with("bearer:"));
         assert!(!fp.contains(token));
-        assert_ne!(fp, auth_fingerprint(&RegistryAuth::Basic("x".into(), token.into())));
+        assert_ne!(
+            fp,
+            auth_fingerprint(&RegistryAuth::Basic("x".into(), token.into()))
+        );
     }
 
     #[test]
@@ -124,6 +136,9 @@ mod tests {
             pool_key("docker.io", &cred),
             "distinct credentials on one registry never share a client"
         );
-        assert_eq!(pool_key("docker.io", &anon), pool_key("docker.io", &RegistryAuth::Anonymous));
+        assert_eq!(
+            pool_key("docker.io", &anon),
+            pool_key("docker.io", &RegistryAuth::Anonymous)
+        );
     }
 }

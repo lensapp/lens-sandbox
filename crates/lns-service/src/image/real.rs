@@ -112,8 +112,10 @@ pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> 
         Ok(reference) => pooled_client(reference.resolve_registry(), &auth),
         Err(_) => new_client(),
     };
-    let registry =
-        CachingRegistry::new(RealRegistry::with_client(client, auth), ManifestCache::new(manifests));
+    let registry = CachingRegistry::new(
+        RealRegistry::with_client(client, auth),
+        ManifestCache::new(manifests),
+    );
     let pulled = pull_inner(&registry, image, layer_cache).await?;
     if let Err(e) = crate::image_store::record(&pulled).await {
         crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
