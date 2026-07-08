@@ -48,11 +48,20 @@ implementation, `/green`, `make e2e`, `/code-review`, `/create-pr` — runs
 inside `$SHIP_DIR`. On resume, if the plan file names a branch whose worktree
 is missing, re-add it (`git worktree add "$SHIP_DIR" <branch>`).
 
-Two host cautions:
-- The worktree builds its own `target/` — real disk on this host. `/green`'s
-  disk guard applies per-worktree.
-- At the Done phase, clean up: `git worktree remove "$SHIP_DIR"` (after
-  confirming the branch is pushed), which also reclaims its `target/`.
+The worktree builds its own `target/` — real disk on this host. `/green`'s
+disk guard applies per-worktree.
+
+**Cleanup** happens on PR terminal state, not at first "everything ticked" —
+an open PR can still receive review comments, and the Respond phase needs the
+worktree. When the Done row runs, check `gh pr view --json state`:
+
+- `MERGED` or `CLOSED` → `git worktree remove "$SHIP_DIR"` (reclaims its
+  `target/`), `git branch -d <branch>`, delete the plan file, and
+  `git worktree prune`.
+- `OPEN` → keep everything; report "awaiting review/merge — rerun /ship
+  after merge to clean up".
+- No PR / no GitHub → there is no merge event to observe; ask the user
+  before removing anything.
 
 ## The plan file
 
@@ -101,7 +110,7 @@ First matching row wins:
 | All implementation boxes ticked; Self-review box unchecked | Review | Run `make e2e` once (Layer 1 wiring — CI's test job runs it, `/green` deliberately doesn't); fix failures via `/green`. Then invoke `/code-review` (self-review mode). If it produces fixes, apply them and invoke `/green` after. On "Ship it" / all findings resolved, tick the box. If the branch touches VM/session plumbing, remind the user of the manual checks: `make e2e-microvm` (virt-capable host) and the `lns run -it` smoke test (`expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`). |
 | Self-review ticked; Open PR box present and unchecked; `gh` available | Package | Invoke `/create-pr`. Tick the box. |
 | PR open with unresolved review comments | Respond | Invoke `/review-comments`. Every fix it applies goes through `/green` before replying/resolving. |
-| Everything ticked, no unresolved comments | Done | Report the pipeline state and stop. |
+| Everything ticked, no unresolved comments | Done | Check PR state and run the cleanup policy (see Isolated worktree): merged/closed → remove worktree + branch + plan file; open → report "awaiting merge" and keep everything. |
 
 ## Rules
 
