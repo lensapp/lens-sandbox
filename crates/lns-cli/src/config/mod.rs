@@ -270,7 +270,8 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
             cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
         }
         ConfigKey::RunVolume => {
-            cfg.run.volume = validated(key, values, |s| lns_ipc::MountSpec::parse(s).map(|_| ()))?;
+            cfg.run.volume =
+                validated(key, values, |s| crate::cli::parse_mount_arg(s).map(|_| ()))?;
         }
         ConfigKey::RunPublish => {
             cfg.run.publish = validated(key, values, |s| {
@@ -368,7 +369,7 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
             ConfigKey::RunVolume,
             &cfg.run.volume,
             path,
-            MountSpec::parse,
+            crate::cli::parse_mount_arg,
         )?,
         publish: parsed_defaults(
             ConfigKey::RunPublish,
@@ -778,6 +779,26 @@ mod tests {
         assert_eq!(
             defaults.mounts,
             vec![MountSpec::parse("/srv/data:/data:ro").unwrap()]
+        );
+    }
+
+    #[test]
+    fn run_volume_keyed_mount_default_round_trips_through_set_and_load() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        let (code, _) = run_ok(
+            &set_cmd(
+                ConfigKey::RunVolume,
+                &["type=bind,source=/srv/data,target=/data,readonly"],
+            ),
+            &path,
+        );
+        assert_eq!(code, 0, "a keyed --mount value must validate when stored");
+        let defaults = load_run_defaults(&path).unwrap();
+        assert_eq!(
+            defaults.mounts,
+            vec![MountSpec::parse("/srv/data:/data:ro").unwrap()],
+            "a stored keyed --mount default must load as the equivalent bind",
         );
     }
 
