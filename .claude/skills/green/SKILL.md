@@ -1,13 +1,10 @@
 ---
 name: green
 description: >
-  Gate-repair loop — run the repo verification gates (make fmt → make lint →
-  make complexity → make coverage-affected), auto-repair failures under a
-  strict policy, and stop only on green, an escalation, no-progress, or the
-  attempt cap. Use when the user runs `/green`, asks to "run the gates",
-  "make the gates pass", or to close out an implemented slice. Do NOT
-  auto-invoke during UI iteration or mid-experiment — only when the user
-  wants the current work proven done.
+  Run the repo verification gates and auto-repair failures until green, an
+  escalation, or the attempt cap. Use when the user runs `/green`, asks to
+  run the gates or make them pass, or closes out an implemented slice. Do
+  not auto-invoke during UI iteration.
 ---
 
 # Green — the closer
