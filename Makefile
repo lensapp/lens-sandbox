@@ -91,6 +91,11 @@ build-lns-service:
 # below). CI invokes these targets as parallel jobs, with
 # `CARGO_LOCKED=--locked make <step>` for strictness on lint/test.
 
+# Gate targets are one-shot full passes; incremental caches only cost
+# disk here (cargo never prunes them), so the gates opt out while
+# `make dev` and raw cargo iteration keep incremental speed.
+lint test complexity coverage-data: export CARGO_INCREMENTAL := 0
+
 lint: export LNS_INIT_BIN := skip
 lint: export LNS_SESSION_BROKER_BIN := skip
 lint: export LNS_NFT_BIN := skip
