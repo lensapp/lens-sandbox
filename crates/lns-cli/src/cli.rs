@@ -169,7 +169,7 @@ pub struct RunArgs {
         long = "pull",
         value_parser = parse_pull_policy,
         default_value = "auto",
-        help = "When to pull the image: `always` (skip cache), `auto` (serve cache if fresh, revalidate if stale), `never` (fail if not cached)."
+        help = "When to pull the image: `always` (revalidate against the registry; digest-pinned refs are still served from cache since they're immutable), `auto` (serve cache if fresh, revalidate if stale), `never` (fail if not cached)."
     )]
     pub pull: PullPolicy,
 
