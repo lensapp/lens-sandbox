@@ -23,10 +23,16 @@ pub async fn handle(
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) {
+    let auto_remove = args.auto_remove;
+    let finished_run_id = run_id.clone();
     let result = orchestrate(run_id, microvm, args, frame_tx.clone(), input_rx)
         .instrument(tracing::Span::current())
         .await;
-    emit_completion(&frame_tx, result).await;
+    let code = emit_completion(&frame_tx, result).await;
+    if auto_remove {
+        crate::run_registry::set_exit_code(&finished_run_id, code);
+        let _ = crate::run_registry::remove_if_exited(&finished_run_id);
+    }
 }
 
 #[allow(clippy::cognitive_complexity)]
