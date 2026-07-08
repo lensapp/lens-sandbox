@@ -49,7 +49,7 @@ The **local pre-push gate** is `make lint && make complexity && make coverage` �
 
 - `make lint` — `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. Also the gate's compile signal (clippy is a strict superset of `cargo check`).
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity` (per-crate because workspace feature unification disagrees with per-crate runs). For genuinely-branchy functions, use `#[allow(clippy::cognitive_complexity)]` with a one-line reason.
-- `make coverage` — compiles and runs all tests **instrumented** in `target-cov/`, then enforces every file at 100% line coverage unless listed in `scripts/coverage-floor.sh`'s IGNORES table. Test failures surface here. See [Per-file coverage gate](#per-file-coverage-gate) below.
+- `make coverage` — compiles and runs all tests **instrumented** in `target/llvm-cov-target/`, then enforces every file at 100% line coverage unless listed in `scripts/coverage-floor.sh`'s IGNORES table. Test failures surface here. See [Per-file coverage gate](#per-file-coverage-gate) below.
 
 `make install-hooks` wires the gate into pre-push. Bypass: `git push --no-verify`.
 
@@ -119,9 +119,9 @@ make complexity      per-crate cargo clippy -- -D clippy::cognitive_complexity (
 make fmt             cargo fmt --all
 make coverage          full workspace coverage gate (all crates, 100% floor)
 make coverage-affected coverage gate narrowed to crates touched since origin/main
-make coverage-lcov     re-emit the last coverage run as target/llvm-cov/lcov.info (no rerun)
+make coverage-lcov     re-emit the last coverage run as target/llvm-cov-target/llvm-cov/lcov.info (no rerun)
 make e2e             Layer 1 cucumber harness against real lns + lns-service binaries
-make clean           rm -rf bin/ target/ target-cov/
+make clean           rm -rf bin/ + cargo clean (coverage artifacts live inside target/)
 
 # CI invokes the same gate targets with strictness toggled on:
 CARGO_LOCKED=--locked make lint
@@ -149,7 +149,7 @@ The gate decomposes into two layers:
 - `make coverage-data` (workspace one-shot) builds the AST-stripped `lcov.info` from `cargo test --workspace --exclude e2e-tests --all-targets`. The single-pass approach is a deliberate simplification — now that Layer 2 is in-process and Layer 1 is excluded entirely, a per-crate `cargo llvm-cov test -p <crate>` rotation would produce equivalent data; the workspace pass keeps the Makefile small.
 - `make coverage` runs `coverage-data` and then iterates every `crates/*/` directory, invoking `scripts/coverage-floor.sh <lcov> <crate-prefix>/` once per crate. Each crate reports its own OK/SKIP/FAIL block. The lcov is shared; the per-file gate is per-crate.
 
-For crate-scoped coverage inspection during development, run `scripts/coverage-floor.sh target-cov/llvm-cov/lcov.info crates/<crate>/` directly (assumes `make coverage-data` has already built the lcov).
+For crate-scoped coverage inspection during development, run `scripts/coverage-floor.sh target/llvm-cov-target/llvm-cov/lcov.info crates/<crate>/` directly (assumes `make coverage-data` has already built the lcov).
 
 **Every file in the (post-strip) lcov must be at 100% UNLESS it's listed in IGNORES**. The IGNORES table lives at the top of `scripts/coverage-floor.sh`. Each entry is `<path-suffix>  <reason>`; the reason is mandatory — reviewers should reject ignore entries without one. **The table is the tracker.** There's no parallel Jira/issue list; the entry's reason names the design move that gets the file to 100%, and the entry leaving the table is the completion signal. Reasons fall in three buckets:
 
