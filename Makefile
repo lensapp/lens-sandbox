@@ -256,6 +256,7 @@ audit:
 clean:
 	rm -rf bin/
 	$(CARGO) clean
+	rm -rf $(WORKSPACE_ROOT)/target-cov
 
 # One-time setup per checkout: point git at the in-tree hooks dir so
 # pre-push runs the gate automatically.
