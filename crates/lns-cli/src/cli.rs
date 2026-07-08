@@ -208,7 +208,7 @@ pub struct RunArgs {
 
     #[arg(
         last = true,
-        help = "Override entrypoint+cmd. Everything after `--` is the command."
+        help = "Command to run in the workload; replaces the image CMD but keeps its ENTRYPOINT (use `--entrypoint` to override or clear that). Accepted after the image or after `--`."
     )]
     pub cmd: Vec<String>,
 }
