@@ -18,11 +18,13 @@ Log levels: `error`, `warn`, `info`, `debug`.
 Run an OCI image in a microVM.
 
 ```bash
-lns run [OPTIONS] [IMAGE] [-- COMMAND...]
+lns run [OPTIONS] [IMAGE] [COMMAND...]
 ```
 
 `IMAGE` is an OCI image reference (e.g. `alpine:3.20`); omit it for an imageless
-run, which requires a `COMMAND` after `--`.
+run, which requires a `COMMAND`. A `COMMAND` after the image overrides the image's
+default command (Docker-style `lns run alpine echo hi`); an explicit `--` separator
+is still accepted and is required for an imageless run (`lns run -- echo hi`).
 
 | Option                       | Default          | Meaning                                                                 |
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
@@ -34,15 +36,19 @@ run, which requires a `COMMAND` after `--`.
 | `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
-| `-v`, `--volume <SPEC>`      |                  | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). |
+| `-v`, `--volume`, `--mount <SPEC>` |            | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). Also accepts Docker keyed syntax: `type=bind\|volume,source=...,target=...[,readonly]`. |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. |
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
 | `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
+| `--rm`                       | `false`          | Remove the run record once the workload exits (Docker-style `--rm`).    |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns sandbox attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
+| `-u`, `--user <USER[:GROUP]>`|                  | Run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`; a numeric segment is used as the uid. |
 | `--sandbox-user <NAME>`      | `sandbox`        | Username the workload runs as inside the guest.                         |
 | `--sandbox-uid <UID>`        | `65534`          | UID the workload runs as inside the guest.                              |
-| `-- <COMMAND...>`            |                  | Override the entrypoint and command. Everything after `--`.             |
+| `--entrypoint <COMMAND>`     | image `ENTRYPOINT` | Override the image `ENTRYPOINT`; the `COMMAND` after the image is kept as its arguments. Pass `--entrypoint ""` to clear the image entrypoint. |
+| `-h`, `--hostname <NAME>`    |                  | Set the guest hostname for this run (ASCII letters, digits, `-`, `.`; ≤63 bytes). |
+| `[COMMAND...]`               |                  | Override the image command (and, with `--entrypoint`, its arguments). Accepted after the image directly or after a `--` separator. |
 
 `--cpus`, `--mem`, `-e`, `-v`, and `-p` fall back to defaults stored with
 [`lns config`](#lns-config); a per-run flag overrides its configured default. For
@@ -116,7 +122,7 @@ Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm
 
 ```bash
 lns sandbox ls
-lns sandbox exec [OPTIONS] <RUN> -- <COMMAND...>
+lns sandbox exec [OPTIONS] <RUN> [--] <COMMAND...>
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
 lns sandbox logs [-f] <RUN>

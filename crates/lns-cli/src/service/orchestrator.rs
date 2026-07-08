@@ -176,7 +176,6 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         sandbox_uid,
         entrypoint: args.entrypoint,
         hostname: args.hostname,
-        pull: args.pull,
         cmd: args.cmd,
         env: args.env,
         workdir: args.workdir,

@@ -109,8 +109,7 @@ where
 {
     let raw: Vec<OsString> = argv.into_iter().map(Into::into).collect();
     match first_subcommand(app, &raw) {
-        Some((idx, "run")) => normalize_run_argv(app, &raw, idx),
-        Some((idx, "exec")) => normalize_exec_argv(&raw, idx),
+        Some((idx, sub @ ("run" | "exec"))) => normalize_workload_argv(app, &raw, idx, sub),
         _ => raw,
     }
 }
@@ -145,9 +144,16 @@ fn normalized_subcommand(arg: &str) -> Option<&'static str> {
     }
 }
 
-fn normalize_exec_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
+fn normalize_workload_argv(
+    app: &clap::Command,
+    raw: &[OsString],
+    idx: usize,
+    sub: &str,
+) -> Vec<OsString> {
+    let consumes = options_consuming_next_value(app, sub);
     let mut out = raw[..=idx].to_vec();
     let rest = &raw[idx + 1..];
+    let mut positional_seen = false;
     let mut i = 0;
     while i < rest.len() {
         let arg = &rest[i];
@@ -155,28 +161,7 @@ fn normalize_exec_argv(raw: &[OsString], idx: usize) -> Vec<OsString> {
             out.extend(rest[i..].iter().cloned());
             return out;
         }
-        match expand_it(arg) {
-            Some(expanded) => out.extend(expanded),
-            None => out.push(arg.clone()),
-        }
-        i += 1;
-    }
-    out
-}
-
-fn normalize_run_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec<OsString> {
-    let consumes = options_consuming_next_value(app, "run");
-    let mut out = raw[..=idx].to_vec();
-    let rest = &raw[idx + 1..];
-    let mut image_seen = false;
-    let mut i = 0;
-    while i < rest.len() {
-        let arg = &rest[i];
-        if arg == "--" {
-            out.extend(rest[i..].iter().cloned());
-            return out;
-        }
-        if image_seen {
+        if positional_seen {
             out.push(OsString::from("--"));
             out.extend(rest[i..].iter().cloned());
             return out;
@@ -197,7 +182,7 @@ fn normalize_run_argv(app: &clap::Command, raw: &[OsString], idx: usize) -> Vec<
             continue;
         }
         if !s.starts_with('-') {
-            image_seen = true;
+            positional_seen = true;
         }
         i += 1;
     }
@@ -450,6 +435,14 @@ mod tests {
         let args: crate::cli::ExecArgs = parse_args(["lns", "exec", "demo"]).unwrap();
         assert_eq!(args.run, "demo");
         assert!(args.cmd.is_empty());
+    }
+
+    #[test]
+    fn exec_inserts_the_command_separator_after_the_run_name() {
+        let args: crate::cli::ExecArgs =
+            parse_args(["lns", "exec", "demo", "sh", "-c", "echo hi"]).unwrap();
+        assert_eq!(args.run, "demo");
+        assert_eq!(args.cmd, ["sh", "-c", "echo hi"]);
     }
 
     #[test]
