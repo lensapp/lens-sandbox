@@ -91,10 +91,14 @@ build-lns-service:
 # below). CI invokes these targets as parallel jobs, with
 # `CARGO_LOCKED=--locked make <step>` for strictness on lint/test.
 
-# Gate targets are one-shot full passes; incremental caches only cost
-# disk here (cargo never prunes them), so the gates opt out while
-# `make dev` and raw cargo iteration keep incremental speed.
-lint test complexity coverage-data: export CARGO_INCREMENTAL := 0
+# lint/complexity are one-shot full passes; incremental caches only cost
+# disk there (cargo never prunes them), so they opt out. test and coverage
+# are re-run in the local edit loop, where incremental turns a full crate
+# rebuild into a partial one — so keep them on off-CI, where the disk cost
+# buys a much faster iteration, and off under CI (cold one-shot, no speedup
+# to gain). `make dev` and raw cargo iteration keep incremental regardless.
+lint complexity: export CARGO_INCREMENTAL := 0
+test coverage-data: export CARGO_INCREMENTAL := $(if $(CI),0,1)
 
 lint: export LNS_INIT_BIN := skip
 lint: export LNS_SESSION_BROKER_BIN := skip
@@ -162,21 +166,28 @@ coverage-data:
 		eval "$$($(CARGO) llvm-cov show-env --export-prefix)"; \
 		$(if $(strip $(COVERAGE_CRATES)),$(if $(filter lns-service,$(COVERAGE_CRATES)),$(CARGO) build -p lns-service;,),$(CARGO) build -p lns-service;) \
 		$(CARGO) test $(COVERAGE_CARGO_SCOPE) --all-targets; \
-		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST); \
 		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST) --html; \
 		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST) --lcov \
 			--output-path $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info; \
 		$(COVERAGE_TARGET_DIR)/debug/coverage-strip-ast $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info; \
 		echo "HTML report: $(COVERAGE_TARGET_DIR)/llvm-cov/html/index.html"
 
+# Full mode: one lcov pass over all crates (the `crates/` prefix keeps the
+# per-crate loop's stale-check suppression, so gate semantics are unchanged
+# — just no 8x re-parse). Affected mode: narrow per-crate loop so only the
+# touched crates' files are gated.
 coverage: coverage-data
-	@status=0; \
+	@if [ -z "$(strip $(COVERAGE_CRATES))" ]; then \
+		./scripts/coverage-floor.sh $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info "crates/"; \
+	else \
+		status=0; \
 		for pkg in $(COVERAGE_CRATES_LIST); do \
 			echo ""; \
 			echo "── $$pkg ──"; \
 			./scripts/coverage-floor.sh $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info "$$pkg/" || status=$$?; \
 		done; \
-		exit $$status
+		exit $$status; \
+	fi
 
 BASE_REF ?= origin/main
 coverage-affected:
