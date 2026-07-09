@@ -175,11 +175,14 @@ async fn orchestrate(
     }
 
     let imageless = args.image.is_none();
-    let runtime_layer = runtime_layer::for_run(
+    static RUNTIME_LAYER_MEMO: runtime_layer::RuntimeLayerMemo =
+        runtime_layer::RuntimeLayerMemo::new();
+    let runtime_layer = runtime_layer::for_run_memoized(
         imageless,
         &content_store,
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
+        &RUNTIME_LAYER_MEMO,
     )?;
 
     let layers = std::mem::take(&mut image.bytes);

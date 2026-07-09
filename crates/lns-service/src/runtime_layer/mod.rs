@@ -296,6 +296,79 @@ fn split_path(normalized: &str) -> Vec<String> {
         .collect()
 }
 
+type MemoKey = (bool, Option<PathBuf>, PathBuf);
+
+pub struct RuntimeLayerMemo(std::sync::Mutex<std::collections::BTreeMap<MemoKey, RuntimeLayer>>);
+
+impl RuntimeLayerMemo {
+    pub const fn new() -> Self {
+        Self(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
+    fn get(&self, key: &MemoKey) -> Option<RuntimeLayer> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn insert(&self, key: MemoKey, layer: RuntimeLayer) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, layer);
+    }
+}
+
+// The layer is a pure function of these source paths (immutable per guest-tools build-id and service binary), so one process-wide build per key replaces re-reading and re-hashing every blob on each run.
+pub fn for_run_memoized(
+    imageless: bool,
+    content_store: &crate::content_store::ContentStore,
+    guest_tools: &crate::guest_tools::GuestTools,
+    assets: Option<&crate::supervisor::SupervisorAssets>,
+    memo: &RuntimeLayerMemo,
+) -> Result<Option<RuntimeLayer>> {
+    for_run_memoized_with(
+        |k| std::env::var_os(k),
+        imageless,
+        content_store,
+        guest_tools,
+        assets,
+        memo,
+    )
+}
+
+fn for_run_memoized_with(
+    env_get: impl Fn(&str) -> Option<std::ffi::OsString>,
+    imageless: bool,
+    content_store: &crate::content_store::ContentStore,
+    guest_tools: &crate::guest_tools::GuestTools,
+    assets: Option<&crate::supervisor::SupervisorAssets>,
+    memo: &RuntimeLayerMemo,
+) -> Result<Option<RuntimeLayer>> {
+    let dev_overrides_active =
+        env_get("LNS_DEBUG_WRAP").is_some() || env_get("LNS_NFT_BIN").is_some();
+    if dev_overrides_active {
+        return for_run(imageless, content_store, guest_tools, assets);
+    }
+    let key = (
+        imageless,
+        assets.map(|a| a.supervisor_bin.clone()),
+        assets
+            .map(|a| a.guest_tools_root.clone())
+            .unwrap_or_else(|| guest_tools.root.clone()),
+    );
+    if let Some(hit) = memo.get(&key) {
+        return Ok(Some(hit));
+    }
+    let layer = for_run(imageless, content_store, guest_tools, assets)?;
+    if let Some(l) = &layer {
+        memo.insert(key, l.clone());
+    }
+    Ok(layer)
+}
+
 pub fn for_run(
     imageless: bool,
     content_store: &crate::content_store::ContentStore,
@@ -833,6 +906,99 @@ mod tests {
             "imageless+supervised must carry /bin/sh"
         );
         assert!(layer.manifest.label.ends_with("+imageless"));
+    }
+
+    fn no_env(_k: &str) -> Option<std::ffi::OsString> {
+        None
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn for_run_memoized_serves_the_second_run_without_rereading_sources() {
+        let _env = NftEnvOverride::install();
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let assets = fake_assets(&d);
+        let memo = RuntimeLayerMemo::new();
+        let nft_env = std::env::var_os("LNS_NFT_BIN");
+        let env_get = |k: &str| (k == "LNS_NFT_BIN").then(|| nft_env.clone()).flatten();
+
+        let first = for_run_memoized_with(env_get, true, &s, &gt, Some(&assets), &memo);
+        // The nft override is active, so the first call bypasses the memo and re-reads.
+        let first_again = for_run_memoized_with(no_env, true, &s, &gt, Some(&assets), &memo)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(&assets.supervisor_bin).unwrap();
+        let hit = for_run_memoized_with(no_env, true, &s, &gt, Some(&assets), &memo)
+            .unwrap()
+            .unwrap();
+        assert!(first.is_ok(), "override path builds: {first:?}");
+        assert_eq!(
+            hit.digest(),
+            first_again.digest(),
+            "a memo hit must serve the identical layer without touching the deleted source"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn for_run_memoized_dev_override_bypasses_the_memo() {
+        let _env = NftEnvOverride::install();
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let assets = fake_assets(&d);
+        let memo = RuntimeLayerMemo::new();
+        let nft_env = std::env::var_os("LNS_NFT_BIN");
+        let env_get = |k: &str| (k == "LNS_NFT_BIN").then(|| nft_env.clone()).flatten();
+
+        for_run_memoized_with(env_get, true, &s, &gt, Some(&assets), &memo)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(&assets.supervisor_bin).unwrap();
+        let err = for_run_memoized_with(env_get, true, &s, &gt, Some(&assets), &memo).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading"),
+            "an active dev override must rebuild from sources every run: {err:#}"
+        );
+    }
+
+    #[test]
+    fn for_run_memoized_keys_on_the_imageless_flag() {
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let memo = RuntimeLayerMemo::new();
+
+        let imageless = for_run_memoized_with(no_env, true, &s, &gt, None, &memo)
+            .unwrap()
+            .unwrap();
+        let oci = for_run_memoized_with(no_env, false, &s, &gt, None, &memo)
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            imageless.digest(),
+            oci.digest(),
+            "imageless and oci layers must not share a memo slot"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn for_run_memoized_real_env_wrapper_builds_and_serves_hits() {
+        let _wrap = crate::test_env::EnvVarGuard::unset("LNS_DEBUG_WRAP");
+        let _nft = crate::test_env::EnvVarGuard::unset("LNS_NFT_BIN");
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        std::fs::write(gt.root.join("marker"), b"x").unwrap();
+        let memo = RuntimeLayerMemo::new();
+
+        let first = for_run_memoized(false, &s, &gt, None, &memo).unwrap().unwrap();
+        std::fs::remove_file(gt.root.join("marker")).unwrap();
+        let hit = for_run_memoized(false, &s, &gt, None, &memo).unwrap().unwrap();
+        assert_eq!(hit.digest(), first.digest());
     }
 
     #[test]
