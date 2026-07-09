@@ -1,0 +1,71 @@
+name: wsl2-smoke
+
+# Tier A WSL2 smoke: proves the shipping Linux binary installs and runs its
+# non-microVM surface inside a real WSL2 userland. It does NOT boot a guest
+# (that needs nested KVM, which only a self-hosted bare-metal Windows 11 runner
+# can provide). Not a required check.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci-wsl2-smoke]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl2-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wsl2-smoke:
+    name: WSL2 smoke (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Report host virtualization + WSL capability
+        continue-on-error: true
+        run: |
+          Write-Host "== OS =="
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          Write-Host "== Optional features =="
+          Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform, Microsoft-Windows-Subsystem-Linux |
+            Select-Object FeatureName, State | Format-Table -AutoSize
+          Write-Host "== wsl --version =="
+          wsl --version
+          Write-Host "== wsl --status =="
+          wsl --status
+          Write-Host "== wsl --list --online =="
+          wsl --list --online
+
+      - name: Install / update WSL2 + Ubuntu
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wsl --set-default-version 2
+          try { wsl --update } catch { Write-Host "wsl --update failed (continuing): $_" }
+          wsl --install -d Ubuntu-24.04 --no-launch
+          wsl --set-default-version 2
+          wsl --version
+
+      - name: Assert a real WSL2 kernel is present (fail if only WSL1)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wsl --list --verbose
+          $procVersion = (wsl -d Ubuntu-24.04 -u root -- cat /proc/version) -join "`n"
+          Write-Host "guest /proc/version: $procVersion"
+          if ($procVersion -notmatch 'microsoft|WSL2') {
+            Write-Error "No WSL2 kernel detected. The hosted runner likely lacks the nested virtualization WSL2 requires; Tier A must run on a self-hosted Windows 11 runner."
+            exit 1
+          }
+
+      - name: Install lns via the shipping install script (inside WSL2)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wsl -d Ubuntu-24.04 -u root -- bash -lc "set -euxo pipefail; apt-get update -y; apt-get install -y curl ca-certificates; export LNS_NO_SERVICE=1; curl -fsSL https://get.lns.run | bash"
+
+      - name: Smoke the non-microVM surface in WSL2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wsl -d Ubuntu-24.04 -u root -- bash -lc 'set -euxo pipefail; LNS="$HOME/.local/bin/lns"; "$LNS" --version; "$LNS" --help >/dev/null; "$LNS" audit || echo "audit exited non-zero without a service (tolerated in smoke)"'
