@@ -8,10 +8,8 @@ pub(crate) trait ConnectOnce {
     fn connect_once(&self, port: u32) -> impl Future<Output = Result<RawFd>> + Send;
 }
 
-const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(10);
-
-// Capped low because every ms spent past guest readiness is added to every single run's boot time, while a refused vsock connect costs near nothing.
-const CONNECT_MAX_DELAY: Duration = Duration::from_millis(100);
+// Constant and low because every ms spent past guest readiness is added to every single run's boot time, while a refused vsock connect costs near nothing.
+const CONNECT_POLL_DELAY: Duration = Duration::from_millis(10);
 
 pub(crate) async fn connect_with<C: ConnectOnce + Sync>(
     connector: &C,
@@ -19,7 +17,6 @@ pub(crate) async fn connect_with<C: ConnectOnce + Sync>(
     timeout: Duration,
 ) -> Result<RawFd> {
     let deadline = Instant::now() + timeout;
-    let mut delay = CONNECT_INITIAL_DELAY;
     loop {
         match connector.connect_once(port).await {
             Ok(fd) => return Ok(fd),
@@ -29,8 +26,7 @@ pub(crate) async fn connect_with<C: ConnectOnce + Sync>(
                         format!("connect_to_guest_port({port}) timed out after {timeout:?}")
                     });
                 }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(CONNECT_MAX_DELAY);
+                tokio::time::sleep(CONNECT_POLL_DELAY).await;
             }
         }
     }
@@ -114,9 +110,9 @@ mod tests {
         let waited = started.elapsed();
         assert_eq!(
             waited,
-            Duration::from_millis(10 + 20 + 40 + 80 + 100 + 100),
-            "backoff schedule regressed — a guest ready after the 6th probe \
-             must be reached in 350ms, not the old 1.27s",
+            Duration::from_millis(6 * 10),
+            "poll schedule regressed — a guest ready after the 6th probe \
+             must be reached in 60ms; every extra ms here is added to every run's boot",
         );
     }
 }
