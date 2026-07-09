@@ -1,11 +1,15 @@
 name: wsl2-smoke
 
 # Tier A WSL2 smoke: proves the shipping Linux binary installs and runs its
-# non-microVM surface inside a real WSL2 userland. It does NOT boot a guest
-# (that needs nested KVM, which only a self-hosted bare-metal Windows 11 runner
-# can provide). Not a required check.
+# non-microVM surface (install script, --version/--help, audit) inside a real
+# WSL2 userland on a hosted windows-2022 runner. It does NOT boot a guest —
+# that needs nested KVM inside WSL2, which only a self-hosted bare-metal
+# Windows 11 runner can provide. Not a required check — nightly and on demand,
+# mirroring e2e-microvm.
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}
   push:
     branches: [ci-wsl2-smoke]
 
@@ -31,8 +35,9 @@ jobs:
           Write-Host "== OS =="
           (Get-CimInstance Win32_OperatingSystem).Caption
           Write-Host "== Optional features =="
-          Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform, Microsoft-Windows-Subsystem-Linux |
-            Select-Object FeatureName, State | Format-Table -AutoSize
+          foreach ($f in 'VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux') {
+            Get-WindowsOptionalFeature -Online -FeatureName $f | Select-Object FeatureName, State
+          }
           Write-Host "== wsl --version =="
           wsl --version
           Write-Host "== wsl --status =="
