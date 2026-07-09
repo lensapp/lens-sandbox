@@ -41,7 +41,7 @@ async fn stop_vm_within_grace(grace: Duration, mut vm_task: JoinHandle<Result<()
 mod tests {
     use super::*;
     use crate::forward::{ForwardError, ForwardSpec, PortForwarder, establish, plan};
-    use crate::vm::GuestTransport;
+    use crate::vm::transport::StopFlagTransport;
     use lns_ipc::{PortPublish, Protocol};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,29 +86,8 @@ mod tests {
         }
     }
 
-    struct FakeTransport {
-        stopped: Arc<AtomicBool>,
-    }
-
-    impl GuestTransport for FakeTransport {
-        fn connect(
-            &self,
-            _port: u32,
-            _timeout: Duration,
-        ) -> futures_util::future::BoxFuture<'_, Result<std::os::fd::RawFd>> {
-            Box::pin(async { Ok(42) })
-        }
-        fn request_stop(&self) {
-            self.stopped.store(true, Ordering::SeqCst);
-        }
-    }
-
     fn stop_guard() -> (VmStopGuard, Arc<AtomicBool>) {
-        let stopped = Arc::new(AtomicBool::new(false));
-        let guard = VmStopGuard::new(Arc::new(FakeTransport {
-            stopped: stopped.clone(),
-        }));
-        (guard, stopped)
+        StopFlagTransport::guard()
     }
 
     fn pp(host_port: u16) -> PortPublish {

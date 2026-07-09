@@ -28,32 +28,41 @@ impl Drop for VmStopGuard {
 }
 
 #[cfg(test)]
+pub(crate) struct StopFlagTransport {
+    pub(crate) stopped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl StopFlagTransport {
+    pub(crate) fn guard() -> (VmStopGuard, Arc<std::sync::atomic::AtomicBool>) {
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = VmStopGuard::new(Arc::new(Self {
+            stopped: stopped.clone(),
+        }));
+        (guard, stopped)
+    }
+}
+
+#[cfg(test)]
+impl GuestTransport for StopFlagTransport {
+    fn connect(&self, _port: u32, _timeout: Duration) -> BoxFuture<'_, Result<RawFd>> {
+        Box::pin(async { Ok(42) })
+    }
+    fn request_stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct FakeTransport {
-        stopped: Arc<AtomicBool>,
-    }
-
-    impl GuestTransport for FakeTransport {
-        fn connect(&self, _port: u32, _timeout: Duration) -> BoxFuture<'_, Result<RawFd>> {
-            Box::pin(async { Ok(42) })
-        }
-        fn request_stop(&self) {
-            self.stopped.store(true, Ordering::SeqCst);
-        }
-    }
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn dropping_the_guard_requests_stop() {
-        let stopped = Arc::new(AtomicBool::new(false));
-        let transport = Arc::new(FakeTransport {
-            stopped: stopped.clone(),
-        });
-        {
-            let _guard = VmStopGuard::new(transport);
-        }
+        let (guard, stopped) = StopFlagTransport::guard();
+        drop(guard);
         assert!(
             stopped.load(Ordering::SeqCst),
             "the stop guard must signal the VM to stop when dropped"
@@ -62,8 +71,8 @@ mod tests {
 
     #[tokio::test]
     async fn connect_delegates_to_the_transport() {
-        let transport = FakeTransport {
-            stopped: Arc::new(AtomicBool::new(false)),
+        let transport = StopFlagTransport {
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let fd = transport
             .connect(1029, Duration::from_secs(1))

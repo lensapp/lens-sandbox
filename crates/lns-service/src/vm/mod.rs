@@ -7,7 +7,7 @@ mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
 pub mod session_client;
-mod transport;
+pub(crate) mod transport;
 #[cfg(target_os = "macos")]
 mod vz;
 
