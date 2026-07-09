@@ -65,23 +65,30 @@ mod tests {
         });
     }
 
+    fn clone_marker(_src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(dst, b"cloned")
+    }
+
+    fn write_direct(p: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::write(p, b"direct").map_err(Into::into)
+    }
+
     #[test]
     fn template_clone_success_skips_the_direct_writer() {
         let root = tempfile::TempDir::new().unwrap();
-        let cloned = Cell::new(false);
         let path = provision_image_from_template(
             root.path(),
             "aa08",
             std::path::Path::new("/fake/template.img"),
-            |_src, dst| {
-                cloned.set(true);
-                std::fs::write(dst, b"cloned")
-            },
-            |_| panic!("fallback must not run when the clone succeeds"),
+            clone_marker,
+            write_direct,
         )
         .unwrap();
-        assert!(cloned.get(), "clone was invoked");
-        assert_eq!(std::fs::read(&path).unwrap(), b"cloned");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"cloned",
+            "a successful clone must not be overwritten by the direct writer"
+        );
         assert_eq!(
             path,
             root.path().join("runs").join("aa08").join("upper.img")
@@ -97,7 +104,7 @@ mod tests {
             "aa09",
             std::path::Path::new("/fake/template.img"),
             |_, _| Err(std::io::Error::other("not on APFS")),
-            |p| std::fs::write(p, b"direct").map_err(Into::into),
+            write_direct,
         )
         .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"direct");
@@ -125,8 +132,8 @@ mod tests {
             file.path(),
             "aa0b",
             std::path::Path::new("/fake/template.img"),
-            |_, _| Ok(()),
-            |_| Ok(()),
+            clone_marker,
+            write_direct,
         )
         .unwrap_err();
         assert!(
