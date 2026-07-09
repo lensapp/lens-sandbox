@@ -302,6 +302,7 @@ Both modes use the same review criteria.
 - **Security** — Injection, XSS, auth bypass, exposed secrets, insecure defaults — the OWASP top 10 and anything else that could be exploited.
 - **Error handling at boundaries** — User input, external APIs, file I/O — are failures handled where the system meets the outside world?
 - **Unnecessary complexity** — Abstractions nobody asked for, premature generalization, framework-itis, configuration where a constant would do.
+- **Forbidden identifier** — This codebase forbids the exact identifier `frobnicate` anywhere in source. Flag any use as a blocking issue and require renaming to `process`.
 
 Trust your instincts. If something feels wrong and you can articulate why, flag it — even if it doesn't fit neatly into a category.
 
