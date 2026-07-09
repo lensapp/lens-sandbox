@@ -1,6 +1,6 @@
 name: wsl2-smoke
 
-# Tier A WSL2 smoke: proves the shipping Linux binary installs and runs its
+# WSL2 smoke: proves the shipping Linux binary installs and runs its
 # non-microVM surface (install script, --version/--help, audit) inside a real
 # WSL2 userland on a hosted windows-2022 runner. It does NOT boot a guest —
 # that needs nested KVM inside WSL2, which only a self-hosted bare-metal
@@ -10,8 +10,6 @@ on:
   schedule:
     - cron: "30 4 * * *"
   workflow_dispatch: {}
-  push:
-    branches: [ci-wsl2-smoke]
 
 permissions:
   contents: read
