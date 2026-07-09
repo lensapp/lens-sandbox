@@ -360,7 +360,7 @@ async fn orchestrate(
         boot_start.elapsed().as_secs_f64()
     );
     crate::run_registry::set_connector(&run_id, connector.clone());
-    let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
+    let vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
     log::progress("Connecting", "session", 0, 0);
     let connect_started = std::time::Instant::now();
@@ -376,8 +376,12 @@ async fn orchestrate(
     log::debug!(code = session_code, "broker session ended");
     crate::run_registry::set_exit_code(&run_id, session_code);
 
-    super::shutdown::shutdown_after_session(forwards, std::time::Duration::from_secs(2), vm_task)
-        .await?;
+    super::shutdown::detach_after_session(
+        forwards,
+        std::time::Duration::from_secs(2),
+        vm_task,
+        vm_stop_guard,
+    );
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
