@@ -18,6 +18,7 @@
     "node_modules/**",
     "**/node_modules/**",
     ".claude/**",
+    ".agents/**",
     "**/CHANGELOG.md",
     // Locally generated context — not committed.
     ".pruner/**"
