@@ -65,7 +65,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           wsl -d Ubuntu-24.04 -u root -- bash -lc "set -euxo pipefail; apt-get update -y; apt-get install -y curl ca-certificates; export LNS_NO_SERVICE=1; curl -fsSL https://get.lns.run | bash"
 
-      - name: Smoke the non-microVM surface in WSL2
+      - name: Show installed lns binary
+        run: wsl -d Ubuntu-24.04 -u root -- ls -la /root/.local/bin
+
+      - name: Smoke lns --version / --help in WSL2
         run: |
           $ErrorActionPreference = 'Stop'
-          wsl -d Ubuntu-24.04 -u root -- bash -lc 'set -euxo pipefail; LNS="$HOME/.local/bin/lns"; "$LNS" --version; "$LNS" --help >/dev/null; "$LNS" audit || echo "audit exited non-zero without a service (tolerated in smoke)"'
+          $PSNativeCommandUseErrorActionPreference = $true
+          wsl -d Ubuntu-24.04 -u root -- /root/.local/bin/lns --version
+          wsl -d Ubuntu-24.04 -u root -- /root/.local/bin/lns --help
+          Write-Host "lns runs in WSL2 (--version / --help OK)"
+
+      - name: Smoke lns audit in WSL2 (informational)
+        continue-on-error: true
+        run: wsl -d Ubuntu-24.04 -u root -- /root/.local/bin/lns audit
