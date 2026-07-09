@@ -75,7 +75,7 @@ mod tests {
             std::path::Path::new("/fake/template.img"),
             |_src, dst| {
                 cloned.set(true);
-                std::fs::write(dst, b"cloned").map_err(Into::into)
+                std::fs::write(dst, b"cloned")
             },
             |_| panic!("fallback must not run when the clone succeeds"),
         )

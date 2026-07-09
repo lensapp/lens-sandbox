@@ -300,6 +300,12 @@ type MemoKey = (bool, Option<PathBuf>, PathBuf);
 
 pub struct RuntimeLayerMemo(std::sync::Mutex<std::collections::BTreeMap<MemoKey, RuntimeLayer>>);
 
+impl Default for RuntimeLayerMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeLayerMemo {
     pub const fn new() -> Self {
         Self(std::sync::Mutex::new(std::collections::BTreeMap::new()))
@@ -995,9 +1001,13 @@ mod tests {
         std::fs::write(gt.root.join("marker"), b"x").unwrap();
         let memo = RuntimeLayerMemo::new();
 
-        let first = for_run_memoized(false, &s, &gt, None, &memo).unwrap().unwrap();
+        let first = for_run_memoized(false, &s, &gt, None, &memo)
+            .unwrap()
+            .unwrap();
         std::fs::remove_file(gt.root.join("marker")).unwrap();
-        let hit = for_run_memoized(false, &s, &gt, None, &memo).unwrap().unwrap();
+        let hit = for_run_memoized(false, &s, &gt, None, &memo)
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.digest(), first.digest());
     }
 

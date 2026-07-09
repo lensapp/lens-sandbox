@@ -436,12 +436,21 @@ mod tests {
 
         let fs2 = FakeFs::new();
         let fetcher = CannedFetcher::ok_once(payload());
-        let resolved =
-            ensure_pinned_memoized(&fetcher, &fs2, &cache_root(), &art(&payload_sha(), None), &memo)
-                .await
-                .expect("deleted artifact must self-heal via fetch");
+        let resolved = ensure_pinned_memoized(
+            &fetcher,
+            &fs2,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("deleted artifact must self-heal via fetch");
         assert_eq!(resolved, cache_file());
-        assert_eq!(fetcher.calls().len(), 1, "gone-from-disk memo hit must fetch");
+        assert_eq!(
+            fetcher.calls().len(),
+            1,
+            "gone-from-disk memo hit must fetch"
+        );
     }
 
     #[tokio::test]

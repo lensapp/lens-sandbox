@@ -1,7 +1,9 @@
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 
-use crate::download::{PinnedArtifact, RealFetcher, RealFs, VerifiedArtifacts, ensure_pinned_memoized};
+use crate::download::{
+    PinnedArtifact, RealFetcher, RealFs, VerifiedArtifacts, ensure_pinned_memoized,
+};
 
 static VERIFIED: VerifiedArtifacts = VerifiedArtifacts::new();
 

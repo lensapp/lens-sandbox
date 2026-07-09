@@ -29,8 +29,7 @@ async fn ensure_template(root: &std::path::Path) -> anyhow::Result<std::path::Pa
         .get_or_try_init(|| async {
             let path = root.join("upper-template.img");
             let write_target = path.clone();
-            tokio::task::spawn_blocking(move || write_ext4(&fresh_plan(), &write_target))
-                .await??;
+            tokio::task::spawn_blocking(move || write_ext4(&fresh_plan(), &write_target)).await??;
             Ok::<_, anyhow::Error>(path)
         })
         .await?;
