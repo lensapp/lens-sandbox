@@ -15,14 +15,20 @@ Lens Sandbox boots a real microVM under a hardware hypervisor:
   the `cloud-hypervisor` and `virtiofsd` binaries available on `PATH` (or pointed
   to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN`). The installer checks
   for both and tells you what's missing.
+- **Windows 11 with WSL2** — Run Lens Sandbox inside WSL2. It uses the Linux
+  build, with the same requirements. To run workloads, turn on nested
+  virtualization so WSL2 can start virtual machines. Windows 11 turns this on by
+  default.
 
-The security model is identical on both: the same per-directory policy, the same
+The security model is identical everywhere: the same per-directory policy, the same
 credential-shaped placeholders, the same "policy you run into, not write."
 
 ## Platform support
 
-macOS on Apple Silicon and Linux (x86_64 / aarch64) are supported. Windows support
-is on the roadmap and not yet available.
+macOS on Apple Silicon, Linux (x86_64 / aarch64), and Windows 11 with WSL2 are
+supported. On Windows, Lens Sandbox runs inside WSL2 as the Linux build. Turn on
+nested virtualization to run workloads. Running Windows directly, without WSL2,
+is not supported.
 
 The Linux binaries require **glibc 2.35 or newer** — Ubuntu 22.04 LTS and newer,
 Debian 12 and newer, Fedora 36 and newer, and current rolling releases (Arch,

@@ -16,7 +16,7 @@ Lens Sandbox is a local desktop app that runs AI agents, commands, OCI images, a
 curl -fsSL https://get.lns.run | bash
 ```
 
-This installs the `lns` CLI and the `lns-service` background service. Lens Sandbox runs on **macOS on Apple Silicon** (M-series, via the Virtualization framework) and **Linux on x86_64/aarch64** (glibc 2.35+, e.g. Ubuntu 22.04+; via KVM + Cloud Hypervisor — needs `/dev/kvm` plus `cloud-hypervisor` and `virtiofsd`). Windows support is on the roadmap.
+This installs the `lns` CLI and the `lns-service` background service. Lens Sandbox runs on **macOS on Apple Silicon** (M-series, via the Virtualization framework) and **Linux on x86_64/aarch64** (glibc 2.35+, e.g. Ubuntu 22.04+; via KVM + Cloud Hypervisor — needs `/dev/kvm` plus `cloud-hypervisor` and `virtiofsd`). On **Windows 11**, run it inside WSL2, which uses the same Linux build — turn on nested virtualization to run workloads.
 
 ## Quickstart
 
