@@ -16,6 +16,45 @@ pub(crate) struct PinnedArtifact<'a> {
     pub label: &'a str,
 }
 
+pub(crate) struct VerifiedArtifacts(std::sync::Mutex<std::collections::BTreeSet<PathBuf>>);
+
+impl VerifiedArtifacts {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(std::collections::BTreeSet::new()))
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(path)
+    }
+
+    fn insert(&self, path: PathBuf) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path);
+    }
+}
+
+// Re-hashing a ~50MB artifact costs ~60ms on every run; once this process has verified the pinned sha, a still-present file is trusted for the process lifetime.
+pub(crate) async fn ensure_pinned_memoized(
+    fetcher: &impl Fetcher,
+    fs: &impl Fs,
+    cache: &Path,
+    artifact: &PinnedArtifact<'_>,
+    memo: &VerifiedArtifacts,
+) -> Result<PathBuf> {
+    let path = cache.join(artifact.filename);
+    if memo.contains(&path) && fs.is_file(&path).await {
+        return Ok(path);
+    }
+    let resolved = ensure_pinned(fetcher, fs, cache, artifact).await?;
+    memo.insert(resolved.clone());
+    Ok(resolved)
+}
+
 #[allow(clippy::cognitive_complexity)] // cache hit/corrupt/miss are one resolution decision; extracting them buries the fall-through to fetch
 pub(crate) async fn ensure_pinned(
     fetcher: &impl Fetcher,
@@ -346,6 +385,91 @@ mod tests {
 
     fn cache_file() -> PathBuf {
         cache_root().join("artifact.bin")
+    }
+
+    #[tokio::test]
+    async fn verified_artifact_is_not_rehashed_on_the_next_ensure() {
+        init_tracing_capture();
+        let fs = FakeFs::new();
+        fs.put_file(cache_file(), payload());
+        let memo = VerifiedArtifacts::new();
+
+        ensure_pinned_memoized(
+            &CannedFetcher::never(),
+            &fs,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("first ensure verifies the cached bytes");
+
+        fs.fail_next_read(io::Error::new(io::ErrorKind::PermissionDenied, "reread"));
+        let resolved = ensure_pinned_memoized(
+            &CannedFetcher::never(),
+            &fs,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("second ensure must trust the memo instead of re-reading");
+        assert_eq!(resolved, cache_file());
+    }
+
+    #[tokio::test]
+    async fn memo_hit_with_deleted_file_falls_through_to_fetch() {
+        init_tracing_capture();
+        let fs = FakeFs::new();
+        fs.put_file(cache_file(), payload());
+        let memo = VerifiedArtifacts::new();
+
+        ensure_pinned_memoized(
+            &CannedFetcher::never(),
+            &fs,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("first ensure verifies");
+
+        let fs2 = FakeFs::new();
+        let fetcher = CannedFetcher::ok_once(payload());
+        let resolved =
+            ensure_pinned_memoized(&fetcher, &fs2, &cache_root(), &art(&payload_sha(), None), &memo)
+                .await
+                .expect("deleted artifact must self-heal via fetch");
+        assert_eq!(resolved, cache_file());
+        assert_eq!(fetcher.calls().len(), 1, "gone-from-disk memo hit must fetch");
+    }
+
+    #[tokio::test]
+    async fn fresh_download_populates_the_memo() {
+        init_tracing_capture();
+        let fs = FakeFs::new();
+        let memo = VerifiedArtifacts::new();
+
+        ensure_pinned_memoized(
+            &CannedFetcher::ok_once(payload()),
+            &fs,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("download installs");
+
+        fs.fail_next_read(io::Error::new(io::ErrorKind::PermissionDenied, "reread"));
+        ensure_pinned_memoized(
+            &CannedFetcher::never(),
+            &fs,
+            &cache_root(),
+            &art(&payload_sha(), None),
+            &memo,
+        )
+        .await
+        .expect("freshly installed artifact must be memoized as verified");
     }
 
     #[tokio::test]

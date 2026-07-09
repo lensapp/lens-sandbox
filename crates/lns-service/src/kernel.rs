@@ -1,7 +1,9 @@
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 
-use crate::download::{PinnedArtifact, RealFetcher, RealFs, ensure_pinned};
+use crate::download::{PinnedArtifact, RealFetcher, RealFs, VerifiedArtifacts, ensure_pinned_memoized};
+
+static VERIFIED: VerifiedArtifacts = VerifiedArtifacts::new();
 
 pub const KERNEL_VERSION: &str = env!("KERNEL_VERSION");
 
@@ -42,7 +44,7 @@ async fn ensure_with(env_get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Re
     let filename = format!("Image-{KERNEL_VERSION}-{ARCH}");
     let url = format!("{cdn_base}/lns-kernel-{KERNEL_VERSION}-{ARCH}");
     let label = format!("guest kernel v{KERNEL_VERSION}");
-    ensure_pinned(
+    ensure_pinned_memoized(
         &RealFetcher {
             max_bytes: MAX_KERNEL_BYTES,
         },
@@ -55,6 +57,7 @@ async fn ensure_with(env_get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Re
             mode: None,
             label: &label,
         },
+        &VERIFIED,
     )
     .await
 }
