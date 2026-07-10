@@ -36,6 +36,20 @@ fn resolve_mounts(world: &mut BehaviourWorld, flags: String) {
     });
 }
 
+#[then(regex = r#"^the resolved volumes are exactly "([^"]*)"$"#)]
+fn resolved_volumes_are(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let view = world
+        .resolved_run
+        .as_ref()
+        .ok_or_else(|| "no resolved run captured".to_string())?;
+    let rendered = view.volumes.join(", ");
+    if rendered == expected {
+        Ok(())
+    } else {
+        Err(format!("expected volumes {expected:?}, got {rendered:?}"))
+    }
+}
+
 #[then(regex = r#"^the resolved host binds are exactly "([^"]*)"$"#)]
 fn resolved_binds_are(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
     let view = world

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::FromArgMatches;
-use lns_ipc::{MountSpec, PortPublish};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::RunArgs;
@@ -17,9 +16,7 @@ pub struct ConfigArgs {
 
 #[derive(clap::Subcommand)]
 pub enum ConfigCommand {
-    #[command(
-        about = "Set a default; list keys (run.env, run.volume, run.publish) replace all previous values."
-    )]
+    #[command(about = "Set a run gap-filler default (run.cpus, run.mem, run.registry).")]
     Set(ConfigSetArgs),
     #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
     Get(ConfigKeyArgs),
@@ -29,8 +26,7 @@ pub enum ConfigCommand {
     List,
 }
 
-const CONFIG_KEY_HELP: &str =
-    "Config key: run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish.";
+const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, or run.registry.";
 
 #[derive(clap::Args)]
 pub struct ConfigSetArgs {
@@ -54,19 +50,16 @@ pub enum ConfigKey {
     RunCpus,
     RunMem,
     RunRegistry,
-    RunEnv,
-    RunVolume,
-    RunPublish,
 }
 
+/// The `run.env` / `run.volume` / `run.publish` keys the sandbox definition now owns; a hand-edited file may still carry them, so `config list` warns and ignores them rather than erroring.
+pub const LEGACY_KEYS: [&str; 3] = ["run.env", "run.volume", "run.publish"];
+
 impl ConfigKey {
-    pub const ALL: [ConfigKey; 6] = [
+    pub const ALL: [ConfigKey; 3] = [
         ConfigKey::RunCpus,
         ConfigKey::RunMem,
         ConfigKey::RunRegistry,
-        ConfigKey::RunEnv,
-        ConfigKey::RunVolume,
-        ConfigKey::RunPublish,
     ];
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -74,11 +67,8 @@ impl ConfigKey {
             "run.cpus" => Ok(ConfigKey::RunCpus),
             "run.mem" => Ok(ConfigKey::RunMem),
             "run.registry" => Ok(ConfigKey::RunRegistry),
-            "run.env" => Ok(ConfigKey::RunEnv),
-            "run.volume" => Ok(ConfigKey::RunVolume),
-            "run.publish" => Ok(ConfigKey::RunPublish),
             other => Err(format!(
-                "unknown config key {other:?}; expected run.cpus, run.mem, run.registry, run.env, run.volume, or run.publish"
+                "unknown key {other:?}; the settable defaults are run.cpus, run.mem, run.registry (env, volumes, and ports now live in the sandbox definition)"
             )),
         }
     }
@@ -88,9 +78,6 @@ impl ConfigKey {
             ConfigKey::RunCpus => "run.cpus",
             ConfigKey::RunMem => "run.mem",
             ConfigKey::RunRegistry => "run.registry",
-            ConfigKey::RunEnv => "run.env",
-            ConfigKey::RunVolume => "run.volume",
-            ConfigKey::RunPublish => "run.publish",
         }
     }
 }
@@ -248,10 +235,16 @@ fn list(path: &Path, writer: &mut impl Write) -> Result<i32> {
         .collect();
     if lines.is_empty() {
         writeln!(writer, "No defaults set in {}", path.display())?;
-        return Ok(0);
+    } else {
+        for line in &lines {
+            writeln!(writer, "{line}")?;
+        }
     }
-    for line in &lines {
-        writeln!(writer, "{line}")?;
+    for legacy in legacy_entries(&cfg) {
+        writeln!(
+            writer,
+            "⚠ {legacy} is no longer supported and is ignored; env, volumes, and ports now live in the sandbox definition"
+        )?;
     }
     Ok(0)
 }
@@ -265,18 +258,6 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
             lns_policy::registry_auth::validate_registry_host(value)
                 .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))?;
             cfg.run.registry = Some(value.to_string());
-        }
-        ConfigKey::RunEnv => {
-            cfg.run.env = validated(key, values, |s| crate::cli::parse_env_kv(s).map(|_| ()))?;
-        }
-        ConfigKey::RunVolume => {
-            cfg.run.volume =
-                validated(key, values, |s| crate::cli::parse_mount_arg(s).map(|_| ()))?;
-        }
-        ConfigKey::RunPublish => {
-            cfg.run.publish = validated(key, values, |s| {
-                crate::cli::parse_publish_arg(s).map(|_| ())
-            })?;
         }
     }
     Ok(())
@@ -310,25 +291,11 @@ fn parse_mem(key: ConfigKey, value: &str) -> Result<usize> {
         .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))
 }
 
-fn validated(
-    key: ConfigKey,
-    values: &[String],
-    check: impl Fn(&str) -> Result<(), String>,
-) -> Result<Vec<String>> {
-    for v in values {
-        check(v).map_err(|e| anyhow!("invalid {} value {v:?}: {e}", key.name()))?;
-    }
-    Ok(values.to_vec())
-}
-
 fn values_of(cfg: &ConfigFile, key: ConfigKey) -> Vec<String> {
     match key {
         ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()).into_iter().collect(),
         ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()).into_iter().collect(),
         ConfigKey::RunRegistry => cfg.run.registry.clone().into_iter().collect(),
-        ConfigKey::RunEnv => cfg.run.env.clone(),
-        ConfigKey::RunVolume => cfg.run.volume.clone(),
-        ConfigKey::RunPublish => cfg.run.publish.clone(),
     }
 }
 
@@ -337,10 +304,22 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
         ConfigKey::RunCpus => cfg.run.cpus = None,
         ConfigKey::RunMem => cfg.run.mem = None,
         ConfigKey::RunRegistry => cfg.run.registry = None,
-        ConfigKey::RunEnv => cfg.run.env.clear(),
-        ConfigKey::RunVolume => cfg.run.volume.clear(),
-        ConfigKey::RunPublish => cfg.run.publish.clear(),
     }
+}
+
+/// The legacy `run.env` / `run.volume` / `run.publish` values a hand-edited file still carries, so `config list` can warn they are ignored.
+fn legacy_entries(cfg: &ConfigFile) -> Vec<&'static str> {
+    let mut present = Vec::new();
+    if !cfg.run.env.is_empty() {
+        present.push("run.env");
+    }
+    if !cfg.run.volume.is_empty() {
+        present.push("run.volume");
+    }
+    if !cfg.run.publish.is_empty() {
+        present.push("run.publish");
+    }
+    present
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -348,9 +327,6 @@ pub struct RunDefaults {
     pub cpus: Option<u8>,
     pub mem: Option<usize>,
     pub registry: Option<String>,
-    pub env: Vec<String>,
-    pub mounts: Vec<MountSpec>,
-    pub publish: Vec<PortPublish>,
 }
 
 pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
@@ -359,24 +335,6 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
         cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
         mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
         registry: cfg.run.registry,
-        env: parsed_defaults(
-            ConfigKey::RunEnv,
-            &cfg.run.env,
-            path,
-            crate::cli::parse_env_kv,
-        )?,
-        mounts: parsed_defaults(
-            ConfigKey::RunVolume,
-            &cfg.run.volume,
-            path,
-            crate::cli::parse_mount_arg,
-        )?,
-        publish: parsed_defaults(
-            ConfigKey::RunPublish,
-            &cfg.run.publish,
-            path,
-            crate::cli::parse_publish_arg,
-        )?,
     })
 }
 
@@ -394,25 +352,6 @@ where
     Ok(value)
 }
 
-fn parsed_defaults<T>(
-    key: ConfigKey,
-    raw: &[String],
-    path: &Path,
-    parse: impl Fn(&str) -> Result<T, String>,
-) -> Result<Vec<T>> {
-    raw.iter()
-        .map(|v| {
-            parse(v).map_err(|e| {
-                anyhow!(
-                    "invalid {} default {v:?} in {}: {e}",
-                    key.name(),
-                    path.display()
-                )
-            })
-        })
-        .collect()
-}
-
 pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.cpus = args.cpus.or(defaults.cpus);
     args.mem = args.mem.or(defaults.mem);
@@ -420,9 +359,6 @@ pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     if let Some(image) = args.image.take() {
         args.image = Some(resolve_default_registry(&image, args.registry.as_deref()));
     }
-    args.env = merged_env(defaults.env, args.env);
-    args.mounts = merged_mounts(defaults.mounts, args.mounts);
-    args.publish = merged_publish(defaults.publish, args.publish);
     args
 }
 
@@ -444,41 +380,6 @@ fn image_has_registry(image: &str) -> bool {
         Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
         None => false,
     }
-}
-
-fn merged_env(defaults: Vec<String>, flags: Vec<String>) -> Vec<String> {
-    let mut merged: Vec<String> = defaults
-        .into_iter()
-        .filter(|d| !flags.iter().any(|f| env_key(f) == env_key(d)))
-        .collect();
-    merged.extend(flags);
-    merged
-}
-
-fn env_key(entry: &str) -> &str {
-    entry.split_once('=').map_or(entry, |(key, _)| key)
-}
-
-fn merged_mounts(defaults: Vec<MountSpec>, flags: Vec<MountSpec>) -> Vec<MountSpec> {
-    let mut merged: Vec<MountSpec> = defaults
-        .into_iter()
-        .filter(|d| !flags.iter().any(|f| f.target() == d.target()))
-        .collect();
-    merged.extend(flags);
-    merged
-}
-
-fn merged_publish(defaults: Vec<PortPublish>, flags: Vec<PortPublish>) -> Vec<PortPublish> {
-    let mut merged: Vec<PortPublish> = defaults
-        .into_iter()
-        .filter(|d| {
-            !flags.iter().any(|f| {
-                f.host_ip == d.host_ip && f.host_port == d.host_port && f.protocol == d.protocol
-            })
-        })
-        .collect();
-    merged.extend(flags);
-    merged
 }
 
 #[cfg(test)]
@@ -533,8 +434,19 @@ mod tests {
     #[test]
     fn config_key_parse_rejects_an_unknown_key_listing_the_valid_ones() {
         let err = ConfigKey::parse("run.bogus").unwrap_err();
-        assert!(err.contains("unknown config key"), "got: {err}");
+        assert!(err.contains("unknown key"), "got: {err}");
         assert!(err.contains("run.cpus"), "must list valid keys: {err}");
+    }
+
+    #[test]
+    fn config_key_parse_rejects_the_dropped_env_volume_publish_keys() {
+        for dropped in LEGACY_KEYS {
+            let err = ConfigKey::parse(dropped).unwrap_err();
+            assert!(
+                err.contains("unknown key"),
+                "{dropped} must be rejected as unknown now: {err}"
+            );
+        }
     }
 
     #[test]
@@ -641,28 +553,17 @@ mod tests {
     fn every_key_survives_a_set_get_list_unset_lifecycle() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let seeds: [(ConfigKey, &[&str]); 6] = [
+        let seeds: [(ConfigKey, &[&str]); 3] = [
             (ConfigKey::RunCpus, &["4"]),
             (ConfigKey::RunMem, &["2048"]),
             (ConfigKey::RunRegistry, &["ghcr.io"]),
-            (ConfigKey::RunEnv, &["TZ=UTC", "CI=1"]),
-            (ConfigKey::RunVolume, &["cache:/var/cache:ro"]),
-            (ConfigKey::RunPublish, &["8080:80"]),
         ];
         for (key, values) in seeds {
             let (code, _) = run_ok(&set_cmd(key, values), &path);
             assert_eq!(code, 0, "set {} failed", key.name());
         }
         let (_, listing) = run_ok(&ConfigCommand::List, &path);
-        for needle in [
-            "run.cpus = 4",
-            "run.mem = 2048",
-            "run.registry = ghcr.io",
-            "run.env = TZ=UTC",
-            "run.env = CI=1",
-            "run.volume = cache:/var/cache:ro",
-            "run.publish = 8080:80",
-        ] {
+        for needle in ["run.cpus = 4", "run.mem = 2048", "run.registry = ghcr.io"] {
             assert!(
                 listing.lines().any(|l| l == needle),
                 "missing {needle}: {listing}"
@@ -753,72 +654,53 @@ mod tests {
     }
 
     #[test]
-    fn load_run_defaults_parses_volume_and_publish_entries_into_typed_mounts() {
+    fn load_run_defaults_tolerates_and_ignores_legacy_env_volume_publish_entries() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(
             &path,
-            "run:\n  volume:\n    - cache:/var/cache:ro\n  publish:\n    - 8080:80\n",
+            "run:\n  cpus: 4\n  env:\n    - TZ=UTC\n  volume:\n    - cache:/var/cache:ro\n  publish:\n    - 8080:80\n",
         )
         .unwrap();
         let defaults = load_run_defaults(&path).unwrap();
         assert_eq!(
-            defaults.mounts,
-            vec![MountSpec::parse("cache:/var/cache:ro").unwrap()]
-        );
-        assert_eq!(defaults.publish[0].host_port, 8080);
-        assert_eq!(defaults.publish[0].container_port, 80);
-    }
-
-    #[test]
-    fn load_run_defaults_parses_a_host_bind_entry() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "run:\n  volume:\n    - /srv/data:/data:ro\n").unwrap();
-        let defaults = load_run_defaults(&path).unwrap();
-        assert_eq!(
-            defaults.mounts,
-            vec![MountSpec::parse("/srv/data:/data:ro").unwrap()]
+            defaults,
+            RunDefaults {
+                cpus: Some(4),
+                ..RunDefaults::default()
+            },
+            "a hand-edited legacy key must not error the run; it is simply not applied",
         );
     }
 
     #[test]
-    fn run_volume_keyed_mount_default_round_trips_through_set_and_load() {
+    fn list_warns_that_a_hand_edited_legacy_key_is_ignored() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let (code, _) = run_ok(
-            &set_cmd(
-                ConfigKey::RunVolume,
-                &["type=bind,source=/srv/data,target=/data,readonly"],
-            ),
+        std::fs::write(&path, "run:\n  env:\n    - TZ=UTC\n").unwrap();
+        let (code, out) = run_ok(&ConfigCommand::List, &path);
+        assert_eq!(code, 0);
+        assert!(out.contains("run.env"), "got: {out}");
+        assert!(out.contains("no longer supported"), "got: {out}");
+        assert!(
+            !out.lines().any(|l| l.starts_with("run.env = ")),
+            "a legacy key must not be listed as an active default: {out}"
+        );
+    }
+
+    #[test]
+    fn list_warns_about_every_legacy_key_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
             &path,
-        );
-        assert_eq!(code, 0, "a keyed --mount value must validate when stored");
-        let defaults = load_run_defaults(&path).unwrap();
-        assert_eq!(
-            defaults.mounts,
-            vec![MountSpec::parse("/srv/data:/data:ro").unwrap()],
-            "a stored keyed --mount default must load as the equivalent bind",
-        );
-    }
-
-    #[test]
-    fn load_run_defaults_names_the_key_and_file_for_a_malformed_volume_entry() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "run:\n  volume:\n    - data:relative\n").unwrap();
-        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
-        assert!(err.contains("run.volume"), "got: {err}");
-        assert!(err.contains("config.yaml"), "got: {err}");
-    }
-
-    #[test]
-    fn load_run_defaults_names_the_key_and_file_for_a_malformed_publish_entry() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "run:\n  publish:\n    - nonsense\n").unwrap();
-        let err = format!("{:#}", load_run_defaults(&path).unwrap_err());
-        assert!(err.contains("run.publish"), "got: {err}");
+            "run:\n  volume:\n    - cache:/var/cache\n  publish:\n    - 8080:80\n",
+        )
+        .unwrap();
+        let (code, out) = run_ok(&ConfigCommand::List, &path);
+        assert_eq!(code, 0);
+        assert!(out.contains("run.volume"), "got: {out}");
+        assert!(out.contains("run.publish"), "got: {out}");
     }
 
     #[test]
@@ -1001,39 +883,5 @@ mod tests {
             },
         );
         assert_eq!(resolved.image, None);
-    }
-
-    #[test]
-    fn merged_env_keeps_configured_entries_first_and_flags_last() {
-        let merged = merged_env(vec!["TZ=UTC".into(), "CI=1".into()], vec!["DEBUG=1".into()]);
-        assert_eq!(merged, vec!["TZ=UTC", "CI=1", "DEBUG=1"]);
-    }
-
-    #[test]
-    fn merged_mounts_keeps_the_same_volume_mounted_at_two_different_targets() {
-        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
-        let merged = merged_mounts(vec![mount("cache:/a")], vec![mount("cache:/b")]);
-        assert_eq!(
-            merged.len(),
-            2,
-            "same name at distinct targets is not a conflict"
-        );
-    }
-
-    #[test]
-    fn merged_mounts_lets_a_flag_override_the_configured_mount_at_the_same_target() {
-        let mount = |spec: &str| MountSpec::parse(spec).unwrap();
-        let merged = merged_mounts(vec![mount("cache:/data")], vec![mount("/srv/data:/data")]);
-        assert_eq!(merged, vec![mount("/srv/data:/data")]);
-    }
-
-    #[test]
-    fn merged_publish_keeps_the_same_host_port_on_two_different_binds() {
-        let publish = |spec: &str| crate::cli::parse_publish_arg(spec).unwrap();
-        let merged = merged_publish(
-            vec![publish("127.0.0.1:8080:80")],
-            vec![publish("0.0.0.0:8080:90")],
-        );
-        assert_eq!(merged.len(), 2, "distinct host ips are distinct binds");
     }
 }

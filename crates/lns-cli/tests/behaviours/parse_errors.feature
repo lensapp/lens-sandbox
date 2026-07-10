@@ -28,7 +28,7 @@ Feature: clap rejects bad input with exit code 2
   Scenario: lns config set rejects an unknown key
     When I run "lns config set run.bogus 1"
     Then the exit code is 2
-    And the output contains "unknown config key"
+    And the output contains "unknown key"
 
   Scenario: lns config set with no value reports the missing arg
     When I run "lns config set run.cpus"
