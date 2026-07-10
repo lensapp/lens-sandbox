@@ -12,6 +12,7 @@ use crate::command::{CommandSpec, subcommand};
 use crate::service::client::BoxFuture;
 
 pub mod author;
+pub mod distribute;
 pub mod real;
 
 #[derive(clap::Args)]
@@ -28,6 +29,14 @@ pub enum SandboxCommand {
     Validate,
     #[command(about = "Render ./lns.yaml's effective definition (merged config, resolved values).")]
     Show,
+    #[command(
+        about = "Build ./lns.yaml and upload it to a registry as a sandbox artifact, in one step."
+    )]
+    Push(SandboxPushArgs),
+    #[command(about = "Fetch a published sandbox and its base image into the local cache.")]
+    Pull(SandboxPullArgs),
+    #[command(about = "Re-reference a cached sandbox under a new tag (`docker tag`-style).")]
+    Tag(SandboxTagArgs),
     #[command(
         visible_alias = "list",
         about = "List active runs (`docker ps`-style)."
@@ -55,6 +64,36 @@ pub enum SandboxCommand {
     Rename(SandboxRenameArgs),
     #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
     Prune,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPushArgs {
+    #[arg(
+        value_name = "REF",
+        help = "Registry reference to publish the sandbox at, e.g. ghcr.io/team/hermes:1.4.0."
+    )]
+    pub reference: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPullArgs {
+    #[arg(
+        value_name = "REF",
+        help = "Published sandbox reference to fetch, e.g. ghcr.io/team/hermes:1.4.0."
+    )]
+    pub reference: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxTagArgs {
+    #[arg(value_name = "SOURCE", help = "Cached sandbox to re-reference.")]
+    pub from: String,
+
+    #[arg(
+        value_name = "TARGET",
+        help = "New reference the cached sandbox also resolves under."
+    )]
+    pub to: String,
 }
 
 #[derive(clap::Args)]
@@ -232,6 +271,30 @@ shortcut_spec!(
     real::run_attach,
     "Re-attach to a running sandbox (shortcut for `lns sandbox attach`)."
 );
+shortcut_spec!(
+    augment_push,
+    PUSH_SPEC,
+    SandboxPushArgs,
+    "push",
+    real::run_push,
+    "Build and publish ./lns.yaml as a sandbox artifact (shortcut for `lns sandbox push`)."
+);
+shortcut_spec!(
+    augment_pull,
+    PULL_SPEC,
+    SandboxPullArgs,
+    "pull",
+    real::run_pull,
+    "Fetch a published sandbox into the cache (shortcut for `lns sandbox pull`)."
+);
+shortcut_spec!(
+    augment_tag,
+    TAG_SPEC,
+    SandboxTagArgs,
+    "tag",
+    real::run_tag,
+    "Re-reference a cached sandbox (shortcut for `lns sandbox tag`)."
+);
 
 pub trait SandboxService: Send + Sync {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
@@ -265,6 +328,11 @@ where
         SandboxCommand::Init | SandboxCommand::Validate | SandboxCommand::Show => {
             bail!("author commands run offline, not through the service dispatch")
         }
+        SandboxCommand::Push(_) => {
+            bail!("push builds and uploads locally, not through the service dispatch")
+        }
+        SandboxCommand::Pull(args) => pull(svc, args, out).await,
+        SandboxCommand::Tag(args) => tag(svc, args, out).await,
         SandboxCommand::Ls => ls(svc, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
@@ -281,6 +349,48 @@ where
 
 pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
+}
+
+async fn pull<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxPullArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::PullImage {
+            image: args.reference.clone(),
+        })
+        .await?;
+    match response {
+        Response::ImagePulled { image } => {
+            writeln!(out, "pulled {}", image.reference)?;
+            writeln!(out, "digest: {}", image.digest)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn tag<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxTagArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::TagImage {
+            from: args.from.clone(),
+            to: args.to.clone(),
+        })
+        .await?;
+    match response {
+        Response::ImageTagged { from, to } => {
+            writeln!(out, "tagged {from} as {to}")?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {

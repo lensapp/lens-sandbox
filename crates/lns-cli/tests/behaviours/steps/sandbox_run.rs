@@ -40,8 +40,17 @@ impl Fs for StepFs {
 }
 
 #[given(regex = r#"^the registry serves the sandbox "([^"]+)"$"#)]
-fn registry_serves_sandbox(_w: &mut BehaviourWorld, _reference: String) {
-    // no-op: the reference is a published sandbox the service would assemble.
+fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.response = Some(lns_ipc::Response::ImagePulled {
+        image: lns_ipc::ImageInfo {
+            reference,
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 3 * 1024 * 1024,
+            layers: 1,
+            pulled: "2026-01-01T00:00:00Z".into(),
+            in_use_by: None,
+        },
+    });
 }
 
 #[given(regex = r#"^the reference "([^"]+)" is a plain OCI image, not a sandbox$"#)]

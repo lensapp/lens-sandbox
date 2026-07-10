@@ -30,6 +30,8 @@ pub struct BehaviourWorld {
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
     pub sandbox_run: SandboxRunRig,
+    /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
+    pub push_outcome: Option<Result<String, String>>,
     pub host_bind: HostBindRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
@@ -81,7 +83,6 @@ pub struct VolumeCliRig {
 #[derive(Debug, Default)]
 pub struct ImageCliRig {
     pub images: Vec<lns_ipc::ImageInfo>,
-    pub pull_result: Option<lns_ipc::ImageInfo>,
     pub remove_result: Option<(String, u64)>,
     pub prune_plan: Option<(Vec<String>, u64)>,
     pub inspect_result: Option<lns_ipc::ArtifactInspection>,

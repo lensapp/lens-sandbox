@@ -9,7 +9,6 @@ Feature: managing cached images from the CLI
   Scenario: the image family lists its verbs in help
     When I run "lns image --help"
     Then the exit code is 0
-    And the output contains "pull"
     And the output contains "ls"
     And the output contains "rm"
     And the output contains "prune"
@@ -18,20 +17,6 @@ Feature: managing cached images from the CLI
     When I run "lns image"
     Then the exit code is 2
     And the output contains "Usage: lns image"
-
-  Scenario: pulling an image reports its digest and a pinnable reference
-    Given the service resolves pulls of "registry.example.test/some-image:1.0" to digest "sha256:abcd"
-    When the user runs image command "pull some-image:1.0"
-    Then the exit code is 0
-    And the output contains "Pulled registry.example.test/some-image:1.0"
-    And the output contains "Digest: sha256:abcd"
-    And the output contains "Pin: registry.example.test/some-image@sha256:abcd"
-
-  Scenario: a failed pull surfaces the service's error
-    Given the image service refuses with "invalid image reference: ###"
-    When the user runs image command "pull ###"
-    Then the exit code is 1
-    And the output contains "invalid image reference"
 
   Scenario: listing images renders a table with digest, size, and user
     Given the service reports a cached image "registry.example.test/some-image:1.0" of 3145728 bytes used by run 7

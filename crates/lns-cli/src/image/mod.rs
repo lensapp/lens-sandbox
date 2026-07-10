@@ -18,8 +18,6 @@ pub struct ImageArgs {
 
 #[derive(clap::Subcommand)]
 pub enum ImageCommand {
-    #[command(about = "Pull an image into the cache ahead of `lns run`, resolving its digest.")]
-    Pull(ImageRefArg),
     #[command(about = "List cached images with their digest, size, age, and user.")]
     Ls,
     #[command(about = "Remove a cached image; refused while a run uses it.")]
@@ -77,7 +75,6 @@ pub async fn run(
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
-        ImageCommand::Pull(args) => pull(svc, &args.image, writer).await,
         ImageCommand::Ls => ls(svc, writer).await,
         ImageCommand::Rm(args) => rm(svc, &args.image, writer).await,
         ImageCommand::Prune(args) => prune(svc, args.force, input, writer).await,
@@ -94,43 +91,6 @@ async fn send(svc: &dyn ImageService, req: Request) -> Result<Response> {
         bail!("{message}");
     }
     Ok(response)
-}
-
-async fn pull(svc: &dyn ImageService, image: &str, writer: &mut impl Write) -> Result<i32> {
-    let req = Request::PullImage {
-        image: image.to_string(),
-    };
-    match send(svc, req).await? {
-        Response::ImagePulled { image } => {
-            let layers = if image.layers == 1 { "layer" } else { "layers" };
-            writeln!(writer, "Pulled {}", image.reference)?;
-            writeln!(writer, "Digest: {}", image.digest)?;
-            writeln!(
-                writer,
-                "Size: {} ({} {layers})",
-                format_size(image.size_bytes),
-                image.layers
-            )?;
-            writeln!(
-                writer,
-                "Pin: {}",
-                pin_reference(&image.reference, &image.digest)
-            )?;
-            Ok(0)
-        }
-        other => bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
-fn pin_reference(reference: &str, digest: &str) -> String {
-    if let Some((repo, _)) = reference.split_once('@') {
-        return format!("{repo}@{digest}");
-    }
-    let repo = match reference.rfind(':') {
-        Some(i) if i > reference.rfind('/').unwrap_or(0) => &reference[..i],
-        _ => reference,
-    };
-    format!("{repo}@{digest}")
 }
 
 async fn ls(svc: &dyn ImageService, writer: &mut impl Write) -> Result<i32> {
@@ -395,7 +355,6 @@ mod tests {
     #[tokio::test]
     async fn each_verb_rejects_a_mismatched_response_kind() {
         for cmd in [
-            ImageCommand::Pull(ref_arg("some-image:1.0")),
             ImageCommand::Ls,
             ImageCommand::Rm(ref_arg("some-image:1.0")),
             ImageCommand::Prune(ImagePruneArgs { force: true }),
@@ -417,79 +376,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such image"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn pull_reports_digest_size_and_a_pinnable_reference() {
-        let svc = CannedService::with([Some(Response::ImagePulled {
-            image: ImageInfo {
-                reference: "docker.io/library/some-image:1.0".into(),
-                digest: format!("sha256:{}", "a".repeat(64)),
-                size_bytes: 3 * 1024 * 1024,
-                layers: 1,
-                pulled: "2026-06-01T12:00:00Z".into(),
-                in_use_by: None,
-            },
-        })]);
-        let (code, out) = run_cmd(&ImageCommand::Pull(ref_arg("some-image:1.0")), &svc)
-            .await
-            .unwrap();
-        assert_eq!(code, 0);
-        assert!(
-            out.contains("Pulled docker.io/library/some-image:1.0"),
-            "got: {out}"
-        );
-        assert!(
-            out.contains(&format!("Digest: sha256:{}", "a".repeat(64))),
-            "got: {out}"
-        );
-        assert!(out.contains("Size: 3 MiB (1 layer)"), "got: {out}");
-        assert!(
-            out.contains(&format!(
-                "Pin: docker.io/library/some-image@sha256:{}",
-                "a".repeat(64)
-            )),
-            "got: {out}"
-        );
-    }
-
-    #[tokio::test]
-    async fn pull_pluralizes_the_layer_count() {
-        let svc = CannedService::with([Some(Response::ImagePulled {
-            image: image("docker.io/library/some-image:1.0"),
-        })]);
-        let (_, out) = run_cmd(&ImageCommand::Pull(ref_arg("some-image:1.0")), &svc)
-            .await
-            .unwrap();
-        assert!(out.contains("(2 layers)"), "got: {out}");
-    }
-
-    #[test]
-    fn pin_reference_swaps_a_tag_for_the_digest() {
-        assert_eq!(
-            pin_reference("docker.io/library/some-image:1.0", "sha256:abc"),
-            "docker.io/library/some-image@sha256:abc"
-        );
-    }
-
-    #[test]
-    fn pin_reference_is_not_fooled_by_a_registry_port() {
-        assert_eq!(
-            pin_reference("registry.example.test:5000/some-image", "sha256:abc"),
-            "registry.example.test:5000/some-image@sha256:abc"
-        );
-        assert_eq!(
-            pin_reference("registry.example.test:5000/some-image:1.0", "sha256:abc"),
-            "registry.example.test:5000/some-image@sha256:abc"
-        );
-    }
-
-    #[test]
-    fn pin_reference_keeps_an_already_pinned_reference_pinned() {
-        assert_eq!(
-            pin_reference("registry.example.test/some-image@sha256:abc", "sha256:abc"),
-            "registry.example.test/some-image@sha256:abc"
-        );
     }
 
     #[tokio::test]

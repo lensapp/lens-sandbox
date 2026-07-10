@@ -1,4 +1,3 @@
-@todo
 Feature: distributing a sandbox
   A sandbox is published to and pulled from an OCI registry as a typed
   artifact. Push builds then uploads in one step; there is no standalone

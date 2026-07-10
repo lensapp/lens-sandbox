@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::sandbox::{SandboxArgs, SandboxCommand, author};
+use lns_cli::integration::LocalBoxFuture;
+use lns_cli::sandbox::{SandboxArgs, SandboxCommand, author, distribute};
 use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{
@@ -292,6 +293,19 @@ impl author::Fs for StepFs {
     }
 }
 
+struct StepProducer(Result<String, String>);
+
+impl distribute::Producer for StepProducer {
+    fn build_and_push<'a>(
+        &'a self,
+        _doc: &'a [u8],
+        _reference: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
+        let outcome = self.0.clone().map_err(|m| anyhow::anyhow!(m));
+        Box::pin(async move { outcome })
+    }
+}
+
 fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
     let cwd = Path::new("/work");
     let fs = StepFs {
@@ -325,6 +339,37 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
 
     if author::is_offline(&args.command) {
         run_author_verb(w, &args.command);
+        return;
+    }
+
+    if let SandboxCommand::Push(push_args) = &args.command {
+        let fs = StepFs {
+            files: RefCell::new(w.author_files.clone()),
+        };
+        let producer = StepProducer(
+            w.push_outcome
+                .clone()
+                .expect("scenario must set a push outcome"),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        let result = distribute::push(
+            &producer,
+            &fs,
+            Path::new("/work"),
+            &push_args.reference,
+            &mut out,
+        )
+        .await;
+        w.result = Some(match result {
+            Ok(exit_code) => CliRun {
+                exit_code,
+                output: String::from_utf8_lossy(&out).into_owned(),
+            },
+            Err(e) => CliRun {
+                exit_code: 1,
+                output: format!("{e:#}"),
+            },
+        });
         return;
     }
 

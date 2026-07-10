@@ -163,6 +163,19 @@ pub async fn remove_with<F: Fs, C: Caches>(
     })
 }
 
+pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -> Result<()> {
+    let from_ref = normalize_reference(from)?;
+    let to_ref = normalize_reference(to)?;
+    let bytes = match fs.read(&record_path(images_root, &from_ref)).await {
+        Ok(bytes) => bytes,
+        Err(_) => bail!("no such cached sandbox: {from_ref}"),
+    };
+    let mut record: ImageRecord =
+        serde_json::from_slice(&bytes).context("parsing cached sandbox record")?;
+    record.reference = to_ref;
+    record_with(fs, images_root, &record).await
+}
+
 pub async fn prune_with<F: Fs, C: Caches>(
     fs: &F,
     caches: &C,
@@ -259,6 +272,11 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
         image,
     )
     .await
+}
+
+pub async fn tag(from: &str, to: &str) -> Result<()> {
+    let _exclusive = cache_lock().write().await;
+    tag_with(&real::RealFs, &images_root()?, from, to).await
 }
 
 pub async fn prune() -> Result<PruneReport> {
@@ -440,6 +458,39 @@ mod tests {
     fn normalize_reference_rejects_garbage() {
         let err = normalize_reference("###").unwrap_err().to_string();
         assert!(err.contains("invalid image reference"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tag_with_re_refs_a_cached_record_under_the_new_name() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let fs = FakeFs::with_records(&[rec(from, &[("sha256:layer", 10)])]);
+        tag_with(
+            &fs,
+            Path::new(ROOT),
+            from,
+            "registry.example.test/team/hermes:latest",
+        )
+        .await
+        .unwrap();
+        let listed = list_with(&fs, Path::new(ROOT), &[]).await.unwrap();
+        let digests: Vec<&str> = listed.iter().map(|i| i.digest.as_str()).collect();
+        assert_eq!(listed.len(), 2, "both the original and the tag are listed");
+        assert!(
+            digests
+                .iter()
+                .all(|d| *d == format!("sha256:{}", "d".repeat(64))),
+            "the tag points at the same cached artifact: {digests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_with_refuses_an_uncached_source() {
+        let fs = FakeFs::default();
+        let err = tag_with(&fs, Path::new(ROOT), "absent:1", "absent:2")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such cached sandbox"), "got: {err}");
     }
 
     #[test]

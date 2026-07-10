@@ -17,6 +17,10 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         if super::author::is_offline(&args.command) {
             return run_author(&args.command, ctx);
         }
+        if let super::SandboxCommand::Push(push_args) = &args.command {
+            let reference = push_args.reference.clone();
+            return push_local(&reference, ctx.cwd()?).await;
+        }
         crate::service::require_running().await;
         dispatch(args).await
     })
@@ -64,6 +68,48 @@ pub fn run_attach<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFut
         let args = super::SandboxAttachArgs::from_arg_matches(matches)?;
         dispatch_command(super::SandboxCommand::Attach(args)).await
     })
+}
+
+pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxPushArgs::from_arg_matches(matches)?;
+        push_local(&args.reference, ctx.cwd()?).await
+    })
+}
+
+pub fn run_pull<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxPullArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Pull(args)).await
+    })
+}
+
+pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxTagArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Tag(args)).await
+    })
+}
+
+async fn push_local(reference: &str, cwd: PathBuf) -> Result<i32> {
+    let mut out = std::io::stdout();
+    super::distribute::push(&RealProducer, &RealFs, &cwd, reference, &mut out).await
+}
+
+struct RealProducer;
+
+impl super::distribute::Producer for RealProducer {
+    fn build_and_push<'a>(
+        &'a self,
+        doc: &'a [u8],
+        reference: &'a str,
+    ) -> crate::integration::LocalBoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let built = lns_artifact::build::build_artifact(doc)?;
+            crate::build::push::push_artifact(&built, reference).await?;
+            Ok(built.manifest_digest)
+        })
+    }
 }
 
 fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {

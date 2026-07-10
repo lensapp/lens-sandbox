@@ -34,7 +34,6 @@ fn full_digest(short: &str) -> String {
 /// Stands in for the running service: answers each image request from the rig's scripted state.
 struct FakeImageService {
     images: Vec<ImageInfo>,
-    pull_result: Option<ImageInfo>,
     remove_result: Option<(String, u64)>,
     prune_plan: Option<(Vec<String>, u64)>,
     inspect_result: Option<lns_ipc::ArtifactInspection>,
@@ -47,7 +46,6 @@ impl FakeImageService {
     fn from_world(world: &BehaviourWorld) -> Self {
         Self {
             images: world.image.images.clone(),
-            pull_result: world.image.pull_result.clone(),
             remove_result: world.image.remove_result.clone(),
             prune_plan: world.image.prune_plan.clone(),
             inspect_result: world.image.inspect_result.clone(),
@@ -69,12 +67,6 @@ impl FakeImageService {
         Some(match req {
             Request::ListImages => Response::ImageList {
                 images: self.images.clone(),
-            },
-            Request::PullImage { .. } => Response::ImagePulled {
-                image: self
-                    .pull_result
-                    .clone()
-                    .expect("fixture has no pull result"),
             },
             Request::RemoveImage { .. } => {
                 let (reference, reclaimed_bytes) = self
@@ -128,16 +120,6 @@ fn reports_unused_image(world: &mut BehaviourWorld, reference: String, size: u64
         &reference,
         &full_digest("sha256:aa"),
         size,
-        None,
-    ));
-}
-
-#[given(expr = "the service resolves pulls of {string} to digest {string}")]
-fn resolves_pull(world: &mut BehaviourWorld, reference: String, digest: String) {
-    world.image.pull_result = Some(fixture_image(
-        &reference,
-        &full_digest(&digest),
-        3 * 1024 * 1024,
         None,
     ));
 }

@@ -208,6 +208,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 .await
                 .map(|inspection| Response::ImageInspected { inspection }),
         ),
+        Request::TagImage { from, to } => {
+            image_response(crate::image_store::tag(from, to).await.map(|()| {
+                Response::ImageTagged {
+                    from: from.clone(),
+                    to: to.clone(),
+                }
+            }))
+        }
         Request::RegistryLogin {
             registry,
             username,
@@ -2020,6 +2028,34 @@ mod tests {
         let listed = as_json(handle_request(&Request::ListImages, now).await);
         assert_eq!(listed["type"], "ImageList", "got {listed}");
         assert_eq!(listed["images"][0]["reference"], reference);
+
+        let tagged = as_json(
+            handle_request(
+                &Request::TagImage {
+                    from: reference.clone(),
+                    to: "registry.example.test/cov/pinned:latest".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(tagged["type"], "ImageTagged", "got {tagged}");
+        let after_tag = as_json(handle_request(&Request::ListImages, now).await);
+        assert_eq!(
+            after_tag["images"].as_array().unwrap().len(),
+            2,
+            "tagging re-refs the cached artifact under a second name"
+        );
+        // Drop the tag copy so the original layer-sweep assertions below still hold.
+        as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: "registry.example.test/cov/pinned:latest".into(),
+                },
+                now,
+            )
+            .await,
+        );
 
         let removed = as_json(
             handle_request(

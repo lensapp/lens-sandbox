@@ -87,6 +87,10 @@ pub enum Request {
     InspectImage {
         image: String,
     },
+    TagImage {
+        from: String,
+        to: String,
+    },
     RegistryLogin {
         registry: String,
         username: String,
@@ -189,6 +193,10 @@ pub enum Response {
     },
     ImageInspected {
         inspection: ArtifactInspection,
+    },
+    ImageTagged {
+        from: String,
+        to: String,
     },
     RunProgress {
         verb: String,
