@@ -19,7 +19,7 @@ const NOT_RUNNING_MESSAGE: &str =
 mod orchestrator;
 pub use orchestrator::{
     DetachBehaviour, PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers,
-    drive_pre_phase, exec_command, exec_image, kill, pre_phase_step, render_started_run,
+    drive_pre_phase, exec_command, exec_image, pre_phase_step, render_started_run,
     render_status_line, require_running, run_command, run_image,
 };
 
@@ -46,18 +46,6 @@ pub enum ServiceCommand {
     #[command(about = "Stop the service and unregister the per-user login agent.")]
     Disable,
 }
-
-pub fn augment_kill(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::cli::KillArgs>("kill").hide(true))
-}
-
-pub const KILL_SPEC: CommandSpec = CommandSpec {
-    name: "kill",
-    augment: augment_kill,
-    run: orchestrator::kill_command,
-    announces_update_check: true,
-    owns_terminal: false,
-};
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(

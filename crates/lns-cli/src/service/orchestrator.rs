@@ -15,7 +15,7 @@ use tokio::time::timeout;
 use clap::FromArgMatches;
 
 use crate::chord::{DetachChordDetector, FeedAction};
-use crate::cli::{ExecArgs, KillArgs, RunArgs};
+use crate::cli::{ExecArgs, RunArgs};
 use crate::command::{RunCtx, RunFuture};
 use lns_ipc::{ExecImageArgs, RunImageArgs};
 
@@ -39,15 +39,6 @@ pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
         let args = ExecArgs::from_arg_matches(matches)?;
         require_running().await;
         exec_image(args).await
-    })
-}
-
-pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = KillArgs::from_arg_matches(matches)?;
-        require_running().await;
-        kill(args).await?;
-        Ok(0)
     })
 }
 
@@ -284,28 +275,6 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         args.quiet,
     )
     .await
-}
-
-pub async fn kill(args: KillArgs) -> Result<()> {
-    let signal = super::parse_signal_name(&args.signal)?;
-    let socket = super::socket_path()?;
-    let response = real::send_request(
-        &socket,
-        &Request::Kill {
-            run: args.run.clone(),
-            signal,
-        },
-    )
-    .await
-    .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
-    match response {
-        Response::Acknowledged => {
-            println!("killed run {}", crate::sandbox::run_label(&args.run));
-            Ok(())
-        }
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
-        other => anyhow::bail!("unexpected response from daemon: {other:?}"),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

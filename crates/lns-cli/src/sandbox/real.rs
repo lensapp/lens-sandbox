@@ -46,6 +46,13 @@ pub fn run_stop<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFutur
     })
 }
 
+pub fn run_kill<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = crate::cli::KillArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Kill(args)).await
+    })
+}
+
 pub fn run_rm<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxRmArgs::from_arg_matches(matches)?;

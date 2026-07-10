@@ -244,6 +244,14 @@ shortcut_spec!(
     "Stop a running sandbox gracefully (shortcut for `lns sandbox stop`)."
 );
 shortcut_spec!(
+    augment_kill,
+    KILL_SPEC,
+    crate::cli::KillArgs,
+    "kill",
+    real::run_kill,
+    "Send a signal to a running sandbox (shortcut for `lns sandbox kill`)."
+);
+shortcut_spec!(
     augment_rm,
     RM_SPEC,
     SandboxRmArgs,
