@@ -58,6 +58,15 @@ pub(crate) async fn peek_and_plan(
             let def = lns_artifact::sandbox::parse(config_json.as_bytes())
                 .with_context(|| format!("parsing published sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
+            record_sandbox_run(
+                run_id,
+                microvm,
+                image_ref,
+                &digest,
+                &[],
+                &resolved,
+                &Verdict::Skipped,
+            );
             disclose_effective_policy(resolved.policy.as_ref());
             Ok(Some(BundlePlan {
                 workload: assembly::assemble(&resolved),
@@ -73,7 +82,7 @@ pub(crate) async fn peek_and_plan(
                 overrides,
             )
             .await?;
-            record_bundle_run(
+            record_sandbox_run(
                 run_id, microvm, image_ref, &digest, overrides, &resolved, &verdict,
             );
             disclose_effective_policy(resolved.policy.as_ref());
@@ -125,12 +134,12 @@ async fn pull_fileset_layers(reference: &str) -> Result<Vec<Vec<u8>>> {
     Ok(blobs)
 }
 
-/// Append a bundle-run event to the audit chain, pinning the resolved bundle digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
-fn record_bundle_run(
+/// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
+fn record_sandbox_run(
     run_id: &str,
     microvm: &str,
     image_ref: &str,
-    bundle_digest: &str,
+    digest: &str,
     overrides: &[Override],
     resolved: &ResolvedBundle,
     verdict: &Verdict,
@@ -146,18 +155,18 @@ fn record_bundle_run(
         .as_ref()
         .map(crate::artifact::audit::policy_hash)
         .unwrap_or_else(|| "none".to_string());
-    if let Err(e) = crate::audit::record_bundle_run(
+    if let Err(e) = crate::audit::record_sandbox_run(
         run_id,
         microvm,
         image_ref,
-        bundle_digest,
+        digest,
         &override_refs,
         &integrations,
         &policy_hash,
         &crate::artifact::audit::verdict_label(verdict),
         &crate::oauth::RealClock,
     ) {
-        crate::log::warn!("failed to record bundle-run audit event: {e:#}");
+        crate::log::warn!("failed to record sandbox-run audit event: {e:#}");
     }
 }
 

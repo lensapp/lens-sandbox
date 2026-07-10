@@ -372,30 +372,30 @@ pub fn bind_mount(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn bundle_run(
+pub fn sandbox_run(
     ctx: &Context,
-    bundle_ref: &str,
-    bundle_digest: &str,
+    reference: &str,
+    digest: &str,
     overrides: &[String],
     integrations: &[String],
     policy_hash: &str,
     signature_verdict: &str,
 ) -> Value {
     let mut ev = Event::new(
-        "bundle_run",
+        "sandbox_run",
         class::PROCESS_ACTIVITY,
         category::SYSTEM,
         activity::PROCESS_LAUNCH,
         severity::INFORMATIONAL,
         ctx,
     )
-    .set("message", format!("ran bundle {bundle_ref}").into())
-    .set("process", json!({"uid": ctx.run, "name": "bundle"}))
+    .set("message", format!("ran sandbox {reference}").into())
+    .set("process", json!({"uid": ctx.run, "name": "sandbox"}))
     .set("device", microvm_device(ctx))
     .set("actor", lns_actor())
     .note("lns_origin", "host".into())
-    .note("lns_bundle", bundle_ref.into())
-    .note("lns_bundle_digest", bundle_digest.into())
+    .note("lns_sandbox", reference.into())
+    .note("lns_sandbox_digest", digest.into())
     .note("lns_policy_hash", policy_hash.into())
     .note("lns_signature", signature_verdict.into());
     if !overrides.is_empty() {
@@ -631,8 +631,8 @@ mod tests {
     }
 
     #[test]
-    fn bundle_run_records_the_reference_resolved_digest_integrations_and_verdict() {
-        let ev = bundle_run(
+    fn sandbox_run_records_the_reference_resolved_digest_integrations_and_verdict() {
+        let ev = sandbox_run(
             &ctx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
@@ -643,14 +643,14 @@ mod tests {
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 1007);
-        assert_eq!(ev["unmapped"]["lns_kind"], "bundle_run");
+        assert_eq!(ev["unmapped"]["lns_kind"], "sandbox_run");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
         assert_eq!(
-            ev["unmapped"]["lns_bundle"],
+            ev["unmapped"]["lns_sandbox"],
             "some-registry.example/some-agent:research"
         );
         assert_eq!(
-            ev["unmapped"]["lns_bundle_digest"], "sha256:beef",
+            ev["unmapped"]["lns_sandbox_digest"], "sha256:beef",
             "the audit must pin which bytes actually ran, not just the mutable tag"
         );
         assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
@@ -663,8 +663,8 @@ mod tests {
     }
 
     #[test]
-    fn bundle_run_omits_the_overrides_and_integrations_notes_when_there_are_none() {
-        let ev = bundle_run(
+    fn sandbox_run_omits_the_overrides_and_integrations_notes_when_there_are_none() {
+        let ev = sandbox_run(
             &ctx(),
             "reg/some-agent:1",
             "sha256:beef",

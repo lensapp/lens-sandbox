@@ -103,19 +103,19 @@ pub fn volume_event(cx: &OcsfCtx, name: &str, target: &str) -> Map<String, Value
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn bundle_run_event(
+pub fn sandbox_run_event(
     cx: &OcsfCtx,
-    bundle_ref: &str,
-    bundle_digest: &str,
+    reference: &str,
+    digest: &str,
     overrides: &[String],
     integrations: &[String],
     policy_hash: &str,
     signature_verdict: &str,
 ) -> Map<String, Value> {
-    into_object(lns_ocsf::bundle_run(
+    into_object(lns_ocsf::sandbox_run(
         &cx.ctx(),
-        bundle_ref,
-        bundle_digest,
+        reference,
+        digest,
         overrides,
         integrations,
         policy_hash,
