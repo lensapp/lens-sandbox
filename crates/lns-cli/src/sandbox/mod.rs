@@ -41,7 +41,7 @@ pub enum SandboxCommand {
     Ps,
     #[command(
         visible_alias = "list",
-        about = "List active runs (`docker ps`-style)."
+        about = "List cached sandboxes (pulled or built) in the local store."
     )]
     Ls,
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
@@ -54,7 +54,9 @@ pub enum SandboxCommand {
     Logs(SandboxLogsArgs),
     #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
     Attach(SandboxAttachArgs),
-    #[command(about = "Print a run's state and launch configuration as JSON.")]
+    #[command(
+        about = "Inspect a sandbox: a running run's live state as JSON, or a cached artifact's kind and definition."
+    )]
     Inspect(SandboxInspectArgs),
     #[command(
         about = "Remove a cached sandbox and free its now-unreferenced layers; refuses a running one."
@@ -98,7 +100,7 @@ pub struct SandboxTagArgs {
 pub struct SandboxStopArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -115,7 +117,7 @@ pub struct SandboxStopArgs {
 pub struct SandboxLogsArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -132,7 +134,7 @@ pub struct SandboxLogsArgs {
 pub struct SandboxAttachArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -148,8 +150,8 @@ pub struct SandboxAttachArgs {
 #[derive(clap::Args)]
 pub struct SandboxInspectArgs {
     #[arg(
-        value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        value_name = "TARGET",
+        help = "A running run's id/name (live state), or a cached sandbox reference (its definition)."
     )]
     pub run: String,
 }
@@ -169,7 +171,7 @@ pub struct SandboxPruneArgs {
         short = 'f',
         long,
         default_value_t = false,
-        help = "Skip the confirmation and prune the cache now."
+        help = "Required: confirm removing every cached sandbox not held by a running one."
     )]
     pub force: bool,
 }

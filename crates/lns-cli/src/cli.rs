@@ -145,7 +145,7 @@ pub struct RunArgs {
         long,
         default_value_t = false,
         conflicts_with_all = ["interactive", "tty"],
-        help = "Return immediately after starting; the run continues in the daemon and is reachable via `lns exec`, `lns kill`, `lns ls`."
+        help = "Return immediately after starting; the run continues in the daemon and is reachable via `lns exec`, `lns kill`, `lns ps`."
     )]
     pub detach: bool,
 

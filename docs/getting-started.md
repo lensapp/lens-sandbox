@@ -71,13 +71,14 @@ lns service status
 ```
 
 The service keeps running across sandbox runs — it owns the microVM lifecycle, the
-image cache, the approval window, and the audit log. Stop it from the tray's
-**Quit** menu or with `lns service stop`. See [the background
-service](service.md) for details.
+cache, the approval window, and the audit log. Stop it from the tray's **Quit**
+menu or with `lns service stop`. See [the background service](service.md) for
+details.
 
 ## Your first run
 
-Change into your project directory, then run an OCI image:
+Change into your project directory, then run an OCI image straight away — this is
+the quick path, no configuration required:
 
 ```bash
 cd ~/dev/my-app
@@ -107,6 +108,58 @@ give the workload your actual project files, bind-mount the directory with
 space that persists across runs instead, attach a named volume. The workload's own
 working directory comes from the image.
 
+## Define a sandbox
+
+The quick path is handy, but the sandbox you'll keep is a **definition** — a
+`./lns.yaml` file that pins the base image plus its command, environment, policy,
+and integrations. One directory is one sandbox. Scaffold it with `lns init`:
+
+```bash
+lns init
+```
+
+That writes a starter `./lns.yaml`:
+
+```yaml
+apiVersion: lns.run/v1
+kind: Sandbox
+metadata:
+  name: sandbox
+spec:
+  # The base OCI image this sandbox runs; pin it by digest before you publish.
+  image: docker.io/library/alpine:3.20
+  # command: sh
+  # env:
+  #   MODE: production
+  # policy:
+  #   defaultVerdict: ask
+  # integrations: []
+```
+
+Edit `spec.image` (and uncomment the fields you need), then check it offline —
+`validate` runs schema, cross-field, and secret checks without touching the
+network or the service, and `show` renders the effective definition:
+
+```bash
+lns sandbox validate     # -> lns.yaml is valid.
+lns sandbox show         # -> the merged, resolved definition
+```
+
+Run it by omitting the reference — `lns run` with no argument runs the
+`./lns.yaml` in the current directory:
+
+```bash
+lns run
+```
+
+When you're ready to share the sandbox, publish it in one step. `lns push` builds
+`./lns.yaml` and uploads it to a registry as a sandbox artifact; anyone can then
+`lns pull` or `lns run` that reference:
+
+```bash
+lns push ghcr.io/acme/reviewer:1.0.0
+```
+
 ## What happens on an unknown request
 
 With the default `ask` verdict, the workload runs normally until it tries to reach
@@ -125,7 +178,8 @@ If no one answers, the request times out and is denied.
 
 ## Where to go next
 
-- Tune resources, mount volumes, publish ports, and run commands directly:
+- Author, run, distribute, and manage a sandbox; tune resources, mount volumes,
+  publish ports, and run commands directly:
   [Running workloads](running-workloads.md).
 - Pre-author rules instead of approving them interactively:
   [Policy and approvals](policy.md).
