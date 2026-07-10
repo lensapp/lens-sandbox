@@ -18,9 +18,9 @@ Feature: addressing runs by name from the CLI
     And the output contains "stopped run 3"
     And the service received a StopRun request for run "3" with timeout 10
 
-  Scenario: the run list shows a NAME column with each run's name
-    Given the service reports a run listing with run 3 named "reviewer" of image "some-image" running
-    When the user runs sandbox command "ls"
+  Scenario: the running list shows a NAME column with each run's name
+    Given the service reports one running sandbox using 125 permille cpu and 92274688 bytes
+    When the user runs "lns ps"
     Then the exit code is 0
     And the output contains "NAME"
     And the output contains "reviewer"

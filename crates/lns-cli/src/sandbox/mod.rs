@@ -450,16 +450,29 @@ fn render_ps_table<W: std::io::Write>(
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::ListRuns).await?;
-    match response {
-        Response::RunList { mut runs } => {
-            runs.sort_by(|a, b| b.started.cmp(&a.started));
-            crate::service::render_ls_table(out, &runs)?;
+    match svc.one_shot(Request::ListImages).await? {
+        Response::ImageList { mut images } => {
+            images.sort_by(|a, b| a.reference.cmp(&b.reference));
+            render_cached_table(out, &images)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+fn render_cached_table<W: std::io::Write>(
+    out: &mut W,
+    images: &[lns_ipc::ImageInfo],
+) -> Result<()> {
+    let ref_w = "SANDBOX"
+        .len()
+        .max(images.iter().map(|i| i.reference.len()).max().unwrap_or(0));
+    writeln!(out, "{:<ref_w$}  STATE", "SANDBOX")?;
+    for image in images {
+        writeln!(out, "{:<ref_w$}  cached", image.reference)?;
+    }
+    Ok(())
 }
 
 async fn kill<W: std::io::Write>(

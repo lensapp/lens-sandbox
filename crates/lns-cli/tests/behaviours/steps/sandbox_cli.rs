@@ -153,30 +153,6 @@ fn then_prune_request(w: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
-#[given(regex = r#"^the service reports a run listing with run (\d+) of image "([^"]+)" running$"#)]
-fn canned_run_listing(w: &mut BehaviourWorld, run_id: u32, image: String) {
-    w.sandbox.response = Some(Response::RunList {
-        runs: vec![RunSummary {
-            id: hexid(run_id),
-            name: String::new(),
-            image,
-            command: "some-command".into(),
-            status: RunStatus::Running,
-            started: "2026-01-01T00:00:00Z".into(),
-        }],
-    });
-}
-
-#[then("the service received a ListRuns request")]
-fn then_list_runs_request(w: &mut BehaviourWorld) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    if requests.contains(&Request::ListRuns) {
-        Ok(())
-    } else {
-        Err(format!("expected ListRuns among {requests:?}"))
-    }
-}
-
 #[then(regex = r"^the service received a Kill request for run (\d+) with signal KILL$")]
 fn then_kill_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
@@ -506,22 +482,6 @@ fn then_workload_stdout(w: &mut BehaviourWorld, needle: String) -> Result<(), St
             "expected workload stdout to contain {needle:?}, got {text:?}"
         ))
     }
-}
-
-#[given(
-    regex = r#"^the service reports a run listing with run (\d+) named "([^"]+)" of image "([^"]+)" running$"#
-)]
-fn canned_named_run_listing(w: &mut BehaviourWorld, run_id: u32, name: String, image: String) {
-    w.sandbox.response = Some(Response::RunList {
-        runs: vec![RunSummary {
-            id: hexid(run_id),
-            name,
-            image,
-            command: "some-command".into(),
-            status: RunStatus::Running,
-            started: "2026-01-01T00:00:00Z".into(),
-        }],
-    });
 }
 
 #[then(regex = r#"^the service received a StopRun request for run "([^"]+)" with timeout (\d+)$"#)]
