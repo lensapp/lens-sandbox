@@ -26,6 +26,46 @@ pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
     Box::pin(async move { run_author(&super::SandboxCommand::Init, ctx) })
 }
 
+async fn dispatch_command(command: super::SandboxCommand) -> Result<i32> {
+    crate::service::require_running().await;
+    dispatch(super::SandboxArgs { command }).await
+}
+
+pub fn run_stop<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxStopArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Stop(args)).await
+    })
+}
+
+pub fn run_rm<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxRmArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Rm(args)).await
+    })
+}
+
+pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxInspectArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Inspect(args)).await
+    })
+}
+
+pub fn run_logs<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxLogsArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Logs(args)).await
+    })
+}
+
+pub fn run_attach<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxAttachArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Attach(args)).await
+    })
+}
+
 fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
     let cwd = ctx.cwd()?;
     let mut out = std::io::stdout();

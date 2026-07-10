@@ -177,6 +177,62 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
     owns_terminal: false,
 };
 
+macro_rules! shortcut_spec {
+    ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal) => {
+        pub fn $augment(app: clap::Command) -> clap::Command {
+            app.subcommand(subcommand::<$args>($name).about($about))
+        }
+        pub const $const_name: CommandSpec = CommandSpec {
+            name: $name,
+            augment: $augment,
+            run: $run,
+            announces_update_check: true,
+            owns_terminal: false,
+        };
+    };
+}
+
+shortcut_spec!(
+    augment_stop,
+    STOP_SPEC,
+    SandboxStopArgs,
+    "stop",
+    real::run_stop,
+    "Stop a running sandbox gracefully (shortcut for `lns sandbox stop`)."
+);
+shortcut_spec!(
+    augment_rm,
+    RM_SPEC,
+    SandboxRmArgs,
+    "rm",
+    real::run_rm,
+    "Remove a sandbox (shortcut for `lns sandbox rm`)."
+);
+shortcut_spec!(
+    augment_inspect,
+    INSPECT_SPEC,
+    SandboxInspectArgs,
+    "inspect",
+    real::run_inspect,
+    "Inspect a sandbox (shortcut for `lns sandbox inspect`)."
+);
+shortcut_spec!(
+    augment_logs,
+    LOGS_SPEC,
+    SandboxLogsArgs,
+    "logs",
+    real::run_logs,
+    "Print a running sandbox's output (shortcut for `lns sandbox logs`)."
+);
+shortcut_spec!(
+    augment_attach,
+    ATTACH_SPEC,
+    SandboxAttachArgs,
+    "attach",
+    real::run_attach,
+    "Re-attach to a running sandbox (shortcut for `lns sandbox attach`)."
+);
+
 pub trait SandboxService: Send + Sync {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
     fn one_shot(&self, request: Request) -> BoxFuture<'_, Result<Response>>;
