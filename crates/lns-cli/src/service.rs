@@ -155,6 +155,14 @@ async fn restart_via_socket(client: &impl ServiceClient) -> Result<()> {
     cmd_start(client).await
 }
 
+fn absent_status_message(alive: bool) -> &'static str {
+    if alive {
+        "Lens Sandbox is running but reports an unreadable status — likely an incompatible or older lns-service. Run `lns service restart` to reconcile."
+    } else {
+        "Lens Sandbox is not running."
+    }
+}
+
 pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
     let Some(StatusInfo {
         pid,
@@ -164,7 +172,7 @@ pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
         build,
     }) = client.status().await
     else {
-        println!("Lens Sandbox is not running.");
+        println!("{}", absent_status_message(client.ping().await));
         return Ok(());
     };
 
@@ -532,15 +540,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cmd_status_reports_not_running_when_status_is_none() {
+    async fn cmd_status_reports_not_running_when_status_is_none_and_ping_fails() {
         let client = FakeClient::default();
         *client.status_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(false);
 
         cmd_status(&client)
             .await
             .expect("cmd_status should succeed");
 
-        assert_eq!(client.calls(), vec!["status"]);
+        assert_eq!(client.calls(), vec!["status", "ping"]);
+    }
+
+    #[tokio::test]
+    async fn cmd_status_pings_to_disambiguate_an_alive_but_undecodable_service() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(true);
+
+        cmd_status(&client)
+            .await
+            .expect("cmd_status should succeed");
+
+        assert_eq!(client.calls(), vec!["status", "ping"]);
+    }
+
+    #[test]
+    fn absent_status_message_distinguishes_an_incompatible_service_from_a_stopped_one() {
+        let alive = absent_status_message(true);
+        assert!(
+            alive.contains("lns service restart"),
+            "unexpected: {alive:?}"
+        );
+        assert!(!absent_status_message(false).contains("restart"));
     }
 
     #[tokio::test]
