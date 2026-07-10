@@ -1566,6 +1566,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_rejects_an_unrelated_remove_response() {
+        let svc = CannedService::with_remove_image(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Pong,
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn prune_requires_force_before_touching_the_cache() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
