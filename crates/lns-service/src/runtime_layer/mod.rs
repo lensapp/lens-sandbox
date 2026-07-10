@@ -298,13 +298,8 @@ fn split_path(normalized: &str) -> Vec<String> {
 
 type MemoKey = (bool, Option<PathBuf>, PathBuf);
 
+#[derive(Default)]
 pub struct RuntimeLayerMemo(std::sync::Mutex<std::collections::BTreeMap<MemoKey, RuntimeLayer>>);
-
-impl Default for RuntimeLayerMemo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl RuntimeLayerMemo {
     pub const fn new() -> Self {
@@ -353,8 +348,9 @@ fn for_run_memoized_with(
     assets: Option<&crate::supervisor::SupervisorAssets>,
     memo: &RuntimeLayerMemo,
 ) -> Result<Option<RuntimeLayer>> {
-    let dev_overrides_active =
-        env_get("LNS_DEBUG_WRAP").is_some() || env_get("LNS_NFT_BIN").is_some();
+    let dev_overrides_active = env_get("LNS_DEBUG_WRAP").is_some()
+        || env_get("LNS_NFT_BIN").is_some()
+        || env_get("LNS_SUPERVISOR_BIN").is_some();
     if dev_overrides_active {
         return for_run(imageless, content_store, guest_tools, assets);
     }
@@ -967,6 +963,29 @@ mod tests {
         assert!(
             format!("{err:#}").contains("reading"),
             "an active dev override must rebuild from sources every run: {err:#}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn for_run_memoized_supervisor_bin_override_bypasses_the_memo() {
+        let _env = NftEnvOverride::install();
+        let d = tempdir();
+        let s = store(&d);
+        let gt = fake_guest_tools(&d);
+        let assets = fake_assets(&d);
+        let memo = RuntimeLayerMemo::new();
+        let env_get = |k: &str| (k == "LNS_SUPERVISOR_BIN").then(|| std::ffi::OsString::from("x"));
+
+        for_run_memoized_with(env_get, true, &s, &gt, Some(&assets), &memo)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(&assets.supervisor_bin).unwrap();
+        let err = for_run_memoized_with(env_get, true, &s, &gt, Some(&assets), &memo).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading"),
+            "a rebuilt supervisor at a fixed LNS_SUPERVISOR_BIN path must be re-read every \
+             run, not served stale from the memo: {err:#}"
         );
     }
 
