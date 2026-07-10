@@ -1,4 +1,3 @@
-@todo
 Feature: running a sandbox
   `lns run` always targets a sandbox — never a raw OCI image. A REF is a
   registry coordinate or a local `lns.yaml`; omitting it runs `./lns.yaml`.
@@ -36,6 +35,7 @@ Feature: running a sandbox
     Then the exit code is 0
     And the run summary names "strict.yaml" as the policy source
 
+  @todo
   Scenario: ps lists running sandboxes with cpu and memory
     Given the service reports one running sandbox using 125 permille cpu and 92274688 bytes
     When the user runs "lns ps"

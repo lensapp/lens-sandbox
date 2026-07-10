@@ -547,6 +547,7 @@ mod tests {
                 auto_remove: false,
                 with: vec![],
                 insecure: false,
+                verify_sandbox: false,
             })),
             Instant::now(),
         )

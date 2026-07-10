@@ -1,7 +1,7 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_service::artifact::spec::Kind;
-use lns_service::artifact::{BUNDLE_ARTIFACT_TYPE, RunPath, dispatch};
+use lns_service::artifact::{BUNDLE_ARTIFACT_TYPE, RunPath, dispatch_run};
 
 #[given("a pulled reference whose manifest has no artifact type")]
 async fn no_artifact_type(world: &mut BehaviourWorld) {
@@ -33,27 +33,40 @@ async fn fileset_artifact(world: &mut BehaviourWorld) {
 async fn resolve_for_launch(world: &mut BehaviourWorld) {
     let artifact_type = world.artifact().artifact_type.clone();
     let config_media_type = world.artifact().config_media_type.clone();
-    match dispatch(artifact_type.as_deref(), config_media_type.as_deref()) {
+    match dispatch_run(
+        artifact_type.as_deref(),
+        config_media_type.as_deref(),
+        "some-registry.example/some-ref:1",
+        true,
+    ) {
         Ok(path) => world.artifact().path = Some(path),
         Err(e) => world.artifact().error = Some(format!("{e:#}")),
     }
 }
 
-#[then("the run launches the single image unchanged")]
-async fn launches_single_image(world: &mut BehaviourWorld) {
-    assert_eq!(world.artifact().path, Some(RunPath::SingleImage));
+#[then("the run is refused because the reference is not a sandbox")]
+async fn refused_not_a_sandbox(world: &mut BehaviourWorld) {
+    let err = world
+        .artifact()
+        .error
+        .clone()
+        .expect("expected a refusal error");
+    assert!(
+        err.contains("not a sandbox"),
+        "expected a not-a-sandbox refusal, got: {err}",
+    );
 }
 
-#[then("no bundle assembly is performed")]
-async fn no_assembly(world: &mut BehaviourWorld) {
-    assert_eq!(
-        world.artifact().path,
-        Some(RunPath::SingleImage),
-        "a plain image must resolve to the single-image path, never assembly",
-    );
+#[then(regex = r#"^the refusal points at "([^"]+)"$"#)]
+async fn refusal_points_at(world: &mut BehaviourWorld, hint: String) {
+    let err = world
+        .artifact()
+        .error
+        .clone()
+        .expect("expected a refusal error");
     assert!(
-        world.artifact().error.is_none(),
-        "a plain image must not be refused"
+        err.contains(&hint),
+        "refusal should mention {hint}, got: {err}"
     );
 }
 

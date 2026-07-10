@@ -50,6 +50,23 @@ pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) ->
     }
 }
 
+/// Classify a run reference and, when the CLI asked to verify it, refuse a plain OCI image that is not a sandbox — pointing at `lns init`. A local sandbox's base image passes `verify=false` and runs directly.
+pub fn dispatch_run(
+    artifact_type: Option<&str>,
+    config_media_type: Option<&str>,
+    reference: &str,
+    verify: bool,
+) -> Result<RunPath> {
+    let path = dispatch(artifact_type, config_media_type)?;
+    if verify && path == RunPath::SingleImage {
+        bail!(
+            "{reference} is not a sandbox; run `lns init` to author an lns.yaml, \
+             or pass a published sandbox reference"
+        );
+    }
+    Ok(path)
+}
+
 fn declared(name: String, reference: &ArtifactRef) -> DeclaredComponent {
     let reference = match &reference.digest {
         Some(digest) => format!("{}@{}", reference.reference, digest),
@@ -315,6 +332,37 @@ mod tests {
     #[test]
     fn an_empty_artifact_type_and_config_type_is_treated_as_a_plain_image() {
         assert_eq!(dispatch(Some(""), Some("")).unwrap(), RunPath::SingleImage);
+    }
+
+    #[test]
+    fn dispatch_run_refuses_a_plain_image_reference_pointing_at_lns_init() {
+        let err = dispatch_run(None, None, "alpine:3.20", true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not a sandbox"), "got: {msg}");
+        assert!(msg.contains("lns init"), "got: {msg}");
+    }
+
+    #[test]
+    fn dispatch_run_lets_a_bundle_reference_through_for_assembly() {
+        assert_eq!(
+            dispatch_run(
+                Some(BUNDLE_ARTIFACT_TYPE),
+                None,
+                "ghcr.io/team/hermes:1",
+                true
+            )
+            .unwrap(),
+            RunPath::AssembleBundle
+        );
+    }
+
+    #[test]
+    fn dispatch_run_runs_a_local_base_image_directly_when_verification_is_off() {
+        assert_eq!(
+            dispatch_run(None, None, "docker.io/library/alpine:3.20", false).unwrap(),
+            RunPath::SingleImage,
+            "a local sandbox's plain base image must run directly, not be refused",
+        );
     }
 
     #[test]

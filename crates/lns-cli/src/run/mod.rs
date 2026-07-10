@@ -2,6 +2,7 @@ pub mod env_file;
 pub mod host_bind;
 pub mod progress;
 pub mod summary;
+pub mod target;
 
 use crate::command::{CommandSpec, subcommand};
 

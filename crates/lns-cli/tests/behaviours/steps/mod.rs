@@ -11,5 +11,6 @@ pub mod run;
 pub mod run_config_defaults;
 pub mod sandbox_author;
 pub mod sandbox_cli;
+pub mod sandbox_run;
 pub mod update_check;
 pub mod volume_cli;

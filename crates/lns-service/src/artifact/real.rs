@@ -3,7 +3,7 @@ use crate::artifact::fetch::fetch_component;
 use crate::artifact::fileset::fileset_runtime_specs;
 use crate::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
 use crate::artifact::signature::{self, SignatureStatus, Verdict};
-use crate::artifact::{RunPath, dispatch, plan_bundle};
+use crate::artifact::{RunPath, dispatch, dispatch_run, plan_bundle};
 use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
@@ -29,12 +29,13 @@ impl ComponentFetcher for RealComponentFetcher {
     }
 }
 
-/// Peek a run reference's manifest and, when it is an AgentSystem bundle, verify its signature then resolve + assemble it; a plain image returns `None` so the caller keeps its existing single-image path.
+/// Peek a run reference's manifest and, when it is an AgentSystem bundle, verify its signature then resolve + assemble it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
 pub(crate) async fn peek_and_plan(
     image_ref: &str,
     host_arch: &str,
     overrides: &[Override],
     insecure: bool,
+    verify_sandbox: bool,
     run_id: &str,
     microvm: &str,
 ) -> Result<Option<BundlePlan>> {
@@ -46,9 +47,11 @@ pub(crate) async fn peek_and_plan(
         .pull_manifest_and_config(&reference)
         .await
         .with_context(|| format!("peeking manifest for {image_ref}"))?;
-    match dispatch(
+    match dispatch_run(
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
+        image_ref,
+        verify_sandbox,
     )? {
         RunPath::SingleImage => Ok(None),
         RunPath::AssembleBundle => {

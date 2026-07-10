@@ -400,6 +400,9 @@ pub struct RunImageArgs {
     pub with: Vec<WithOverride>,
     #[serde(default)]
     pub insecure: bool,
+    /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
+    #[serde(default)]
+    pub verify_sandbox: bool,
 }
 
 /// A launch-time `--with` component override, addressed by OCI reference; its mount path comes from the referenced FileSet's manifest at resolve time.
@@ -726,6 +729,7 @@ mod tests {
             auto_remove: false,
             with: Vec::new(),
             insecure: false,
+            verify_sandbox: false,
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -770,6 +774,7 @@ mod tests {
             auto_remove: false,
             with: Vec::new(),
             insecure: false,
+            verify_sandbox: false,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -902,6 +907,7 @@ mod tests {
             auto_remove: true,
             with: Vec::new(),
             insecure: false,
+            verify_sandbox: false,
         }
     }
 

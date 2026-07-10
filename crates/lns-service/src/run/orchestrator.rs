@@ -84,6 +84,7 @@ async fn orchestrate(
                 &image::want_arch().to_string(),
                 &overrides,
                 args.insecure,
+                args.verify_sandbox,
                 &run_id,
                 &microvm,
             )

@@ -1,0 +1,139 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use cucumber::{given, then, when};
+use lns_cli::cli::RunArgs;
+use lns_cli::command::parse_args;
+use lns_cli::run::progress::ProgressRenderer;
+use lns_cli::run::summary::{PolicySource, format_summary};
+use lns_cli::run::target::{RunTarget, resolve};
+use lns_cli::sandbox::author::Fs;
+use lns_cli::service::pre_phase_step;
+use lns_ipc::{Response, encode_frame};
+use lns_policy::Policy;
+
+use crate::runner::CliRun;
+use crate::world::BehaviourWorld;
+
+struct StepFs {
+    files: RefCell<HashMap<PathBuf, String>>,
+}
+
+impl Fs for StepFs {
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        self.files
+            .borrow()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
+    }
+    fn write(&self, path: &Path, contents: &str) -> std::io::Result<()> {
+        self.files
+            .borrow_mut()
+            .insert(path.to_path_buf(), contents.to_string());
+        Ok(())
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.files.borrow().contains_key(path)
+    }
+}
+
+#[given(regex = r#"^the registry serves the sandbox "([^"]+)"$"#)]
+fn registry_serves_sandbox(_w: &mut BehaviourWorld, _reference: String) {
+    // no-op: the reference is a published sandbox the service would assemble.
+}
+
+#[given(regex = r#"^the reference "([^"]+)" is a plain OCI image, not a sandbox$"#)]
+fn reference_is_plain_image(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox_run.refusal = Some(format!(
+        "{reference} is not a sandbox; run `lns init` to author an lns.yaml, \
+         or pass a published sandbox reference"
+    ));
+}
+
+#[when(regex = r#"^the user runs "lns run(.*)"$"#)]
+fn user_runs_lns_run(w: &mut BehaviourWorld, rest: String) {
+    let mut argv = vec!["lns".to_string(), "run".to_string()];
+    argv.extend(rest.split_whitespace().map(str::to_string));
+    let args: RunArgs = match parse_args(&argv) {
+        Ok(args) => args,
+        Err(e) => {
+            w.result = Some(CliRun {
+                exit_code: e.exit_code(),
+                output: e.to_string(),
+            });
+            return;
+        }
+    };
+    let cwd = Path::new("/work");
+    let fs = StepFs {
+        files: RefCell::new(w.author_files.clone()),
+    };
+    match resolve(args.image.as_deref(), &fs, cwd) {
+        Err(e) => {
+            w.result = Some(CliRun {
+                exit_code: 1,
+                output: format!("{e:#}"),
+            });
+        }
+        Ok(target) => run_resolved(w, args, &target, cwd),
+    }
+}
+
+fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: &Path) {
+    if let Some(refusal) = w.sandbox_run.refusal.clone() {
+        w.result = Some(surface_service_refusal(&refusal));
+        return;
+    }
+    w.sandbox_run.request_image = Some(target.image());
+    w.sandbox_run.verify_sandbox = Some(target.verify_sandbox());
+    if let Some(policy) = args.policy.as_deref() {
+        w.summary_output = format_summary(
+            &args,
+            &Policy::default(),
+            &cwd.join(policy),
+            &PolicySource::Explicit(policy.to_path_buf()),
+        );
+    }
+    w.result = Some(CliRun {
+        exit_code: 0,
+        output: String::new(),
+    });
+}
+
+/// Drive the CLI's real pre-phase surfacing of a daemon `Error` frame, exactly as `lns run` renders a service refusal.
+fn surface_service_refusal(message: &str) -> CliRun {
+    let frame = encode_frame(&Response::Error {
+        message: message.to_string(),
+    })
+    .expect("encode error frame");
+    let mut buf = Vec::new();
+    let err = pre_phase_step(&frame, &mut buf, &mut ProgressRenderer::new(false), false)
+        .expect_err("a daemon Error frame must surface as an error");
+    CliRun {
+        exit_code: 1,
+        output: format!("{err:#}"),
+    }
+}
+
+#[then("the service received a request to run a sandbox")]
+fn service_received_run_request(w: &mut BehaviourWorld) -> Result<(), String> {
+    match &w.sandbox_run.request_image {
+        Some(image) if !image.is_empty() => Ok(()),
+        _ => Err("no run request was built for the service".to_string()),
+    }
+}
+
+#[then(regex = r#"^the run summary names "([^"]+)" as the policy source$"#)]
+fn summary_names_policy_source(w: &mut BehaviourWorld, name: String) -> Result<(), String> {
+    let needle = format!("--policy {name}");
+    if w.summary_output.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the summary to name {needle:?}, got:\n{}",
+            w.summary_output
+        ))
+    }
+}

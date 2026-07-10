@@ -92,15 +92,6 @@ pub fn format_summary(
     .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
-    if !args.with.is_empty() {
-        s.push_str("  Overrides:\n");
-        for over in &args.with {
-            writeln!(s, "    --with {}", over.reference).unwrap();
-        }
-    }
-    if args.insecure {
-        s.push_str("  Signature: verification skipped (--insecure)\n");
-    }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
     writeln!(
@@ -118,7 +109,7 @@ pub fn format_summary(
 fn image_line(args: &RunArgs) -> String {
     match &args.image {
         Some(image) => format!("{image} (resolving…)"),
-        None => "<imageless>".to_string(),
+        None => "./lns.yaml (resolving…)".to_string(),
     }
 }
 
@@ -250,8 +241,6 @@ mod tests {
             publish: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
-            with: Vec::new(),
-            insecure: false,
             cmd: Vec::new(),
         }
     }
@@ -352,72 +341,6 @@ mod tests {
         assert!(s.contains("Resources:"), "missing Resources line: {s}");
         assert!(s.contains("Flags:"), "missing Flags line: {s}");
         assert!(s.contains("Policy:"), "missing Policy block: {s}");
-    }
-
-    #[test]
-    fn summary_lists_each_with_override_and_omits_the_block_when_none() {
-        let mut args = run_args(Some("some-agent:research"));
-        args.with = vec![
-            lns_ipc::WithOverride {
-                reference: "some-registry.example/skills/a:1".into(),
-            },
-            lns_ipc::WithOverride {
-                reference: "some-registry.example/skills/b:1".into(),
-            },
-        ];
-        let s = format_summary(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
-        );
-        assert!(s.contains("Overrides:"), "missing overrides block: {s}");
-        assert!(
-            s.contains("--with some-registry.example/skills/a:1"),
-            "got: {s}"
-        );
-        assert!(
-            s.contains("--with some-registry.example/skills/b:1"),
-            "got: {s}"
-        );
-
-        let bare = format_summary(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
-        );
-        assert!(
-            !bare.contains("Overrides:"),
-            "no overrides block expected: {bare}"
-        );
-    }
-
-    #[test]
-    fn summary_notes_skipped_signature_verification_only_under_insecure() {
-        let mut args = run_args(Some("some-agent:research"));
-        args.insecure = true;
-        let s = format_summary(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
-        );
-        assert!(
-            s.contains("Signature: verification skipped (--insecure)"),
-            "got: {s}"
-        );
-
-        let secure = format_summary(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
-        );
-        assert!(
-            !secure.contains("Signature:"),
-            "no signature line expected: {secure}"
-        );
     }
 
     #[test]
@@ -565,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn imageless_run_displays_imageless_marker_instead_of_image_placeholder() {
+    fn no_reference_run_shows_the_local_definition_as_the_image() {
         let args = run_args(None);
         let s = format_summary(
             &args,
@@ -573,10 +496,10 @@ mod tests {
             Path::new("/x/lns-policy.yaml"),
             &PolicySource::FoundInCwd,
         );
-        assert!(s.contains("<imageless>"), "no imageless marker: {s}");
+        assert!(s.contains("./lns.yaml (resolving…)"), "got: {s}");
         assert!(
-            !s.contains("resolving"),
-            "no resolving placeholder on imageless: {s}"
+            !s.contains("imageless"),
+            "the imageless marker is retired: {s}"
         );
     }
 

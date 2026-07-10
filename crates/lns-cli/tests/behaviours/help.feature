@@ -29,8 +29,8 @@ Feature: users discover the CLI surface
     When I run "lns run --help"
     Then the exit code is 0
     And the output contains "Usage: lns run"
-    And the output contains "IMAGE"
-    And the output contains "imageless mode"
+    And the output contains "REF"
+    And the output contains "./lns.yaml"
     And the output contains "--cpus"
     And the output contains "--mem"
     And the output contains "--policy"

@@ -32,7 +32,8 @@ pub struct Cli {
 #[derive(clap::Args)]
 pub struct RunArgs {
     #[arg(
-        help = "OCI image reference (e.g. alpine:3.20); omit for imageless mode, which requires a command after `--`."
+        value_name = "REF",
+        help = "Sandbox reference: a registry coordinate (e.g. ghcr.io/team/hermes:1.4.0) or a local lns.yaml. Omit to run ./lns.yaml in the current directory."
     )]
     pub image: Option<String>,
 
@@ -205,21 +206,6 @@ pub struct RunArgs {
         help = "Suppress the launch banner and ✓ status lines; warnings, errors, and the workload's own output are still printed. Useful for scripted/programmatic callers."
     )]
     pub quiet: bool,
-
-    #[arg(
-        long = "with",
-        value_name = "NAME=/mount/path",
-        value_parser = lns_ipc::WithOverride::parse,
-        help = "Override a bundle's mounted FileSet at launch (repeatable): NAME=/mount/path lands last, on top of the base image and bundle filesets."
-    )]
-    pub with: Vec<lns_ipc::WithOverride>,
-
-    #[arg(
-        long = "insecure",
-        default_value_t = false,
-        help = "Skip bundle signature verification for this run. Only affects signed-bundle enforcement; plain images are unaffected."
-    )]
-    pub insecure: bool,
 
     #[arg(
         last = true,

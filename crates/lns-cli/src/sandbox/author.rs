@@ -52,7 +52,7 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
     Ok(0)
 }
 
-fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
+pub(crate) fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
     let path = yaml_path(cwd);
     let yaml = fs
         .read_to_string(&path)

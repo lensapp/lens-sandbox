@@ -129,6 +129,8 @@ fn resolve_host_binds(
 
 pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let cwd = std::env::current_dir().context("reading current directory")?;
+    let target =
+        crate::run::target::resolve(args.image.as_deref(), &crate::sandbox::real::RealFs, &cwd)?;
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
@@ -171,15 +173,15 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         mem: args.effective_mem(),
         cpus_explicit: args.cpus.is_some(),
         mem_explicit: args.mem.is_some(),
-        image: args.image,
+        cmd: target.command(args.cmd),
+        env: target.env(args.env),
+        image: Some(target.image()),
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
         sandbox_uid,
         entrypoint: args.entrypoint,
         hostname: args.hostname,
-        cmd: args.cmd,
-        env: args.env,
         workdir: args.workdir,
         debug,
         tty,
@@ -190,8 +192,9 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         volumes,
         binds,
         auto_remove: args.auto_remove,
-        with: args.with,
-        insecure: args.insecure,
+        with: Vec::new(),
+        insecure: false,
+        verify_sandbox: target.verify_sandbox(),
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

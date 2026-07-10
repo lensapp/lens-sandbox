@@ -77,7 +77,7 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
     }
 }
 
-struct RealFs;
+pub(crate) struct RealFs;
 
 impl super::author::Fs for RealFs {
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {

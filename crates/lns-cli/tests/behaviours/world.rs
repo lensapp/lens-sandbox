@@ -29,6 +29,7 @@ pub struct BehaviourWorld {
     pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
+    pub sandbox_run: SandboxRunRig,
     pub host_bind: HostBindRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
@@ -88,6 +89,14 @@ pub struct ImageCliRig {
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub prompt_answer: Option<String>,
+}
+
+/// Drives the in-process `lns run` target resolution: what image a run request would carry, and a service refusal to surface.
+#[derive(Debug, Default)]
+pub struct SandboxRunRig {
+    pub request_image: Option<String>,
+    pub verify_sandbox: Option<bool>,
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Default)]

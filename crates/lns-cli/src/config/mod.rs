@@ -748,8 +748,6 @@ mod tests {
             publish: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
-            with: Vec::new(),
-            insecure: false,
             cmd: Vec::new(),
         }
     }
