@@ -1,6 +1,6 @@
 use crate::E2eWorld;
 use crate::registry::LocalRegistry;
-use crate::specutil::run_cli_with_env;
+use crate::specutil::run_cli_in_dir;
 use cucumber::{given, then, when};
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::{Reference, secrets::RegistryAuth};
@@ -36,50 +36,30 @@ fn a_local_registry(world: &mut E2eWorld) {
     world.registry.get_or_insert_with(LocalRegistry::start);
 }
 
-#[when("the user builds a sandbox into the cache and then pushes it from the cache")]
-fn build_into_cache_then_push(world: &mut E2eWorld) {
+#[when("the user pushes a sandbox built from ./lns.yaml in one step")]
+fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
     let host = world.registry.as_ref().expect("a registry").host();
     let reference = format!("{host}/e2e-cache-sandbox:1");
-    let manifest = format!(
-        "apiVersion: lens.dev/v1alpha1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  isolation: microvm\n  baseImage: reg/base@sha256:{}\n",
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: reg/base@sha256:{}\n",
         "a".repeat(64)
     );
     let env = cache_env(world);
-    let manifest_path = world
-        .home
-        .as_ref()
-        .expect("home set by cache_env")
-        .path()
-        .join("cache-sandbox.yaml");
-    std::fs::write(&manifest_path, manifest).expect("write manifest fixture");
+    let project = world.home.as_ref().expect("home set by cache_env").path();
+    std::fs::write(project.join("lns.yaml"), definition).expect("write lns.yaml fixture");
 
-    let built = run_cli_with_env(
-        [
-            "build".to_string(),
-            manifest_path.to_string_lossy().into_owned(),
-            "-t".to_string(),
-            reference.clone(),
-        ],
-        env.clone(),
-    );
-    assert_eq!(
-        built.exit_code, 0,
-        "lns build (no push) must populate the cache:\n{}\n{}",
-        built.stdout, built.stderr
-    );
-    assert!(
-        !built.stdout.contains("pushed"),
-        "a build without --push must not upload:\n{}",
-        built.stdout
-    );
-    world.pushed_digest = extract_digest(&format!("{}\n{}", built.stdout, built.stderr));
-
-    let pushed = run_cli_with_env(["push".to_string(), reference.clone()], env);
+    let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
     assert_eq!(
         pushed.exit_code, 0,
-        "lns push must upload the cached artifact:\n{}\n{}",
+        "lns push must build ./lns.yaml and upload it in one step:\n{}\n{}",
         pushed.stdout, pushed.stderr
     );
+    assert!(
+        pushed.stdout.contains("built and pushed"),
+        "push must report the built-and-pushed reference:\n{}",
+        pushed.stdout
+    );
+    world.pushed_digest = extract_digest(&format!("{}\n{}", pushed.stdout, pushed.stderr));
     world.pushed_ref = Some(reference);
 }
 

@@ -10,8 +10,8 @@ fn fresh_home(world: &mut E2eWorld) {
     world.home = Some(tempfile::TempDir::new().expect("tempdir"));
 }
 
-#[given(regex = r#"^the home config file declares a malformed run\.env entry "([^"]+)"$"#)]
-fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
+#[given("the home config file declares an invalid run.cpus default")]
+fn home_config_with_invalid_cpus(world: &mut E2eWorld) {
     let home = world
         .home
         .as_ref()
@@ -23,11 +23,7 @@ fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
     };
     let dir = config_dir.join("lns");
     std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(
-        dir.join("config.yaml"),
-        format!("run:\n  env:\n    - {entry}\n"),
-    )
-    .expect("write config");
+    std::fs::write(dir.join("config.yaml"), "run:\n  cpus: 0\n").expect("write config");
 }
 
 #[when(regex = r#"^I run "([^"]*)"$"#)]
