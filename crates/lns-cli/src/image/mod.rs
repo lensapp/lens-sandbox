@@ -180,6 +180,23 @@ fn render_inspection<W: Write>(
             writeln!(out, "Digest: {}", view.digest)?;
         }
         ArtifactInspection::Bundle(bundle) => render_bundle(out, bundle)?,
+        ArtifactInspection::Sandbox(view) => render_sandbox(out, view)?,
+    }
+    Ok(())
+}
+
+fn render_sandbox<W: Write>(out: &mut W, view: &lns_ipc::SandboxView) -> std::io::Result<()> {
+    writeln!(out, "Kind: Sandbox")?;
+    writeln!(out, "Reference: {}", view.reference)?;
+    writeln!(out, "image: {}", view.image)?;
+    if !view.integrations.is_empty() {
+        writeln!(out, "Integrations:")?;
+        for id in &view.integrations {
+            writeln!(out, "  {id}")?;
+        }
+    }
+    for flag in &view.policy_flags {
+        writeln!(out, "⚠ {flag}")?;
     }
     Ok(())
 }
@@ -540,6 +557,29 @@ mod tests {
             out.contains("signed") && out.contains("trusted"),
             "got: {out}"
         );
+        assert!(out.contains("defaultVerdict: allow"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn inspect_labels_a_cached_sandbox_with_its_base_image() {
+        let svc = CannedService::with([Some(Response::ImageInspected {
+            inspection: ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                image: "docker.io/library/alpine@sha256:abc".into(),
+                integrations: vec!["some-provider".into()],
+                policy_flags: vec!["permissive defaultVerdict: allow".into()],
+            }),
+        })]);
+        let (code, out) = run_cmd(&ImageCommand::Inspect(ref_arg("hermes:1.4.0")), &svc)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("Kind: Sandbox"), "got: {out}");
+        assert!(
+            out.contains("image: docker.io/library/alpine"),
+            "got: {out}"
+        );
+        assert!(out.contains("some-provider"), "got: {out}");
         assert!(out.contains("defaultVerdict: allow"), "got: {out}");
     }
 

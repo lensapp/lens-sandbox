@@ -23,6 +23,7 @@ pub const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.lens.bundle.v1+json";
 pub enum RunPath {
     SingleImage,
     AssembleBundle,
+    Sandbox,
 }
 
 pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) -> Result<RunPath> {
@@ -34,16 +35,17 @@ pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) ->
         None => config_media_type.and_then(Kind::from_config_media_type),
     };
     match kind {
+        Some(Kind::Sandbox) => Ok(RunPath::Sandbox),
         Some(Kind::AgentSystem) => Ok(RunPath::AssembleBundle),
         Some(other) => bail!(
             "a {} artifact is not directly runnable; \
-             lns run takes a plain OCI image or an AgentSystem bundle",
+             lns run takes a published sandbox or an AgentSystem bundle",
             other.as_str()
         ),
         None => match artifact_type {
             Some(unknown) => bail!(
                 "unsupported artifact type {unknown}; \
-                 lns run can launch a plain OCI image or an AgentSystem bundle"
+                 lns run launches a sandbox"
             ),
             None => Ok(RunPath::SingleImage),
         },
@@ -91,6 +93,22 @@ fn flatten(components: &BundleComponents) -> BundleSpec {
     }
     BundleSpec {
         components: declared_components,
+    }
+}
+
+/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble.
+pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedBundle {
+    ResolvedBundle {
+        base_image: def.spec.image.clone(),
+        base_paths: Vec::new(),
+        filesets: Vec::new(),
+        command: def.spec.command.clone(),
+        env: def.spec.env.clone(),
+        resources: def.spec.resources.clone(),
+        policy: Some(lns_policy::Policy {
+            network: def.spec.policy.clone(),
+            integrations: def.spec.integrations.clone(),
+        }),
     }
 }
 
@@ -353,6 +371,41 @@ mod tests {
             )
             .unwrap(),
             RunPath::AssembleBundle
+        );
+    }
+
+    #[test]
+    fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"defaultVerdict":"deny"},"integrations":["some-provider"]}}"#,
+        )
+        .unwrap();
+        let resolved = resolved_from_sandbox(&def);
+        assert_eq!(resolved.base_image, "ghcr.io/team/base@sha256:abc");
+        assert_eq!(resolved.command.as_deref(), Some("agent --serve"));
+        assert_eq!(
+            resolved.env.get("MODE").map(String::as_str),
+            Some("research")
+        );
+        assert!(resolved.filesets.is_empty());
+        let policy = resolved
+            .policy
+            .expect("a flat sandbox carries its inline policy");
+        assert_eq!(policy.network.default_verdict, lns_policy::Verdict::Deny);
+        assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_runs_a_published_sandbox_artifact_directly() {
+        let sandbox_type = Kind::Sandbox.artifact_type();
+        assert_eq!(
+            dispatch(Some(&sandbox_type), None).unwrap(),
+            RunPath::Sandbox
+        );
+        assert_eq!(
+            dispatch_run(Some(&sandbox_type), None, "ghcr.io/team/hermes:1", true).unwrap(),
+            RunPath::Sandbox,
+            "a published sandbox is the one runnable noun, verified or not"
         );
     }
 

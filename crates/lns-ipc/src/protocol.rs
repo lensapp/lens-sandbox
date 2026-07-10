@@ -237,12 +237,23 @@ pub struct ImageInfo {
 pub enum ArtifactInspection {
     Image(ImageView),
     Bundle(BundleView),
+    Sandbox(SandboxView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageView {
     pub reference: String,
     pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxView {
+    pub reference: String,
+    pub image: String,
+    #[serde(default)]
+    pub integrations: Vec<String>,
+    #[serde(default)]
+    pub policy_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

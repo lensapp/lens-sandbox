@@ -29,6 +29,11 @@ async fn fileset_artifact(world: &mut BehaviourWorld) {
     world.artifact().artifact_type = Some(Kind::FileSet.artifact_type());
 }
 
+#[given("a pulled reference whose manifest is a sandbox artifact")]
+async fn sandbox_artifact(world: &mut BehaviourWorld) {
+    world.artifact().artifact_type = Some(Kind::Sandbox.artifact_type());
+}
+
 #[when("the run resolves the reference for launch")]
 async fn resolve_for_launch(world: &mut BehaviourWorld) {
     let artifact_type = world.artifact().artifact_type.clone();
@@ -73,6 +78,11 @@ async fn refusal_points_at(world: &mut BehaviourWorld, hint: String) {
 #[then("the run assembles the bundle before launching")]
 async fn assembles_bundle(world: &mut BehaviourWorld) {
     assert_eq!(world.artifact().path, Some(RunPath::AssembleBundle));
+}
+
+#[then("the run launches the sandbox directly")]
+async fn launches_sandbox(world: &mut BehaviourWorld) {
+    assert_eq!(world.artifact().path, Some(RunPath::Sandbox));
 }
 
 #[then("the run is refused because the artifact type is unsupported")]

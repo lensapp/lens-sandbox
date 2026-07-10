@@ -3,7 +3,7 @@ use crate::artifact::fetch::fetch_component;
 use crate::artifact::fileset::fileset_runtime_specs;
 use crate::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
 use crate::artifact::signature::{self, SignatureStatus, Verdict};
-use crate::artifact::{RunPath, dispatch, dispatch_run, plan_bundle};
+use crate::artifact::{RunPath, dispatch, dispatch_run, plan_bundle, resolved_from_sandbox};
 use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
@@ -54,6 +54,16 @@ pub(crate) async fn peek_and_plan(
         verify_sandbox,
     )? {
         RunPath::SingleImage => Ok(None),
+        RunPath::Sandbox => {
+            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
+                .with_context(|| format!("parsing published sandbox {image_ref}"))?;
+            let resolved = resolved_from_sandbox(&def);
+            disclose_effective_policy(resolved.policy.as_ref());
+            Ok(Some(BundlePlan {
+                workload: assembly::assemble(&resolved),
+                fileset_specs: Vec::new(),
+            }))
+        }
         RunPath::AssembleBundle => {
             let verdict = enforce_signature(image_ref, insecure)?;
             let resolved = plan_bundle(
@@ -185,6 +195,26 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
             reference: image_ref.to_string(),
             digest,
         })),
+        RunPath::Sandbox => {
+            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
+                .with_context(|| format!("inspecting sandbox {image_ref}"))?;
+            let resolved = resolved_from_sandbox(&def);
+            Ok(ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: image_ref.to_string(),
+                image: resolved.base_image,
+                integrations: def.spec.integrations,
+                policy_flags: resolved
+                    .policy
+                    .as_ref()
+                    .map(|p| {
+                        crate::artifact::policy::guardrail_flags(p)
+                            .iter()
+                            .map(|f| f.message().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }))
+        }
         RunPath::AssembleBundle => {
             let resolved = plan_bundle(
                 config_json.as_bytes(),

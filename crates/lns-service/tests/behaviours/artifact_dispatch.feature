@@ -11,6 +11,11 @@ Feature: run dispatches on the pulled artifact type
     Then the run is refused because the reference is not a sandbox
     And the refusal points at "lns init"
 
+  Scenario: A published sandbox artifact runs directly
+    Given a pulled reference whose manifest is a sandbox artifact
+    When the run resolves the reference for launch
+    Then the run launches the sandbox directly
+
   Scenario: A bundle artifact takes the assembly path
     Given a pulled reference whose manifest is an "AgentSystem" bundle
     When the run resolves the reference for launch
