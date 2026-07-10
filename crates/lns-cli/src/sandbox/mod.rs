@@ -571,12 +571,12 @@ async fn inspect<W: std::io::Write>(
     args: &SandboxInspectArgs,
     out: &mut W,
 ) -> Result<i32> {
-    let response = svc
+    match svc
         .one_shot(Request::InspectRun {
             run: args.run.clone(),
         })
-        .await?;
-    match response {
+        .await?
+    {
         Response::RunInspect { details } => {
             let policy = details
                 .config
@@ -586,9 +586,54 @@ async fn inspect<W: std::io::Write>(
             render_inspect(&details, policy, out)?;
             Ok(0)
         }
+        // Not a running sandbox — fall through to the cached artifact's definition.
+        Response::Error { .. } => inspect_cached(svc, &args.run, out).await,
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn inspect_cached<W: std::io::Write>(
+    svc: &impl SandboxService,
+    reference: &str,
+    out: &mut W,
+) -> Result<i32> {
+    match svc
+        .one_shot(Request::InspectImage {
+            image: reference.to_string(),
+        })
+        .await?
+    {
+        Response::ImageInspected { inspection } => {
+            render_cached_inspect(&inspection, out)?;
+            Ok(0)
+        }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+fn render_cached_inspect<W: std::io::Write>(
+    inspection: &lns_ipc::ArtifactInspection,
+    out: &mut W,
+) -> Result<()> {
+    match inspection {
+        lns_ipc::ArtifactInspection::Sandbox(view) => {
+            writeln!(out, "kind: Sandbox")?;
+            writeln!(out, "image: {}", view.image)?;
+            for id in &view.integrations {
+                writeln!(out, "integration: {id}")?;
+            }
+        }
+        lns_ipc::ArtifactInspection::Image(view) => {
+            writeln!(out, "kind: Image")?;
+            writeln!(out, "reference: {}", view.reference)?;
+        }
+        lns_ipc::ArtifactInspection::Bundle(view) => {
+            writeln!(out, "kind: AgentSystem")?;
+            writeln!(out, "reference: {}", view.reference)?;
+        }
+    }
+    Ok(())
 }
 
 fn policy_doc(path: &str, loaded: Option<serde_json::Value>) -> serde_json::Value {
@@ -635,6 +680,10 @@ fn render_inspect<W: std::io::Write>(
         serde_json::to_value(details.summary.status)?,
     );
     doc.insert("started".into(), details.summary.started.clone().into());
+    doc.insert(
+        "uptime".into(),
+        format!("since {}", details.summary.started).into(),
+    );
     doc.insert("config".into(), config.into());
     doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
     let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(doc))?;
@@ -762,6 +811,7 @@ mod tests {
     struct CannedService {
         response: Response,
         stats_response: Option<Response>,
+        inspect_image_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -771,6 +821,7 @@ mod tests {
             Self {
                 response,
                 stats_response: None,
+                inspect_image_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -778,19 +829,22 @@ mod tests {
 
         fn with_stats(response: Response, stats_response: Response) -> Self {
             Self {
-                response,
                 stats_response: Some(stats_response),
-                frames: Vec::new(),
-                requests: Arc::new(Mutex::new(Vec::new())),
+                ..Self::new(response)
+            }
+        }
+
+        fn with_inspect_image(run_response: Response, image_response: Response) -> Self {
+            Self {
+                inspect_image_response: Some(image_response),
+                ..Self::new(run_response)
             }
         }
 
         fn with_frames(frames: Vec<Vec<u8>>) -> Self {
             Self {
-                response: Response::Pong,
-                stats_response: None,
                 frames,
-                requests: Arc::new(Mutex::new(Vec::new())),
+                ..Self::new(Response::Pong)
             }
         }
     }
@@ -801,6 +855,10 @@ mod tests {
             let response = match &request {
                 Request::RunStats { .. } => self
                     .stats_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::InspectImage { .. } => self
+                    .inspect_image_response
                     .clone()
                     .unwrap_or_else(|| self.response.clone()),
                 _ => self.response.clone(),
@@ -1197,6 +1255,101 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
+    }
+
+    #[tokio::test]
+    async fn inspect_falls_back_to_a_cached_sandbox_definition() {
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "no active run with id hermes:1.4.0".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                    reference: "hermes:1.4.0".into(),
+                    image: "docker.io/library/alpine@sha256:abc".into(),
+                    integrations: vec!["some-provider".into()],
+                    policy_flags: Vec::new(),
+                }),
+            },
+        );
+        let mut out = Vec::new();
+        let code = inspect(
+            &svc,
+            &SandboxInspectArgs {
+                run: "hermes:1.4.0".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("kind: Sandbox"), "got: {text}");
+        assert!(
+            text.contains("image: docker.io/library/alpine"),
+            "got: {text}"
+        );
+        assert!(text.contains("integration: some-provider"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn inspect_cached_renders_image_and_bundle_kinds() {
+        let image = CannedService::with_inspect_image(
+            Response::Error {
+                message: "not running".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
+                    reference: "alpine:3.20".into(),
+                    digest: "sha256:abc".into(),
+                }),
+            },
+        );
+        let mut out = Vec::new();
+        inspect(&image, &SandboxInspectArgs { run: "x".into() }, &mut out)
+            .await
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("kind: Image"));
+
+        let bundle = CannedService::with_inspect_image(
+            Response::Error {
+                message: "not running".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Bundle(lns_ipc::BundleView {
+                    reference: "team/system:1".into(),
+                    sandbox_base_image: None,
+                    filesets: Vec::new(),
+                    integrations: Vec::new(),
+                    signature: lns_ipc::SignatureView::Unsigned,
+                    policy_flags: Vec::new(),
+                }),
+            },
+        );
+        let mut out = Vec::new();
+        inspect(&bundle, &SandboxInspectArgs { run: "x".into() }, &mut out)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("kind: AgentSystem")
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_cached_rejects_an_unrelated_image_response() {
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "not running".into(),
+            },
+            Response::Pong,
+        );
+        let mut out = Vec::new();
+        let err = inspect(&svc, &SandboxInspectArgs { run: "x".into() }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]

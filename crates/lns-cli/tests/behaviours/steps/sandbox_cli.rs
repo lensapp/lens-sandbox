@@ -20,6 +20,7 @@ use crate::world::BehaviourWorld;
 struct FakeSandboxService {
     response: Option<Response>,
     stats_response: Option<Response>,
+    inspect_image_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -33,6 +34,10 @@ impl SandboxService for FakeSandboxService {
         let response = match &request {
             Request::RunStats { .. } => self
                 .stats_response
+                .clone()
+                .or_else(|| self.response.clone()),
+            Request::InspectImage { .. } => self
+                .inspect_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
             _ => self.response.clone(),
@@ -339,14 +344,7 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
         return;
     }
 
-    let svc = FakeSandboxService {
-        response: w.sandbox.response.clone(),
-        stats_response: w.sandbox.stats_response.clone(),
-        frames: w.sandbox.frames.clone(),
-        unreachable: w.sandbox.unreachable,
-        policy: w.sandbox.policy.clone(),
-        requests: w.sandbox.requests.clone(),
-    };
+    let svc = fake_sandbox_service(w);
 
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
@@ -397,16 +395,48 @@ fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
     });
 }
 
-#[when(regex = r#"^the user runs "lns ps"$"#)]
-async fn run_lns_ps(w: &mut BehaviourWorld) {
-    let svc = FakeSandboxService {
+fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
+    FakeSandboxService {
         response: w.sandbox.response.clone(),
         stats_response: w.sandbox.stats_response.clone(),
-        frames: Vec::new(),
+        inspect_image_response: w.sandbox.inspect_image_response.clone(),
+        frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
-        policy: None,
+        policy: w.sandbox.policy.clone(),
         requests: w.sandbox.requests.clone(),
-    };
+    }
+}
+
+#[when(regex = r#"^the user runs "lns inspect ([^"]+)"$"#)]
+async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
+    let svc = fake_sandbox_service(w);
+    let mut out: Vec<u8> = Vec::new();
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let result = run_with_writers(
+        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs { run: reference }),
+        &svc,
+        TermInfo::default(),
+        &mut out,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
+#[when(regex = r#"^the user runs "lns ps"$"#)]
+async fn run_lns_ps(w: &mut BehaviourWorld) {
+    let svc = fake_sandbox_service(w);
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();

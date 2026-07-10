@@ -103,6 +103,8 @@ pub struct SandboxCliRig {
     pub response: Option<lns_ipc::Response>,
     /// Response the fake returns for a `RunStats` request specifically, so `ps` can canned-serve both a run listing and its stats.
     pub stats_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for an `InspectImage` request, so `inspect` can fall back from a running run to the cached artifact.
+    pub inspect_image_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,

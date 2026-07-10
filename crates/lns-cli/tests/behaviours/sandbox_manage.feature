@@ -15,7 +15,6 @@ Feature: managing cached sandboxes
     When I run "lns ls"
     Then the exit code is 2
 
-  @todo
   Scenario: inspect on a running sandbox shows its live state
     Given the reference "reviewer" resolves to a running sandbox
     When the user runs "lns inspect reviewer"
@@ -23,7 +22,6 @@ Feature: managing cached sandboxes
     And the output contains "running"
     And the output contains "uptime"
 
-  @todo
   Scenario: inspect on a cached sandbox shows its definition
     Given the reference "hermes:1.4.0" resolves to a cached sandbox
     When the user runs "lns inspect hermes:1.4.0"
