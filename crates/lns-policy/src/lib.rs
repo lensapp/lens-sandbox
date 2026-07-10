@@ -30,16 +30,12 @@ pub struct NetworkPolicy {
     pub allowed_routes: Vec<RouteRule>,
     #[serde(default = "default_ask")]
     pub default_verdict: Verdict,
-    #[serde(default = "default_direct")]
+    #[serde(default, skip_serializing_if = "is_direct_transport")]
     pub default_transport: Transport,
 }
 
 fn default_ask() -> Verdict {
     Verdict::Ask
-}
-
-fn default_direct() -> Transport {
-    Transport::Direct
 }
 
 impl Default for NetworkPolicy {
