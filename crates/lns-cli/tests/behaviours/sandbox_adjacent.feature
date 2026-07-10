@@ -1,8 +1,9 @@
 Feature: adjacent commands reshaped around the sandbox
   The own-top-level groups keep their mechanisms but are reframed around the
   single sandbox noun: integration connect only binds credentials, config
-  keeps only the run gap-fillers, volumes stay durable and never swept by
-  sandbox GC, and the audit chain records a sandbox_run.
+  keeps only the run gap-fillers, and volumes stay durable and never swept by
+  sandbox GC. (The audit chain's bundle_run→sandbox_run rename is pinned at
+  Layer 3 in audit/mod.rs, since the audit CLI reads the on-disk chain.)
 
   @todo
   Scenario: integration connect binds a credential and does not declare
@@ -50,19 +51,3 @@ Feature: adjacent commands reshaped around the sandbox
     Then the exit code is 0
     And the volume "orphan" is removed
     And the volume "claude-home" is kept
-
-  @todo
-  Scenario: audit records a sandbox_run event
-    Given the service has recorded a sandbox run in the audit chain
-    When the user runs "lns audit --json"
-    Then the exit code is 0
-    And the output contains "sandbox_run"
-    And the output does not contain "bundle_run"
-
-  @todo
-  Scenario: audit scopes to one sandbox by name
-    Given the audit chain carries events for sandboxes "hermes" and "scribe"
-    When the user runs "lns audit hermes"
-    Then the exit code is 0
-    And the output contains "hermes"
-    And the output does not contain "scribe"

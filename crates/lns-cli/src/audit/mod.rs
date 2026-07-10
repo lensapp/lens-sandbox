@@ -107,6 +107,32 @@ mod tests {
         }
     }
 
+    fn write_sandbox_run_chain(home: &std::path::Path, run_id: &str) {
+        let event = lns_ocsf::sandbox_run(
+            &octx(run_id, "2026-06-29T13:00:00Z"),
+            "ghcr.io/team/hermes:1.4.0",
+            "sha256:abc",
+            &[],
+            &[],
+            "policyhash",
+            "skipped",
+        )
+        .to_string();
+        for data in ["Library/Application Support", ".local/share"] {
+            let dir = home.join(data).join("lns").join("runs").join(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut chain = lns_ipc::AuditChain::new();
+            let mut payload = chain.augment(&event).unwrap();
+            payload.push(b'\n');
+            std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+            std::fs::write(
+                dir.join("audit.anchor"),
+                chain.anchor().expect("chain has events").to_line(),
+            )
+            .unwrap();
+        }
+    }
+
     fn tamper_run_log(home: &std::path::Path, run_id: &str) {
         let mut event =
             lns_ocsf::volume_mount(&octx(run_id, "2026-06-29T13:00:00Z"), "data", "/data");
@@ -275,6 +301,22 @@ mod tests {
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.trim(), "No audit events for sandbox nope.");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_json_flag_labels_a_sandbox_run_not_a_bundle_run() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_sandbox_run_chain(home.path(), "5a5a5a");
+        let _env = home_env(home.path());
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit", "--json"], &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("sandbox_run"), "got: {text}");
+        assert!(!text.contains("bundle_run"), "got: {text}");
     }
 
     #[tokio::test]
