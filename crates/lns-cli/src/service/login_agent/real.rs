@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use super::{CommandOutput, CommandRunner, DisableOutcome, EnableOutcome, Fs};
+use super::{CommandOutput, CommandRunner, DisableOutcome, EnableOutcome, Fs, RestartOutcome};
 
 pub(super) struct RealFs;
 
@@ -52,4 +52,12 @@ pub(in crate::service) async fn disable() -> DisableOutcome {
         Err(_) => return DisableOutcome::WasNotRegistered,
     };
     super::disable_with(&RealFs, &RealCommandRunner, &spec).await
+}
+
+pub(in crate::service) async fn restart() -> RestartOutcome {
+    let spec = match super::production_spec() {
+        Ok(s) => s,
+        Err(_) => return RestartOutcome::NotRegistered,
+    };
+    super::restart_with(&RealFs, &RealCommandRunner, &spec).await
 }

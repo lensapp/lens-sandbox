@@ -47,8 +47,9 @@ crates/lns-supervisor/src/config/mod.rs                  load_config: process en
 
 # Vendored / host-build glue — not our source.
 crates/lns-service/src/composefs/vendor/                 vendored upstream composefs (erofs/fsverity); tracked upstream
-crates/lns-service/build.rs                              host cross-build glue (parses kernels.toml)
+crates/lns-service/build.rs                              host cross-build glue (parses kernels.toml) + LNS_BUILD_SHA git-stamp emission
 crates/lns-policy/build.rs                               OAuth env-substitution codegen: scans integrations.yaml for ${VAR} refs and resolves them from the build env; the substitution logic is host-tested at 100% in env_subst.rs
+crates/lns-cli/build.rs                                  LNS_BUILD_SHA git-stamp emission (short sha + -dirty / unknown); coverage-exempt build glue like the sibling build scripts
 
 # Production-wiring adapters — thin pass-throughs; if logic is added, write a unit test and drop the entry.
 crates/lns-service/src/browser.rs                        process-spawn leaf (`open`/`xdg-open`); only caller is the tray's sign-in card (itself IGNORES'd GUI). Pinned by manual `lns integration connect github_oauth` smoke.

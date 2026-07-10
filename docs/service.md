@@ -16,14 +16,24 @@ it's meant to stay running so the sandbox is always ready.
 
 ```bash
 lns service start    # launch it and wait until it's ready
-lns service status   # report whether it's running (PID, uptime, version)
+lns service status   # report whether it's running (PID, uptime, version, build)
 lns service stop     # ask it to shut down
+lns service restart  # stop it, then start the currently installed binary
 ```
 
 You can also quit it from the **Quit** item in its tray menu.
 
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.
+
+### Reconciling a stale service
+
+`lns` and `lns-service` are released together and speak a versioned local
+protocol. If a command warns that the running service is a different build — or
+refuses to run because the two are protocol-incompatible — the running service
+predates the binaries now on disk (a common outcome of an in-place upgrade,
+since the old process keeps serving until it is relaunched). Run
+`lns service restart` to stop it and start the currently installed binary.
 
 ### Socket and binary locations
 

@@ -69,6 +69,7 @@ pub async fn dispatch(cmd: &super::ServiceCommand) -> Result<()> {
     match cmd {
         super::ServiceCommand::Start => super::cmd_start(&client).await,
         super::ServiceCommand::Stop => super::cmd_stop(&client).await,
+        super::ServiceCommand::Restart => super::cmd_restart(&client).await,
         super::ServiceCommand::Status => super::cmd_status(&client).await,
         super::ServiceCommand::Enable => super::cmd_enable(&client).await,
         super::ServiceCommand::Disable => super::cmd_disable(&client).await,
@@ -83,11 +84,20 @@ pub async fn require_running() {
             std::process::exit(1);
         }
     };
-    let alive = client.ping().await;
-    if let Err(msg) = require_running_check(alive) {
+    if let Err(msg) = gate_running_service(&client).await {
         crate::log::error!("{msg}");
         std::process::exit(1);
     }
+}
+
+async fn gate_running_service(client: &impl ServiceClient) -> Result<(), String> {
+    require_running_check(client.ping().await).map_err(str::to_string)?;
+    let status = client.status().await;
+    super::handshake::enforce_for_command(super::handshake::classify(
+        super::handshake::CLI_PROTOCOL,
+        super::handshake::CLI_BUILD,
+        status.as_ref(),
+    ))
 }
 fn real_client() -> Result<real::RealServiceClient> {
     Ok(real::RealServiceClient::new(

@@ -35,6 +35,13 @@ pub(super) enum DisableOutcome {
     WasNotRegistered,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RestartOutcome {
+    Relaunched,
+    NotRegistered,
+    Degraded(String),
+}
+
 fn platform_for_os(os: &str) -> Platform {
     match os {
         "macos" => Platform::MacOs,
@@ -311,6 +318,47 @@ async fn disable_linux(runner: &impl CommandRunner) {
     let _ = runner.run("systemctl", &reload).await;
 }
 
+async fn restart_with(
+    fs: &impl Fs,
+    runner: &impl CommandRunner,
+    spec: &AgentSpec,
+) -> RestartOutcome {
+    if !fs.exists(&spec.agent_path).await {
+        return RestartOutcome::NotRegistered;
+    }
+    match spec.platform {
+        Platform::MacOs => restart_macos(runner, spec).await,
+        Platform::Linux => restart_linux(runner).await,
+    }
+}
+
+async fn restart_macos(runner: &impl CommandRunner, spec: &AgentSpec) -> RestartOutcome {
+    let target = format!("gui/{}/{}", spec.uid, spec.label);
+    let _ = runner
+        .run("launchctl", &["bootout".to_string(), target])
+        .await;
+    let plist = spec.agent_path.to_string_lossy().into_owned();
+    let bootstrap = vec!["bootstrap".to_string(), format!("gui/{}", spec.uid), plist];
+    match runner.run("launchctl", &bootstrap).await {
+        Ok(out) if out.status == 0 => RestartOutcome::Relaunched,
+        Ok(out) => RestartOutcome::Degraded(degraded_reason("launchctl", &out)),
+        Err(e) => RestartOutcome::Degraded(classify_runner_error("launchctl", &e)),
+    }
+}
+
+async fn restart_linux(runner: &impl CommandRunner) -> RestartOutcome {
+    let restart = vec![
+        "--user".to_string(),
+        "restart".to_string(),
+        SYSTEMD_UNIT_NAME.to_string(),
+    ];
+    match runner.run("systemctl", &restart).await {
+        Ok(out) if out.status == 0 => RestartOutcome::Relaunched,
+        Ok(out) => RestartOutcome::Degraded(degraded_reason("systemctl", &out)),
+        Err(e) => RestartOutcome::Degraded(classify_runner_error("systemctl", &e)),
+    }
+}
+
 fn home_dir() -> Result<PathBuf, String> {
     home_dir_with(|k| std::env::var_os(k))
 }
@@ -338,7 +386,7 @@ fn production_spec() -> Result<AgentSpec, String> {
     ))
 }
 
-pub(super) use real::{disable, enable};
+pub(super) use real::{disable, enable, restart};
 
 #[cfg(test)]
 mod tests {
@@ -888,6 +936,128 @@ mod tests {
 
         let outcome = disable_with(&fs, &runner, &spec).await;
         assert_eq!(outcome, DisableOutcome::WasNotRegistered);
+    }
+
+    #[tokio::test]
+    async fn restart_returns_not_registered_when_no_agent_file() {
+        let fs = FakeFs::default();
+        let runner = FakeRunner::default();
+        let spec = macos_spec();
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert_eq!(outcome, RestartOutcome::NotRegistered);
+        assert!(
+            runner.calls().is_empty(),
+            "an unregistered agent must not touch launchctl"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_macos_boots_out_then_bootstraps_the_plist() {
+        let fs = FakeFs::default();
+        let spec = macos_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_ok(0, "");
+        runner.push_ok(0, "");
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert_eq!(outcome, RestartOutcome::Relaunched);
+        let calls = runner.calls();
+        assert_eq!(calls[0].1, vec!["bootout", "gui/501/run.lns.service"]);
+        assert_eq!(
+            calls[1].1,
+            vec![
+                "bootstrap",
+                "gui/501",
+                "/Users/alice/Library/LaunchAgents/run.lns.service.plist"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_macos_degrades_when_bootstrap_fails() {
+        let fs = FakeFs::default();
+        let spec = macos_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_ok(0, "");
+        runner.push_ok(125, "Bootstrap failed: 125: Could not find domain for");
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert!(
+            matches!(&outcome, RestartOutcome::Degraded(r) if r.contains("Bootstrap failed: 125")),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_macos_degrades_when_launchctl_missing() {
+        let fs = FakeFs::default();
+        let spec = macos_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_ok(0, "");
+        runner.push_err(io::Error::from(io::ErrorKind::NotFound));
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert!(
+            matches!(&outcome, RestartOutcome::Degraded(r) if r.contains("launchctl not found")),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_linux_restarts_the_user_unit() {
+        let fs = FakeFs::default();
+        let spec = linux_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_ok(0, "");
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert_eq!(outcome, RestartOutcome::Relaunched);
+        assert_eq!(
+            runner.calls()[0].1,
+            vec!["--user", "restart", "lns-service"]
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_linux_degrades_on_failure() {
+        let fs = FakeFs::default();
+        let spec = linux_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_ok(1, "Failed to connect to bus: No medium found");
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert!(
+            matches!(&outcome, RestartOutcome::Degraded(r) if r.contains("Failed to connect to bus")),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_linux_degrades_when_systemctl_missing() {
+        let fs = FakeFs::default();
+        let spec = linux_spec();
+        fs.put(&spec.agent_path);
+        let runner = FakeRunner::default();
+        runner.push_err(io::Error::from(io::ErrorKind::NotFound));
+
+        let outcome = restart_with(&fs, &runner, &spec).await;
+        assert!(
+            matches!(&outcome, RestartOutcome::Degraded(r) if r.contains("systemctl not found")),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn restart_production_entry_not_registered_when_home_unset() {
+        let _g = crate::test_env::EnvScope::unset("HOME");
+        assert_eq!(restart().await, RestartOutcome::NotRegistered);
     }
 
     #[test]

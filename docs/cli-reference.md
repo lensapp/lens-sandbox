@@ -231,14 +231,15 @@ untrustworthy. There is no separate verify step. See [Audit](audit.md).
 Manage the background service.
 
 ```bash
-lns service start | stop | status | enable | disable
+lns service start | stop | restart | status | enable | disable
 ```
 
 | Subcommand | Meaning                                                                 |
 | ---------- | ----------------------------------------------------------------------- |
 | `start`    | Start the background service and wait until it's ready.                 |
 | `stop`     | Stop the background service.                                            |
-| `status`   | Show whether it's running (PID, uptime, version).                       |
+| `restart`  | Stop it, then start the currently installed binary.                     |
+| `status`   | Show whether it's running (PID, uptime, version, build).                |
 | `enable`   | Register a per-user login agent and start the service now and on every login. |
 | `disable`  | Stop the service and unregister the per-user login agent.               |
 

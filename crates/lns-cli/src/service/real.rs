@@ -381,4 +381,28 @@ mod tests {
 
         assert!(!result);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_is_pong_only_and_survives_a_protocol_bump() {
+        let ready_pinger = FakePinger::scripted([true]);
+        assert!(
+            poll_until_ready_with(&ready_pinger, Duration::from_millis(100)).await,
+            "lns update pings a swapped service across a protocol bump; readiness must never gate on the handshake"
+        );
+
+        let start_pinger = FakePinger::scripted([true]);
+        let mut child = FakeChild::scripted([]);
+        let socket = PathBuf::from("/tmp/test.sock");
+        assert!(
+            wait_for_ready_with(
+                &start_pinger,
+                &mut child,
+                &socket,
+                Duration::from_millis(100)
+            )
+            .await
+            .unwrap(),
+            "a Pong-answering service is ready regardless of Status compatibility"
+        );
+    }
 }

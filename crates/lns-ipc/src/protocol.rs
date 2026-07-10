@@ -2,6 +2,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
+/// Wire-protocol version for the lns-cli ↔ lns-service IPC contract; bump only on wire-breaking changes.
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
@@ -405,6 +408,8 @@ pub struct StatusInfo {
     pub pid: u32,
     pub uptime_secs: u64,
     pub version: String,
+    pub protocol: u32,
+    pub build: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

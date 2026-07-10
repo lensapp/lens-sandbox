@@ -99,6 +99,8 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             pid: std::process::id(),
             uptime_secs: started_at.elapsed().as_secs(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol: lns_ipc::IPC_PROTOCOL_VERSION,
+            build: env!("LNS_BUILD_SHA").to_string(),
         }),
         Request::Shutdown => Response::ShuttingDown,
         Request::RunImage(_) => {
@@ -489,6 +491,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_sha_is_embedded() {
+        assert!(
+            !env!("LNS_BUILD_SHA").is_empty(),
+            "build.rs must stamp a non-empty LNS_BUILD_SHA"
+        );
+    }
+
+    #[test]
     fn peer_with_the_services_own_uid_is_authorized() {
         assert!(peer_is_authorized(1000, 1000));
     }
@@ -516,6 +526,8 @@ mod tests {
             Response::Status(info) => {
                 assert_eq!(info.pid, std::process::id());
                 assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+                assert_eq!(info.protocol, lns_ipc::IPC_PROTOCOL_VERSION);
+                assert!(!info.build.is_empty(), "build stamp must be populated");
             }
             _ => panic!("expected Status response"),
         }

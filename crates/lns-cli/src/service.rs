@@ -5,6 +5,7 @@ use anyhow::Result;
 use lns_ipc::{SignalKind, StatusInfo};
 
 pub mod client;
+mod handshake;
 mod login_agent;
 pub(crate) mod real;
 
@@ -37,6 +38,8 @@ pub enum ServiceCommand {
     Start,
     #[command(about = "Stop the Lens Sandbox background service.")]
     Stop,
+    #[command(about = "Restart the Lens Sandbox background service.")]
+    Restart,
     #[command(about = "Show status of the Lens Sandbox background service.")]
     Status,
     #[command(
@@ -71,7 +74,16 @@ fn require_running_check(alive: bool) -> Result<(), &'static str> {
 
 pub(super) async fn cmd_start(client: &impl ServiceClient) -> Result<()> {
     if client.ping().await {
-        println!("Lens Sandbox is already running.");
+        let status = client.status().await;
+        let compat = handshake::classify(
+            handshake::CLI_PROTOCOL,
+            handshake::CLI_BUILD,
+            status.as_ref(),
+        );
+        match handshake::already_running_warning(&compat) {
+            None => println!("Lens Sandbox is already running."),
+            Some(warning) => crate::log::warn!("{warning}"),
+        }
         return Ok(());
     }
 
@@ -103,11 +115,53 @@ pub(super) async fn cmd_stop(client: &impl ServiceClient) -> Result<()> {
     }
 }
 
+pub(super) async fn cmd_restart(client: &impl ServiceClient) -> Result<()> {
+    restart_with_outcome(client, login_agent::restart().await).await
+}
+
+async fn restart_with_outcome(
+    client: &impl ServiceClient,
+    outcome: login_agent::RestartOutcome,
+) -> Result<()> {
+    match outcome {
+        login_agent::RestartOutcome::Relaunched => {
+            if client.wait_for_ready(START_TIMEOUT).await {
+                println!("Lens Sandbox restarted.");
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "lns-service did not become ready within {}s after restart",
+                    START_TIMEOUT.as_secs()
+                );
+            }
+        }
+        login_agent::RestartOutcome::NotRegistered => restart_via_socket(client).await,
+        login_agent::RestartOutcome::Degraded(reason) => {
+            crate::log::warn!(
+                "could not restart via the login agent ({reason}); restarting the service directly"
+            );
+            restart_via_socket(client).await
+        }
+    }
+}
+
+async fn restart_via_socket(client: &impl ServiceClient) -> Result<()> {
+    if client.shutdown().await.is_some() && !client.wait_for_stopped(STOP_TIMEOUT).await {
+        anyhow::bail!(
+            "Lens Sandbox acknowledged shutdown but did not exit within {}s",
+            STOP_TIMEOUT.as_secs()
+        );
+    }
+    cmd_start(client).await
+}
+
 pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
     let Some(StatusInfo {
         pid,
         uptime_secs,
         version,
+        protocol,
+        build,
     }) = client.status().await
     else {
         println!("Lens Sandbox is not running.");
@@ -115,9 +169,11 @@ pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
     };
 
     println!("Lens Sandbox is running.");
-    println!("  PID:     {pid}");
-    println!("  Uptime:  {uptime_secs}s");
-    println!("  Version: {version}");
+    println!("  PID:      {pid}");
+    println!("  Uptime:   {uptime_secs}s");
+    println!("  Version:  {version}");
+    println!("  Build:    {build}");
+    println!("  Protocol: {protocol}");
     Ok(())
 }
 
@@ -235,6 +291,14 @@ mod tests {
     use client::BoxFuture;
 
     #[test]
+    fn build_sha_is_embedded() {
+        assert!(
+            !env!("LNS_BUILD_SHA").is_empty(),
+            "build.rs must stamp a non-empty LNS_BUILD_SHA"
+        );
+    }
+
+    #[test]
     fn require_running_check_ok_when_alive() {
         assert!(require_running_check(true).is_ok());
     }
@@ -346,14 +410,48 @@ mod tests {
         }
     }
 
+    fn matching_status() -> StatusInfo {
+        StatusInfo {
+            pid: 1,
+            uptime_secs: 1,
+            version: env!("CARGO_PKG_VERSION").into(),
+            protocol: lns_ipc::IPC_PROTOCOL_VERSION,
+            build: env!("LNS_BUILD_SHA").into(),
+        }
+    }
+
     #[tokio::test]
     async fn cmd_start_reports_already_running_when_ping_succeeds() {
         let client = FakeClient::default();
         client.ping_responses.lock().unwrap().push_back(true);
+        *client.status_response.lock().unwrap() = Some(Some(matching_status()));
 
         cmd_start(&client).await.expect("cmd_start should succeed");
 
-        assert_eq!(client.calls(), vec!["ping"]);
+        assert_eq!(client.calls(), vec!["ping", "status"]);
+    }
+
+    #[test]
+    fn cmd_start_warns_to_restart_when_the_running_build_differs() {
+        let client = FakeClient::default();
+        client.ping_responses.lock().unwrap().push_back(true);
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 1,
+            uptime_secs: 1,
+            version: "0.0.0".into(),
+            protocol: lns_ipc::IPC_PROTOCOL_VERSION,
+            build: "a-different-build".into(),
+        }));
+
+        let events = capture_warn(|| {
+            futures_block_on(cmd_start(&client)).expect("a build drift must not fail start");
+        });
+
+        assert_eq!(client.calls(), vec!["ping", "status"]);
+        assert!(
+            events.iter().any(|e| e.contains("lns service restart")),
+            "expected a restart hint: {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -452,6 +550,8 @@ mod tests {
             pid: 4242,
             uptime_secs: 17,
             version: "test-version".into(),
+            protocol: 1,
+            build: "abc123def456".into(),
         }));
 
         cmd_status(&client)
@@ -580,43 +680,7 @@ exit 0
     }
 
     fn capture_warn(emit: impl FnOnce()) -> Vec<String> {
-        use std::sync::{Arc, Mutex, Once};
-        use tracing::field::{Field, Visit};
-        use tracing::{Event, Subscriber};
-        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-
-        static OPEN_GATE: Once = Once::new();
-        OPEN_GATE.call_once(|| {
-            let gate = tracing_subscriber::fmt()
-                .with_writer(std::io::sink)
-                .with_max_level(tracing::Level::TRACE)
-                .finish();
-            tracing::subscriber::set_global_default(gate).ok();
-        });
-
-        type Sink = Arc<Mutex<Vec<String>>>;
-        struct CapturingLayer(Sink);
-        impl<S: Subscriber> Layer<S> for CapturingLayer {
-            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-                struct V<'a>(&'a mut String);
-                impl Visit for V<'_> {
-                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                        if field.name() == "message" {
-                            *self.0 = format!("{value:?}");
-                        }
-                    }
-                }
-                let mut message = String::new();
-                event.record(&mut V(&mut message));
-                self.0.lock().unwrap().push(message);
-            }
-        }
-
-        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
-        tracing::subscriber::with_default(subscriber, emit);
-        let captured = sink.lock().unwrap();
-        captured.clone()
+        crate::test_env::capture_events(emit)
     }
 
     #[test]
@@ -733,10 +797,113 @@ exit 0
         let _g = crate::test_env::EnvScope::unset("HOME");
         let client = FakeClient::default();
         client.ping_responses.lock().unwrap().push_back(true);
+        *client.status_response.lock().unwrap() = Some(Some(matching_status()));
 
         cmd_enable(&client).await.expect("enable must not fail");
 
-        assert_eq!(client.calls(), vec!["ping"]);
+        assert_eq!(client.calls(), vec!["ping", "status"]);
+    }
+
+    #[tokio::test]
+    async fn restart_with_outcome_relaunched_waits_for_ready() {
+        let client = FakeClient::default();
+        *client.wait_for_ready_response.lock().unwrap() = Some(true);
+
+        restart_with_outcome(&client, login_agent::RestartOutcome::Relaunched)
+            .await
+            .expect("a relaunched managed service that becomes ready succeeds");
+
+        assert_eq!(client.calls(), vec!["wait_for_ready"]);
+    }
+
+    #[tokio::test]
+    async fn restart_with_outcome_relaunched_bails_when_never_ready() {
+        let client = FakeClient::default();
+        *client.wait_for_ready_response.lock().unwrap() = Some(false);
+
+        let err = restart_with_outcome(&client, login_agent::RestartOutcome::Relaunched)
+            .await
+            .expect_err("a relaunch that never becomes ready must surface");
+        assert!(err.to_string().contains("did not become ready"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn restart_with_outcome_not_registered_stops_then_starts_over_the_socket() {
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(Some(()));
+        *client.wait_for_stopped_response.lock().unwrap() = Some(true);
+        client.ping_responses.lock().unwrap().push_back(false);
+        *client.start_response.lock().unwrap() = Some(Ok(true));
+
+        restart_with_outcome(&client, login_agent::RestartOutcome::NotRegistered)
+            .await
+            .expect("an unmanaged restart stops then starts");
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "shutdown",
+                "wait_for_stopped",
+                "ping",
+                "start_and_wait_for_ready"
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_with_outcome_degraded_warns_then_restarts_directly() {
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(false);
+        *client.start_response.lock().unwrap() = Some(Ok(true));
+
+        let events = capture_warn(|| {
+            futures_block_on(restart_with_outcome(
+                &client,
+                login_agent::RestartOutcome::Degraded("no gui session".into()),
+            ))
+            .expect("a degraded login-agent restart still restarts directly");
+        });
+
+        assert_eq!(
+            client.calls(),
+            vec!["shutdown", "ping", "start_and_wait_for_ready"]
+        );
+        assert!(
+            events.iter().any(|e| e.contains("no gui session")),
+            "expected the degraded reason in the warning: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_via_socket_bails_when_stop_times_out() {
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(Some(()));
+        *client.wait_for_stopped_response.lock().unwrap() = Some(false);
+
+        let err = restart_via_socket(&client)
+            .await
+            .expect_err("a stop that never completes must surface");
+        assert!(err.to_string().contains("did not exit within"), "{err}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn cmd_restart_falls_back_to_socket_when_home_unset() {
+        let _g = crate::test_env::EnvScope::unset("HOME");
+        let client = FakeClient::default();
+        *client.shutdown_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(false);
+        *client.start_response.lock().unwrap() = Some(Ok(true));
+
+        cmd_restart(&client)
+            .await
+            .expect("with no login agent, restart reconciles over the socket");
+
+        assert_eq!(
+            client.calls(),
+            vec!["shutdown", "ping", "start_and_wait_for_ready"]
+        );
     }
 
     #[tokio::test]
