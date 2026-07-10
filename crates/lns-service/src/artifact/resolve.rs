@@ -427,7 +427,8 @@ mod tests {
                 reference: "i".into(),
             },
         ];
-        let resolved = compose(&components, &cache).expect("a kind compose does not model is ignored, not fatal");
+        let resolved = compose(&components, &cache)
+            .expect("a kind compose does not model is ignored, not fatal");
         assert_eq!(resolved.base_image, base);
     }
 

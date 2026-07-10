@@ -19,6 +19,7 @@ use crate::world::BehaviourWorld;
 
 struct FakeSandboxService {
     response: Option<Response>,
+    stats_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -29,9 +30,15 @@ impl SandboxService for FakeSandboxService {
     type Stream = tokio::io::DuplexStream;
 
     fn one_shot(&self, request: Request) -> BoxFuture<'_, anyhow::Result<Response>> {
+        let response = match &request {
+            Request::RunStats { .. } => self
+                .stats_response
+                .clone()
+                .or_else(|| self.response.clone()),
+            _ => self.response.clone(),
+        };
         self.requests.lock().unwrap().push(request);
         let unreachable = self.unreachable;
-        let response = self.response.clone();
         Box::pin(async move {
             if unreachable {
                 anyhow::bail!("no response from lns-service (is it running?)");
@@ -371,6 +378,7 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
 
     let svc = FakeSandboxService {
         response: w.sandbox.response.clone(),
+        stats_response: w.sandbox.stats_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
@@ -391,6 +399,63 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
     .await;
 
     w.sandbox.workload_stdout = stdout;
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
+#[given(
+    regex = r"^the service reports one running sandbox using (\d+) permille cpu and (\d+) bytes$"
+)]
+fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: hexid(3),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }],
+    });
+    w.sandbox.stats_response = Some(Response::RunStats {
+        stats: RunStatsInfo {
+            cpu_permille: permille,
+            mem_used_bytes: used,
+            mem_total_bytes: 536_870_912,
+        },
+    });
+}
+
+#[when(regex = r#"^the user runs "lns ps"$"#)]
+async fn run_lns_ps(w: &mut BehaviourWorld) {
+    let svc = FakeSandboxService {
+        response: w.sandbox.response.clone(),
+        stats_response: w.sandbox.stats_response.clone(),
+        frames: Vec::new(),
+        unreachable: w.sandbox.unreachable,
+        policy: None,
+        requests: w.sandbox.requests.clone(),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let result = run_with_writers(
+        &SandboxCommand::Ps,
+        &svc,
+        TermInfo::default(),
+        &mut out,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
             exit_code,

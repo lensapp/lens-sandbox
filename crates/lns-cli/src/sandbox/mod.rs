@@ -37,6 +37,8 @@ pub enum SandboxCommand {
     Pull(SandboxPullArgs),
     #[command(about = "Re-reference a cached sandbox under a new tag (`docker tag`-style).")]
     Tag(SandboxTagArgs),
+    #[command(about = "List running sandboxes with their CPU and memory (`docker ps`-style).")]
+    Ps,
     #[command(
         visible_alias = "list",
         about = "List active runs (`docker ps`-style)."
@@ -216,6 +218,22 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
     owns_terminal: false,
 };
 
+pub fn augment_ps(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        clap::Command::new("ps").about(
+            "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
+        ),
+    )
+}
+
+pub const PS_SPEC: CommandSpec = CommandSpec {
+    name: "ps",
+    augment: augment_ps,
+    run: real::run_ps,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
 macro_rules! shortcut_spec {
     ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal) => {
         pub fn $augment(app: clap::Command) -> clap::Command {
@@ -333,6 +351,7 @@ where
         }
         SandboxCommand::Pull(args) => pull(svc, args, out).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
+        SandboxCommand::Ps => ps(svc, out).await,
         SandboxCommand::Ls => ls(svc, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
@@ -391,6 +410,70 @@ async fn tag<W: std::io::Write>(
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+    let running = match svc.one_shot(Request::ListRuns).await? {
+        Response::RunList { runs } => runs
+            .into_iter()
+            .filter(|r| matches!(r.status, lns_ipc::RunStatus::Running))
+            .collect::<Vec<_>>(),
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    };
+    let mut rows = Vec::with_capacity(running.len());
+    for run in &running {
+        let stats = match svc
+            .one_shot(Request::RunStats {
+                run: run.id.clone(),
+            })
+            .await?
+        {
+            Response::RunStats { stats } => stats,
+            Response::Error { message } => bail!("daemon error: {message}"),
+            other => bail!("unexpected response from daemon: {other:?}"),
+        };
+        rows.push((run, stats));
+    }
+    render_ps_table(&running, &rows, out)
+}
+
+fn render_ps_table<W: std::io::Write>(
+    running: &[lns_ipc::RunSummary],
+    rows: &[(&lns_ipc::RunSummary, RunStatsInfo)],
+    out: &mut W,
+) -> Result<i32> {
+    let id_w = "ID".len().max(
+        running
+            .iter()
+            .map(|r| lns_ipc::short_run_id(&r.id).len())
+            .max()
+            .unwrap_or(0),
+    );
+    let name_w = "NAME"
+        .len()
+        .max(running.iter().map(|r| r.name.len()).max().unwrap_or(0));
+    let image_w = "IMAGE"
+        .len()
+        .max(running.iter().map(|r| r.image.len()).max().unwrap_or(0));
+    writeln!(
+        out,
+        "{:<id_w$}  {:<name_w$}  {:<image_w$}  CPU %   MEM",
+        "ID", "NAME", "IMAGE",
+    )?;
+    for (run, stats) in rows {
+        writeln!(
+            out,
+            "{:<id_w$}  {:<name_w$}  {:<image_w$}  {:<6}  {} / {}",
+            lns_ipc::short_run_id(&run.id),
+            run.name,
+            run.image,
+            format_permille(stats.cpu_permille),
+            format_bytes(stats.mem_used_bytes),
+            format_bytes(stats.mem_total_bytes),
+        )?;
+    }
+    Ok(0)
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
@@ -750,6 +833,7 @@ mod tests {
 
     struct CannedService {
         response: Response,
+        stats_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -758,6 +842,16 @@ mod tests {
         fn new(response: Response) -> Self {
             Self {
                 response,
+                stats_response: None,
+                frames: Vec::new(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_stats(response: Response, stats_response: Response) -> Self {
+            Self {
+                response,
+                stats_response: Some(stats_response),
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -766,6 +860,7 @@ mod tests {
         fn with_frames(frames: Vec<Vec<u8>>) -> Self {
             Self {
                 response: Response::Pong,
+                stats_response: None,
                 frames,
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -775,8 +870,14 @@ mod tests {
     impl SandboxService for CannedService {
         type Stream = tokio::io::DuplexStream;
         fn one_shot(&self, request: Request) -> BoxFuture<'_, Result<Response>> {
+            let response = match &request {
+                Request::RunStats { .. } => self
+                    .stats_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                _ => self.response.clone(),
+            };
             self.requests.lock().unwrap().push(request);
-            let response = self.response.clone();
             Box::pin(async move { Ok(response) })
         }
         fn open_stream(&self, _request: Request) -> BoxFuture<'_, Result<Self::Stream>> {
@@ -999,6 +1100,108 @@ mod tests {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
         let err = ls(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    fn running_run() -> lns_ipc::RunSummary {
+        lns_ipc::RunSummary {
+            id: "1a2b3c4d0000000000000000000000aa".into(),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "cmd".into(),
+            status: lns_ipc::RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ps_renders_running_sandboxes_with_cpu_and_memory() {
+        let svc = CannedService::with_stats(
+            Response::RunList {
+                runs: vec![running_run()],
+            },
+            Response::RunStats {
+                stats: RunStatsInfo {
+                    cpu_permille: 125,
+                    mem_used_bytes: 92_274_688,
+                    mem_total_bytes: 536_870_912,
+                },
+            },
+        );
+        let mut out = Vec::new();
+        let code = ps(&svc, &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("CPU") && text.contains("MEM"), "got: {text}");
+        assert!(text.contains("12.5%"), "got: {text}");
+        assert!(text.contains("88.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn ps_renders_only_the_header_when_nothing_is_running() {
+        let svc = CannedService::new(Response::RunList {
+            runs: vec![lns_ipc::RunSummary {
+                status: lns_ipc::RunStatus::Exited { code: 0 },
+                ..running_run()
+            }],
+        });
+        let mut out = Vec::new();
+        let code = ps(&svc, &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("CPU"), "got: {text}");
+        assert!(
+            !text.contains("reviewer"),
+            "an exited run must not list: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ps_surfaces_a_listing_error_and_rejects_an_unrelated_variant() {
+        let err = ps(
+            &CannedService::new(Response::Error {
+                message: "registry poisoned".into(),
+            }),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+
+        let err = ps(&CannedService::new(Response::Pong), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn ps_surfaces_a_stats_error_and_rejects_an_unrelated_stats_variant() {
+        let err = ps(
+            &CannedService::with_stats(
+                Response::RunList {
+                    runs: vec![running_run()],
+                },
+                Response::Error {
+                    message: "stats probe failed".into(),
+                },
+            ),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("stats probe failed"));
+
+        let err = ps(
+            &CannedService::with_stats(
+                Response::RunList {
+                    runs: vec![running_run()],
+                },
+                Response::Pong,
+            ),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
