@@ -37,14 +37,12 @@ Feature: adjacent commands reshaped around the sandbox
     And the output warns that "run.env" is no longer supported
     And the output does not list "run.env" as an active default
 
-  @todo
   Scenario: volume rm refuses a volume a running sandbox holds
     Given the volume "claude-home" is held by a running sandbox
     When the user runs volume command "rm claude-home"
     Then the command fails with an exit code other than 0
     And the output contains "running"
 
-  @todo
   Scenario: volume prune removes only unreferenced volumes and confirms first
     Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
     And the volume "claude-home" is named by a cached sandbox
