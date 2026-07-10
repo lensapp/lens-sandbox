@@ -13,9 +13,7 @@ Feature: managing running sandboxes from the CLI
     And the output contains "logs"
     And the output contains "attach"
     And the output contains "inspect"
-    And the output contains "stats"
     And the output contains "rm"
-    And the output contains "rename"
     And the output contains "prune"
 
   Scenario: the flat ls, exec, and kill verbs stay usable but leave the front page
@@ -115,13 +113,6 @@ Feature: managing running sandboxes from the CLI
     When the user runs sandbox command "inspect 3"
     Then the exit code is 0
     And the output contains "policy file could not be read"
-
-  Scenario: stats renders the sampled cpu share and memory
-    Given the service reports run 3 using 125 permille cpu and 92274688 of 536870912 bytes
-    When the user runs sandbox command "stats 3"
-    Then the exit code is 0
-    And the output contains "12.5%"
-    And the output contains "88.0 MiB / 512.0 MiB"
 
   Scenario: logs dumps the captured output and stops at the end of the buffer
     Given the run 3 stream carries stdout "hello from the workload" then ends

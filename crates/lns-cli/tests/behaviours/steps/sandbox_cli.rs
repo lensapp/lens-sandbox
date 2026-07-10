@@ -235,19 +235,6 @@ fn canned_policy_doc(w: &mut BehaviourWorld, verdict: String) {
     }));
 }
 
-#[given(
-    regex = r"^the service reports run (\d+) using (\d+) permille cpu and (\d+) of (\d+) bytes$"
-)]
-fn canned_stats(w: &mut BehaviourWorld, _run_id: u32, permille: u32, used: u64, total: u64) {
-    w.sandbox.response = Some(Response::RunStats {
-        stats: RunStatsInfo {
-            cpu_permille: permille,
-            mem_used_bytes: used,
-            mem_total_bytes: total,
-        },
-    });
-}
-
 #[given(regex = r#"^the run (\d+) stream carries stdout "([^"]*)" then ends$"#)]
 fn stream_then_ends(w: &mut BehaviourWorld, run_id: u32, text: String) {
     w.sandbox.frames = vec![
@@ -548,21 +535,6 @@ fn then_stop_request_by_handle(
         run,
         timeout_secs: timeout,
     };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
-}
-
-#[then(regex = r#"^the service received a RenameRun request for run "([^"]+)" to "([^"]+)"$"#)]
-fn then_rename_request(
-    w: &mut BehaviourWorld,
-    run: String,
-    new_name: String,
-) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::RenameRun { run, new_name };
     if requests.contains(&expected) {
         Ok(())
     } else {

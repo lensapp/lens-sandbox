@@ -56,14 +56,10 @@ pub enum SandboxCommand {
     Attach(SandboxAttachArgs),
     #[command(about = "Print a run's state and launch configuration as JSON.")]
     Inspect(SandboxInspectArgs),
-    #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
-    Stats(SandboxStatsArgs),
     #[command(
         about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
     )]
     Rm(SandboxRmArgs),
-    #[command(about = "Rename a run (`docker rename`-style); the new name resolves immediately.")]
-    Rename(SandboxRenameArgs),
     #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
     Prune,
 }
@@ -159,33 +155,12 @@ pub struct SandboxInspectArgs {
 }
 
 #[derive(clap::Args)]
-pub struct SandboxStatsArgs {
-    #[arg(
-        value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
-    )]
-    pub run: String,
-}
-
-#[derive(clap::Args)]
 pub struct SandboxRmArgs {
     #[arg(
         value_name = "RUN",
         help = "Target finished run id or name surfaced by `lns sandbox ls`."
     )]
     pub run: String,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxRenameArgs {
-    #[arg(value_name = "RUN", help = "Run to rename, by current id or name.")]
-    pub run: String,
-
-    #[arg(
-        value_name = "NEW_NAME",
-        help = "New name; must not be all digits and must be unique among listed runs."
-    )]
-    pub new_name: String,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -357,11 +332,9 @@ where
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
         SandboxCommand::Inspect(args) => inspect(svc, args, out).await,
-        SandboxCommand::Stats(args) => stats(svc, args, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
-        SandboxCommand::Rename(args) => rename(svc, args, out).await,
         SandboxCommand::Prune => prune(svc, out).await,
     }
 }
@@ -561,32 +534,6 @@ async fn rm<W: std::io::Write>(
     }
 }
 
-async fn rename<W: std::io::Write>(
-    svc: &impl SandboxService,
-    args: &SandboxRenameArgs,
-    out: &mut W,
-) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RenameRun {
-            run: args.run.clone(),
-            new_name: args.new_name.clone(),
-        })
-        .await?;
-    match response {
-        Response::Acknowledged => {
-            writeln!(
-                out,
-                "renamed run {} to {}",
-                run_label(&args.run),
-                args.new_name
-            )?;
-            Ok(0)
-        }
-        Response::Error { message } => bail!("daemon error: {message}"),
-        other => bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
 async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
     let response = svc.one_shot(Request::PruneRuns).await?;
     match response {
@@ -679,38 +626,6 @@ fn render_inspect<W: std::io::Write>(
     doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
     let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(doc))?;
     writeln!(out, "{rendered}")?;
-    Ok(())
-}
-
-async fn stats<W: std::io::Write>(
-    svc: &impl SandboxService,
-    args: &SandboxStatsArgs,
-    out: &mut W,
-) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RunStats {
-            run: args.run.clone(),
-        })
-        .await?;
-    match response {
-        Response::RunStats { stats } => {
-            render_stats(&stats, out)?;
-            Ok(0)
-        }
-        Response::Error { message } => bail!("daemon error: {message}"),
-        other => bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
-fn render_stats<W: std::io::Write>(stats: &RunStatsInfo, out: &mut W) -> Result<()> {
-    writeln!(out, "CPU %   MEM USAGE / LIMIT")?;
-    writeln!(
-        out,
-        "{:<6}  {} / {}",
-        format_permille(stats.cpu_permille),
-        format_bytes(stats.mem_used_bytes),
-        format_bytes(stats.mem_total_bytes),
-    )?;
     Ok(())
 }
 
@@ -1272,28 +1187,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stats_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
-        let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn stats_surfaces_a_daemon_error() {
-        let svc = CannedService::new(Response::Error {
-            message: "macOS-only".into(),
-        });
-        let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("macOS-only"));
-    }
-
-    #[tokio::test]
     async fn rm_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
@@ -1301,44 +1194,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rename_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
-        let mut out = Vec::new();
-        let err = rename(
-            &svc,
-            &SandboxRenameArgs {
-                run: "reviewer".into(),
-                new_name: "auditor".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rename_confirms_with_the_handle_and_new_name() {
-        let svc = CannedService::new(Response::Acknowledged);
-        let mut out = Vec::new();
-        let code = rename(
-            &svc,
-            &SandboxRenameArgs {
-                run: "reviewer".into(),
-                new_name: "auditor".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, 0);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "renamed run reviewer to auditor\n"
-        );
     }
 
     #[tokio::test]
