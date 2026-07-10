@@ -352,14 +352,10 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
                 .expect("scenario must set a push outcome"),
         );
         let mut out: Vec<u8> = Vec::new();
-        let result = distribute::push(
-            &producer,
-            &fs,
-            Path::new("/work"),
-            &push_args.reference,
-            &mut out,
-        )
-        .await;
+        let result = match author::load_definition_json(&fs, Path::new("/work")) {
+            Ok(doc) => distribute::push(&producer, &doc, &push_args.reference, &mut out).await,
+            Err(e) => Err(e),
+        };
         w.result = Some(match result {
             Ok(exit_code) => CliRun {
                 exit_code,

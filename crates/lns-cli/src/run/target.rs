@@ -85,9 +85,7 @@ mod tests {
     impl FakeFs {
         fn with(path: &str, contents: &str) -> Self {
             let fs = Self::default();
-            fs.files
-                .borrow_mut()
-                .insert(PathBuf::from(path), contents.to_string());
+            fs.write(&PathBuf::from(path), contents).unwrap();
             fs
         }
     }

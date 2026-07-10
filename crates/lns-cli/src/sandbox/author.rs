@@ -52,7 +52,7 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
     Ok(0)
 }
 
-pub(crate) fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
+pub fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
     let path = yaml_path(cwd);
     let yaml = fs
         .read_to_string(&path)
@@ -115,6 +115,7 @@ mod tests {
     #[derive(Default)]
     struct FakeFs {
         files: RefCell<HashMap<PathBuf, String>>,
+        fail_write: bool,
     }
 
     impl FakeFs {
@@ -136,6 +137,9 @@ mod tests {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
         }
         fn write(&self, path: &Path, contents: &str) -> io::Result<()> {
+            if self.fail_write {
+                return Err(io::Error::other("disk full"));
+            }
             self.files
                 .borrow_mut()
                 .insert(path.to_path_buf(), contents.to_string());
@@ -186,20 +190,12 @@ mod tests {
 
     #[test]
     fn init_surfaces_a_write_failure() {
-        struct FailWrite;
-        impl Fs for FailWrite {
-            fn read_to_string(&self, _: &Path) -> io::Result<String> {
-                unreachable!()
-            }
-            fn write(&self, _: &Path, _: &str) -> io::Result<()> {
-                Err(io::Error::other("disk full"))
-            }
-            fn exists(&self, _: &Path) -> bool {
-                false
-            }
-        }
+        let fs = FakeFs {
+            fail_write: true,
+            ..Default::default()
+        };
         let mut out = Vec::new();
-        let err = init(&FailWrite, cwd(), &mut out).unwrap_err();
+        let err = init(&fs, cwd(), &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("writing"));
     }
 

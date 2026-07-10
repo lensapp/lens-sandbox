@@ -856,6 +856,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_with_writers_refuses_push_which_runs_locally() {
+        let svc = CannedService::new(Response::Pong);
+        let cmd = SandboxCommand::Push(SandboxPushArgs {
+            reference: "ghcr.io/team/hermes:1.4.0".into(),
+        });
+        let mut out = Vec::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("locally"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn pull_reports_the_pulled_reference_and_digest() {
+        let svc = CannedService::new(Response::ImagePulled {
+            image: lns_ipc::ImageInfo {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 1024,
+                layers: 1,
+                pulled: "2026-01-01T00:00:00Z".into(),
+                in_use_by: None,
+            },
+        });
+        let mut out = Vec::new();
+        let code = pull(
+            &svc,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("sha256:"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn pull_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = pull(
+            &CannedService::new(Response::Error {
+                message: "registry unreachable".into(),
+            }),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry unreachable"));
+
+        let err = pull(
+            &CannedService::new(Response::Pong),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn tag_confirms_the_new_reference() {
+        let svc = CannedService::new(Response::ImageTagged {
+            from: "hermes:1.4.0".into(),
+            to: "hermes:latest".into(),
+        });
+        let mut out = Vec::new();
+        let code = tag(
+            &svc,
+            &SandboxTagArgs {
+                from: "hermes:1.4.0".into(),
+                to: "hermes:latest".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "tagged hermes:1.4.0 as hermes:latest\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = tag(
+            &CannedService::new(Response::Error {
+                message: "no such cached sandbox".into(),
+            }),
+            &SandboxTagArgs {
+                from: "a:1".into(),
+                to: "a:2".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such cached sandbox"));
+
+        let err = tag(
+            &CannedService::new(Response::Pong),
+            &SandboxTagArgs {
+                from: "a:1".into(),
+                to: "a:2".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn ls_surfaces_a_daemon_error() {
         let svc = CannedService::new(Response::Error {
             message: "registry poisoned".into(),

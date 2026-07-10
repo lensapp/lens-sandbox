@@ -92,8 +92,9 @@ pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture
 }
 
 async fn push_local(reference: &str, cwd: PathBuf) -> Result<i32> {
+    let doc = super::author::load_definition_json(&RealFs, &cwd)?;
     let mut out = std::io::stdout();
-    super::distribute::push(&RealProducer, &RealFs, &cwd, reference, &mut out).await
+    super::distribute::push(&RealProducer, &doc, reference, &mut out).await
 }
 
 struct RealProducer;

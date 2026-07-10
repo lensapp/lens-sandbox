@@ -385,6 +385,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compose_defensively_ignores_a_component_kind_it_does_not_handle() {
+        let base = format!("reg/base@sha256:{}", "a".repeat(64));
+        let cache = HashMap::from([
+            (
+                "s".to_string(),
+                FetchedComponent {
+                    kind: "Sandbox".into(),
+                    base_image: Some(base.clone()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "a".to_string(),
+                FetchedComponent {
+                    kind: "Agent".into(),
+                    command: Some("run".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "i".to_string(),
+                FetchedComponent {
+                    kind: "Integration".into(),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let components = vec![
+            DeclaredComponent {
+                name: "s".into(),
+                reference: "s".into(),
+            },
+            DeclaredComponent {
+                name: "a".into(),
+                reference: "a".into(),
+            },
+            DeclaredComponent {
+                name: "i".into(),
+                reference: "i".into(),
+            },
+        ];
+        let resolved = compose(&components, &cache).expect("a kind compose does not model is ignored, not fatal");
+        assert_eq!(resolved.base_image, base);
+    }
+
     #[tokio::test]
     async fn an_unbounded_component_chain_is_refused_before_it_exhausts_the_stack() {
         let bundle = BundleSpec {
