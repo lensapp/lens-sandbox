@@ -435,7 +435,7 @@ pub fn validate_any(config_json: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn is_valid_name(name: &str) -> bool {
+pub(crate) fn is_valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
         return false;

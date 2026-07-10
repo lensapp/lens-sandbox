@@ -4,7 +4,12 @@ use serde_json::Value;
 /// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the secret guard. Returns every problem found, not just the first.
 pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
-    if let Err(e) = spec::validate_any(doc) {
+    let schema = if crate::sandbox::is_sandbox_definition(doc) {
+        crate::sandbox::validate(doc)
+    } else {
+        spec::validate_any(doc)
+    };
+    if let Err(e) = schema {
         problems.push(format!("schema: {e:#}"));
     }
     problems.extend(scan_secrets(doc));
@@ -192,5 +197,37 @@ mod tests {
         let problems = validate(b"not json at all").unwrap_err();
         assert_eq!(problems.len(), 1);
         assert!(problems[0].starts_with("schema:"));
+    }
+
+    #[test]
+    fn a_well_formed_flat_sandbox_definition_validates() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#;
+        validate(doc).expect("a lns.run/v1 sandbox routes to the flat validator");
+    }
+
+    #[test]
+    fn a_flat_sandbox_schema_violation_is_reported() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#;
+        let problems = validate(doc).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("must carry an image")),
+            "a flat sandbox missing its image must be reported: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_looking_token_in_a_flat_sandbox_env_is_flagged() {
+        let doc = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","env":{{"GH_TOKEN":"ghp_{}"}}}}}}"#,
+            "a".repeat(36)
+        )
+        .into_bytes();
+        let problems = validate(&doc).unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("GitHub token") && p.contains("spec.env.GH_TOKEN")),
+            "the secret guard must run on a flat sandbox too: {problems:?}"
+        );
     }
 }

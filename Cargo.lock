@@ -3211,6 +3211,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "lns-policy",
  "serde",
  "serde_json",
  "serde_yaml",

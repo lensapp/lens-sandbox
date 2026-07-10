@@ -1,5 +1,6 @@
 pub mod build;
 pub mod registry;
+pub mod sandbox;
 pub mod spec;
 pub mod validate;
 
