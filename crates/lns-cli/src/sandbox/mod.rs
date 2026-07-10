@@ -57,11 +57,11 @@ pub enum SandboxCommand {
     #[command(about = "Print a run's state and launch configuration as JSON.")]
     Inspect(SandboxInspectArgs),
     #[command(
-        about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
+        about = "Remove a cached sandbox and free its now-unreferenced layers; refuses a running one."
     )]
     Rm(SandboxRmArgs),
-    #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
-    Prune,
+    #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
+    Prune(SandboxPruneArgs),
 }
 
 #[derive(clap::Args)]
@@ -157,10 +157,21 @@ pub struct SandboxInspectArgs {
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
     #[arg(
-        value_name = "RUN",
-        help = "Target finished run id or name surfaced by `lns sandbox ls`."
+        value_name = "REF",
+        help = "Cached sandbox reference (or a running sandbox's id/name, which is refused)."
     )]
     pub run: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPruneArgs {
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Skip the confirmation and prune the cache now."
+    )]
+    pub force: bool,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -335,7 +346,7 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
-        SandboxCommand::Prune => prune(svc, out).await,
+        SandboxCommand::Prune(args) => prune(svc, args, out).await,
     }
 }
 
@@ -532,14 +543,50 @@ async fn rm<W: std::io::Write>(
     args: &SandboxRmArgs,
     out: &mut W,
 ) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RemoveRun {
+    // rm owns the cached cache; a running sandbox must be stopped first.
+    match svc
+        .one_shot(Request::InspectRun {
             run: args.run.clone(),
         })
-        .await?;
-    match response {
-        Response::Acknowledged => {
-            writeln!(out, "removed run {}", run_label(&args.run))?;
+        .await?
+    {
+        Response::RunInspect { details }
+            if matches!(details.summary.status, lns_ipc::RunStatus::Running) =>
+        {
+            bail!(
+                "{} is a running sandbox; stop it first with `lns stop {}`",
+                args.run,
+                args.run
+            )
+        }
+        Response::RunInspect { .. } | Response::Error { .. } => {
+            remove_cached(svc, &args.run, out).await
+        }
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn remove_cached<W: std::io::Write>(
+    svc: &impl SandboxService,
+    reference: &str,
+    out: &mut W,
+) -> Result<i32> {
+    match svc
+        .one_shot(Request::RemoveImage {
+            image: reference.to_string(),
+        })
+        .await?
+    {
+        Response::ImageRemoved {
+            reference,
+            reclaimed_bytes,
+        } => {
+            writeln!(out, "removed {reference}")?;
+            writeln!(
+                out,
+                "freed {} of base-image layers",
+                format_bytes(reclaimed_bytes)
+            )?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -547,18 +594,26 @@ async fn rm<W: std::io::Write>(
     }
 }
 
-async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::PruneRuns).await?;
-    match response {
-        Response::RunsPruned { mut removed } => {
-            if removed.is_empty() {
-                writeln!(out, "no finished runs to remove")?;
-            } else {
-                removed.sort_unstable();
-                for id in removed {
-                    writeln!(out, "removed run {}", lns_ipc::short_run_id(&id))?;
-                }
+async fn prune<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxPruneArgs,
+    out: &mut W,
+) -> Result<i32> {
+    if !args.force {
+        bail!(
+            "this removes every cached sandbox not held by a running one; pass --force to confirm"
+        );
+    }
+    match svc.one_shot(Request::PruneImages).await? {
+        Response::ImagesPruned {
+            mut removed,
+            reclaimed_bytes,
+        } => {
+            removed.sort_unstable();
+            for reference in &removed {
+                writeln!(out, "removed {reference}")?;
             }
+            writeln!(out, "reclaimed {}", format_bytes(reclaimed_bytes))?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -812,6 +867,7 @@ mod tests {
         response: Response,
         stats_response: Option<Response>,
         inspect_image_response: Option<Response>,
+        remove_image_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -822,6 +878,7 @@ mod tests {
                 response,
                 stats_response: None,
                 inspect_image_response: None,
+                remove_image_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -837,6 +894,13 @@ mod tests {
         fn with_inspect_image(run_response: Response, image_response: Response) -> Self {
             Self {
                 inspect_image_response: Some(image_response),
+                ..Self::new(run_response)
+            }
+        }
+
+        fn with_remove_image(run_response: Response, remove_response: Response) -> Self {
+            Self {
+                remove_image_response: Some(remove_response),
                 ..Self::new(run_response)
             }
         }
@@ -859,6 +923,10 @@ mod tests {
                     .unwrap_or_else(|| self.response.clone()),
                 Request::InspectImage { .. } => self
                     .inspect_image_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::RemoveImage { .. } => self
+                    .remove_image_response
                     .clone()
                     .unwrap_or_else(|| self.response.clone()),
                 _ => self.response.clone(),
@@ -1352,8 +1420,89 @@ mod tests {
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
+    fn running_inspect(status: lns_ipc::RunStatus) -> Response {
+        Response::RunInspect {
+            details: Box::new(RunDetails {
+                summary: lns_ipc::RunSummary {
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
+                    name: "reviewer".into(),
+                    image: "some-image".into(),
+                    command: String::new(),
+                    status,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: lns_ipc::RunConfig::default(),
+            }),
+        }
+    }
+
     #[tokio::test]
-    async fn rm_rejects_an_unrelated_response_variant() {
+    async fn rm_refuses_a_running_sandbox_naming_stop() {
+        let svc = CannedService::new(running_inspect(lns_ipc::RunStatus::Running));
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("running"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("lns stop"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn rm_removes_a_cached_sandbox_and_reports_freed_layers() {
+        let svc = CannedService::with_remove_image(
+            Response::Error {
+                message: "no active run with id hermes:1.4.0".into(),
+            },
+            Response::ImageRemoved {
+                reference: "hermes:1.4.0".into(),
+                reclaimed_bytes: 3 * 1024 * 1024,
+            },
+        );
+        let mut out = Vec::new();
+        let code = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "hermes:1.4.0".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("removed hermes:1.4.0"), "got: {text}");
+        assert!(text.contains("freed 3.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_falls_through_to_the_cache_and_surfaces_its_error() {
+        let svc = CannedService::with_remove_image(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Error {
+                message: "no such cached sandbox".into(),
+            },
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such cached sandbox"));
+    }
+
+    #[tokio::test]
+    async fn rm_rejects_an_unrelated_inspect_response() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
         let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
@@ -1363,20 +1512,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_surfaces_a_daemon_error() {
-        let svc = CannedService::new(Response::Error {
-            message: "registry poisoned".into(),
-        });
+    async fn prune_requires_force_before_touching_the_cache() {
+        let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = prune(&svc, &mut out).await.unwrap_err();
-        assert!(format!("{err:#}").contains("registry poisoned"));
+        let err = prune(&svc, &SandboxPruneArgs { force: false }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("--force"), "got: {err:#}");
     }
 
     #[tokio::test]
-    async fn prune_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
+    async fn prune_with_force_lists_removed_sandboxes_and_reclaimed_bytes() {
+        let svc = CannedService::new(Response::ImagesPruned {
+            removed: vec!["b:2".into(), "a:1".into()],
+            reclaimed_bytes: 64 * 1024 * 1024,
+        });
         let mut out = Vec::new();
-        let err = prune(&svc, &mut out).await.unwrap_err();
+        let code = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("removed a:1") && text.contains("removed b:2"),
+            "got: {text}"
+        );
+        assert!(text.contains("reclaimed 64.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn prune_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = prune(
+            &CannedService::new(Response::Error {
+                message: "registry poisoned".into(),
+            }),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+
+        let err = prune(
+            &CannedService::new(Response::Pong),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 

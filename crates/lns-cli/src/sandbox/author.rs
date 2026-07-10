@@ -163,7 +163,7 @@ mod tests {
         assert!(is_offline(&SandboxCommand::Init));
         assert!(is_offline(&SandboxCommand::Validate));
         assert!(is_offline(&SandboxCommand::Show));
-        assert!(!is_offline(&SandboxCommand::Prune));
+        assert!(!is_offline(&SandboxCommand::Ps));
         assert!(!is_offline(&SandboxCommand::Ls));
     }
 

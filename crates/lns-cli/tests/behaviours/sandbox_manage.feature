@@ -29,14 +29,12 @@ Feature: managing cached sandboxes
     And the output contains "kind: Sandbox"
     And the output contains "image"
 
-  @todo
   Scenario: rm refuses a running sandbox
     Given the reference "reviewer" resolves to a running sandbox
     When the user runs sandbox command "rm reviewer"
     Then the command fails with an exit code other than 0
     And the output contains "running"
 
-  @todo
   Scenario: rm removes a cached sandbox and frees its now-unreferenced layers
     Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers
     When the user runs sandbox command "rm hermes:1.4.0"
@@ -44,7 +42,6 @@ Feature: managing cached sandboxes
     And the output contains "removed"
     And the output reports reclaimed base-image layers
 
-  @todo
   Scenario: prune sweeps the reconstructible cache and reports reclaimed bytes
     Given two cached sandboxes and one running sandbox
     When the user runs sandbox command "prune --force"
@@ -52,7 +49,6 @@ Feature: managing cached sandboxes
     And the output reports reclaimed bytes
     And the running sandbox and its layers are kept
 
-  @todo
   Scenario: prune never removes a named volume
     Given a cached sandbox that names a volume "claude-home"
     When the user runs sandbox command "prune --force"

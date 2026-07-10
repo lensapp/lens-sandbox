@@ -105,6 +105,8 @@ pub struct SandboxCliRig {
     pub stats_response: Option<lns_ipc::Response>,
     /// Response the fake returns for an `InspectImage` request, so `inspect` can fall back from a running run to the cached artifact.
     pub inspect_image_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `RemoveImage` request, so `rm` can resolve running-vs-cached then remove.
+    pub remove_image_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,

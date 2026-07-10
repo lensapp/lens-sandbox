@@ -21,6 +21,7 @@ struct FakeSandboxService {
     response: Option<Response>,
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
+    remove_image_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -38,6 +39,10 @@ impl SandboxService for FakeSandboxService {
                 .or_else(|| self.response.clone()),
             Request::InspectImage { .. } => self
                 .inspect_image_response
+                .clone()
+                .or_else(|| self.response.clone()),
+            Request::RemoveImage { .. } => self
+                .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
             _ => self.response.clone(),
@@ -121,41 +126,6 @@ fn service_unreachable(w: &mut BehaviourWorld) {
 #[given(regex = r"^the service will answer Acknowledged$")]
 fn canned_acknowledged(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::Acknowledged);
-}
-
-#[given(regex = r"^the service will answer RunsPruned for runs (\d+) and (\d+)$")]
-fn canned_pruned(w: &mut BehaviourWorld, first: u32, second: u32) {
-    w.sandbox.response = Some(Response::RunsPruned {
-        removed: vec![hexid(first), hexid(second)],
-    });
-}
-
-#[given(regex = r"^the service will answer RunsPruned for no runs$")]
-fn canned_pruned_empty(w: &mut BehaviourWorld) {
-    w.sandbox.response = Some(Response::RunsPruned { removed: vec![] });
-}
-
-#[then(regex = r"^the service received a RemoveRun request for run (\d+)$")]
-fn then_remove_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::RemoveRun {
-        run: run_id.to_string(),
-    };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
-}
-
-#[then("the service received a PruneRuns request")]
-fn then_prune_request(w: &mut BehaviourWorld) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    if requests.contains(&Request::PruneRuns) {
-        Ok(())
-    } else {
-        Err(format!("expected PruneRuns among {requests:?}"))
-    }
 }
 
 #[then(regex = r"^the service received a Kill request for run (\d+) with signal KILL$")]
@@ -400,6 +370,7 @@ fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         response: w.sandbox.response.clone(),
         stats_response: w.sandbox.stats_response.clone(),
         inspect_image_response: w.sandbox.inspect_image_response.clone(),
+        remove_image_response: w.sandbox.remove_image_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
