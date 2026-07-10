@@ -1,10 +1,21 @@
 use crate::world::BehaviourWorld;
 use cucumber::gherkin::Step;
 use cucumber::given;
-use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, SignatureView};
+use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, Response, SignatureView};
 
 fn full_digest() -> String {
     format!("sha256:{}", "a".repeat(64))
+}
+
+fn not_running(reference: &str) -> Response {
+    Response::Error {
+        message: format!("no active run with id {reference}"),
+    }
+}
+
+fn cached_artifact(world: &mut BehaviourWorld, reference: &str, inspection: ArtifactInspection) {
+    world.sandbox.response = Some(not_running(reference));
+    world.sandbox.inspect_image_response = Some(Response::ImageInspected { inspection });
 }
 
 fn empty_bundle(reference: &str) -> BundleView {
@@ -20,10 +31,11 @@ fn empty_bundle(reference: &str) -> BundleView {
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a plain image$"#)]
 fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
-    world.image.inspect_result = Some(ArtifactInspection::Image(ImageView {
-        reference,
+    let inspection = ArtifactInspection::Image(ImageView {
+        reference: reference.clone(),
         digest: full_digest(),
-    }));
+    });
+    cached_artifact(world, &reference, inspection);
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a bundle composing:$"#)]
@@ -48,14 +60,14 @@ fn inspects_bundle_composing(world: &mut BehaviourWorld, step: &Step, reference:
             other => panic!("unknown composing row kind {other:?}"),
         }
     }
-    world.image.inspect_result = Some(ArtifactInspection::Bundle(bundle));
+    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a bundle signed by a trusted key$"#)]
 fn inspects_signed_bundle(world: &mut BehaviourWorld, reference: String) {
     let mut bundle = empty_bundle(&reference);
     bundle.signature = SignatureView::SignedTrusted;
-    world.image.inspect_result = Some(ArtifactInspection::Bundle(bundle));
+    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a bundle whose policy defaults to allow$"#)]
@@ -64,12 +76,13 @@ fn inspects_permissive_bundle(world: &mut BehaviourWorld, reference: String) {
     bundle
         .policy_flags
         .push("permissive defaultVerdict: allow — the sandbox is open by default".to_string());
-    world.image.inspect_result = Some(ArtifactInspection::Bundle(bundle));
+    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
 }
 
 #[given(regex = r#"^the service reports "inspect" needs a login for host "([^"]+)"$"#)]
 fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
-    world.image.refuse_message = Some(format!(
-        "inspecting the bundle needs a login for {host}: run `lns login {host}`"
-    ));
+    world.sandbox.response = Some(not_running("some-registry.example/some-agent:research"));
+    world.sandbox.inspect_image_response = Some(Response::Error {
+        message: format!("inspecting the bundle needs a login for {host}: run `lns login {host}`"),
+    });
 }
