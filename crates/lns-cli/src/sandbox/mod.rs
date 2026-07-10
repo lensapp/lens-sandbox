@@ -553,7 +553,6 @@ async fn rm<W: std::io::Write>(
     args: &SandboxRmArgs,
     out: &mut W,
 ) -> Result<i32> {
-    // rm owns the cached cache; a running sandbox must be stopped first.
     match svc
         .one_shot(Request::InspectRun {
             run: args.run.clone(),
@@ -569,9 +568,29 @@ async fn rm<W: std::io::Write>(
                 args.run
             )
         }
-        Response::RunInspect { .. } | Response::Error { .. } => {
-            remove_cached(svc, &args.run, out).await
+        // An exited run is a spent record; a reference the service knows no run for is a cached sandbox.
+        Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
+        Response::Error { .. } => remove_cached(svc, &args.run, out).await,
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn remove_run<W: std::io::Write>(
+    svc: &impl SandboxService,
+    run: &str,
+    out: &mut W,
+) -> Result<i32> {
+    match svc
+        .one_shot(Request::RemoveRun {
+            run: run.to_string(),
+        })
+        .await?
+    {
+        Response::Acknowledged => {
+            writeln!(out, "removed run {run}")?;
+            Ok(0)
         }
+        Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -916,6 +935,7 @@ mod tests {
         stats_response: Option<Response>,
         inspect_image_response: Option<Response>,
         remove_image_response: Option<Response>,
+        remove_run_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -927,6 +947,7 @@ mod tests {
                 stats_response: None,
                 inspect_image_response: None,
                 remove_image_response: None,
+                remove_run_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -953,6 +974,13 @@ mod tests {
             }
         }
 
+        fn with_remove_run(run_response: Response, remove_response: Response) -> Self {
+            Self {
+                remove_run_response: Some(remove_response),
+                ..Self::new(run_response)
+            }
+        }
+
         fn with_frames(frames: Vec<Vec<u8>>) -> Self {
             Self {
                 frames,
@@ -975,6 +1003,10 @@ mod tests {
                     .unwrap_or_else(|| self.response.clone()),
                 Request::RemoveImage { .. } => self
                     .remove_image_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::RemoveRun { .. } => self
+                    .remove_run_response
                     .clone()
                     .unwrap_or_else(|| self.response.clone()),
                 _ => self.response.clone(),
@@ -1545,11 +1577,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rm_of_an_exited_run_falls_through_to_the_cache_and_surfaces_its_error() {
-        let svc = CannedService::with_remove_image(
+    async fn rm_of_an_exited_run_removes_the_spent_run_record() {
+        let svc = CannedService::with_remove_run(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Acknowledged,
+        );
+        let mut out = Vec::new();
+        let code = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("removed run reviewer"),
+            "an exited run must be dropped via RemoveRun"
+        );
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, Request::RemoveRun { .. })),
+            "rm of an exited run must issue RemoveRun, not RemoveImage: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_surfaces_the_daemon_error() {
+        let svc = CannedService::with_remove_run(
             running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
             Response::Error {
-                message: "no such cached sandbox".into(),
+                message: "run vanished mid-remove".into(),
             },
         );
         let mut out = Vec::new();
@@ -1562,7 +1626,26 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("no such cached sandbox"));
+        assert!(format!("{err:#}").contains("run vanished mid-remove"));
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_rejects_an_unrelated_remove_response() {
+        let svc = CannedService::with_remove_run(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Pong,
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]
@@ -1576,9 +1659,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_of_a_cached_sandbox_surfaces_the_daemon_error() {
+        let svc = CannedService::with_remove_image(
+            Response::Error {
+                message: "no active run with id ghcr.io/team/x:1".into(),
+            },
+            Response::Error {
+                message: "no such image: ghcr.io/team/x:1".into(),
+            },
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "ghcr.io/team/x:1".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such image"));
+    }
+
+    #[tokio::test]
     async fn rm_rejects_an_unrelated_remove_response() {
         let svc = CannedService::with_remove_image(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Error {
+                message: "no active run with id reviewer".into(),
+            },
             Response::Pong,
         );
         let mut out = Vec::new();
