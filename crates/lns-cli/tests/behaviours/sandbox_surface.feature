@@ -1,9 +1,8 @@
-@todo
 Feature: the sandbox is the one noun, on a two-tier surface
   `lns` exposes a single user-facing noun — the sandbox. The top level
   carries only docker-familiar verbs, each an exact shortcut into the
   complete `lns sandbox` namespace; lns-native verbs with no docker
-  analog (validate, show, ls, prune, diff) live only under `lns sandbox`.
+  analog (validate, show, ls, prune) live only under `lns sandbox`.
 
   Scenario: the front page lists only the docker verbs and the own groups
     When I run "lns --help"
@@ -23,10 +22,9 @@ Feature: the sandbox is the one noun, on a two-tier surface
     When I run "lns --help"
     Then the exit code is 0
     And the output does not contain "validate"
-    And the output does not contain "show"
     And the output does not contain "diff"
 
-  Scenario: the sandbox namespace lists the full grouped surface
+  Scenario: the sandbox namespace lists the shipped grouped surface
     When I run "lns sandbox --help"
     Then the exit code is 0
     And the output contains "init"
@@ -35,7 +33,6 @@ Feature: the sandbox is the one noun, on a two-tier surface
     And the output contains "pull"
     And the output contains "push"
     And the output contains "tag"
-    And the output contains "run"
     And the output contains "ps"
     And the output contains "exec"
     And the output contains "logs"
@@ -46,8 +43,23 @@ Feature: the sandbox is the one noun, on a two-tier surface
     And the output contains "inspect"
     And the output contains "rm"
     And the output contains "prune"
-    And the output contains "diff"
 
+  Scenario: there is no lns image command
+    When I run "lns image ls"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
+
+  Scenario: the pre-namespace lns ls alias is gone
+    When I run "lns ls"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
+
+  Scenario: sandbox rename is gone
+    When I run "lns sandbox rename 3 newname"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
+
+  @todo
   Scenario Outline: a top-level verb is an exact shortcut into its sandbox form
     Given the service is ready to record the request
     When the user runs "lns <verb> <args>"
@@ -63,22 +75,15 @@ Feature: the sandbox is the one noun, on a two-tier surface
       | rm      | some-ref    |
       | inspect | some-ref    |
 
-  Scenario: there is no lns image command
-    When I run "lns image ls"
-    Then the exit code is 2
-    And the output contains "unrecognized subcommand"
+  @todo
+  Scenario: run and diff join the sandbox namespace
+    When I run "lns sandbox --help"
+    Then the exit code is 0
+    And the output contains "run"
+    And the output contains "diff"
 
-  Scenario: the pre-namespace lns ls alias is gone
-    When I run "lns ls"
-    Then the exit code is 2
-    And the output contains "unrecognized subcommand"
-
+  @todo
   Scenario: sandbox stats is gone and points at ps
     When I run "lns sandbox stats 3"
     Then the exit code is 2
     And the output contains "lns ps"
-
-  Scenario: sandbox rename is gone
-    When I run "lns sandbox rename 3 newname"
-    Then the exit code is 2
-    And the output contains "unrecognized subcommand"
