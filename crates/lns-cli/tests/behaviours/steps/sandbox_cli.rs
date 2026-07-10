@@ -1,9 +1,11 @@
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::sandbox::SandboxArgs;
+use lns_cli::sandbox::{SandboxArgs, SandboxCommand, author};
 use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{
@@ -267,11 +269,64 @@ fn stream_opens_with_error(w: &mut BehaviourWorld, _run_id: u32, message: String
     w.sandbox.frames = vec![encode_frame(&Response::Error { message }).unwrap()];
 }
 
+struct StepFs {
+    files: RefCell<HashMap<PathBuf, String>>,
+}
+
+impl author::Fs for StepFs {
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        self.files
+            .borrow()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
+    }
+    fn write(&self, path: &Path, contents: &str) -> std::io::Result<()> {
+        self.files
+            .borrow_mut()
+            .insert(path.to_path_buf(), contents.to_string());
+        Ok(())
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.files.borrow().contains_key(path)
+    }
+}
+
+fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
+    let cwd = Path::new("/work");
+    let fs = StepFs {
+        files: RefCell::new(w.author_files.clone()),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let result = match cmd {
+        SandboxCommand::Init => author::init(&fs, cwd, &mut out),
+        SandboxCommand::Validate => author::validate(&fs, cwd, &mut out),
+        SandboxCommand::Show => author::show(&fs, cwd, &mut out),
+        _ => unreachable!("run_author_verb is only called for the offline author verbs"),
+    };
+    w.author_files = fs.files.into_inner();
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
 #[when(regex = r#"^the user runs sandbox command "([^"]+)"$"#)]
 async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
     let args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
+
+    if author::is_offline(&args.command) {
+        run_author_verb(w, &args.command);
+        return;
+    }
 
     let svc = FakeSandboxService {
         response: w.sandbox.response.clone(),

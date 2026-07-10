@@ -30,6 +30,8 @@ pub struct BehaviourWorld {
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
     pub host_bind: HostBindRig,
+    /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
+    pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
 }
 
 use lns_policy::host_bind_decisions::SecretDisposition;

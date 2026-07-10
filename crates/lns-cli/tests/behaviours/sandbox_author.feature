@@ -1,4 +1,3 @@
-@todo
 Feature: authoring a sandbox
   A sandbox is authored on disk as `./lns.yaml` (kind: Sandbox). The author
   verbs scaffold it, validate it offline, and render its effective definition.
