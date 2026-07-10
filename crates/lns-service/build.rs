@@ -159,7 +159,13 @@ fn git_path(name: &str) -> Option<String> {
         return None;
     }
     let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!path.is_empty()).then_some(path)
+    if path.is_empty() {
+        return None;
+    }
+    // Absolute so Cargo watches the real file regardless of how it resolves rerun-if-changed.
+    std::fs::canonicalize(&path)
+        .ok()
+        .map(|p| p.display().to_string())
 }
 
 fn stage_static_nft(workspace: &Path, out_dir: &Path) {
