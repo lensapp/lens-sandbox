@@ -55,6 +55,7 @@ pub fn registry() -> Vec<CommandSpec> {
         crate::volume::SPEC,
         crate::image::SPEC,
         crate::sandbox::SPEC,
+        crate::sandbox::INIT_SPEC,
         crate::audit::SPEC,
         crate::service::SPEC,
         crate::update::SPEC,

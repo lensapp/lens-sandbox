@@ -11,12 +11,44 @@ use super::{SandboxService, TermInfo, run_with_writers};
 use crate::command::{RunCtx, RunFuture};
 use crate::service::client::BoxFuture;
 
-pub fn run<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxArgs::from_arg_matches(matches)?;
+        if super::author::is_offline(&args.command) {
+            return run_author(&args.command, ctx);
+        }
         crate::service::require_running().await;
         dispatch(args).await
     })
+}
+
+pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move { run_author(&super::SandboxCommand::Init, ctx) })
+}
+
+fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
+    let cwd = ctx.cwd()?;
+    let mut out = std::io::stdout();
+    match command {
+        super::SandboxCommand::Init => super::author::init(&RealFs, &cwd, &mut out),
+        super::SandboxCommand::Validate => super::author::validate(&RealFs, &cwd, &mut out),
+        super::SandboxCommand::Show => super::author::show(&RealFs, &cwd, &mut out),
+        _ => unreachable!("run_author is only called for offline author verbs"),
+    }
+}
+
+struct RealFs;
+
+impl super::author::Fs for RealFs {
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+    fn write(&self, path: &Path, contents: &str) -> std::io::Result<()> {
+        std::fs::write(path, contents)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
 }
 
 pub struct RealSandboxService {

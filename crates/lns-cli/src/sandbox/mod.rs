@@ -11,6 +11,7 @@ use crate::cli::{DetachChord, ExecArgs, KillArgs, parse_detach_keys_arg};
 use crate::command::{CommandSpec, subcommand};
 use crate::service::client::BoxFuture;
 
+pub mod author;
 pub mod real;
 
 #[derive(clap::Args)]
@@ -21,6 +22,12 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
+    #[command(about = "Scaffold a default ./lns.yaml (kind: Sandbox) in this directory.")]
+    Init,
+    #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
+    Validate,
+    #[command(about = "Render ./lns.yaml's effective definition (merged config, resolved values).")]
+    Show,
     #[command(
         visible_alias = "list",
         about = "List active runs (`docker ps`-style)."
@@ -141,15 +148,31 @@ pub struct SandboxRenameArgs {
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<SandboxArgs>("sandbox").about(
-        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.",
-    ))
+    app.subcommand(
+        subcommand::<SandboxArgs>("sandbox")
+            .about("The sandbox — author, distribute, run, and manage it (the complete surface)."),
+    )
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
     name: "sandbox",
     augment,
     run: real::run,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+pub fn augment_init(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        clap::Command::new("init")
+            .about("Scaffold a default ./lns.yaml (shortcut for `lns sandbox init`)."),
+    )
+}
+
+pub const INIT_SPEC: CommandSpec = CommandSpec {
+    name: "init",
+    augment: augment_init,
+    run: real::run_init,
     announces_update_check: true,
     owns_terminal: false,
 };
@@ -183,6 +206,9 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
+        SandboxCommand::Init | SandboxCommand::Validate | SandboxCommand::Show => {
+            bail!("author commands run offline, not through the service dispatch")
+        }
         SandboxCommand::Ls => ls(svc, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
@@ -636,6 +662,31 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("interactive"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn run_with_writers_refuses_the_offline_author_verbs() {
+        let svc = CannedService::new(Response::Pong);
+        for cmd in [
+            SandboxCommand::Init,
+            SandboxCommand::Validate,
+            SandboxCommand::Show,
+        ] {
+            let mut out = Vec::new();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let err = run_with_writers(
+                &cmd,
+                &svc,
+                TermInfo::default(),
+                &mut out,
+                &mut stdout,
+                &mut stderr,
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("offline"), "got: {err:#}");
+        }
     }
 
     #[tokio::test]
