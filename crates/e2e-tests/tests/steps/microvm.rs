@@ -1,9 +1,81 @@
 use crate::E2eWorld;
-use crate::specutil::{arg_parser::split_args, run_cli_with_timeout};
+use crate::specutil::{arg_parser::split_args, run_cli_with_timeout_in_dir};
 use cucumber::{given, then, when};
 use std::time::{Duration, Instant};
 
 const MICROVM_RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+// `lns run` takes a published sandbox or ./lns.yaml (imageless mode and plain-image REFs are retired), so every microVM scenario boots a sandbox over this base.
+// The ECR mirror of Docker Hub: anonymous pulls there hit hard rate limits when the suite boots ~45 guests.
+const MICROVM_IMAGE: &str = "public.ecr.aws/docker/library/alpine:3.20";
+
+static PINNED_MICROVM_IMAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn linux_host_arch_resolver(entries: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    entries
+        .iter()
+        .find(|e| {
+            !e.media_type.contains("attestation")
+                && e.platform.as_ref().is_some_and(|p| {
+                    p.os.to_string() == "linux" && p.architecture.to_string() == arch
+                })
+        })
+        .map(|e| e.digest.clone())
+}
+
+// Resolve the base tag to a digest-pinned reference once per process: pinned refs hit the daemon's manifest cache, so ~45 booted guests cost one registry round-trip instead of a rate-limited flood.
+fn pinned_microvm_image() -> String {
+    PINNED_MICROVM_IMAGE
+        .get_or_init(|| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let reference: oci_client::Reference =
+                        MICROVM_IMAGE.parse().expect("base ref parses");
+                    // Mirror the daemon's linux/host-arch index resolution so the pin lands on the platform manifest digest the daemon verifies against.
+                    let client = oci_client::Client::new(oci_client::client::ClientConfig {
+                        platform_resolver: Some(Box::new(linux_host_arch_resolver)),
+                        ..Default::default()
+                    });
+                    let (_, digest) = client
+                        .pull_image_manifest(
+                            &reference,
+                            &oci_client::secrets::RegistryAuth::Anonymous,
+                        )
+                        .await
+                        .expect("resolve the base image digest");
+                    format!(
+                        "{}/{}@{digest}",
+                        reference.registry(),
+                        reference.repository()
+                    )
+                })
+            })
+        })
+        .clone()
+}
+
+fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
+    let dir = world
+        .project
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("project tempdir"));
+    let root = dir.path().to_path_buf();
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}\n",
+        pinned_microvm_image()
+    );
+    std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/lns-policy.yaml"),
+        root.join("lns-policy.yaml"),
+    )
+    .expect("copy the e2e policy into the project");
+    root
+}
 
 fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
     world
@@ -22,20 +94,26 @@ fn parse_run_id(text: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
-fn run_microvm(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
+fn run_microvm(world: &mut E2eWorld, run_args: Vec<String>, cmd_line: &str) {
+    run_microvm_of(world, run_args, cmd_line);
+}
+
+fn run_microvm_of(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
     run_args.push("--".to_string());
     run_args.extend(split_args(cmd_line));
     run_lns_microvm(world, run_args);
 }
 
 fn run_lns_microvm(world: &mut E2eWorld, tail: Vec<String>) {
+    let project = microvm_project(world);
     let mut args = vec!["run".to_string()];
     if let Some(policy) = &world.policy_path {
         args.push("--policy".to_string());
         args.push(policy.to_string_lossy().into_owned());
     }
     args.extend(tail);
-    let result = run_cli_with_timeout(args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    let result =
+        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
 }
@@ -358,14 +436,58 @@ fn run_command_with_env(world: &mut E2eWorld, cmd_line: String, env: String) {
     run_microvm(world, vec!["-e".into(), env], &cmd_line);
 }
 
+static RUN_SANDBOX_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// `lns run` refuses a plain OCI image, so image-driven scenarios publish a minimal sandbox over it to the in-process registry and run that reference.
+async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String {
+    let image = if image == MICROVM_IMAGE {
+        pinned_microvm_image()
+    } else {
+        image.to_string()
+    };
+    let host = world
+        .registry
+        .get_or_insert_with(crate::registry::LocalRegistry::start)
+        .host();
+    let seq = RUN_SANDBOX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let reference: oci_client::Reference = format!("{host}/e2e-run-sandbox:{seq}")
+        .parse()
+        .expect("run-sandbox ref parses");
+    let doc = format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"e2e-run-sandbox"}},"spec":{{"image":"{image}"}}}}"#
+    );
+    let built = lns_artifact::build::build_artifact(doc.as_bytes()).expect("build run sandbox");
+    let client = oci_client::Client::new(oci_client::client::ClientConfig {
+        protocol: oci_client::client::ClientProtocol::Http,
+        ..Default::default()
+    });
+    for blob in &built.blobs {
+        client
+            .push_blob(&reference, blob.data.clone(), &blob.digest)
+            .await
+            .expect("push run-sandbox blob");
+    }
+    client
+        .push_manifest_raw(
+            &reference,
+            built.manifest.clone(),
+            http::HeaderValue::from_str(&built.manifest_media_type).expect("media type header"),
+        )
+        .await
+        .expect("push run-sandbox manifest");
+    reference.whole()
+}
+
 #[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)"$"#)]
-fn run_image_command(world: &mut E2eWorld, image: String, cmd_line: String) {
-    run_microvm(world, vec![image], &cmd_line);
+async fn run_image_command(world: &mut E2eWorld, image: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(world, vec![reference], &cmd_line);
 }
 
 #[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)" and no separator$"#)]
-fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line: String) {
-    let mut tail = vec![image];
+async fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    let mut tail = vec![reference];
     tail.extend(split_args(&cmd_line));
     run_lns_microvm(world, tail);
 }
@@ -373,22 +495,24 @@ fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line:
 #[when(
     regex = r#"^the user runs image "([^"]+)" with entrypoint "([^"]+)" and command "([^"]*)"$"#
 )]
-fn run_image_with_entrypoint(
+async fn run_image_with_entrypoint(
     world: &mut E2eWorld,
     image: String,
     entrypoint: String,
     cmd_line: String,
 ) {
-    run_microvm(
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(
         world,
-        vec!["--entrypoint".into(), entrypoint, image],
+        vec!["--entrypoint".into(), entrypoint, reference],
         &cmd_line,
     );
 }
 
 #[when(regex = r#"^the user runs image "([^"]+)" as user "([^"]+)" with command "([^"]*)"$"#)]
-fn run_image_as_user(world: &mut E2eWorld, image: String, user: String, cmd_line: String) {
-    run_microvm(world, vec!["-u".into(), user, image], &cmd_line);
+async fn run_image_as_user(world: &mut E2eWorld, image: String, user: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(world, vec!["-u".into(), user, reference], &cmd_line);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with (\d+) vCPUs$"#)]

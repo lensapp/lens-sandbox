@@ -157,6 +157,28 @@ where
     capture_with_timeout(cmd, timeout)
 }
 
+pub fn run_cli_with_timeout_in_dir<I, S, E, K, V>(
+    dir: &Path,
+    args: I,
+    envs: E,
+    timeout: Duration,
+) -> CliResult
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut cmd = Command::new(lns_binary());
+    cmd.current_dir(dir).args(&args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    capture_with_timeout(cmd, timeout)
+}
+
 pub fn capture_with_timeout(mut cmd: Command, timeout: Duration) -> CliResult {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

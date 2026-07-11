@@ -5,8 +5,8 @@ Feature: host bind mounts expose live host files inside the guest
   host files are visible in the guest, writes to a writable bind land back on
   the host, and a read-only bind rejects writes. These outcomes are guest-
   observable and need a booted microVM, so they are @microvm and run only via
-  `make e2e-microvm`. They are imageless: the commands use /bin/sh builtins, so
-  no registry pull is needed.
+  `make e2e-microvm`. The commands use /bin/sh builtins atop the standard
+  alpine base.
 
   Scenario: a writable host bind exposes host files and writes land back on the host
     Given the Lens Sandbox service is running

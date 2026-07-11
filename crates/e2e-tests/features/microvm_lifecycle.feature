@@ -3,8 +3,8 @@ Feature: a detached run's lifecycle is driven against a real guest
   A detached run keeps a real microVM alive until it is stopped or killed.
   These scenarios prove the lifecycle verbs reach a booted guest: inspect
   reports the live state, and stop/kill actually tear the VM down and free
-  the resources it held. They are imageless — the workload just sleeps via
-  the bundled busybox. (logs/stats rendering is pinned at Layer 2, where the
+  the resources it held. The workload just sleeps via the bundled
+  guest-tools busybox atop the standard alpine base. (logs/stats rendering is pinned at Layer 2, where the
   ring buffer is exercised without a live relay.)
 
   Scenario: inspecting a live detached run reports it running
