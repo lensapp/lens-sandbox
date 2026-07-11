@@ -1,7 +1,8 @@
 Feature: distributing a sandbox
   A sandbox is published to and pulled from an OCI registry as a typed
   artifact. Push builds then uploads in one step; there is no standalone
-  build. Pull fetches the artifact and, as a side effect, its base image.
+  build. Pull hands the reference to the service, which caches the
+  artifact and prefetches its base image (pinned in lns-service).
 
   Scenario: push builds then uploads in a single step
     Given a valid lns.yaml in the current directory
@@ -24,12 +25,12 @@ Feature: distributing a sandbox
     And the output contains "push scope"
     And the output contains "ghcr.io"
 
-  Scenario: pull fetches the sandbox artifact and its base image
+  Scenario: pull hands the reference to the service and reports the digest
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
     When the user runs sandbox command "pull ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "sha256:"
-    And the service received a request to pull the base image
+    And the service received a request to pull "ghcr.io/team/hermes:1.4.0"
 
   Scenario: tag re-refs a cached sandbox
     Given the sandbox "hermes:1.4.0" is cached

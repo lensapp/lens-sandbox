@@ -2079,4 +2079,109 @@ mod tests {
         assert_eq!(pruned["removed"], serde_json::json!([]));
         assert_eq!(pruned["reclaimed_bytes"], 0);
     }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_pull_of_a_sandbox_artifact_caches_it_with_its_base_image() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+
+        use sha2::Digest;
+        let cache_root = crate::cache::root().unwrap();
+        let manifest_cache =
+            crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"));
+        let layer_cache = crate::oci_layer_cache::LayerCache::new(cache_root.join("layers"));
+
+        let layer_bytes = b"offline base layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer_bytes));
+        layer_cache
+            .install_from_bytes(&layer_digest, &layer_bytes)
+            .unwrap();
+        let base_manifest = oci_client::manifest::OciImageManifest {
+            layers: vec![oci_client::manifest::OciDescriptor {
+                digest: layer_digest.clone(),
+                size: layer_bytes.len() as i64,
+                media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let base_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&base_manifest).unwrap())
+        );
+        let base_ref = format!("registry.example.test/cov/base@{base_digest}");
+        manifest_cache
+            .put(
+                &base_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: base_manifest,
+                    manifest_digest: base_digest.clone(),
+                    config: format!(
+                        r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
+                    ),
+                },
+            )
+            .unwrap();
+
+        let definition = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"{base_ref}"}}}}"#
+        );
+        let artifact_manifest = oci_client::manifest::OciImageManifest {
+            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            config: oci_client::manifest::OciDescriptor {
+                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
+                size: definition.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let artifact_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&artifact_manifest).unwrap())
+        );
+        let artifact_ref = format!("registry.example.test/cov/sandbox@{artifact_digest}");
+        manifest_cache
+            .put(
+                &artifact_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: artifact_manifest,
+                    manifest_digest: artifact_digest.clone(),
+                    config: definition,
+                },
+            )
+            .unwrap();
+
+        let pulled = as_json(
+            handle_request(
+                &Request::PullImage {
+                    image: artifact_ref.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(pulled["type"], "ImagePulled", "got {pulled}");
+        assert_eq!(pulled["image"]["reference"], artifact_ref);
+        assert_eq!(pulled["image"]["digest"], artifact_digest);
+        assert_eq!(
+            pulled["image"]["layers"], 0,
+            "a config-only artifact records no layers"
+        );
+
+        let listed = as_json(handle_request(&Request::ListImages, now).await);
+        let refs: Vec<String> = listed["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["reference"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            refs.contains(&artifact_ref) && refs.contains(&base_ref),
+            "pull must cache the sandbox and prefetch its base image, got {refs:?}"
+        );
+    }
 }

@@ -21,16 +21,18 @@ fn sandbox_is_cached(w: &mut BehaviourWorld, reference: String) {
     });
 }
 
-#[then("the service received a request to pull the base image")]
-fn service_received_pull(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then(regex = r#"^the service received a request to pull "([^"]+)"$"#)]
+fn service_received_pull(w: &mut BehaviourWorld, reference: String) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();
     if requests
         .iter()
-        .any(|r| matches!(r, Request::PullImage { .. }))
+        .any(|r| matches!(r, Request::PullImage { image } if *image == reference))
     {
         Ok(())
     } else {
-        Err(format!("expected a PullImage request among {requests:?}"))
+        Err(format!(
+            "expected a PullImage request for {reference:?} among {requests:?}"
+        ))
     }
 }
 

@@ -50,6 +50,18 @@ fn record_path(images_root: &Path, reference: &str) -> PathBuf {
     images_root.join(format!("{key}.json"))
 }
 
+pub fn artifact_record_for(
+    artifact: &crate::image::PulledArtifact,
+    pulled_unix_secs: u64,
+) -> ImageRecord {
+    ImageRecord {
+        reference: artifact.reference.whole(),
+        digest: artifact.digest.clone(),
+        layers: Vec::new(),
+        pulled_unix_secs,
+    }
+}
+
 pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
     ImageRecord {
         reference: pulled.reference.whole(),
@@ -243,11 +255,21 @@ pub async fn pull_with<F: Fs>(
 
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let pulled = crate::image::pull(image, &layer_cache).await?;
+    let record = match crate::image::pull_target(image, &layer_cache).await? {
+        crate::image::PulledTarget::Image(pulled) => record_for(&pulled, now_unix_secs()),
+        crate::image::PulledTarget::Artifact(artifact) => {
+            if let Some(base) = &artifact.base_image {
+                crate::image::pull(base, &layer_cache)
+                    .await
+                    .with_context(|| format!("fetching the sandbox's base image {base}"))?;
+            }
+            artifact_record_for(&artifact, now_unix_secs())
+        }
+    };
     pull_with(
         &real::RealFs,
         &images_root()?,
-        &record_for(&pulled, now_unix_secs()),
+        &record,
         &crate::run_registry::snapshot(),
     )
     .await
@@ -491,6 +513,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such cached sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn artifact_record_for_normalizes_the_reference_and_carries_no_layers() {
+        let artifact = crate::image::PulledArtifact {
+            reference: "some-sandbox:1.0".parse().unwrap(),
+            digest: "sha256:manifest".into(),
+            base_image: Some("registry.example.test/base@sha256:abc".into()),
+        };
+        let record = artifact_record_for(&artifact, 42);
+        assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
+        assert_eq!(record.digest, "sha256:manifest");
+        assert_eq!(record.pulled_unix_secs, 42);
+        assert_eq!(
+            record.layers,
+            vec![],
+            "a config-only artifact holds no reclaimable layers",
+        );
     }
 
     #[test]

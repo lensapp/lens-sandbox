@@ -13,8 +13,8 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    CountingSink, PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver,
-    pull_inner, serialized_len,
+    CountingSink, PulledImage, PulledTarget, Registry, enforce_manifest_doc_size,
+    linux_platform_resolver, pull_inner, pull_target_with, serialized_len,
 };
 
 pub struct RealRegistry {
@@ -123,13 +123,32 @@ impl Registry for RealRegistry {
 
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
     let _shared = crate::image_store::lock_shared().await;
-    let manifests = crate::cache::root()?.join("manifests");
-    let auth = registry_auth_for(image);
-    let registry =
-        CachingRegistry::new(RealRegistry::with_auth(auth), ManifestCache::new(manifests));
+    let registry = caching_registry_for(image)?;
     let pulled = pull_inner(&registry, image, layer_cache).await?;
     if let Err(e) = crate::image_store::record(&pulled).await {
         crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
     }
     Ok(pulled)
+}
+
+pub async fn pull_target(image: &str, layer_cache: &LayerCache) -> Result<PulledTarget> {
+    let _shared = crate::image_store::lock_shared().await;
+    let registry = caching_registry_for(image)?;
+    let target = pull_target_with(&registry, image, layer_cache).await?;
+    if let PulledTarget::Image(pulled) = &target
+        && let Err(e) = crate::image_store::record(pulled).await
+    {
+        crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
+    }
+    Ok(target)
+}
+
+fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {
+    let manifests = crate::cache::root()?.join("manifests");
+    let auth = registry_auth_for(image);
+    let inner = match image.parse::<Reference>() {
+        Ok(parsed) => RealRegistry::for_reference(&parsed, auth),
+        Err(_) => RealRegistry::with_auth(auth),
+    };
+    Ok(CachingRegistry::new(inner, ManifestCache::new(manifests)))
 }
