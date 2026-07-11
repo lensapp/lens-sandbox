@@ -36,13 +36,61 @@ fn a_local_registry(world: &mut E2eWorld) {
     world.registry.get_or_insert_with(LocalRegistry::start);
 }
 
+async fn seed_base_image(host: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let reference: Reference = format!("{host}/e2e-base:1")
+        .parse()
+        .expect("base ref parses");
+    let client = oci_client::Client::new(ClientConfig {
+        protocol: ClientProtocol::Http,
+        ..Default::default()
+    });
+    let layer = b"e2e base layer tar".to_vec();
+    let layer_digest = format!("sha256:{:x}", Sha256::digest(&layer));
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    let config = format!(
+        r#"{{"architecture":"{arch}","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
+    )
+    .into_bytes();
+    let config_digest = format!("sha256:{:x}", Sha256::digest(&config));
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+        config.len(),
+        layer.len()
+    )
+    .into_bytes();
+    let manifest_digest = format!("sha256:{:x}", Sha256::digest(&manifest));
+    client
+        .push_blob(&reference, layer, &layer_digest)
+        .await
+        .expect("push base layer");
+    client
+        .push_blob(&reference, config, &config_digest)
+        .await
+        .expect("push base config");
+    client
+        .push_manifest_raw(
+            &reference,
+            manifest,
+            http::HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        )
+        .await
+        .expect("push base manifest");
+    format!("{host}/e2e-base@{manifest_digest}")
+}
+
+#[given("the user pushes a sandbox built from ./lns.yaml in one step")]
 #[when("the user pushes a sandbox built from ./lns.yaml in one step")]
-fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
+async fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
     let host = world.registry.as_ref().expect("a registry").host();
     let reference = format!("{host}/e2e-cache-sandbox:1");
+    let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: reg/base@sha256:{}\n",
-        "a".repeat(64)
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: {base}\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();

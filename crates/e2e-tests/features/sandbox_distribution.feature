@@ -1,0 +1,52 @@
+Feature: distributing a sandbox through a registry end to end
+  push uploads ./lns.yaml as a sandbox artifact; pull fetches it back into
+  the daemon's cache over the real Unix-socket IPC and real (loopback)
+  registry HTTP; tag, ls, inspect, rm, and prune then manage the cached
+  copy. All of it runs virt-free, and each verb here uses its top-level
+  shortcut form to prove the shortcut tier is wired end to end.
+
+  Background:
+    Given a clean lns cache home
+    And a local registry
+    And the Lens Sandbox service is running in that home
+    And the user pushes a sandbox built from ./lns.yaml in one step
+
+  Scenario: pull fetches the pushed sandbox and its base image into the daemon cache
+    When I run lns "pull <pushed-ref>" against the service
+    Then the exit code is 0
+    And the output contains "pulled"
+    And the output contains the pushed reference
+    When I run lns "sandbox ls" against the service
+    Then the exit code is 0
+    And the output contains the pushed reference
+    And the output contains "/e2e-base@sha256:"
+    And the output contains "cached"
+
+  Scenario: tag re-references the cached sandbox under a new tag
+    When I run lns "pull <pushed-ref>" against the service
+    And I run lns "tag <pushed-ref> <pushed-ref>-copy" against the service
+    Then the exit code is 0
+    When I run lns "sandbox ls" against the service
+    Then the output contains "e2e-cache-sandbox:1-copy"
+
+  Scenario: inspect renders the cached sandbox's definition
+    When I run lns "pull <pushed-ref>" against the service
+    And I run lns "inspect <pushed-ref>" against the service
+    Then the exit code is 0
+    And the output contains "kind: Sandbox"
+    And the output contains the pushed reference
+
+  Scenario: rm removes the cached sandbox
+    When I run lns "pull <pushed-ref>" against the service
+    And I run lns "rm <pushed-ref>" against the service
+    Then the exit code is 0
+    When I run lns "sandbox ls" against the service
+    Then the output no longer lists the pushed reference
+
+  Scenario: prune reclaims the cached sandbox
+    When I run lns "pull <pushed-ref>" against the service
+    And I run lns "sandbox prune --force" against the service
+    Then the exit code is 0
+    And the output contains "reclaimed"
+    When I run lns "sandbox ls" against the service
+    Then the output no longer lists the pushed reference

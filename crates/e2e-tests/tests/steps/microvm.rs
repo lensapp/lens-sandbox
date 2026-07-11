@@ -497,6 +497,26 @@ fn inspect_that_run(world: &mut E2eWorld) -> Result<(), String> {
     Ok(())
 }
 
+#[when("the user lists running sandboxes")]
+fn list_running_sandboxes(world: &mut E2eWorld) {
+    world.result = Some(world.run_with_service_env(&["ps"]));
+}
+
+#[then("the output lists that run")]
+fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    let short = lns_ipc::short_run_id(&id);
+    let res = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}{}", res.stdout, res.stderr);
+    if combined.contains(short) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the listing to show run {short}, got:\n{combined}"
+        ))
+    }
+}
+
 #[given("a network policy that denies all egress")]
 fn policy_deny_all(world: &mut E2eWorld) {
     write_policy(world, "network:\n  defaultVerdict: deny\n");

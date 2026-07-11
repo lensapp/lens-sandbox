@@ -30,3 +30,13 @@ Feature: a detached run's lifecycle is driven against a real guest
     When the user kills that run
     Then the exit code is 0
     And volume "e2e-vol-kill" is released
+
+  Scenario: ps lists a live detached run with its resource usage
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user lists running sandboxes
+    Then the exit code is 0
+    And the output lists that run
+    And the output contains "CPU"
+    And the output contains "MEM"

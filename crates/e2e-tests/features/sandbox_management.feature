@@ -24,3 +24,8 @@ Feature: cached sandbox management end to end
     When I run "lns sandbox prune --force"
     Then the exit code is 0
     And the output contains "reclaimed 0 B"
+
+  Scenario: prune refuses to run without --force
+    When I run "lns sandbox prune"
+    Then the exit code is non-zero
+    And the output contains "pass --force to confirm"
