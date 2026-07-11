@@ -1,5 +1,5 @@
 //! Validates the in-process OCI registry speaks the exact protocol subset that
-//! `lns build --push` (oci_client chunked push) and `lns run` (manifest/config
+//! `lns push` (oci_client chunked push) and `lns run` (manifest/config
 //! pull) use — without booting a VM, so the registry can be iterated fast.
 
 #[path = "support/registry.rs"]
