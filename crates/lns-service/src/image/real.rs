@@ -143,7 +143,7 @@ pub async fn pull_target(image: &str, layer_cache: &LayerCache) -> Result<Pulled
     Ok(target)
 }
 
-fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {
+pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {
     let manifests = crate::cache::root()?.join("manifests");
     let auth = registry_auth_for(image);
     let inner = match image.parse::<Reference>() {

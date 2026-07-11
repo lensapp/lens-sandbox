@@ -10,7 +10,7 @@ use crate::oci_layer_cache::LayerCache;
 
 pub(crate) mod manifest_cache;
 mod real;
-pub(crate) use real::{RealRegistry, registry_auth_for};
+pub(crate) use real::{RealRegistry, caching_registry_for, registry_auth_for};
 pub use real::{pull, pull_target, verify_login};
 
 pub(crate) trait Registry: Send + Sync {

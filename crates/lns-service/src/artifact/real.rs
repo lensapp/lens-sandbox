@@ -42,7 +42,8 @@ pub(crate) async fn peek_and_plan(
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
-    let registry = RealRegistry::for_reference(&reference, registry_auth_for(image_ref));
+    // Peek through the manifest cache so a digest-pinned reference that was pulled once (e.g. via `lns pull`) resolves without touching the registry again.
+    let registry = crate::image::caching_registry_for(image_ref)?;
     let (manifest, digest, config_json) = registry
         .pull_manifest_and_config(&reference)
         .await
