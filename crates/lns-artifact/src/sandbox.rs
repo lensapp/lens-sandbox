@@ -150,12 +150,21 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             );
         }
     }
+    let mut container_ports = BTreeSet::new();
     for port in &doc.spec.ports {
         if !(1..=65535).contains(&port.container) {
             bail!(
                 "sandbox port container {} is out of range (1-65535)",
                 port.container
             );
+        }
+        if let Some(host) = port.host
+            && !(1..=65535).contains(&host)
+        {
+            bail!("sandbox port host {host} is out of range (1-65535)");
+        }
+        if !container_ports.insert(port.container) {
+            bail!("duplicate container port {}", port.container);
         }
     }
     Ok(Definition {
@@ -418,6 +427,27 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("out of range"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_an_out_of_range_host_port() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","ports":[{"host":0,"container":3003}]}"#,
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("out of range"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_container_ports() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","ports":[{"container":3003},{"host":8080,"container":3003}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate container port 3003"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
