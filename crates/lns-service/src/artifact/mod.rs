@@ -112,6 +112,13 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
     }
 }
 
+/// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, integrations, and resources apply identically.
+pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedBundle> {
+    let def = lns_artifact::sandbox::parse(config_json)
+        .context("parsing the local sandbox definition")?;
+    Ok(resolved_from_sandbox(&def))
+}
+
 pub async fn plan_bundle<F: ComponentFetcher>(
     config_json: &[u8],
     fetcher: &F,
@@ -393,6 +400,31 @@ mod tests {
             .expect("a flat sandbox carries its inline policy");
         assert_eq!(policy.network.default_verdict, lns_policy::Verdict::Deny);
         assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+    }
+
+    #[test]
+    fn plan_local_sandbox_resolves_the_definition_like_a_published_one() {
+        let resolved = plan_local_sandbox(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","integrations":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolved.base_image, "ghcr.io/team/base:1");
+        assert!(
+            resolved.resources.is_some(),
+            "resources must survive the plan"
+        );
+        let policy = resolved.policy.expect("the plan carries the inline policy");
+        assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+    }
+
+    #[test]
+    fn plan_local_sandbox_surfaces_a_broken_definition() {
+        let err = plan_local_sandbox(br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must carry an image"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

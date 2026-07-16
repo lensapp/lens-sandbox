@@ -11,7 +11,6 @@ Feature: a sandbox definition's declared integrations arm at launch
   it stays the sign-in vehicle for oauth integrations and the way to arm
   a directory that has no definition.
 
-  @todo
   Scenario: A definition-declared integration is armed at launch without a local connect
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares integration "some-provider"
@@ -20,7 +19,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And the running policy allows the "api.some-provider.example" route
 
-  @todo
   Scenario: A published sandbox's declared integrations arm on the consuming machine
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"
     And a published sandbox artifact declares integration "some-provider"
@@ -36,7 +34,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     Then a credential card appears for "some-provider"
     And the workload's request is held pending a decision
 
-  @todo
   Scenario: Declared and connected integrations union without duplication
     Given the machine catalog has credential integrations "some-provider" and "other-provider"
     And the sandbox definition declares integrations "some-provider" and "other-provider"

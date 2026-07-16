@@ -96,6 +96,16 @@ pub(crate) async fn peek_and_plan(
     }
 }
 
+/// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run.
+pub(crate) fn plan_local(definition_json: &str) -> Result<BundlePlan> {
+    let resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
+    disclose_effective_policy(resolved.policy.as_ref());
+    Ok(BundlePlan {
+        workload: assembly::assemble(&resolved),
+        fileset_specs: Vec::new(),
+    })
+}
+
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the bundle's filesets land in the microVM at their mount paths.
 async fn materialize_filesets(resolved: &ResolvedBundle) -> Result<Vec<RuntimeFileSpec>> {
     let mut specs = Vec::new();

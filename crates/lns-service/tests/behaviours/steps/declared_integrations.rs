@@ -1,0 +1,226 @@
+use cucumber::{given, then, when};
+use lns_policy::integrations::{AuthKind, CredentialAuth, Integration, IntegrationRoute};
+use lns_policy::providers::{InjectionDef, InjectionKind};
+use lns_policy::{Policy, Verdict};
+use lns_service::artifact::policy::merge_effective;
+use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
+use lns_service::credential_flow::integrations::resolve_applied_integrations;
+use lns_service::credential_flow::providers::Provider;
+
+use crate::world::BehaviourWorld;
+
+fn credential_integration(id: &str, env_var: &str, route: Option<&str>) -> Integration {
+    let domain = route.unwrap_or("api.example.test");
+    Integration {
+        id: id.into(),
+        name: None,
+        auth_kind: AuthKind::Credential,
+        routes: route
+            .map(|host| {
+                vec![IntegrationRoute {
+                    match_pattern: host.into(),
+                    transport: None,
+                    scheme: None,
+                    tls_terminate: false,
+                    rules: Vec::new(),
+                }]
+            })
+            .unwrap_or_default(),
+        credential: Some(CredentialAuth {
+            env_var: env_var.into(),
+            placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: domain.into(),
+                header: None,
+            }],
+        }),
+        oauth: None,
+        token_fallback: None,
+    }
+}
+
+fn definition_declaring(ids: &[&str]) -> String {
+    let list = ids
+        .iter()
+        .map(|id| format!("\"{id}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","integrations":[{list}]}}}}"#
+    )
+}
+
+fn launch(
+    w: &mut BehaviourWorld,
+    resolved: anyhow::Result<lns_service::artifact::assembly::ResolvedBundle>,
+) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            rig.error = Some(format!("{e:#}"));
+            return;
+        }
+    };
+    let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
+    let applied = resolve_applied_integrations(&policy, &rig.catalog);
+    policy
+        .network
+        .allowed_routes
+        .extend(applied.routes.iter().cloned());
+    rig.providers = applied
+        .providers
+        .iter()
+        .map(|p| {
+            (
+                p.id().to_string(),
+                p.env_var().to_string(),
+                p.placeholder().to_string(),
+            )
+        })
+        .collect();
+    rig.running_policy = Some(policy);
+}
+
+#[given(
+    regex = r#"^the machine catalog has a credential integration "([^"]+)" managing "([^"]+)" with a route to "([^"]+)"$"#
+)]
+fn catalog_has_integration_with_route(
+    w: &mut BehaviourWorld,
+    id: String,
+    env: String,
+    host: String,
+) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.catalog
+        .push(credential_integration(&id, &env, Some(&host)));
+}
+
+#[given(
+    regex = r#"^the machine catalog has a credential integration "([^"]+)" managing "([^"]+)"$"#
+)]
+fn catalog_has_integration(w: &mut BehaviourWorld, id: String, env: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.catalog.push(credential_integration(&id, &env, None));
+}
+
+#[given(regex = r#"^the machine catalog has credential integrations "([^"]+)" and "([^"]+)"$"#)]
+fn catalog_has_two_integrations(w: &mut BehaviourWorld, first: String, second: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    for id in [&first, &second] {
+        let env = format!("{}_TOKEN", id.to_uppercase().replace('-', "_"));
+        rig.catalog.push(credential_integration(id, &env, None));
+    }
+}
+
+#[given(regex = r#"^the sandbox definition declares integration "([^"]+)"$"#)]
+fn definition_declares_one(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.definition = Some(definition_declaring(&[&id]));
+}
+
+#[given(regex = r#"^the sandbox definition declares integrations "([^"]+)" and "([^"]+)"$"#)]
+fn definition_declares_two(w: &mut BehaviourWorld, first: String, second: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.definition = Some(definition_declaring(&[&first, &second]));
+}
+
+#[given(regex = r#"^a published sandbox artifact declares integration "([^"]+)"$"#)]
+fn published_declares_one(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.definition = Some(definition_declaring(&[&id]));
+}
+
+#[given("the directory's lns-policy.yaml connects no integrations")]
+fn overlay_connects_nothing(w: &mut BehaviourWorld) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.overlay = Policy::default();
+}
+
+#[given(regex = r#"^the directory's lns-policy.yaml connects "([^"]+)"$"#)]
+fn overlay_connects(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.overlay.integrations.push(id);
+}
+
+#[when("the sandbox is launched")]
+fn sandbox_launched(w: &mut BehaviourWorld) {
+    let definition = w
+        .declared
+        .get_or_insert_with(Default::default)
+        .definition
+        .clone()
+        .expect("a Given step must declare the definition");
+    launch(w, plan_local_sandbox(definition.as_bytes()));
+}
+
+#[when("the published sandbox is launched")]
+fn published_sandbox_launched(w: &mut BehaviourWorld) {
+    let definition = w
+        .declared
+        .get_or_insert_with(Default::default)
+        .definition
+        .clone()
+        .expect("a Given step must declare the definition");
+    let resolved = lns_artifact::sandbox::parse(definition.as_bytes());
+    launch(w, resolved.map(|def| resolved_from_sandbox(&def)));
+}
+
+#[then(regex = r#"^the workload's environment contains the "([^"]+)" placeholder$"#)]
+fn env_contains_placeholder(w: &mut BehaviourWorld, env: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if let Some(err) = &rig.error {
+        return Err(format!("the launch failed: {err}"));
+    }
+    let armed = rig
+        .providers
+        .iter()
+        .find(|(_, var, _)| var == &env)
+        .ok_or_else(|| format!("no provider seeds {env}; armed: {:?}", rig.providers))?;
+    if armed.2.is_empty() {
+        return Err(format!("{env} was seeded without a placeholder"));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the running policy allows the "([^"]+)" route$"#)]
+fn running_policy_allows(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
+    let policy = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.running_policy.as_ref())
+        .ok_or("no running policy was produced")?;
+    let allowed = policy
+        .network
+        .allowed_routes
+        .iter()
+        .any(|r| r.match_pattern == host && r.verdict == Verdict::Allow);
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected an allow route for {host}, got: {:?}",
+            policy.network.allowed_routes
+        ))
+    }
+}
+
+#[then(regex = r#"^the workload's environment seeds "([^"]+)" and "([^"]+)" each exactly once$"#)]
+fn env_seeds_each_once(
+    w: &mut BehaviourWorld,
+    first: String,
+    second: String,
+) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    for id in [&first, &second] {
+        let count = rig.providers.iter().filter(|(pid, _, _)| pid == id).count();
+        if count != 1 {
+            return Err(format!(
+                "expected {id} to be seeded exactly once, found {count}; armed: {:?}",
+                rig.providers
+            ));
+        }
+    }
+    Ok(())
+}

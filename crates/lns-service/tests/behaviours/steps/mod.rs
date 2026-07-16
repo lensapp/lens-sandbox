@@ -6,6 +6,7 @@ pub mod bundle_resolution;
 pub mod bundle_resources;
 pub mod credential_at_boot;
 pub mod credential_flow;
+pub mod declared_integrations;
 pub mod env_injection;
 pub mod forward;
 pub mod host_binds;

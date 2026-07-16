@@ -8,6 +8,7 @@ use crate::artifact_rig::ArtifactRig;
 use crate::bind_rig::BindRig;
 use crate::cred_boot_rig::CredBootRig;
 use crate::credential_rig::CredentialRig;
+use crate::declared_rig::DeclaredRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
 use crate::policy_rig::PolicyRig;
@@ -59,6 +60,8 @@ pub struct BehaviourWorld {
     pub policy: Option<PolicyRig>,
 
     pub cred_boot: Option<CredBootRig>,
+
+    pub declared: Option<DeclaredRig>,
 
     pub resource: Option<ResourceRig>,
 
