@@ -106,6 +106,18 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             ));
         }
     }
+    if !world.project_ports.is_empty() {
+        spec_tail.push_str("\n  ports:");
+        for (host, container) in &world.project_ports {
+            if let Some(host) = host {
+                spec_tail.push_str(&format!(
+                    "\n    - host: {host}\n      container: {container}"
+                ));
+            } else {
+                spec_tail.push_str(&format!("\n    - container: {container}"));
+            }
+        }
+    }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         pinned_microvm_image()
@@ -768,6 +780,19 @@ fn start_detached(world: &mut E2eWorld, cmd_line: String) {
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with auto-remove$"#)]
 fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["-d".into(), "--rm".into()], &cmd_line);
+}
+
+#[given(regex = r"^the project definition declares port (\d+)$")]
+fn project_declares_port(world: &mut E2eWorld, port: u16) {
+    world.project_ports.push((None, port));
+}
+
+#[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with no port flags$"#)]
+fn start_detached_no_port_flags(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec!["-d".into()], &cmd_line);
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
 }
 
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" publishing port (\d+)$"#)]

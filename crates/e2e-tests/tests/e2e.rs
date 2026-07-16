@@ -30,6 +30,8 @@ pub struct E2eWorld {
     pub project_env: Vec<(String, String)>,
     /// Credential slots the project definition declares, as (integration id, env target, required).
     pub project_credentials: Vec<(String, String, bool)>,
+    /// Ports the project definition declares, as (host, container).
+    pub project_ports: Vec<(Option<u16>, u16)>,
 }
 
 impl E2eWorld {
