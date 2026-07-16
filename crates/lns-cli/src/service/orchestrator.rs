@@ -22,6 +22,8 @@ use lns_ipc::{ExecImageArgs, RunImageArgs};
 use super::{client::ServiceClient, real, require_running_check};
 use crate::run::summary::print_run_summary;
 
+const PUBLISHED_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let mut args = RunArgs::from_arg_matches(matches)?;
@@ -144,14 +146,25 @@ fn published_target(
 }
 
 async fn preflight_published(socket: &Path, reference: &str) -> Result<PublishedTarget> {
-    match real::send_request(
-        socket,
-        &Request::InspectImage {
-            image: reference.to_string(),
-        },
-    )
-    .await
-    {
+    let request = Request::InspectImage {
+        image: reference.to_string(),
+    };
+    await_published_preflight(reference, real::send_request(socket, &request)).await
+}
+
+async fn await_published_preflight(
+    reference: &str,
+    response: impl std::future::Future<Output = Option<Response>>,
+) -> Result<PublishedTarget> {
+    let response = timeout(PUBLISHED_PREFLIGHT_TIMEOUT, response)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "published sandbox preflight timed out after {}s while inspecting {reference}",
+                PUBLISHED_PREFLIGHT_TIMEOUT.as_secs()
+            )
+        })?;
+    match response {
         Some(Response::ImageInspected { inspection }) => published_target(reference, inspection),
         Some(Response::Error { message }) => anyhow::bail!("daemon error: {message}"),
         Some(other) => anyhow::bail!("expected sandbox preflight, got {other:?}"),
@@ -1067,6 +1080,20 @@ mod tests {
         .unwrap();
         assert_eq!(target.image, "registry.example.test/team/system:1");
         assert!(target.defaults.mounts.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn published_preflight_times_out_when_the_service_never_responds() {
+        let err = await_published_preflight(
+            "registry.example.test/team/sandbox:1",
+            std::future::pending::<Option<Response>>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "published sandbox preflight timed out after 30s while inspecting registry.example.test/team/sandbox:1"
+        );
     }
 
     #[tokio::test]
