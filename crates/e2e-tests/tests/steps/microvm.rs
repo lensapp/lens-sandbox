@@ -660,6 +660,14 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
     }
 }
 
+#[given("a network policy holding an ask default and a direct-transport allow route")]
+fn policy_ask_with_direct_route(world: &mut E2eWorld) {
+    write_policy(
+        world,
+        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  allowedRoutes:\n    - match: api.example.test\n      verdict: allow\n      transport: direct\n",
+    );
+}
+
 #[given("a network policy that denies all egress")]
 fn policy_deny_all(world: &mut E2eWorld) {
     write_policy(world, "network:\n  defaultVerdict: deny\n");

@@ -30,7 +30,8 @@ pub struct NetworkPolicy {
     pub allowed_routes: Vec<RouteRule>,
     #[serde(default = "default_ask")]
     pub default_verdict: Verdict,
-    #[serde(default, skip_serializing_if = "is_direct_transport")]
+    // Always serialized: sandbox-core's schema requires transport, and a missing one fail-closes a non-deny verdict to deny in the guest.
+    #[serde(default)]
     pub default_transport: Transport,
 }
 
@@ -52,10 +53,6 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn is_direct_transport(transport: &Transport) -> bool {
-    *transport == Transport::Direct
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteRule {
@@ -63,7 +60,7 @@ pub struct RouteRule {
     #[serde(rename = "match")]
     pub match_pattern: String,
     pub verdict: Verdict,
-    #[serde(default, skip_serializing_if = "is_direct_transport")]
+    #[serde(default)]
     pub transport: Transport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<Scheme>,
@@ -246,10 +243,12 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_yaml_omits_direct_transport_fields() {
+    fn default_policy_yaml_emits_the_transport_the_guest_gate_requires() {
         let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
-        assert!(!yaml.contains("defaultTransport"), "got:\n{yaml}");
-        assert!(!yaml.contains("transport:"), "got:\n{yaml}");
+        assert!(
+            yaml.contains("defaultTransport: direct"),
+            "the sandbox-core schema requires defaultTransport; omitting it fail-closes ask to deny in the guest:\n{yaml}"
+        );
     }
 
     #[test]
@@ -287,13 +286,14 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_route_omits_the_richness_keys() {
+    fn a_plain_route_omits_the_richness_keys_but_keeps_the_required_transport() {
         let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.example.com")).unwrap();
         assert!(
-            !yaml.contains("transport")
-                && !yaml.contains("scheme")
-                && !yaml.contains("tlsTerminate")
-                && !yaml.contains("rules"),
+            yaml.contains("transport: direct"),
+            "the sandbox-core route schema has no transport default; a rule without one fails the whole route parse and forces deny:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("scheme") && !yaml.contains("tlsTerminate") && !yaml.contains("rules"),
             "a plain allow rule must stay minimal:\n{yaml}"
         );
     }
