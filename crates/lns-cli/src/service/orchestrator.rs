@@ -110,10 +110,81 @@ fn resolve_host_binds(
     )
 }
 
-pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
+#[derive(Debug)]
+struct PublishedTarget {
+    image: String,
+    defaults: crate::run::declarative::Defaults,
+}
+
+fn published_target(
+    reference: &str,
+    inspection: lns_ipc::ArtifactInspection,
+) -> Result<PublishedTarget> {
+    match inspection {
+        lns_ipc::ArtifactInspection::Sandbox(view) => {
+            if view.digest.is_empty() {
+                anyhow::bail!("published sandbox preflight returned no manifest digest");
+            }
+            let parsed: oci_client::Reference = reference
+                .parse()
+                .with_context(|| format!("invalid sandbox reference {reference}"))?;
+            Ok(PublishedTarget {
+                image: parsed.clone_with_digest(view.digest.clone()).to_string(),
+                defaults: crate::run::declarative::Defaults::from_view(&view),
+            })
+        }
+        lns_ipc::ArtifactInspection::Bundle(_) => Ok(PublishedTarget {
+            image: reference.to_string(),
+            defaults: crate::run::declarative::Defaults::default(),
+        }),
+        lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
+            "{reference} is not a sandbox; run `lns init` to author an lns.yaml, or pass a published sandbox reference"
+        ),
+    }
+}
+
+async fn preflight_published(socket: &Path, reference: &str) -> Result<PublishedTarget> {
+    match real::send_request(
+        socket,
+        &Request::InspectImage {
+            image: reference.to_string(),
+        },
+    )
+    .await
+    {
+        Some(Response::ImageInspected { inspection }) => published_target(reference, inspection),
+        Some(Response::Error { message }) => anyhow::bail!("daemon error: {message}"),
+        Some(other) => anyhow::bail!("expected sandbox preflight, got {other:?}"),
+        None => anyhow::bail!("no response from lns-service during sandbox preflight"),
+    }
+}
+
+pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let target =
         crate::run::target::resolve(args.image.as_deref(), &crate::sandbox::real::RealFs, &cwd)?;
+    let client = real_client()?;
+    let published = match &target {
+        crate::run::target::RunTarget::Reference(reference) => {
+            Some(preflight_published(client.socket(), reference).await?)
+        }
+        crate::run::target::RunTarget::Local { .. } => None,
+    };
+    let defaults = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => {
+            crate::run::declarative::Defaults::from_definition(def)
+        }
+        (_, Some(published)) => published.defaults.clone(),
+        _ => crate::run::declarative::Defaults::default(),
+    };
+    let resolved = crate::run::declarative::resolve(
+        &defaults,
+        &cwd,
+        args.workdir.take(),
+        std::mem::take(&mut args.mounts),
+    )?;
+    args.workdir = resolved.workdir;
+    args.mounts = resolved.mounts;
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
@@ -133,7 +204,6 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     }
     let binds: Vec<lns_ipc::BindMount> = resolved_binds.iter().map(|b| b.to_wire()).collect();
 
-    let client = real_client()?;
     let socket = client.socket();
     let mut stream = UnixStream::connect(socket)
         .await
@@ -159,6 +229,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         cmd: args.cmd,
         env: args.env,
         image: Some(target.image()),
+        resolved_image: published.as_ref().map(|published| published.image.clone()),
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
@@ -919,6 +990,66 @@ fn phrase_for_verb(verb: &str) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn published_sandbox_preflight_pins_the_artifact_and_keeps_launch_defaults() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let target = published_target(
+            "registry.example.test/team/sandbox:1",
+            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: "registry.example.test/team/sandbox:1".into(),
+                digest: digest.clone(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: Some("/workspace".into()),
+                mounts: vec![lns_ipc::SandboxMount {
+                    kind: lns_ipc::SandboxMountKind::Bind,
+                    source: ".".into(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                }],
+                integrations: Vec::new(),
+                policy_flags: Vec::new(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            target.image,
+            format!("registry.example.test/team/sandbox@{digest}")
+        );
+        assert_eq!(target.defaults.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(target.defaults.mounts[0].source, ".");
+    }
+
+    #[test]
+    fn published_preflight_refuses_a_plain_image() {
+        let err = published_target(
+            "registry.example.test/team/image:1",
+            lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
+                reference: "registry.example.test/team/image:1".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not a sandbox"));
+    }
+
+    #[test]
+    fn published_preflight_keeps_agent_system_bundles_compatible() {
+        let target = published_target(
+            "registry.example.test/team/system:1",
+            lns_ipc::ArtifactInspection::Bundle(lns_ipc::BundleView {
+                reference: "registry.example.test/team/system:1".into(),
+                sandbox_base_image: None,
+                filesets: Vec::new(),
+                integrations: Vec::new(),
+                signature: lns_ipc::SignatureView::Unsigned,
+                policy_flags: Vec::new(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(target.image, "registry.example.test/team/system:1");
+        assert!(target.defaults.mounts.is_empty());
+    }
 
     #[tokio::test]
     async fn drive_attached_session_returns_exit_code_from_run_exit_frame() {

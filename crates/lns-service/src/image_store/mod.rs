@@ -50,6 +50,13 @@ fn record_path(images_root: &Path, reference: &str) -> PathBuf {
     images_root.join(format!("{key}.json"))
 }
 
+fn pinned_reference(reference: &str, digest: &str) -> Result<String> {
+    let parsed: oci_client::Reference = reference
+        .parse()
+        .with_context(|| format!("invalid image reference: {reference}"))?;
+    Ok(parsed.clone_with_digest(digest.to_string()).whole())
+}
+
 pub fn artifact_record_for(
     artifact: &crate::image::PulledArtifact,
     pulled_unix_secs: u64,
@@ -108,6 +115,19 @@ async fn load_records<F: Fs>(fs: &F, images_root: &Path) -> Result<Vec<ImageReco
     Ok(records)
 }
 
+async fn cached_digest_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    image: &str,
+) -> Result<Option<String>> {
+    let reference = normalize_reference(image)?;
+    Ok(load_records(fs, images_root)
+        .await?
+        .into_iter()
+        .find(|record| record.reference == reference)
+        .map(|record| record.digest))
+}
+
 fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
     active
         .iter()
@@ -154,9 +174,10 @@ pub async fn remove_with<F: Fs, C: Caches>(
 ) -> Result<RemovedImage> {
     let reference = normalize_reference(image)?;
     let records = load_records(fs, images_root).await?;
-    if !records.iter().any(|r| r.reference == reference) {
-        bail!("no such image: {reference}");
-    }
+    let record = records
+        .iter()
+        .find(|record| record.reference == reference)
+        .ok_or_else(|| anyhow::anyhow!("no such image: {reference}"))?;
     if let Some(run_id) = holder(active, &reference) {
         bail!(
             "image {reference:?} in use by run {}",
@@ -167,6 +188,10 @@ pub async fn remove_with<F: Fs, C: Caches>(
         .await
         .with_context(|| format!("removing image record for {reference}"))?;
     caches.remove_manifest(&reference)?;
+    let pinned = pinned_reference(&reference, &record.digest)?;
+    if pinned != reference {
+        caches.remove_manifest(&pinned)?;
+    }
     let keep = layer_keep_set(records.iter().filter(|r| r.reference != reference));
     let reclaimed_bytes = caches.sweep_layers(&keep)?;
     Ok(RemovedImage {
@@ -204,6 +229,10 @@ pub async fn prune_with<F: Fs, C: Caches>(
             .await
             .with_context(|| format!("removing image record for {}", record.reference))?;
         caches.remove_manifest(&record.reference)?;
+        let pinned = pinned_reference(&record.reference, &record.digest)?;
+        if pinned != record.reference {
+            caches.remove_manifest(&pinned)?;
+        }
         removed.push(record.reference.clone());
     }
     let reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
@@ -282,6 +311,10 @@ pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
         &crate::run_registry::snapshot(),
     )
     .await
+}
+
+pub(crate) async fn cached_digest(image: &str) -> Result<Option<String>> {
+    cached_digest_with(&real::RealFs, &images_root()?, image).await
 }
 
 pub async fn remove(image: &str) -> Result<RemovedImage> {
@@ -480,6 +513,33 @@ mod tests {
     fn normalize_reference_rejects_garbage() {
         let err = normalize_reference("###").unwrap_err().to_string();
         assert!(err.contains("invalid image reference"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cached_digest_finds_the_digest_recorded_for_a_tag() {
+        let fs = FakeFs::with_records(&[rec("registry.example.test/team/sandbox:1", &[])]);
+        let digest =
+            cached_digest_with(&fs, Path::new(ROOT), "registry.example.test/team/sandbox:1")
+                .await
+                .unwrap();
+        assert_eq!(
+            digest.as_deref(),
+            Some(format!("sha256:{}", "d".repeat(64)).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_digest_is_none_for_an_uncached_reference() {
+        assert_eq!(
+            cached_digest_with(
+                &FakeFs::default(),
+                Path::new(ROOT),
+                "registry.example.test/team/missing:1",
+            )
+            .await
+            .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -778,7 +838,10 @@ mod tests {
         )));
         assert_eq!(
             *caches.removed_manifests.lock().unwrap(),
-            vec!["registry.example.test/gone:1".to_string()]
+            vec![
+                "registry.example.test/gone:1".to_string(),
+                format!("registry.example.test/gone@sha256:{}", "d".repeat(64))
+            ]
         );
         let swept = caches.swept_with.lock().unwrap();
         assert_eq!(swept.len(), 1);
@@ -1004,6 +1067,14 @@ mod tests {
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         record(&pulled).await.unwrap();
+
+        assert_eq!(
+            cached_digest("registry.example.test/cov/lifecycle:1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(format!("sha256:{}", "c".repeat(64)).as_str())
+        );
 
         let listed = list().await.unwrap();
         assert_eq!(listed.len(), 1);

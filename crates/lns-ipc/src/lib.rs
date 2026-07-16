@@ -23,9 +23,9 @@ pub use protocol::{
     ArtifactInspection, BindMount, BindSpec, BundleView, CredentialBindDecision, ExecImageArgs,
     FilesetView, ImageInfo, ImageView, LogLevel, MountSpec, PortPublish, Protocol, Request,
     Response, RunConfig, RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary,
-    SandboxView, SignalKind, SignatureView, StatusInfo, VolumeInfo, VolumeMount,
-    VolumePruneFailure, WithOverride, cmdline_unsafe_char, validate_bind_source, validate_run_name,
-    validate_volume_name, validate_volume_target,
+    SandboxMount, SandboxMountKind, SandboxView, SignalKind, SignatureView, StatusInfo, VolumeInfo,
+    VolumeMount, VolumePruneFailure, WithOverride, cmdline_unsafe_char, validate_bind_source,
+    validate_run_name, validate_volume_name, validate_volume_target,
 };
 pub use socket::{SocketPathError, default_socket_path};
 pub use update::{NO_UPDATE_CHECK_ENV, UpdateStatus};

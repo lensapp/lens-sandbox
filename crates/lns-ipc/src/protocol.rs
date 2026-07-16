@@ -267,11 +267,32 @@ pub struct ImageView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxView {
     pub reference: String,
+    #[serde(default)]
+    pub digest: String,
     pub image: String,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub mounts: Vec<SandboxMount>,
     #[serde(default)]
     pub integrations: Vec<String>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMountKind {
+    Bind,
+    Volume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxMount {
+    pub kind: SandboxMountKind,
+    pub source: String,
+    pub target: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,6 +360,8 @@ pub struct RunConfig {
     #[serde(default)]
     pub hostname: Option<String>,
     pub env: Vec<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
@@ -359,6 +382,7 @@ impl RunConfig {
             entrypoint: args.entrypoint.clone(),
             hostname: args.hostname.clone(),
             env: args.env.clone(),
+            workdir: args.workdir.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
             binds: args.binds.clone(),
@@ -393,6 +417,8 @@ pub struct PortPublish {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
+    #[serde(default)]
+    pub resolved_image: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
@@ -746,6 +772,7 @@ mod tests {
         };
         let req = Request::RunImage(Box::new(RunImageArgs {
             image: Some("prism".into()),
+            resolved_image: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -782,6 +809,7 @@ mod tests {
     fn run_image_args_volumes_and_binds_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
+            resolved_image: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -911,6 +939,7 @@ mod tests {
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
             image: Some("some-image:1".into()),
+            resolved_image: None,
             name: None,
             cpus: 2,
             mem: 1024,
@@ -923,7 +952,7 @@ mod tests {
             hostname: Some("demo".into()),
             cmd: vec!["echo".into(), "hi".into()],
             env: vec!["FOO=bar".into()],
-            workdir: None,
+            workdir: Some("/workspace".into()),
             debug: false,
             tty: false,
             stdin: false,
@@ -968,6 +997,7 @@ mod tests {
         assert!(config.auto_remove);
         assert_eq!(config.sandbox_uid, Some(65534));
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);
+        assert_eq!(config.workdir.as_deref(), Some("/workspace"));
         assert_eq!(config.published_ports, args.published_ports);
         assert_eq!(config.volumes, args.volumes);
         assert_eq!(config.binds, args.binds);
@@ -1298,6 +1328,30 @@ mod tests {
         assert_eq!(json["reference"], "registry.example.test/some/image:1.0");
         assert_eq!(json["size_bytes"], 4096);
         assert_eq!(json["layers"], 1);
+    }
+
+    #[test]
+    fn sandbox_view_round_trips_declarative_launch_settings() {
+        let view = SandboxView {
+            reference: "registry.example.test/team/sandbox:1".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: Some("/workspace".into()),
+            mounts: vec![SandboxMount {
+                kind: SandboxMountKind::Bind,
+                source: ".".into(),
+                target: "/workspace".into(),
+                read_only: true,
+            }],
+            integrations: Vec::new(),
+            policy_flags: Vec::new(),
+        };
+        let response = Response::ImageInspected {
+            inspection: ArtifactInspection::Sandbox(view),
+        };
+        let frame = crate::encode_frame(&response).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, response);
     }
 
     #[test]

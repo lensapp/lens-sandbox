@@ -77,7 +77,8 @@ async fn orchestrate(
 
     // A local definition plans directly; a bundle reference resolves its component graph and boots its sandbox base image; a plain image passes through unchanged.
     let overrides = super::bundle_overrides(&args.with);
-    let bundle = match (args.definition.as_deref(), args.image.as_deref()) {
+    let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
+    let bundle = match (args.definition.as_deref(), resolved_image) {
         (Some(definition), _) => Some(crate::artifact::real::plan_local(definition)?),
         (None, Some(image_ref)) => {
             crate::artifact::real::peek_and_plan(
@@ -111,7 +112,7 @@ async fn orchestrate(
         .map(|plan| super::bundle_launch(&plan.workload, &args.cmd, &args.env));
     let image_ref: Option<String> = match &launch {
         Some(l) => Some(l.image.clone()),
-        None => args.image.clone(),
+        None => resolved_image.map(str::to_string),
     };
     let cmd: Vec<String> = launch
         .as_ref()

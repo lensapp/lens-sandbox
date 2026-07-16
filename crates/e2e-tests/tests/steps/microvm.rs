@@ -250,6 +250,24 @@ fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
 }
 
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" from a declarative sandbox$"#)]
+fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) {
+    let project = microvm_project(world);
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
+        pinned_microvm_image()
+    );
+    std::fs::write(project.join("lns.yaml"), definition)
+        .expect("write declarative project lns.yaml");
+    track_volume(world, "e2e-declarative");
+    let mut args = vec!["run".to_string(), "--".to_string()];
+    args.extend(split_args(&cmd_line));
+    let result =
+        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with hostname "([^"]+)"$"#)]
 fn run_command_with_hostname(world: &mut E2eWorld, cmd_line: String, hostname: String) {
     run_microvm(world, vec!["-h".into(), hostname], &cmd_line);

@@ -9,6 +9,8 @@ Feature: authoring a sandbox
     And a file "lns.yaml" is created
     And the file "lns.yaml" contains "kind: Sandbox"
     And the file "lns.yaml" contains "apiVersion: lns.run/v1"
+    And the file "lns.yaml" contains "workdir: /workspace"
+    And the file "lns.yaml" contains "volumes:"
 
   Scenario: init refuses to clobber an existing definition
     Given the current directory already has an lns.yaml
@@ -43,3 +45,13 @@ Feature: authoring a sandbox
     And the output contains "image"
     And the output contains "policy"
     And the service received no request
+
+  Scenario: validate and show understand declarative workdir and mounts
+    Given an lns.yaml declaring workdir and declarative mounts
+    When the user runs sandbox command "validate"
+    Then the exit code is 0
+    When the user runs sandbox command "show"
+    Then the exit code is 0
+    And the output contains "/workspace"
+    And the output contains "bind ."
+    And the output contains "volume some-cache"

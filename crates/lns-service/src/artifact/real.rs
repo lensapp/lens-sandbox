@@ -7,7 +7,10 @@ use crate::artifact::{RunPath, dispatch, dispatch_run, plan_bundle, resolved_fro
 use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
-use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, SignatureView};
+use lns_ipc::{
+    ArtifactInspection, BundleView, FilesetView, ImageView, SandboxMount, SandboxMountKind,
+    SignatureView,
+};
 use oci_client::Reference;
 
 /// A resolved bundle ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
@@ -255,10 +258,18 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
 
 /// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image, filesets, declared integrations, and any over-broad-policy flags; signature trust awaits the verification follow-up.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
-    let reference: Reference = image_ref
+    let requested: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
-    let registry = RealRegistry::for_reference(&reference, registry_auth_for(image_ref));
+    let reference = if requested.digest().is_none() {
+        match crate::image_store::cached_digest(image_ref).await? {
+            Some(digest) => requested.clone_with_digest(digest),
+            None => requested,
+        }
+    } else {
+        requested
+    };
+    let registry = crate::image::caching_registry_for(&reference.to_string())?;
     let (manifest, digest, config_json) = registry
         .pull_manifest_and_config(&reference)
         .await
@@ -277,7 +288,24 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
             let resolved = resolved_from_sandbox(&def);
             Ok(ArtifactInspection::Sandbox(lns_ipc::SandboxView {
                 reference: image_ref.to_string(),
+                digest,
                 image: resolved.base_image,
+                workdir: def.spec.workdir.clone(),
+                mounts: def
+                    .spec
+                    .volumes
+                    .iter()
+                    .map(|volume| SandboxMount {
+                        kind: if volume.is_bind() {
+                            SandboxMountKind::Bind
+                        } else {
+                            SandboxMountKind::Volume
+                        },
+                        source: volume.source().to_string(),
+                        target: volume.target.clone(),
+                        read_only: volume.read_only(),
+                    })
+                    .collect(),
                 integrations: def.spec.integrations,
                 policy_flags: resolved
                     .policy

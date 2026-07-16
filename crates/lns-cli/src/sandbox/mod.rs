@@ -704,7 +704,25 @@ fn render_cached_inspect<W: std::io::Write>(
         lns_ipc::ArtifactInspection::Sandbox(view) => {
             writeln!(out, "kind: Sandbox")?;
             writeln!(out, "reference: {}", view.reference)?;
+            if !view.digest.is_empty() {
+                writeln!(out, "digest: {}", view.digest)?;
+            }
             writeln!(out, "image: {}", view.image)?;
+            if let Some(workdir) = &view.workdir {
+                writeln!(out, "workdir: {workdir}")?;
+            }
+            for mount in &view.mounts {
+                let kind = match mount.kind {
+                    lns_ipc::SandboxMountKind::Bind => "bind",
+                    lns_ipc::SandboxMountKind::Volume => "volume",
+                };
+                let mode = if mount.read_only { " (read-only)" } else { "" };
+                writeln!(
+                    out,
+                    "mount: {kind} {} -> {}{mode}",
+                    mount.source, mount.target
+                )?;
+            }
             render_integrations(out, &view.integrations)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
@@ -774,6 +792,10 @@ fn render_inspect<W: std::io::Write>(
     config.insert("cpus".into(), details.config.cpus.into());
     config.insert("memMib".into(), details.config.mem_mib.into());
     config.insert("env".into(), serde_json::to_value(&details.config.env)?);
+    config.insert(
+        "workdir".into(),
+        serde_json::to_value(&details.config.workdir)?,
+    );
     config.insert(
         "publishedPorts".into(),
         serde_json::to_value(&details.config.published_ports)?,
@@ -1414,7 +1436,10 @@ mod tests {
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
                     reference: "hermes:1.4.0".into(),
+                    digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
+                    workdir: None,
+                    mounts: Vec::new(),
                     integrations: vec!["some-provider".into()],
                     policy_flags: Vec::new(),
                 }),

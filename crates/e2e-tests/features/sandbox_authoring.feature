@@ -10,6 +10,8 @@ Feature: authoring a sandbox definition offline
     Then the exit code is 0
     And the output contains "Created lns.yaml"
     And the project file "lns.yaml" contains "kind: Sandbox"
+    And the project file "lns.yaml" contains "workdir: /workspace"
+    And the project file "lns.yaml" contains "volumes:"
 
   Scenario: init refuses to overwrite an existing lns.yaml
     When I run "lns init" in the project directory

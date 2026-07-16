@@ -65,9 +65,20 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         &self,
         reference: &Reference,
     ) -> Result<(OciImageManifest, String, String)> {
-        // Only digest-pinned references are immutable; caching a tag would freeze it past upstream republishes.
+        // Only digest-pinned references are read from cache; tags always re-resolve so upstream republishes remain visible.
         if reference.digest().is_none() {
-            return self.inner.pull_manifest_and_config(reference).await;
+            let (manifest, manifest_digest, config) =
+                self.inner.pull_manifest_and_config(reference).await?;
+            let pinned = reference.clone_with_digest(manifest_digest.clone()).whole();
+            let entry = CachedManifest {
+                manifest: manifest.clone(),
+                manifest_digest: manifest_digest.clone(),
+                config: config.clone(),
+            };
+            if let Err(e) = self.cache.put(&pinned, &entry) {
+                crate::log::warn!("manifest cache write failed for {pinned} ({e:#}); continuing");
+            }
+            return Ok((manifest, manifest_digest, config));
         }
         let key = reference.whole();
         if let Some(c) = self.cache.get(&key) {
@@ -244,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tag_references_are_never_cached_and_always_re_resolve() {
+    async fn tags_re_resolve_but_cache_the_resolved_digest_for_offline_use() {
         let d = tempfile::tempdir().unwrap();
         let caching = CachingRegistry::new(
             CountingRegistry {
@@ -261,9 +272,12 @@ mod tests {
             2,
             "a mutable tag must re-resolve every pull so upstream republishes are picked up"
         );
+        let pinned = reference
+            .clone_with_digest("sha256:manifest".into())
+            .whole();
         assert!(
-            std::fs::read_dir(d.path()).unwrap().next().is_none(),
-            "no manifest cache file may be written for a tag reference"
+            ManifestCache::new(d.path()).get(&pinned).is_some(),
+            "the immutable result must be cached under its digest for an offline run"
         );
     }
 
@@ -283,6 +297,25 @@ mod tests {
             .pull_manifest_and_config(&reference)
             .await
             .expect("an uncacheable manifest must still pull successfully");
+        assert_eq!(digest, "sha256:manifest");
+    }
+
+    #[tokio::test]
+    async fn a_cache_write_failure_does_not_break_a_tagged_pull() {
+        let d = tempfile::tempdir().unwrap();
+        let blocked = d.path().join("blocked");
+        std::fs::write(&blocked, b"i am a file, not a dir").unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            ManifestCache::new(&blocked),
+        );
+        let reference: Reference = "ghcr.io/x/y:latest".parse().unwrap();
+        let (_, digest, _) = caching
+            .pull_manifest_and_config(&reference)
+            .await
+            .expect("a tagged manifest must still resolve when its cache write fails");
         assert_eq!(digest, "sha256:manifest");
     }
 

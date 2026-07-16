@@ -1,3 +1,4 @@
+pub mod declarative;
 pub mod env_file;
 pub mod host_bind;
 pub mod progress;
