@@ -12,6 +12,14 @@ Feature: declarative workdir and mounts reach a real guest
     And the output contains "bind=readonly"
     And the output contains "volume=mounted"
 
+  Scenario: a declared path fileset is snapshotted into the guest
+    Given the Lens Sandbox service is running
+    And the project declares a fileset directory "skills" containing "prompts.md" mounted at "/opt/agent-skills"
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox cat /opt/agent-skills/prompts.md'"
+    Then the exit code is 0
+    And the output contains "fileset payload"
+    And the run output carries no signature warning
+
   Scenario: a pulled published sandbox launches offline from the consumer project
     Given a local registry
     And the Lens Sandbox service is running

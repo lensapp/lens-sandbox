@@ -118,6 +118,16 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             }
         }
     }
+    if !world.project_filesets.is_empty() {
+        spec_tail.push_str("\n  filesets:");
+        for (dir, file, mount) in &world.project_filesets {
+            let fileset_dir = root.join(dir);
+            std::fs::create_dir_all(&fileset_dir).expect("create fileset dir");
+            std::fs::write(fileset_dir.join(file), "fileset payload\n")
+                .expect("write fileset file");
+            spec_tail.push_str(&format!("\n    - path: ./{dir}\n      mountPath: {mount}"));
+        }
+    }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         pinned_microvm_image()
@@ -785,6 +795,26 @@ fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
 #[given(regex = r"^the project definition declares port (\d+)$")]
 fn project_declares_port(world: &mut E2eWorld, port: u16) {
     world.project_ports.push((None, port));
+}
+
+#[given(
+    regex = r#"^the project declares a fileset directory "([^"]+)" containing "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn project_declares_fileset(world: &mut E2eWorld, dir: String, file: String, mount: String) {
+    world.project_filesets.push((dir, file, mount));
+}
+
+#[then("the run output carries no signature warning")]
+fn no_signature_warning(world: &mut E2eWorld) -> Result<(), String> {
+    let result = world.result.as_ref().ok_or("no run captured")?;
+    let combined = format!("{}\n{}", result.stdout, result.stderr);
+    if combined.to_lowercase().contains("signature") {
+        Err(format!(
+            "a sandbox run must not consult the signature gate, got:\n{combined}"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with no port flags$"#)]

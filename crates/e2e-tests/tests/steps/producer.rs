@@ -111,6 +111,35 @@ async fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
     world.pushed_ref = Some(reference);
 }
 
+#[when("the user pushes a sandbox declaring a path fileset in one step")]
+async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
+    let host = world.registry.as_ref().expect("a registry").host();
+    let reference = format!("{host}/e2e-fileset-sandbox:1");
+    let base = seed_base_image(&host).await;
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-fileset-sandbox\nspec:\n  image: {base}\n  filesets:\n    - path: ./skills\n      mountPath: /opt/agent-skills\n"
+    );
+    let env = cache_env(world);
+    let project = world.home.as_ref().expect("home set by cache_env").path();
+    std::fs::write(project.join("lns.yaml"), definition).expect("write lns.yaml fixture");
+    std::fs::create_dir_all(project.join("skills")).expect("create fileset dir");
+    std::fs::write(project.join("skills/prompts.md"), "fileset payload\n")
+        .expect("write fileset file");
+
+    let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
+    assert_eq!(
+        pushed.exit_code, 0,
+        "lns push must pack the fileset and upload the pinned sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    assert!(
+        pushed.stdout.contains("pushed fileset"),
+        "push must report the packed fileset ref:\n{}",
+        pushed.stdout
+    );
+    world.pushed_ref = Some(reference);
+}
+
 #[then("the registry serves the pushed artifact at its ref")]
 async fn registry_serves_pushed(world: &mut E2eWorld) {
     let reference = world.pushed_ref.clone().expect("a ref was pushed");

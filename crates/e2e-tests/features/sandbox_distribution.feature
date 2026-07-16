@@ -39,6 +39,16 @@ Feature: distributing a sandbox through a registry end to end
     And the output contains "bind . -> /workspace"
     And the output contains "volume e2e-cache -> /home/sandbox/.cache"
 
+  Scenario: a path fileset publishes pinned and discloses on inspect
+    When the user pushes a sandbox declaring a path fileset in one step
+    And I run lns "pull <pushed-ref>" against the service
+    Then the exit code is 0
+    When I run lns "inspect <pushed-ref>" against the service
+    Then the exit code is 0
+    And the output contains "fileset: "
+    And the output contains "@sha256:"
+    And the output contains "/opt/agent-skills"
+
   Scenario: rm removes the cached sandbox
     When I run lns "pull <pushed-ref>" against the service
     And I run lns "rm <pushed-ref>" against the service
