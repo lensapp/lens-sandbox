@@ -4,7 +4,9 @@ use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
-use lns_service::credential_flow::integrations::resolve_applied_integrations;
+use lns_service::credential_flow::integrations::{
+    resolve_applied_integrations, unknown_integration_ids, unknown_integrations_refusal,
+};
 use lns_service::credential_flow::providers::Provider;
 
 use crate::world::BehaviourWorld;
@@ -63,6 +65,16 @@ fn launch(
             return;
         }
     };
+    let declared = resolved
+        .policy
+        .as_ref()
+        .map(|p| p.integrations.clone())
+        .unwrap_or_default();
+    let unknown = unknown_integration_ids(&declared, &rig.catalog);
+    if !unknown.is_empty() {
+        rig.error = Some(unknown_integrations_refusal(&unknown));
+        return;
+    }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
     let applied = resolve_applied_integrations(&policy, &rig.catalog);
     policy
@@ -165,6 +177,53 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
         .expect("a Given step must declare the definition");
     let resolved = lns_artifact::sandbox::parse(definition.as_bytes());
     launch(w, resolved.map(|def| resolved_from_sandbox(&def)));
+}
+
+#[given(regex = r#"^the machine catalog has no integration "([^"]+)"$"#)]
+fn catalog_lacks_integration(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    assert!(
+        rig.catalog.iter().all(|i| i.id != id),
+        "the rig catalog unexpectedly knows {id}"
+    );
+}
+
+#[then("the launch is refused")]
+fn launch_refused(w: &mut BehaviourWorld) -> Result<(), String> {
+    match w.declared.as_ref().and_then(|r| r.error.as_ref()) {
+        Some(_) => Ok(()),
+        None => Err("the launch was not refused".to_string()),
+    }
+}
+
+#[then(regex = r#"^the error names "([^"]+)"$"#)]
+fn error_names(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let error = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.error.as_ref())
+        .ok_or("no launch error was recorded")?;
+    if error.contains(&id) {
+        Ok(())
+    } else {
+        Err(format!("expected the error to name {id}, got: {error}"))
+    }
+}
+
+#[then(regex = r#"^the error points at `lns integration add`$"#)]
+fn error_points_at_add(w: &mut BehaviourWorld) -> Result<(), String> {
+    let error = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.error.as_ref())
+        .ok_or("no launch error was recorded")?;
+    if error.contains("`lns integration add`") {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the error to point at `lns integration add`, got: {error}"
+        ))
+    }
 }
 
 #[then(regex = r#"^the workload's environment contains the "([^"]+)" placeholder$"#)]

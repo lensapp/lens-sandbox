@@ -106,6 +106,29 @@ pub(crate) fn plan_local(definition_json: &str) -> Result<BundlePlan> {
     })
 }
 
+/// Refuse a launch whose definition declares an integration this machine's catalog cannot arm — fail-fast at boot instead of an opaque mid-run credential miss.
+pub(crate) fn refuse_unknown_integrations(policy: Option<&lns_policy::Policy>) -> Result<()> {
+    let declared = match policy {
+        Some(p) if !p.integrations.is_empty() => &p.integrations,
+        _ => return Ok(()),
+    };
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_else(|e| {
+        crate::log::warn!(
+            "unreadable user integration catalog ({e}); using the bundled catalog only"
+        );
+        lns_policy::integrations::Catalog::default()
+    });
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let unknown = crate::credential_flow::integrations::unknown_integration_ids(declared, &catalog);
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(crate::credential_flow::integrations::unknown_integrations_refusal(&unknown))
+}
+
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the bundle's filesets land in the microVM at their mount paths.
 async fn materialize_filesets(resolved: &ResolvedBundle) -> Result<Vec<RuntimeFileSpec>> {
     let mut specs = Vec::new();

@@ -56,7 +56,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     Then the allow rule is written to the directory's lns-policy.yaml
     And the sandbox definition is not modified
 
-  @todo
   Scenario: An unknown declared integration refuses the launch
     Given the sandbox definition declares integration "some-unknown"
     And the machine catalog has no integration "some-unknown"

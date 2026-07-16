@@ -93,6 +93,9 @@ async fn orchestrate(
         }
         (None, None) => None,
     };
+    if let Some(plan) = &bundle {
+        crate::artifact::real::refuse_unknown_integrations(plan.workload.policy.as_ref())?;
+    }
     let launch = bundle
         .as_ref()
         .map(|plan| super::bundle_launch(&plan.workload, &args.cmd, &args.env));

@@ -69,6 +69,29 @@ pub fn applied_integration_routes(ids: &[String], catalog: &[Integration]) -> Ve
         .collect()
 }
 
+/// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-policy.yaml` id which stays a tolerant skip.
+pub fn unknown_integration_ids(declared: &[String], catalog: &[Integration]) -> Vec<String> {
+    let known: HashSet<&str> = catalog.iter().map(|i| i.id.as_str()).collect();
+    declared
+        .iter()
+        .filter(|id| !known.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// The launch-refusal message for definition-declared ids missing from the machine catalog, pointing at `lns integration add`.
+pub fn unknown_integrations_refusal(unknown: &[String]) -> String {
+    let ids = unknown
+        .iter()
+        .map(|id| format!("\"{id}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "the sandbox definition declares integration {ids} which this machine's catalog does not know; \
+         declare it with `lns integration add`, or remove it from spec.integrations"
+    )
+}
+
 /// Resolves the policy's applied integration ids against the effective catalog.
 pub fn resolve_applied_integrations(
     policy: &Policy,
@@ -176,6 +199,33 @@ mod tests {
         assert_eq!(out.routes.len(), 1);
         assert_eq!(out.routes[0].match_pattern, "gitlab.com");
         assert_eq!(out.routes[0].verdict, lns_policy::Verdict::Allow);
+    }
+
+    #[test]
+    fn unknown_integration_ids_reports_only_ids_the_catalog_lacks_in_order() {
+        let catalog = vec![cred_integration(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let declared = vec![
+            "some-unknown".to_string(),
+            "some-provider".to_string(),
+            "other-unknown".to_string(),
+        ];
+        assert_eq!(
+            unknown_integration_ids(&declared, &catalog),
+            vec!["some-unknown".to_string(), "other-unknown".to_string()]
+        );
+        assert!(unknown_integration_ids(&["some-provider".to_string()], &catalog).is_empty());
+    }
+
+    #[test]
+    fn unknown_integrations_refusal_names_each_id_and_lns_integration_add() {
+        let msg = unknown_integrations_refusal(&["some-unknown".to_string(), "other".to_string()]);
+        assert!(msg.contains("\"some-unknown\""), "got: {msg}");
+        assert!(msg.contains("\"other\""), "got: {msg}");
+        assert!(msg.contains("`lns integration add`"), "got: {msg}");
     }
 
     #[test]
