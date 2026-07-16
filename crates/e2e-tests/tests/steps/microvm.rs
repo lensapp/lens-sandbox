@@ -103,11 +103,11 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         pinned_microvm_image()
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
-    std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/lns-policy.yaml"),
+    std::fs::write(
         root.join("lns-policy.yaml"),
+        "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
     )
-    .expect("copy the e2e policy into the project");
+    .expect("write the project policy");
     root
 }
 

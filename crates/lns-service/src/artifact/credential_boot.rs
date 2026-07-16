@@ -212,6 +212,33 @@ mod tests {
     }
 
     #[test]
+    fn a_blockless_catalog_entry_arms_as_a_no_op_instead_of_blocking() {
+        let catalog = vec![Integration {
+            id: "some-blockless".into(),
+            name: None,
+            auth_kind: AuthKind::Credential,
+            routes: Vec::new(),
+            credential: None,
+            oauth: None,
+            token_fallback: None,
+        }];
+        let plans = plan_declared_integrations(
+            &["some-blockless".to_string()],
+            &catalog,
+            &CredentialStateFile::new(),
+        );
+        assert_eq!(
+            plans,
+            vec![SlotPlan::Armed {
+                env: String::new(),
+                placeholder: String::new(),
+            }],
+            "an entry the catalog validator would refuse must never block a boot"
+        );
+        assert_eq!(boot_gate(&plans), BootGate::StartWorkload);
+    }
+
+    #[test]
     fn an_id_the_catalog_lacks_is_skipped_by_the_gate() {
         let plans = plan_declared_integrations(
             &["some-unknown".to_string()],
