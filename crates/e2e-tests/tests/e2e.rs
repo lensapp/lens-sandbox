@@ -26,6 +26,8 @@ pub struct E2eWorld {
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,
     pub project_integrations: Vec<String>,
+    pub project_command: Option<String>,
+    pub project_env: Vec<(String, String)>,
 }
 
 impl E2eWorld {

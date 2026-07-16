@@ -82,18 +82,24 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         .project
         .get_or_insert_with(|| tempfile::TempDir::new().expect("project tempdir"));
     let root = dir.path().to_path_buf();
-    let integrations = if world.project_integrations.is_empty() {
-        String::new()
-    } else {
-        let ids: String = world
-            .project_integrations
-            .iter()
-            .map(|id| format!("\n    - {id}"))
-            .collect();
-        format!("\n  integrations:{ids}")
-    };
+    let mut spec_tail = String::new();
+    if let Some(command) = &world.project_command {
+        spec_tail.push_str(&format!("\n  command: {command}"));
+    }
+    if !world.project_env.is_empty() {
+        spec_tail.push_str("\n  env:");
+        for (key, value) in &world.project_env {
+            spec_tail.push_str(&format!("\n    {key}: {value}"));
+        }
+    }
+    if !world.project_integrations.is_empty() {
+        spec_tail.push_str("\n  integrations:");
+        for id in &world.project_integrations {
+            spec_tail.push_str(&format!("\n    - {id}"));
+        }
+    }
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{integrations}\n",
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         pinned_microvm_image()
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
@@ -194,6 +200,36 @@ fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
 #[given(regex = r#"^the project definition declares integration "([^"]+)"$"#)]
 fn project_declares_integration(world: &mut E2eWorld, id: String) {
     world.project_integrations.push(id);
+}
+
+#[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]
+fn project_sets_command(world: &mut E2eWorld, command: String) {
+    world.project_command = Some(command);
+}
+
+#[given(regex = r#"^the project definition sets env "([^"]+)=([^"]*)"$"#)]
+fn project_sets_env(world: &mut E2eWorld, key: String, value: String) {
+    world.project_env.push((key, value));
+}
+
+#[given(
+    regex = r#"^the home's integration catalog declares an oauth integration "([^"]+)" signing in at "([^"]+)"$"#
+)]
+fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home before writing a catalog");
+    let catalog = format!(
+        "integrations:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
+    );
+    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
+        .expect("write the user integration catalog");
+}
+
+#[when("the user runs the sandbox definition")]
+fn run_definition_only(world: &mut E2eWorld) {
+    run_lns_microvm(world, vec![]);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)"$"#)]
