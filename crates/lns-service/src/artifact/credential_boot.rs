@@ -103,6 +103,21 @@ pub fn resolve_connect(prompt: &ConnectPrompt, choice: ConnectChoice) -> SlotOut
     }
 }
 
+/// The ids the sign-in gate plans: the definition's declared integrations plus its required credential slots, deduplicated in declaration order.
+pub fn sign_in_gate_ids(
+    policy: Option<&lns_policy::Policy>,
+    slots: &[CredentialSlot],
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    policy
+        .map(|p| p.integrations.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(slots.iter().filter(|s| s.required).map(|s| s.name.clone()))
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequiredSlotFailure {
     Unbound { integration: String, env: String },
@@ -384,6 +399,45 @@ mod tests {
         lns_policy::credentials::CredentialEntry::Stored {
             value: value.into(),
         }
+    }
+
+    #[test]
+    fn sign_in_gate_ids_unions_declared_integrations_with_required_slots_once_each() {
+        let policy = lns_policy::Policy {
+            integrations: vec!["some-provider".into(), "some-oauth".into()],
+            ..lns_policy::Policy::default()
+        };
+        let slots = vec![
+            CredentialSlot {
+                name: "some-oauth".into(),
+                env: "SOME_OAUTH_TOKEN".into(),
+                required: true,
+            },
+            CredentialSlot {
+                name: "other-provider".into(),
+                env: "OTHER_TOKEN".into(),
+                required: true,
+            },
+            CredentialSlot {
+                name: "optional-provider".into(),
+                env: "OPTIONAL_TOKEN".into(),
+                required: false,
+            },
+        ];
+        assert_eq!(
+            sign_in_gate_ids(Some(&policy), &slots),
+            vec![
+                "some-provider".to_string(),
+                "some-oauth".to_string(),
+                "other-provider".to_string(),
+            ],
+            "required slots join once; an optional slot never blocks a sign-in"
+        );
+        assert_eq!(
+            sign_in_gate_ids(None, &slots),
+            vec!["some-oauth".to_string(), "other-provider".to_string()]
+        );
+        assert!(sign_in_gate_ids(None, &[]).is_empty());
     }
 
     #[test]

@@ -99,7 +99,12 @@ async fn orchestrate(
             &plan.workload.credentials,
         )?;
         crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
-        gate_declared_sign_ins(plan.workload.policy.as_ref(), &frame_tx).await?;
+        gate_declared_sign_ins(
+            plan.workload.policy.as_ref(),
+            &plan.workload.credentials,
+            &frame_tx,
+        )
+        .await?;
     }
     let launch = bundle
         .as_ref()
@@ -440,21 +445,23 @@ async fn orchestrate(
     Ok(session_code)
 }
 
-/// Block the boot on any definition-declared oauth integration with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete.
+/// Block the boot on any definition-declared oauth integration — under `spec.integrations` or a required credential slot — with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete.
 async fn gate_declared_sign_ins(
     policy: Option<&lns_policy::Policy>,
+    credentials: &[lns_artifact::spec::CredentialSlot],
     frame_tx: &Sender<WireFrame>,
 ) -> Result<()> {
     use crate::artifact::credential_boot::{
         BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+        sign_in_gate_ids,
     };
     use crate::credential_flow::store::{
         CredentialStore, JsonFileCredentialStore, default_credentials_path,
     };
     use lns_ipc::Response;
 
-    let Some(policy) = policy else { return Ok(()) };
-    if policy.integrations.is_empty() {
+    let declared = sign_in_gate_ids(policy, credentials);
+    if declared.is_empty() {
         return Ok(());
     }
     let user = lns_policy::integrations::Catalog::load_or_default(
@@ -465,7 +472,7 @@ async fn gate_declared_sign_ins(
     let state = JsonFileCredentialStore::new(default_credentials_path())
         .load()
         .unwrap_or_default();
-    let plans = plan_declared_integrations(&policy.integrations, &catalog, &state);
+    let plans = plan_declared_integrations(&declared, &catalog, &state);
     if boot_gate(&plans) == BootGate::StartWorkload {
         return Ok(());
     }

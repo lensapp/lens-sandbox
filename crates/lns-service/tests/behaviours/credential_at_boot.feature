@@ -67,7 +67,6 @@ Feature: a sandbox definition's credential slots gate the launch
     Then the workload sees only a placeholder in "SOME_TOKEN"
     And the real value is substituted at the boundary
 
-  @todo
   Scenario: A required oauth-kind slot blocks on the sign-in gate instead of refusing
     Given the machine catalog has an oauth integration "some-oauth"
     And the sandbox definition requires a credential slot for "some-oauth" injected as "SOME_OAUTH_TOKEN"

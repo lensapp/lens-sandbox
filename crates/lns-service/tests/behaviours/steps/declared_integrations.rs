@@ -7,7 +7,7 @@ use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
     BootGate, ConnectChoice, SlotPlan, boot_gate, gate_required_slots, plan_declared_integrations,
-    resolve_connect,
+    resolve_connect, sign_in_gate_ids,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
@@ -87,7 +87,11 @@ fn launch(
         rig.error = Some(failure.as_message());
         return;
     }
-    let plans = plan_declared_integrations(&declared, &rig.catalog, &rig.store);
+    let plans = plan_declared_integrations(
+        &sign_in_gate_ids(resolved.policy.as_ref(), &resolved.credentials),
+        &rig.catalog,
+        &rig.store,
+    );
     if boot_gate(&plans) == BootGate::AwaitConnect {
         rig.pending = plans.into_iter().find_map(|plan| match plan {
             SlotPlan::Connect(prompt) => Some(prompt),
