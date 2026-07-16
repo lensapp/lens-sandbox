@@ -1,10 +1,9 @@
 Feature: inspecting a typed artifact before running it
-  `lns inspect <ref>` is the type-aware, pre-run view of a cached sandbox: it
-  names the kind, and for an AgentSystem bundle it lists what the bundle
-  composes — the base image, the filesets with their mount paths, the policy,
-  and the integrations — plus the signature and trust status, and it flags an
-  over-broad shipped policy. It lets a consumer review the pieces before
-  trusting a configured sandbox.
+  `lns inspect <ref>` is the type-aware, pre-run view of a cached artifact: it
+  names the kind, and for a published sandbox it lists the base image, declared
+  mounts, ports, and filesets with their mount paths, plus the integrations, and
+  it flags an over-broad shipped policy. It lets a consumer review the pieces
+  before trusting a configured sandbox.
 
   Scenario: inspect is discoverable in the front-page help
     When I run "lns inspect --help"
@@ -38,34 +37,8 @@ Feature: inspecting a typed artifact before running it
     And the output contains "fileset"
     And the output contains "/root/.agent/skills"
 
-  Scenario: inspecting a bundle lists what it composes
-    Given the service inspects "some-registry.example/some-agent:research" as a bundle composing:
-      | sandbox base | registry.example.test/base:1                    |
-      | fileset      | settings -> /root/.some-agent/settings.json     |
-      | fileset      | deep-research -> /root/.some-agent/skills/deep  |
-      | integration  | some-provider                                   |
-    When the user runs "lns inspect some-registry.example/some-agent:research"
-    Then the exit code is 0
-    And the output contains "AgentSystem"
-    And the output contains "registry.example.test/base:1"
-    And the output contains "/root/.some-agent/settings.json"
-    And the output contains "some-provider"
-
-  Scenario: inspecting a signed bundle reports the trust status
-    Given the service inspects "some-registry.example/some-agent:research" as a bundle signed by a trusted key
-    When the user runs "lns inspect some-registry.example/some-agent:research"
-    Then the exit code is 0
-    And the output contains "signed"
-    And the output contains "trusted"
-
-  Scenario: inspecting a bundle with a permissive defaultVerdict flags it
-    Given the service inspects "some-registry.example/some-agent:research" as a bundle whose policy defaults to allow
-    When the user runs "lns inspect some-registry.example/some-agent:research"
-    Then the exit code is 0
-    And the output contains "defaultVerdict: allow"
-
-  Scenario: inspecting a bundle names the host that needs a login
+  Scenario: inspecting names the host that needs a login
     Given the service reports "inspect" needs a login for host "other-registry.example.test"
-    When the user runs "lns inspect some-registry.example/some-agent:research"
+    When the user runs "lns inspect some-registry.example/some-sandbox:research"
     Then the exit code is 1
     And the output contains "other-registry.example.test"

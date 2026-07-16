@@ -254,7 +254,6 @@ pub struct ImageInfo {
 #[serde(tag = "kind")]
 pub enum ArtifactInspection {
     Image(ImageView),
-    Bundle(BundleView),
     Sandbox(SandboxView),
 }
 
@@ -313,29 +312,6 @@ pub struct SandboxMount {
     pub source: String,
     pub target: String,
     pub read_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BundleView {
-    pub reference: String,
-    pub sandbox_base_image: Option<String>,
-    pub filesets: Vec<FilesetView>,
-    pub integrations: Vec<String>,
-    pub signature: SignatureView,
-    pub policy_flags: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FilesetView {
-    pub name: String,
-    pub mount_path: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SignatureView {
-    Unsigned,
-    SignedTrusted,
-    SignedUntrusted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,7 +419,7 @@ pub struct RunImageArgs {
     pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
-    /// True when the user set `--cpus`/`-m` explicitly, so a bundle's Sandbox size can't silently override an explicit request that happens to equal the built-in default.
+    /// True when the user set `--cpus`/`-m` explicitly, so a published sandbox's size can't silently override an explicit request that happens to equal the built-in default.
     #[serde(default)]
     pub cpus_explicit: bool,
     #[serde(default)]
@@ -479,40 +455,12 @@ pub struct RunImageArgs {
     pub binds: Vec<BindMount>,
     #[serde(default)]
     pub auto_remove: bool,
-    #[serde(default)]
-    pub with: Vec<WithOverride>,
-    #[serde(default)]
-    pub insecure: bool,
     /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
     #[serde(default)]
     pub verify_sandbox: bool,
     /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, integrations, and resources apply.
     #[serde(default)]
     pub definition: Option<String>,
-}
-
-/// A launch-time `--with` component override, addressed by OCI reference; its mount path comes from the referenced FileSet's manifest at resolve time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WithOverride {
-    pub reference: String,
-}
-
-impl WithOverride {
-    /// Parse a `--with <component-ref>` flag value.
-    pub fn parse(spec: &str) -> Result<Self, String> {
-        let reference = spec.trim();
-        if reference.is_empty() {
-            return Err("invalid --with: empty component reference".to_string());
-        }
-        if reference.split_whitespace().count() != 1 {
-            return Err(format!(
-                "invalid --with {spec:?}: a component reference has no spaces"
-            ));
-        }
-        Ok(Self {
-            reference: reference.to_string(),
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -815,8 +763,6 @@ mod tests {
             volumes: Vec::new(),
             binds: Vec::new(),
             auto_remove: false,
-            with: Vec::new(),
-            insecure: false,
             verify_sandbox: false,
             definition: None,
         }));
@@ -862,8 +808,6 @@ mod tests {
                 kept_paths: vec![".npmrc".into()],
             }],
             auto_remove: false,
-            with: Vec::new(),
-            insecure: false,
             verify_sandbox: false,
             definition: None,
         };
@@ -997,8 +941,6 @@ mod tests {
                 kept_paths: vec![],
             }],
             auto_remove: true,
-            with: Vec::new(),
-            insecure: false,
             verify_sandbox: false,
             definition: Some(r#"{"kind":"Sandbox"}"#.into()),
         }
@@ -1409,26 +1351,6 @@ mod tests {
     fn volume_mount_parse_honors_ro_and_rw_suffixes() {
         assert!(VolumeMount::parse("v:/data:ro").unwrap().read_only);
         assert!(!VolumeMount::parse("v:/data:rw").unwrap().read_only);
-    }
-
-    #[test]
-    fn with_override_parse_takes_a_component_reference() {
-        assert_eq!(
-            WithOverride::parse("some-registry.example/skills/deep@sha256:abcd").unwrap(),
-            WithOverride {
-                reference: "some-registry.example/skills/deep@sha256:abcd".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn with_override_parse_rejects_an_empty_or_spaced_reference() {
-        assert!(WithOverride::parse("   ").unwrap_err().contains("empty"));
-        assert!(
-            WithOverride::parse("reg/a reg/b")
-                .unwrap_err()
-                .contains("no spaces")
-        );
     }
 
     #[test]

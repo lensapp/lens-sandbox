@@ -745,7 +745,6 @@ fn render_cached_inspect<W: std::io::Write>(
             writeln!(out, "reference: {}", view.reference)?;
             writeln!(out, "digest: {}", view.digest)?;
         }
-        lns_ipc::ArtifactInspection::Bundle(view) => render_bundle(out, view)?,
     }
     Ok(())
 }
@@ -761,24 +760,6 @@ fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
         .join(", ")
 }
 
-fn render_bundle<W: std::io::Write>(out: &mut W, view: &lns_ipc::BundleView) -> Result<()> {
-    writeln!(out, "kind: AgentSystem")?;
-    writeln!(out, "reference: {}", view.reference)?;
-    if let Some(base) = &view.sandbox_base_image {
-        writeln!(out, "image: {base}")?;
-    }
-    if !view.filesets.is_empty() {
-        writeln!(out, "filesets:")?;
-        for fileset in &view.filesets {
-            writeln!(out, "  {} -> {}", fileset.name, fileset.mount_path)?;
-        }
-    }
-    render_integrations(out, &view.integrations)?;
-    writeln!(out, "signature: {}", signature_label(view.signature))?;
-    render_policy_flags(out, &view.policy_flags)?;
-    Ok(())
-}
-
 fn render_integrations<W: std::io::Write>(out: &mut W, integrations: &[String]) -> Result<()> {
     for id in integrations {
         writeln!(out, "integration: {id}")?;
@@ -791,14 +772,6 @@ fn render_policy_flags<W: std::io::Write>(out: &mut W, flags: &[String]) -> Resu
         writeln!(out, "⚠ {flag}")?;
     }
     Ok(())
-}
-
-fn signature_label(signature: lns_ipc::SignatureView) -> &'static str {
-    match signature {
-        lns_ipc::SignatureView::Unsigned => "unsigned",
-        lns_ipc::SignatureView::SignedTrusted => "signed (trusted)",
-        lns_ipc::SignatureView::SignedUntrusted => "signed (untrusted signer)",
-    }
 }
 
 fn policy_doc(path: &str, loaded: Option<serde_json::Value>) -> serde_json::Value {
@@ -1512,45 +1485,6 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
-
-        let bundle = CannedService::with_inspect_image(
-            Response::Error {
-                message: "not running".into(),
-            },
-            Response::ImageInspected {
-                inspection: lns_ipc::ArtifactInspection::Bundle(lns_ipc::BundleView {
-                    reference: "team/system:1".into(),
-                    sandbox_base_image: Some("ghcr.io/team/base:1".into()),
-                    filesets: vec![lns_ipc::FilesetView {
-                        name: "settings".into(),
-                        mount_path: "/root/.agent/settings.json".into(),
-                    }],
-                    integrations: vec!["some-provider".into()],
-                    signature: lns_ipc::SignatureView::SignedUntrusted,
-                    policy_flags: vec!["permissive defaultVerdict: allow".into()],
-                }),
-            },
-        );
-        let mut out = Vec::new();
-        inspect(&bundle, &SandboxInspectArgs { run: "x".into() }, &mut out)
-            .await
-            .unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("kind: AgentSystem"), "got: {text}");
-        assert!(text.contains("image: ghcr.io/team/base:1"), "got: {text}");
-        assert!(
-            text.contains("settings -> /root/.agent/settings.json"),
-            "got: {text}"
-        );
-        assert!(text.contains("integration: some-provider"), "got: {text}");
-        assert!(
-            text.contains("signature: signed (untrusted signer)"),
-            "got: {text}"
-        );
-        assert!(
-            text.contains("⚠ permissive defaultVerdict: allow"),
-            "got: {text}"
-        );
     }
 
     #[tokio::test]

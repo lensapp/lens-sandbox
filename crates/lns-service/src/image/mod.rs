@@ -1127,7 +1127,9 @@ mod tests {
         img.manifest.config.media_type = "application/vnd.lens.sandbox.config.v1+json".into();
         let registry = img.into_registry();
         let (_dir, cache) = cache();
-        let pulled = pull_inner(&registry, "reg/sandbox:1", &cache).await.unwrap();
+        let pulled = pull_inner(&registry, "reg/sandbox:1", &cache)
+            .await
+            .unwrap();
         assert_eq!(
             pulled.artifact_type.as_deref(),
             Some("application/vnd.lens.sandbox.v1+json"),

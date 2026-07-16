@@ -137,11 +137,6 @@ fn published_target(
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
             })
         }
-        lns_ipc::ArtifactInspection::Bundle(_) => Ok(PublishedTarget {
-            image: reference.to_string(),
-            defaults: crate::run::declarative::Defaults::default(),
-            filesets: Vec::new(),
-        }),
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
             "{reference} is not a sandbox; run `lns init` to author an lns.yaml, or pass a published sandbox reference"
         ),
@@ -285,8 +280,6 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
         volumes,
         binds,
         auto_remove: args.auto_remove,
-        with: Vec::new(),
-        insecure: false,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),
     }));
@@ -1109,24 +1102,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("no manifest digest"));
-    }
-
-    #[test]
-    fn published_preflight_keeps_agent_system_bundles_compatible() {
-        let target = published_target(
-            "registry.example.test/team/system:1",
-            lns_ipc::ArtifactInspection::Bundle(lns_ipc::BundleView {
-                reference: "registry.example.test/team/system:1".into(),
-                sandbox_base_image: None,
-                filesets: Vec::new(),
-                integrations: Vec::new(),
-                signature: lns_ipc::SignatureView::Unsigned,
-                policy_flags: Vec::new(),
-            }),
-        )
-        .unwrap();
-        assert_eq!(target.image, "registry.example.test/team/system:1");
-        assert!(target.defaults.mounts.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

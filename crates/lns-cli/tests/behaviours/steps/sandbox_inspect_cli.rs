@@ -1,9 +1,8 @@
 use crate::world::BehaviourWorld;
-use cucumber::gherkin::Step;
 use cucumber::given;
 use lns_ipc::{
-    ArtifactInspection, BundleView, FilesetView, ImageView, Response, SandboxMount,
-    SandboxMountKind, SandboxPort, SandboxView, SignatureView,
+    ArtifactInspection, ImageView, Response, SandboxMount, SandboxMountKind, SandboxPort,
+    SandboxView,
 };
 
 fn full_digest() -> String {
@@ -19,17 +18,6 @@ fn not_running(reference: &str) -> Response {
 fn cached_artifact(world: &mut BehaviourWorld, reference: &str, inspection: ArtifactInspection) {
     world.sandbox.response = Some(not_running(reference));
     world.sandbox.inspect_image_response = Some(Response::ImageInspected { inspection });
-}
-
-fn empty_bundle(reference: &str) -> BundleView {
-    BundleView {
-        reference: reference.to_string(),
-        sandbox_base_image: None,
-        filesets: Vec::new(),
-        integrations: Vec::new(),
-        signature: SignatureView::Unsigned,
-        policy_flags: Vec::new(),
-    }
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a plain image$"#)]
@@ -122,51 +110,10 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
     cached_artifact(world, &reference, inspection);
 }
 
-#[given(regex = r#"^the service inspects "([^"]+)" as a bundle composing:$"#)]
-fn inspects_bundle_composing(world: &mut BehaviourWorld, step: &Step, reference: String) {
-    let mut bundle = empty_bundle(&reference);
-    let rows = &step.table().expect("the composing step needs a table").rows;
-    for row in rows {
-        let kind = row[0].trim();
-        let value = row[1].trim();
-        match kind {
-            "sandbox base" => bundle.sandbox_base_image = Some(value.to_string()),
-            "fileset" => {
-                let (name, mount) = value
-                    .split_once("->")
-                    .expect("a fileset row reads `name -> mount`");
-                bundle.filesets.push(FilesetView {
-                    name: name.trim().to_string(),
-                    mount_path: mount.trim().to_string(),
-                });
-            }
-            "integration" => bundle.integrations.push(value.to_string()),
-            other => panic!("unknown composing row kind {other:?}"),
-        }
-    }
-    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
-}
-
-#[given(regex = r#"^the service inspects "([^"]+)" as a bundle signed by a trusted key$"#)]
-fn inspects_signed_bundle(world: &mut BehaviourWorld, reference: String) {
-    let mut bundle = empty_bundle(&reference);
-    bundle.signature = SignatureView::SignedTrusted;
-    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
-}
-
-#[given(regex = r#"^the service inspects "([^"]+)" as a bundle whose policy defaults to allow$"#)]
-fn inspects_permissive_bundle(world: &mut BehaviourWorld, reference: String) {
-    let mut bundle = empty_bundle(&reference);
-    bundle
-        .policy_flags
-        .push("permissive defaultVerdict: allow — the sandbox is open by default".to_string());
-    cached_artifact(world, &reference, ArtifactInspection::Bundle(bundle));
-}
-
 #[given(regex = r#"^the service reports "inspect" needs a login for host "([^"]+)"$"#)]
 fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
-    world.sandbox.response = Some(not_running("some-registry.example/some-agent:research"));
+    world.sandbox.response = Some(not_running("some-registry.example/some-sandbox:research"));
     world.sandbox.inspect_image_response = Some(Response::Error {
-        message: format!("inspecting the bundle needs a login for {host}: run `lns login {host}`"),
+        message: format!("inspecting the sandbox needs a login for {host}: run `lns login {host}`"),
     });
 }
