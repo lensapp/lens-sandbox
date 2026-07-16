@@ -272,4 +272,49 @@ mod tests {
         assert_eq!(outcome, SlotOutcome::Connected);
         assert!(outcome.starts_workload());
     }
+
+    #[test]
+    fn a_bound_slot_arms_under_its_env_without_a_prompt() {
+        let plan = plan_slot(
+            &slot(true),
+            Some(Binding {
+                placeholder: "some-provider-LNSPLACEHOLDER0000".into(),
+            }),
+        );
+        assert_eq!(
+            plan,
+            SlotPlan::Armed {
+                env: "SOME_TOKEN".into(),
+                placeholder: "some-provider-LNSPLACEHOLDER0000".into(),
+            }
+        );
+        assert_eq!(
+            boot_gate(std::slice::from_ref(&plan)),
+            BootGate::StartWorkload
+        );
+    }
+
+    #[test]
+    fn declining_a_required_slot_aborts_the_launch() {
+        let prompt = ConnectPrompt {
+            integration: "some-provider".into(),
+            env: "SOME_TOKEN".into(),
+            required: true,
+        };
+        let outcome = resolve_connect(&prompt, ConnectChoice::Decline);
+        assert_eq!(outcome, SlotOutcome::AbortLaunch);
+        assert!(!outcome.starts_workload());
+    }
+
+    #[test]
+    fn declining_an_optional_slot_proceeds_with_the_slot_unbound() {
+        let prompt = ConnectPrompt {
+            integration: "some-provider".into(),
+            env: "SOME_TOKEN".into(),
+            required: false,
+        };
+        let outcome = resolve_connect(&prompt, ConnectChoice::Decline);
+        assert_eq!(outcome, SlotOutcome::LeftUnbound);
+        assert!(outcome.starts_workload());
+    }
 }

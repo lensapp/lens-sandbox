@@ -553,3 +553,15 @@ fn env_seeds_each_once(
     }
     Ok(())
 }
+
+#[then("the launch is aborted")]
+fn launch_aborted(w: &mut BehaviourWorld) {
+    let rig = w.declared.as_ref().expect("a launch happened");
+    assert!(rig.aborted, "the launch was not aborted");
+}
+
+#[then("the workload never starts")]
+fn workload_never_starts(w: &mut BehaviourWorld) {
+    let rig = w.declared.as_ref().expect("a launch happened");
+    assert!(rig.running_policy.is_none(), "the workload started");
+}
