@@ -341,6 +341,114 @@ fn workload_starts_with_placeholder(w: &mut BehaviourWorld, id: String) -> Resul
     Ok(())
 }
 
+#[given(regex = r#"^a launched sandbox whose definition declares integration "([^"]+)"$"#)]
+fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
+    {
+        let rig = w.declared.get_or_insert_with(Default::default);
+        rig.catalog
+            .push(credential_integration(&id, "SOME_TOKEN", None));
+        rig.definition = Some(definition_declaring(&[&id]));
+        rig.definition_snapshot = rig.definition.clone();
+    }
+    relaunch(w);
+    let rig = w.declared.as_ref().expect("relaunch built the rig");
+    assert!(
+        rig.running_policy.is_some(),
+        "the declared launch must arm and start; error: {:?}",
+        rig.error
+    );
+    w.credential();
+    w.approval();
+}
+
+#[given(regex = r#"^the directory's lns-policy.yaml denies "([^"]+)"$"#)]
+fn overlay_denies(w: &mut BehaviourWorld, host: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.overlay
+        .network
+        .allowed_routes
+        .push(lns_policy::RouteRule::deny_host(host));
+}
+
+#[when(regex = r#"^the developer approves a new destination "([^"]+)" with "always allow"$"#)]
+fn developer_approves_destination(w: &mut BehaviourWorld, host: String) {
+    use lns_service::approval_flow::protocol::{Decision, RequestPending};
+    let rig = w.approval();
+    rig.session.submit_pending(
+        RequestPending {
+            id: format!("req-{host}"),
+            host: host.clone(),
+            action: format!("CONNECT {host}:443"),
+            reason: "policy-ambiguous".into(),
+        },
+        std::time::Instant::now(),
+    );
+    let id = rig
+        .notifier
+        .presented
+        .lock()
+        .unwrap()
+        .last()
+        .expect("the approval card must be visible")
+        .id
+        .clone();
+    rig.session.record_decision(&id, Decision::AllowAlways);
+}
+
+#[then(regex = r#"^a workload request to "([^"]+)" is denied by policy$"#)]
+fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
+    let policy = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.running_policy.as_ref())
+        .ok_or("no running policy was produced")?;
+    // The guest gate is first-match-wins; the merged policy must present the deny before the integration's allow.
+    let verdict = policy
+        .network
+        .allowed_routes
+        .iter()
+        .find(|r| r.match_pattern == host)
+        .map(|r| r.verdict)
+        .unwrap_or(policy.network.default_verdict);
+    if verdict == Verdict::Deny {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {host} to be denied, first match gave {verdict:?}; routes: {:?}",
+            policy.network.allowed_routes
+        ))
+    }
+}
+
+#[then("the allow rule is written to the directory's lns-policy.yaml")]
+fn allow_rule_written_to_policy_file(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.approval();
+    let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
+    let has_allow = on_disk
+        .network
+        .allowed_routes
+        .iter()
+        .any(|r| r.verdict == Verdict::Allow);
+    if has_allow {
+        Ok(())
+    } else {
+        Err(format!(
+            "no allow rule landed in {}: {:?}",
+            rig.policy_path.display(),
+            on_disk.network.allowed_routes
+        ))
+    }
+}
+
+#[then("the sandbox definition is not modified")]
+fn definition_not_modified(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no declared launch happened")?;
+    match (&rig.definition, &rig.definition_snapshot) {
+        (Some(now), Some(then)) if now == then => Ok(()),
+        (now, then) => Err(format!("the definition changed: was {then:?}, now {now:?}")),
+    }
+}
+
 #[given(regex = r#"^the machine catalog has no integration "([^"]+)"$"#)]
 fn catalog_lacks_integration(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);

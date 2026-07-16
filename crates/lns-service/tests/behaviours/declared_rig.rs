@@ -17,4 +17,6 @@ pub struct DeclaredRig {
     pub pending: Option<ConnectPrompt>,
     pub aborted: bool,
     pub error: Option<String>,
+    /// The definition bytes as authored, for pinning that nothing writes back to it.
+    pub definition_snapshot: Option<String>,
 }

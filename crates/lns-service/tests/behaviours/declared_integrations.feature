@@ -26,7 +26,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     When the published sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
 
-  @todo
   Scenario: First placeholder use still pauses for the per-machine value decision
     Given a launched sandbox whose definition declares integration "some-provider"
     And no credential rule exists in "~/.lns-credentials.json" for "some-provider"
@@ -41,7 +40,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     When the sandbox is launched
     Then the workload's environment seeds "some-provider" and "other-provider" each exactly once
 
-  @todo
   Scenario: A local deny still dominates a declared integration's route
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares integration "some-provider"
@@ -49,7 +47,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     When the sandbox is launched
     Then a workload request to "api.some-provider.example" is denied by policy
 
-  @todo
   Scenario: Approvals persist to the directory policy, never to the definition
     Given a launched sandbox whose definition declares integration "some-provider"
     When the developer approves a new destination "api.example.test" with "always allow"
