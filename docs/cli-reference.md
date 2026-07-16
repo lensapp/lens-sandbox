@@ -274,8 +274,10 @@ lns policy remove <PATTERN>
 ## `lns integration`
 
 Manage the credential-integration catalog — the services whose credentials reach a
-workload. The catalog is machine-global (`~/.lns-integrations.yaml`); connecting one
-records it under `integrations:` in a directory's `lns-policy.yaml`.
+workload. The catalog is machine-global (`~/.lns-integrations.yaml`). An integration
+declared in a sandbox definition's `spec.integrations` arms at launch with no
+further setup; connecting one records it under `integrations:` in a directory's
+`lns-policy.yaml` for directories without a definition.
 
 ```bash
 lns integration add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
@@ -290,7 +292,7 @@ lns integration disconnect <ID> [--policy <PATH>]
 | `add`        | Declare a credential integration in your machine-global catalog.              |
 | `list`       | List the bundled and user-declared integrations and their auth kind.          |
 | `remove`     | Remove a user-declared integration; bundled ones cannot be removed.           |
-| `connect`    | Connect an integration to this directory's policy (`oauth` integrations sign in). |
+| `connect`    | Connect an integration to this directory's policy (`oauth` integrations sign in). Unneeded for ids a definition already declares, except as the `oauth` sign-in vehicle. |
 | `disconnect` | Disconnect an integration from this directory's policy.                       |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,

@@ -29,9 +29,10 @@ routes it needs. `openai`, `anthropic`, `bedrock`, `linear`, `telegram`, `gitlab
 and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
 (device sign-in) and `openrouter` as an `oauth` integration (pkce browser sign-in).
 Declare your own for an internal API with `lns integration add`
-(see [Integrations](integrations.md)). Connect one to a project with
-`lns integration connect <id>`, which records it under `integrations:` in that
-directory's `lns-policy.yaml`.
+(see [Integrations](integrations.md)). A sandbox definition that lists a provider
+under `spec.integrations` arms it at launch on any machine; for a directory
+without a definition, `lns integration connect <id>` records it under
+`integrations:` in that directory's `lns-policy.yaml`.
 
 ## Value decisions
 

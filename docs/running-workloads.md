@@ -48,7 +48,7 @@ The `spec` fields:
 | `command`      | Command to run in the workload, replacing the image's default command.       |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `policy`       | The network policy — `defaultVerdict` and `allowedRoutes` (see [Policy](policy.md)). |
-| `integrations` | Ids of connected [integrations](integrations.md) whose credentials and routes the sandbox needs. |
+| `integrations` | Ids of the [integrations](integrations.md) whose credentials and routes the sandbox needs. Declared ids arm at launch on any machine — no `lns integration connect` step; an id the machine's catalog doesn't know refuses the launch. |
 
 Check the definition offline — no network, no service — with `validate` and
 `show`:
