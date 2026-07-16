@@ -61,6 +61,7 @@ The `spec` fields:
 | `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
+| `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 
 Check the definition offline — no network, no service — with `validate` and
@@ -322,6 +323,47 @@ Paths are normalized, and a relative source cannot escape the project with
 Launch flags are the final override layer. Lens Sandbox starts with the mounts
 from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
 `--mount` targets the same guest path, and keeps mounts with other targets.
+
+### Filesets — files shipped inside the artifact
+
+`spec.volumes` attaches the *consumer's* files: live host binds and named
+volumes on the machine where the sandbox runs. `spec.filesets` is the opposite
+direction — files the *author* ships **inside** the published artifact (agent
+settings, skills, prompt libraries), materialized into the guest at launch as a
+read-only snapshot:
+
+```yaml
+spec:
+  filesets:
+    - path: ./skills              # a directory in the author's project
+      mountPath: /root/.agent/skills
+    - ref: ghcr.io/team/settings@sha256:…   # a pre-published FileSet artifact
+      mountPath: /root/.agent/settings
+```
+
+- **`path`** names a directory in the authoring project. A local `lns run`
+  snapshots it at launch — the guest sees exactly what a consumer of the
+  published artifact would see (live files are `spec.volumes`' job). At
+  `lns push`, each `path` directory is packed into a deterministic FileSet
+  artifact, uploaded alongside the sandbox, and rewritten to a digest-pinned
+  `ref` in the published config — the same publish-time pinning `spec.image`
+  gets.
+- **`ref`** names a pre-published FileSet artifact, always pinned by digest. A
+  pulled sandbox's filesets are fetched and materialized at launch; `lns
+  inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
+  review what a sandbox ships before running it, and the run summary
+  discloses them as `Fileset:` lines.
+- Each entry sets exactly one of `path`/`ref`. `mountPath` is an absolute
+  guest path; duplicates — including collisions with a volume `target` — are
+  rejected offline.
+- A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
+  fileset refuses `validate`, `run`, and `push` outright: a fileset is baked
+  into an artifact, so there is no keep/drop prompt to catch it later — real
+  secrets stay outside the workload.
+
+The trust model is pinning plus disclosure: a published sandbox whose fileset
+ref is not digest-pinned is refused, and what a sandbox ships is always
+visible in `lns inspect` before anything runs.
 
 ### Host bind mounts
 

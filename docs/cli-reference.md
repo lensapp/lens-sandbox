@@ -127,7 +127,7 @@ interchangeable everywhere a run is addressed.
 | `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
 | `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. |
 | `show`     | —              | Render `./lns.yaml`'s effective definition (merged config, resolved values). |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. |
+| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. |
 | `pull`     | `lns pull`     | Fetch a published sandbox and its base image into the local cache. |
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
@@ -137,7 +137,7 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition (an `Image`, or an `AgentSystem` bundle's base image, filesets, integrations, signature/trust, and a permissive-policy flag). |
+| `inspect`  | `lns inspect`  | For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, and filesets (`fileset: <ref> -> <mountPath>`); a plain `Image`; or an `AgentSystem` bundle's base image, filesets, integrations, signature/trust, and a permissive-policy flag. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
 | `prune`    | —              | Remove every cached sandbox not held by a running one, reclaiming disk. Requires `-f`/`--force` — there is no interactive prompt. |
 
