@@ -87,7 +87,20 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub volumes: Vec<Volume>,
     #[serde(default)]
+    pub filesets: Vec<FilesetEntry>,
+    #[serde(default)]
     pub ports: Vec<Port>,
+}
+
+/// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FilesetEntry {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(rename = "ref", default)]
+    pub reference: Option<String>,
+    #[serde(rename = "mountPath")]
+    pub mount_path: String,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +163,12 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             );
         }
     }
+    for fileset in &doc.spec.filesets {
+        validate_fileset(fileset)?;
+        if !targets.insert(&fileset.mount_path) {
+            bail!("duplicate mount target {}", fileset.mount_path);
+        }
+    }
     let mut container_ports = BTreeSet::new();
     for port in &doc.spec.ports {
         if !(1..=65535).contains(&port.container) {
@@ -171,6 +190,21 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
         metadata: doc.metadata,
         spec: doc.spec,
     })
+}
+
+fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
+    match (&fileset.path, &fileset.reference) {
+        (Some(_), Some(_)) | (None, None) => bail!(
+            "fileset targeting {} must set either path or ref",
+            fileset.mount_path
+        ),
+        (Some(path), None) if path.is_empty() => bail!("fileset path must not be empty"),
+        (None, Some(reference)) if reference.is_empty() => {
+            bail!("fileset ref must not be empty")
+        }
+        _ => {}
+    }
+    spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")
 }
 
 fn validate_volume(volume: &Volume) -> Result<()> {
@@ -427,6 +461,88 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("out of range"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_reads_path_and_ref_fileset_entries() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"},{"ref":"registry.example.test/team/settings@sha256:abc","mountPath":"/root/.agent/settings"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.filesets[0].path.as_deref(), Some("./skills"));
+        assert_eq!(def.spec.filesets[0].mount_path, "/root/.agent/skills");
+        assert_eq!(
+            def.spec.filesets[1].reference.as_deref(),
+            Some("registry.example.test/team/settings@sha256:abc")
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_fileset_with_both_path_and_ref_or_neither() {
+        for entry in [
+            r#"{"path":"./skills","ref":"reg/skills@sha256:abc","mountPath":"/s"}"#,
+            r#"{"mountPath":"/s"}"#,
+        ] {
+            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("either path or ref"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_or_traversing_fileset_mount_path() {
+        for mount in ["skills", "/root/../etc"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"path":"./skills","mountPath":"{mount}"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("fileset mountPath"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_fileset_mount_paths() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./a","mountPath":"/s"},{"path":"./b","mountPath":"/s"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate mount target /s"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_fileset_colliding_with_a_volume_target() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"path":"./a","mountPath":"/s"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate mount target /s"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_empty_fileset_source() {
+        for entry in [
+            r#"{"path":"","mountPath":"/s"}"#,
+            r#"{"ref":"","mountPath":"/s"}"#,
+        ] {
+            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("must not be empty"),
+                "got: {err:#}"
+            );
+        }
     }
 
     #[test]

@@ -119,6 +119,14 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
             volume.target
         )?;
     }
+    for fileset in &def.spec.filesets {
+        let source = fileset
+            .path
+            .as_deref()
+            .or(fileset.reference.as_deref())
+            .unwrap_or_default();
+        writeln!(out, "  fileset:      {source} -> {}", fileset.mount_path)?;
+    }
     writeln!(
         out,
         "  policy:       defaultVerdict={} ({} route(s))",
@@ -294,6 +302,25 @@ mod tests {
             String::from_utf8(out)
                 .unwrap()
                 .contains("command:      agent --serve")
+        );
+    }
+
+    #[test]
+    fn show_renders_path_and_ref_filesets() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n";
+        let fs = FakeFs::with("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        show(&fs, cwd(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("fileset:      ./skills -> /root/.agent/skills"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains(
+                "fileset:      registry.example.test/team/settings@sha256:abc -> /root/.agent/settings"
+            ),
+            "got: {text}"
         );
     }
 
