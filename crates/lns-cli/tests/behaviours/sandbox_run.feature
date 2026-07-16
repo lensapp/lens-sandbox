@@ -22,6 +22,13 @@ Feature: running a sandbox
     Then the exit code is 0
     And the service received a request to run a sandbox
 
+  @todo
+  Scenario: run carries the local definition's policy, integrations, and resources to the service
+    Given a valid lns.yaml declaring a policy, integrations, and resources
+    When the user runs "lns run"
+    Then the exit code is 0
+    And the service request carries the definition's policy, integrations, and resources
+
   Scenario: run with no reference and no lns.yaml fails clearly
     Given the current directory has no lns.yaml
     When the user runs "lns run"
