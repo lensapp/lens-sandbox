@@ -1,14 +1,20 @@
 use lns_policy::Policy;
+use lns_policy::credentials::CredentialStateFile;
 use lns_policy::integrations::Integration;
+use lns_service::artifact::credential_boot::ConnectPrompt;
 
-/// Drives a sandbox definition's declared integrations through the launch arming path: catalog + definition + overlay in, armed providers + running policy out.
+/// Drives a sandbox definition's declared integrations through the launch arming path: catalog + definition + overlay + machine store in, armed providers + running policy (or a blocked/refused launch) out.
 #[derive(Debug, Default)]
 pub struct DeclaredRig {
     pub catalog: Vec<Integration>,
     pub definition: Option<String>,
     pub overlay: Policy,
+    pub store: CredentialStateFile,
     /// Armed providers as (integration id, env var, placeholder).
     pub providers: Vec<(String, String, String)>,
     pub running_policy: Option<Policy>,
+    /// The sign-in the launch is blocked on, when the gate said AwaitConnect.
+    pub pending: Option<ConnectPrompt>,
+    pub aborted: bool,
     pub error: Option<String>,
 }

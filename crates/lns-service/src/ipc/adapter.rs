@@ -217,8 +217,32 @@ async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()
     crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
-/// Drives an integration's interactive sign-in host-side, dispatching on its oauth `flow` and persisting the obtained credential for the next run to arm.
+/// Drives an integration's interactive sign-in host-side, streaming its progress frames to the client and closing with the terminal response.
 async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
+    let sign_in = run_integration_sign_in(&id, progress_tx);
+    tokio::pin!(sign_in);
+    let terminal = loop {
+        tokio::select! {
+            biased;
+            Some(resp) = progress_rx.recv() => {
+                stream.write_all(&encode_frame(&resp)?).await?;
+            }
+            res = &mut sign_in => break res,
+        }
+    };
+    while let Ok(resp) = progress_rx.try_recv() {
+        stream.write_all(&encode_frame(&resp)?).await?;
+    }
+    stream.write_all(&encode_frame(&terminal)?).await?;
+    Ok(())
+}
+
+/// Drive an integration's oauth sign-in host-side — dispatching on its `flow`, emitting progress via `progress`, persisting the obtained credential — and return the terminal response. Shared by the connect verb and the run launch gate.
+pub(crate) async fn run_integration_sign_in(
+    id: &str,
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use lns_policy::integrations::OauthFlow;
 
     let user = lns_policy::integrations::Catalog::load_or_default(
@@ -231,58 +255,43 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
         .find(|i| i.id == id)
         .and_then(|i| i.oauth.as_ref())
     else {
-        let frame = encode_frame(&Response::OauthSignInFailed {
+        return Response::OauthSignInFailed {
             reason: format!("{id:?} is not an oauth integration"),
-        })?;
-        stream.write_all(&frame).await?;
-        return Ok(());
+        };
     };
     match oauth.flow {
         OauthFlow::Device => {
-            handle_device_sign_in(stream, &id, crate::oauth::OauthConfig::from(oauth)).await
+            device_sign_in(id, crate::oauth::OauthConfig::from(oauth), progress).await
         }
-        OauthFlow::Pkce => {
-            handle_pkce_sign_in(stream, &id, crate::oauth::PkceConfig::from(oauth)).await
-        }
+        OauthFlow::Pkce => pkce_sign_in(id, crate::oauth::PkceConfig::from(oauth), progress).await,
     }
 }
 
-/// Streams the device-flow verification prompt to the client and persists the obtained token set.
-async fn handle_device_sign_in(
-    mut stream: UnixStream,
+/// Emits the device-flow verification prompt and persists the obtained token set.
+async fn device_sign_in(
     id: &str,
     cfg: crate::oauth::OauthConfig,
-) -> anyhow::Result<()> {
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use crate::oauth::{
         DeviceCode, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
     };
 
-    let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
-    let flow = run_device_flow(
+    let outcome = run_device_flow(
         &RealDeviceFlow,
         &cfg,
         move |code: &DeviceCode| {
-            let _ = code_tx.send(code.clone());
+            let _ = progress.send(Response::OauthVerification {
+                verification_uri: code.verification_uri.clone(),
+                user_code: code.user_code.clone(),
+                expires_in_secs: code.expires_in.as_secs(),
+            });
         },
         std::future::pending::<SignInPivot>(),
-    );
-    tokio::pin!(flow);
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            Some(code) = code_rx.recv() => {
-                let frame = encode_frame(&Response::OauthVerification {
-                    verification_uri: code.verification_uri,
-                    user_code: code.user_code,
-                    expires_in_secs: code.expires_in.as_secs(),
-                })?;
-                stream.write_all(&frame).await?;
-            }
-            res = &mut flow => break res,
-        }
-    };
+    )
+    .await;
 
-    let response = match outcome {
+    match outcome {
         Ok(SignIn::Completed(token)) => match persist_oauth_token(id, &token, &RealClock) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
@@ -298,56 +307,44 @@ async fn handle_device_sign_in(
         Ok(SignIn::Cancelled) => Response::OauthSignInFailed {
             reason: "the sign-in was cancelled".into(),
         },
-        // This CLI-driven path streams only the browser dance; it offers no token-paste surface, so a pivot can't arise here.
+        // This streamed path offers no token-paste surface, so a pivot can't arise here.
         Ok(SignIn::Token(_)) => Response::OauthSignInFailed {
             reason: "token fallback is not available over this sign-in path".into(),
         },
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),
         },
-    };
-    let frame = encode_frame(&response)?;
-    stream.write_all(&frame).await?;
-    Ok(())
+    }
 }
 
-/// Opens the browser to the PKCE authorization URL (sending it to the client too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
-async fn handle_pkce_sign_in(
-    mut stream: UnixStream,
+/// Opens the browser to the PKCE authorization URL (emitting it too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
+async fn pkce_sign_in(
     id: &str,
     cfg: crate::oauth::PkceConfig,
-) -> anyhow::Result<()> {
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use crate::oauth::{
         PkceChallenge, PkceSignIn, RealAuthCodeFlow, RealCallbackListener, run_pkce_flow,
     };
 
     let challenge = PkceChallenge::generate();
-    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let flow = run_pkce_flow(
+    let outcome = run_pkce_flow(
         &RealAuthCodeFlow,
         &RealCallbackListener,
         &cfg,
         &challenge,
         move |url: &str| {
-            let _ = url_tx.send(url.to_string());
+            let _ = progress.send(Response::OauthBrowserOpened {
+                authorization_url: url.to_string(),
+            });
             crate::browser::open(url);
         },
         std::future::pending::<()>(),
         crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
-    );
-    tokio::pin!(flow);
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            Some(url) = url_rx.recv() => {
-                let frame = encode_frame(&Response::OauthBrowserOpened { authorization_url: url })?;
-                stream.write_all(&frame).await?;
-            }
-            res = &mut flow => break res,
-        }
-    };
+    )
+    .await;
 
-    let response = match outcome {
+    match outcome {
         Ok(PkceSignIn::Completed(key)) => match persist_pkce_key(id, key) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
@@ -363,10 +360,7 @@ async fn handle_pkce_sign_in(
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),
         },
-    };
-    let frame = encode_frame(&response)?;
-    stream.write_all(&frame).await?;
-    Ok(())
+    }
 }
 
 fn persist_oauth_token(

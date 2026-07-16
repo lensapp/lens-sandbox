@@ -10,10 +10,11 @@ Feature: an agent's credential slots resolve at boot, before the workload starts
   artifact or the workload — only the boundary sees it.
 
   NOTE: these scenarios pin the boot-gate DECISION logic (plan_slot / boot_gate
-  / resolve_connect) in isolation. Proactive at-boot resolution is not yet wired
-  into the live launch path — the shipping credential flow is reactive (an unbound
-  credential is prompted when the workload first uses it), which covers the
-  functional case; the proactive prompt-before-fork gate is a tracked follow-up.
+  / resolve_connect) in isolation. The gate IS live for a sandbox definition's
+  declared oauth integrations (see declared_integrations.feature — the launch
+  blocks pre-boot on the sign-in). For a bundle Agent's credential slots the
+  shipping flow remains reactive (an unbound credential prompts when the
+  workload first uses it); wiring the gate to Agent slots is a tracked follow-up.
 
   Scenario: A slot already bound in the store resolves at boot without prompting
     Given a bundle whose agent declares a credential slot for integration "some-provider" injected as "SOME_TOKEN"

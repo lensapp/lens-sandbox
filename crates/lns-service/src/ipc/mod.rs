@@ -4,7 +4,7 @@ use lns_ipc::{Request, Response, StatusInfo, WireFrame, encode_wire_frame};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-mod adapter;
+pub(crate) mod adapter;
 pub use adapter::run_server;
 
 #[derive(Debug, PartialEq, Eq)]

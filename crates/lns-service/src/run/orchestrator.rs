@@ -95,6 +95,7 @@ async fn orchestrate(
     };
     if let Some(plan) = &bundle {
         crate::artifact::real::refuse_unknown_integrations(plan.workload.policy.as_ref())?;
+        gate_declared_sign_ins(plan.workload.policy.as_ref(), &frame_tx).await?;
     }
     let launch = bundle
         .as_ref()
@@ -429,4 +430,86 @@ async fn orchestrate(
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
+}
+
+/// Block the boot on any definition-declared oauth integration with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete.
+async fn gate_declared_sign_ins(
+    policy: Option<&lns_policy::Policy>,
+    frame_tx: &Sender<WireFrame>,
+) -> Result<()> {
+    use crate::artifact::credential_boot::{
+        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+    };
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+    use lns_ipc::Response;
+
+    let Some(policy) = policy else { return Ok(()) };
+    if policy.integrations.is_empty() {
+        return Ok(());
+    }
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let state = JsonFileCredentialStore::new(default_credentials_path())
+        .load()
+        .unwrap_or_default();
+    let plans = plan_declared_integrations(&policy.integrations, &catalog, &state);
+    if boot_gate(&plans) == BootGate::StartWorkload {
+        return Ok(());
+    }
+    for plan in plans {
+        let SlotPlan::Connect(prompt) = plan else {
+            continue;
+        };
+        let id = prompt.integration.clone();
+        let _ = frame_tx
+            .send(WireFrame::Json(Response::RunLog {
+                level: lns_ipc::LogLevel::Info,
+                verb: None,
+                message: format!("integration {id} needs a sign-in before the workload starts"),
+            }))
+            .await;
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
+        let sign_in = crate::ipc::adapter::run_integration_sign_in(&id, progress_tx);
+        tokio::pin!(sign_in);
+        let terminal = loop {
+            tokio::select! {
+                biased;
+                Some(resp) = progress_rx.recv() => {
+                    let _ = frame_tx.send(WireFrame::Json(resp)).await;
+                }
+                res = &mut sign_in => break res,
+            }
+        };
+        while let Ok(resp) = progress_rx.try_recv() {
+            let _ = frame_tx.send(WireFrame::Json(resp)).await;
+        }
+        match terminal {
+            Response::OauthSignInComplete => {
+                let _ = frame_tx
+                    .send(WireFrame::Json(Response::RunLog {
+                        level: lns_ipc::LogLevel::Info,
+                        verb: None,
+                        message: format!("signed in to {id}"),
+                    }))
+                    .await;
+            }
+            Response::OauthSignInFailed { reason } => {
+                if resolve_connect(&prompt, ConnectChoice::Decline).starts_workload() {
+                    continue;
+                }
+                anyhow::bail!(
+                    "sign-in for integration {id} did not complete ({reason}); launch aborted"
+                );
+            }
+            other => {
+                anyhow::bail!("unexpected sign-in response for integration {id}: {other:?}");
+            }
+        }
+    }
+    Ok(())
 }

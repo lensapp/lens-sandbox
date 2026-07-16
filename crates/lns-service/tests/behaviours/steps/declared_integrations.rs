@@ -1,7 +1,13 @@
 use cucumber::{given, then, when};
-use lns_policy::integrations::{AuthKind, CredentialAuth, Integration, IntegrationRoute};
+use lns_policy::credentials::CredentialEntry;
+use lns_policy::integrations::{
+    AuthKind, CredentialAuth, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+};
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
+use lns_service::artifact::credential_boot::{
+    BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+};
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::integrations::{
@@ -73,6 +79,14 @@ fn launch(
     let unknown = unknown_integration_ids(&declared, &rig.catalog);
     if !unknown.is_empty() {
         rig.error = Some(unknown_integrations_refusal(&unknown));
+        return;
+    }
+    let plans = plan_declared_integrations(&declared, &rig.catalog, &rig.store);
+    if boot_gate(&plans) == BootGate::AwaitConnect {
+        rig.pending = plans.into_iter().find_map(|plan| match plan {
+            SlotPlan::Connect(prompt) => Some(prompt),
+            SlotPlan::Armed { .. } => None,
+        });
         return;
     }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
@@ -177,6 +191,154 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
         .expect("a Given step must declare the definition");
     let resolved = lns_artifact::sandbox::parse(definition.as_bytes());
     launch(w, resolved.map(|def| resolved_from_sandbox(&def)));
+}
+
+fn oauth_integration(id: &str) -> Integration {
+    Integration {
+        id: id.into(),
+        name: None,
+        auth_kind: AuthKind::Oauth,
+        routes: Vec::new(),
+        credential: None,
+        oauth: Some(OauthAuth {
+            flow: OauthFlow::Device,
+            client_id: Some("some-client".into()),
+            client_secret: None,
+            scopes: Vec::new(),
+            device_authorization_endpoint: Some("https://api.some-oauth.example/device".into()),
+            authorization_endpoint: None,
+            token_endpoint: "https://api.some-oauth.example/token".into(),
+            userinfo_endpoint: None,
+            account_field: None,
+            env_var: "SOME_OAUTH_TOKEN".into(),
+            placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+            injections: Vec::new(),
+        }),
+        token_fallback: None,
+    }
+}
+
+fn relaunch(w: &mut BehaviourWorld) {
+    let definition = w
+        .declared
+        .get_or_insert_with(Default::default)
+        .definition
+        .clone()
+        .expect("the blocked launch kept its definition");
+    launch(w, plan_local_sandbox(definition.as_bytes()));
+}
+
+#[given(regex = r#"^the machine catalog has an oauth integration "([^"]+)"$"#)]
+fn catalog_has_oauth(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.catalog.push(oauth_integration(&id));
+}
+
+#[given(regex = r#"^the per-machine credential store has no grant for "([^"]+)"$"#)]
+fn store_has_no_grant(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    assert!(
+        !rig.store.contains_key(&id),
+        "the rig store unexpectedly holds a grant for {id}"
+    );
+}
+
+#[given(regex = r#"^a launch blocked on the "([^"]+)" sign-in$"#)]
+fn launch_blocked_on_sign_in(w: &mut BehaviourWorld, id: String) {
+    {
+        let rig = w.declared.get_or_insert_with(Default::default);
+        rig.catalog.push(oauth_integration(&id));
+        rig.definition = Some(definition_declaring(&[&id]));
+    }
+    relaunch(w);
+    let rig = w.declared.as_ref().expect("relaunch built the rig");
+    assert_eq!(
+        rig.pending.as_ref().map(|p| p.integration.as_str()),
+        Some(id.as_str()),
+        "the launch must be blocked on the {id} sign-in"
+    );
+}
+
+#[when("the sign-in completes")]
+fn sign_in_completes(w: &mut BehaviourWorld) {
+    {
+        let rig = w.declared.as_mut().expect("a launch is blocked");
+        let prompt = rig.pending.take().expect("a sign-in is pending");
+        assert!(
+            resolve_connect(&prompt, ConnectChoice::Connect).starts_workload(),
+            "a completed sign-in must release the launch"
+        );
+        rig.store.insert(
+            prompt.integration.clone(),
+            CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: 9999,
+                scopes: vec![],
+                account: None,
+            },
+        );
+    }
+    relaunch(w);
+}
+
+#[when("the developer declines the sign-in")]
+fn sign_in_declined(w: &mut BehaviourWorld) {
+    let rig = w.declared.as_mut().expect("a launch is blocked");
+    let prompt = rig.pending.take().expect("a sign-in is pending");
+    let outcome = resolve_connect(&prompt, ConnectChoice::Decline);
+    if !outcome.starts_workload() {
+        rig.aborted = true;
+        rig.error = Some(format!(
+            "sign-in for integration {} did not complete; launch aborted",
+            prompt.integration
+        ));
+    }
+}
+
+#[then(regex = r#"^a sign-in prompt for "([^"]+)" is shown before the workload starts$"#)]
+fn sign_in_prompt_shown(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    match &rig.pending {
+        Some(prompt) if prompt.integration == id => Ok(()),
+        Some(prompt) => Err(format!(
+            "the launch is blocked on {}, not {id}",
+            prompt.integration
+        )),
+        None => Err("the launch was not blocked on a sign-in".to_string()),
+    }
+}
+
+#[then("the workload does not start until the sign-in is decided")]
+fn workload_waits_for_sign_in(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.running_policy.is_some() {
+        return Err("the workload started while the sign-in was undecided".to_string());
+    }
+    if rig.error.is_some() {
+        return Err("the launch errored instead of waiting".to_string());
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the workload starts with the "([^"]+)" placeholder seeded$"#)]
+fn workload_starts_with_placeholder(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.running_policy.is_none() {
+        return Err(format!(
+            "the workload did not start; pending: {:?}, error: {:?}",
+            rig.pending, rig.error
+        ));
+    }
+    let armed = rig
+        .providers
+        .iter()
+        .find(|(pid, _, _)| pid == &id)
+        .ok_or_else(|| format!("no provider seeds {id}; armed: {:?}", rig.providers))?;
+    if armed.2.is_empty() {
+        return Err(format!("{id} was seeded without a placeholder"));
+    }
+    Ok(())
 }
 
 #[given(regex = r#"^the machine catalog has no integration "([^"]+)"$"#)]

@@ -64,7 +64,6 @@ Feature: a sandbox definition's declared integrations arm at launch
     And the error names "some-unknown"
     And the error points at `lns integration add`
 
-  @todo
   Scenario: A declared oauth integration with no machine grant blocks the launch
     Given the machine catalog has an oauth integration "some-oauth"
     And the sandbox definition declares integration "some-oauth"
@@ -73,13 +72,11 @@ Feature: a sandbox definition's declared integrations arm at launch
     Then a sign-in prompt for "some-oauth" is shown before the workload starts
     And the workload does not start until the sign-in is decided
 
-  @todo
   Scenario: Completing the sign-in releases the blocked launch
     Given a launch blocked on the "some-oauth" sign-in
     When the sign-in completes
     Then the workload starts with the "some-oauth" placeholder seeded
 
-  @todo
   Scenario: Declining the sign-in aborts the launch
     Given a launch blocked on the "some-oauth" sign-in
     When the developer declines the sign-in

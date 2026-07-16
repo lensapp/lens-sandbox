@@ -168,11 +168,19 @@ async fn prompt_names_target(world: &mut BehaviourWorld, env: String) {
 
 #[then("the launch is aborted")]
 async fn launch_aborted(world: &mut BehaviourWorld) {
+    if let Some(rig) = world.declared.as_ref() {
+        assert!(rig.aborted, "the launch was not aborted");
+        return;
+    }
     assert_eq!(outcome(world), SlotOutcome::AbortLaunch);
 }
 
 #[then("the workload never starts")]
 async fn workload_never_starts(world: &mut BehaviourWorld) {
+    if let Some(rig) = world.declared.as_ref() {
+        assert!(rig.running_policy.is_none(), "the workload started");
+        return;
+    }
     assert!(!outcome(world).starts_workload());
 }
 
