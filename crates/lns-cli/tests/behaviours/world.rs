@@ -33,6 +33,8 @@ pub struct BehaviourWorld {
     pub push_outcome: Option<Result<String, String>>,
     /// FileSet artifact refs the push uploaded, in order.
     pub pushed_filesets: Vec<String>,
+    /// The definition JSON a prepared local run would send to the service.
+    pub wire_definition: Option<String>,
     /// The definition doc the push handed to build_and_push, when it got that far.
     pub pushed_doc: Option<Vec<u8>>,
     pub host_bind: HostBindRig,

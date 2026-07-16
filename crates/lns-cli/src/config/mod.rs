@@ -649,6 +649,7 @@ mod tests {
             publish: Vec::new(),
             publish_declared: false,
             declared_unpublished: Vec::new(),
+            filesets: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
             cmd: Vec::new(),

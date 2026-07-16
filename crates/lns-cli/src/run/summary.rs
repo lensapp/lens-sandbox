@@ -80,6 +80,9 @@ pub fn format_summary(
     for bind in &binds {
         writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
+    for (source, mount) in &args.filesets {
+        writeln!(s, "  Fileset:   {source} -> {mount}").unwrap();
+    }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
@@ -174,6 +177,20 @@ fn flags_line(args: &RunArgs) -> String {
     }
 }
 
+/// The summary names a fileset by what the author wrote: the path verbatim, or the ref with its digest shortened to the usual 12 characters.
+pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
+    if let Some(path) = &fileset.path {
+        return path.clone();
+    }
+    let reference = fileset.reference.as_deref().unwrap_or_default();
+    match reference.split_once("@sha256:") {
+        Some((repo, digest)) if digest.len() > 12 => {
+            format!("{repo}@sha256:{}…", &digest[..12])
+        }
+        _ => reference.to_string(),
+    }
+}
+
 fn ports_line(args: &RunArgs) -> String {
     if args.publish.is_empty() {
         return "(none)".to_string();
@@ -253,6 +270,7 @@ mod tests {
             publish: Vec::new(),
             publish_declared: false,
             declared_unpublished: Vec::new(),
+            filesets: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
             cmd: Vec::new(),

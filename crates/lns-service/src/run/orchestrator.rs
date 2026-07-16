@@ -79,7 +79,7 @@ async fn orchestrate(
     let overrides = super::bundle_overrides(&args.with);
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
     let bundle = match (args.definition.as_deref(), resolved_image) {
-        (Some(definition), _) => Some(crate::artifact::real::plan_local(definition)?),
+        (Some(definition), _) => Some(crate::artifact::real::plan_local(definition).await?),
         (None, Some(image_ref)) => {
             crate::artifact::real::peek_and_plan(
                 image_ref,

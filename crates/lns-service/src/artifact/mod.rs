@@ -103,7 +103,32 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
     ResolvedBundle {
         base_image: def.spec.image.clone(),
         base_paths: Vec::new(),
-        filesets: Vec::new(),
+        local_filesets: def
+            .spec
+            .filesets
+            .iter()
+            .filter_map(|fileset| {
+                fileset.path.as_ref().map(|path| assembly::LocalFileset {
+                    source: path.clone(),
+                    mount_path: fileset.mount_path.clone(),
+                })
+            })
+            .collect(),
+        filesets: def
+            .spec
+            .filesets
+            .iter()
+            .filter_map(|fileset| {
+                fileset
+                    .reference
+                    .as_ref()
+                    .map(|reference| assembly::ResolvedFileset {
+                        name: fileset.mount_path.clone(),
+                        paths: vec![fileset.mount_path.clone()],
+                        reference: reference.clone(),
+                    })
+            })
+            .collect(),
         command: def.spec.command.clone(),
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
@@ -113,6 +138,33 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         }),
         credentials: def.spec.credentials.clone(),
     }
+}
+
+/// The digest-pin trust gate for a published sandbox's filesets: a local path has no meaning off the author's machine, and a floating ref defeats pinning — both refuse the plan.
+pub fn published_fileset_problems(resolved: &ResolvedBundle) -> Vec<String> {
+    let mut problems: Vec<String> = resolved
+        .local_filesets
+        .iter()
+        .map(|local| {
+            format!(
+                "published sandbox declares a local path fileset {}; publish pins filesets by digest",
+                local.source
+            )
+        })
+        .collect();
+    problems.extend(
+        resolved
+            .filesets
+            .iter()
+            .filter(|fileset| !fileset.reference.contains("@sha256:"))
+            .map(|fileset| {
+                format!(
+                    "fileset ref {} is not digest-pinned; refusing to run it",
+                    fileset.reference
+                )
+            }),
+    );
+    problems
 }
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, integrations, and resources apply identically.
@@ -355,6 +407,37 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("resolving bundle some-bundle"), "got: {msg}");
         assert!(msg.contains("exactly one sandbox"), "got: {msg}");
+    }
+
+    #[test]
+    fn resolved_from_sandbox_splits_path_and_ref_filesets() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b"}]}}"#,
+        )
+        .unwrap();
+        let resolved = resolved_from_sandbox(&def);
+        assert_eq!(
+            resolved.local_filesets,
+            [assembly::LocalFileset {
+                source: "/work/skills".into(),
+                mount_path: "/a".into(),
+            }]
+        );
+        assert_eq!(resolved.filesets.len(), 1);
+        assert_eq!(resolved.filesets[0].reference, "reg/skills@sha256:abc");
+        assert_eq!(resolved.filesets[0].paths, ["/b"]);
+    }
+
+    #[test]
+    fn published_fileset_problems_refuse_paths_and_floating_refs_but_pass_pinned_refs() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:abc","mountPath":"/c"}]}}"#,
+        )
+        .unwrap();
+        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
+        assert_eq!(problems.len(), 2, "got: {problems:?}");
+        assert!(problems[0].contains("local path fileset ./skills"));
+        assert!(problems[1].contains("reg/skills:latest is not digest-pinned"));
     }
 
     #[test]

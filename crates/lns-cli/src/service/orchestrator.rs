@@ -206,6 +206,19 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
     )?;
     args.publish = composed.published;
     args.declared_unpublished = composed.declared_unpublished;
+    if let crate::run::target::RunTarget::Local { def, .. } = &target {
+        args.filesets = def
+            .spec
+            .filesets
+            .iter()
+            .map(|fileset| {
+                (
+                    crate::run::summary::fileset_source_display(fileset),
+                    fileset.mount_path.clone(),
+                )
+            })
+            .collect();
+    }
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;

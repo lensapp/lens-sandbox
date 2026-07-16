@@ -24,6 +24,11 @@ pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<Run
             }
             let json = load_definition_json(fs, cwd)?;
             let def = lns_artifact::sandbox::parse(&json)?;
+            let problems = crate::sandbox::fileset::path_fileset_problems(fs, cwd, &def);
+            if !problems.is_empty() {
+                bail!("{}", problems.join("\n"));
+            }
+            let json = absolutize_fileset_paths(json, &def, cwd)?;
             let json = String::from_utf8(json).context("definition json was not utf-8")?;
             Ok(RunTarget::Local {
                 def: Box::new(def),
@@ -31,6 +36,30 @@ pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<Run
             })
         }
     }
+}
+
+/// The wire definition roots each path fileset in the consumer's project, the same way bind sources resolve, so the service snapshots exactly the directories this machine declared.
+fn absolutize_fileset_paths(
+    json: Vec<u8>,
+    def: &lns_artifact::sandbox::Definition,
+    cwd: &Path,
+) -> Result<Vec<u8>> {
+    if def.spec.filesets.iter().all(|f| f.path.is_none()) {
+        return Ok(json);
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&json).context("re-reading the definition for fileset rooting")?;
+    let entries = value["spec"]["filesets"]
+        .as_array_mut()
+        .context("spec.filesets is not an array")?;
+    for (index, fileset) in def.spec.filesets.iter().enumerate() {
+        if let Some(path) = &fileset.path {
+            let rooted = crate::run::declarative::resolve_bind_source(path, cwd)
+                .with_context(|| format!("fileset {path}"))?;
+            entries[index]["path"] = serde_json::Value::String(rooted);
+        }
+    }
+    serde_json::to_vec(&value).context("serializing the rooted definition")
 }
 
 impl RunTarget {

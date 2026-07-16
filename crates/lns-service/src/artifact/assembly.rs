@@ -6,10 +6,18 @@ pub struct Override {
     pub reference: String,
 }
 
+/// A local definition's path fileset: an absolute host directory snapshotted into the guest at launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalFileset {
+    pub source: String,
+    pub mount_path: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedBundle {
     pub base_image: String,
     pub base_paths: Vec<String>,
+    pub local_filesets: Vec<LocalFileset>,
     pub filesets: Vec<ResolvedFileset>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,

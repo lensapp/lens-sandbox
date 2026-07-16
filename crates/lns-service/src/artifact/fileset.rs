@@ -1,9 +1,60 @@
 use std::io::Read;
-use std::path::Component;
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
+use crate::artifact::assembly::LocalFileset;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
+
+pub struct SnapshotEntry {
+    pub name: String,
+    pub dir: bool,
+    pub mode: u32,
+}
+
+/// Directory listing seam for local path-fileset snapshots; `RealSnapshotDir` in `real.rs` is the std::fs leaf.
+pub trait SnapshotDir {
+    fn entries(&self, dir: &Path) -> std::io::Result<Vec<SnapshotEntry>>;
+}
+
+/// Snapshot each local path fileset into host-file guest-write specs, so a local definition's files land in the guest exactly like a published fileset's.
+pub fn local_fileset_specs<D: SnapshotDir + ?Sized>(
+    dir: &D,
+    locals: &[LocalFileset],
+) -> Result<Vec<RuntimeFileSpec>> {
+    let mut specs = Vec::new();
+    for local in locals {
+        let root = local.mount_path.trim_end_matches('/');
+        snapshot_into(dir, Path::new(&local.source), root, &mut specs)
+            .with_context(|| format!("snapshotting fileset {}", local.source))?;
+    }
+    Ok(specs)
+}
+
+fn snapshot_into<D: SnapshotDir + ?Sized>(
+    dir: &D,
+    host_dir: &Path,
+    guest_dir: &str,
+    out: &mut Vec<RuntimeFileSpec>,
+) -> Result<()> {
+    let listed = dir
+        .entries(host_dir)
+        .with_context(|| format!("reading {}", host_dir.display()))?;
+    for entry in listed {
+        let host_path = host_dir.join(&entry.name);
+        let guest_path = format!("{guest_dir}/{}", entry.name);
+        if entry.dir {
+            snapshot_into(dir, &host_path, &guest_path, out)?;
+        } else {
+            out.push(RuntimeFileSpec {
+                guest_path,
+                mode: entry.mode,
+                source: RuntimeSource::HostFile(host_path),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Expand a FileSet's tar layer into guest-write specs rooted at `mount_path`, so the fileset's files land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered fileset can't write outside its declared mount.
 pub fn fileset_runtime_specs(mount_path: &str, layer_tar: &[u8]) -> Result<Vec<RuntimeFileSpec>> {
@@ -150,6 +201,88 @@ mod tests {
         let err = fileset_runtime_specs("/mount", &tar).unwrap_err();
         assert!(
             format!("{err:#}").contains("escapes its mount"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn local_specs_snapshot_nested_directories_as_host_file_specs() {
+        struct TwoLevel;
+        impl SnapshotDir for TwoLevel {
+            fn entries(&self, dir: &Path) -> std::io::Result<Vec<SnapshotEntry>> {
+                if dir == Path::new("/work/skills") {
+                    Ok(vec![
+                        SnapshotEntry {
+                            name: "deep".into(),
+                            dir: true,
+                            mode: 0o755,
+                        },
+                        SnapshotEntry {
+                            name: "prompts.md".into(),
+                            dir: false,
+                            mode: 0o644,
+                        },
+                    ])
+                } else if dir == Path::new("/work/skills/deep") {
+                    Ok(vec![SnapshotEntry {
+                        name: "run.sh".into(),
+                        dir: false,
+                        mode: 0o755,
+                    }])
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no such directory",
+                    ))
+                }
+            }
+        }
+        let specs = local_fileset_specs(
+            &TwoLevel,
+            &[LocalFileset {
+                source: "/work/skills".into(),
+                mount_path: "/root/.agent/skills/".into(),
+            }],
+        )
+        .unwrap();
+        let rendered: Vec<(String, u32)> = specs
+            .iter()
+            .map(|spec| (spec.guest_path.clone(), spec.mode))
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                ("/root/.agent/skills/deep/run.sh".to_string(), 0o755),
+                ("/root/.agent/skills/prompts.md".to_string(), 0o644),
+            ]
+        );
+        assert!(specs.iter().all(|spec| matches!(
+            &spec.source,
+            RuntimeSource::HostFile(path) if path.starts_with("/work/skills")
+        )));
+    }
+
+    #[test]
+    fn local_specs_surface_a_missing_directory_naming_the_fileset() {
+        struct NoDirs;
+        impl SnapshotDir for NoDirs {
+            fn entries(&self, _: &Path) -> std::io::Result<Vec<SnapshotEntry>> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such directory",
+                ))
+            }
+        }
+        let err = local_fileset_specs(
+            &NoDirs,
+            &[LocalFileset {
+                source: "/work/missing".into(),
+                mount_path: "/s".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("snapshotting fileset /work/missing"),
             "got: {err:#}"
         );
     }

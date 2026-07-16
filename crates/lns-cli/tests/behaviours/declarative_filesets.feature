@@ -1,4 +1,3 @@
-@todo
 Feature: declared filesets ship files inside the sandbox artifact
   spec.filesets is how a sandbox ships files — agent settings, skills —
   inside the published artifact. An entry names either a local directory
@@ -21,7 +20,7 @@ Feature: declared filesets ship files inside the sandbox artifact
     Given an lns.yaml declaring fileset ref "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" mounted at "/root/.agent/skills"
     When the local sandbox run is prepared
     Then the definition sent to the service carries the fileset ref unchanged
-    And the run summary shows a Fileset line `registry.example.test/team/skills@sha256:aaaa… -> /root/.agent/skills`
+    And the run summary shows a Fileset line `registry.example.test/team/skills@sha256:aaaaaaaaaaaa… -> /root/.agent/skills`
 
   Scenario: a secret-shaped file in a path fileset refuses the run
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"

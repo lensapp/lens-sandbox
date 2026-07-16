@@ -184,7 +184,7 @@ fn resolve_mount(mount: &MountDefault, project_dir: &Path) -> Result<lns_ipc::Mo
     }))
 }
 
-fn resolve_bind_source(source: &str, project_dir: &Path) -> Result<String> {
+pub(crate) fn resolve_bind_source(source: &str, project_dir: &Path) -> Result<String> {
     let source = Path::new(source);
     let joined = if source.is_absolute() {
         source.to_path_buf()

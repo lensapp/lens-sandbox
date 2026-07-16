@@ -72,9 +72,14 @@ pub(crate) async fn peek_and_plan(
                 &Verdict::Skipped,
             );
             disclose_effective_policy(resolved.policy.as_ref());
+            let problems = crate::artifact::published_fileset_problems(&resolved);
+            if !problems.is_empty() {
+                anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
+            }
+            let fileset_specs = materialize_filesets(&resolved).await?;
             Ok(Some(BundlePlan {
                 workload: assembly::assemble(&resolved),
-                fileset_specs: Vec::new(),
+                fileset_specs,
             }))
         }
         RunPath::AssembleBundle => {
@@ -100,13 +105,47 @@ pub(crate) async fn peek_and_plan(
 }
 
 /// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run.
-pub(crate) fn plan_local(definition_json: &str) -> Result<BundlePlan> {
+pub(crate) async fn plan_local(definition_json: &str) -> Result<BundlePlan> {
     let resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
     disclose_effective_policy(resolved.policy.as_ref());
+    let mut fileset_specs = materialize_filesets(&resolved).await?;
+    fileset_specs.extend(crate::artifact::fileset::local_fileset_specs(
+        &RealSnapshotDir,
+        &resolved.local_filesets,
+    )?);
     Ok(BundlePlan {
         workload: assembly::assemble(&resolved),
-        fileset_specs: Vec::new(),
+        fileset_specs,
     })
+}
+
+struct RealSnapshotDir;
+
+impl crate::artifact::fileset::SnapshotDir for RealSnapshotDir {
+    fn entries(
+        &self,
+        dir: &std::path::Path,
+    ) -> std::io::Result<Vec<crate::artifact::fileset::SnapshotEntry>> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|name| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("non-utf8 file name {name:?}"),
+                )
+            })?;
+            let metadata = entry.metadata()?;
+            entries.push(crate::artifact::fileset::SnapshotEntry {
+                name,
+                dir: metadata.is_dir(),
+                mode: metadata.permissions().mode() & 0o777,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
 }
 
 /// Refuse a launch whose definition declares an integration — under `spec.integrations` or as a credential slot — this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss.

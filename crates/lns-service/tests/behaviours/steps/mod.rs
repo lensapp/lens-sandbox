@@ -17,6 +17,7 @@ pub mod pkce_integration;
 pub mod policy_guardrail;
 pub mod run_lifecycle;
 pub mod run_naming;
+pub mod sandbox_filesets;
 pub mod signature_trust;
 pub mod volume_management;
 pub mod volumes;

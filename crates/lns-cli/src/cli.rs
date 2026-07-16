@@ -201,6 +201,9 @@ pub struct RunArgs {
     #[arg(skip)]
     pub declared_unpublished: Vec<u16>,
 
+    #[arg(skip)]
+    pub filesets: Vec<(String, String)>,
+
     #[arg(
         short = 'v',
         long = "volume",
