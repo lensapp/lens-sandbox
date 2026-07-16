@@ -272,6 +272,14 @@ async fn run_credential_bind(id: &str) -> Response {
             reason: format!("{id:?} is not a credential integration"),
         };
     };
+    // Fail fast instead of holding the CLI on a card a headless service can never show.
+    if !crate::tray::display_present() {
+        return Response::CredentialBindFailed {
+            reason: "no display is available for the approval-window value decision; \
+                     bind on a machine where the Lens Sandbox window can appear"
+                .into(),
+        };
+    }
     let Some(window_state) = crate::approval_flow::window::get() else {
         return Response::CredentialBindFailed {
             reason: "the approval window is not available to make the value decision".into(),

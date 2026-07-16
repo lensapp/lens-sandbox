@@ -22,3 +22,13 @@ Feature: credential placeholders cross the boundary as fakes, never real secrets
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox env'"
     Then the exit code is 0
     And the output contains "SOME_TOKEN=some-provider-LNSPLACEHOLDER"
+
+  Scenario: a credential slot arms in the guest under the slot's env name
+    Given a clean lns cache home
+    And the home's integration catalog declares "some-provider" managing "SOME_TOKEN"
+    And the Lens Sandbox service is running in that home
+    And the project definition declares credential "some-provider" injected as "PROVIDER_KEY"
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox env'"
+    Then the exit code is 0
+    And the output contains "PROVIDER_KEY=some-provider-LNSPLACEHOLDER"
+    And the output does not contain "SOME_TOKEN=some-provider-LNSPLACEHOLDER"

@@ -168,10 +168,18 @@ pub fn run_tray(
 
 /// Whether a desktop session the tray can attach to is present: macOS always has a window server, while Linux needs Wayland or X11 — whose absence (headless servers, CI, plain SSH) means winit cannot create an event loop.
 pub fn display_present() -> bool {
+    display_present_with(|key| std::env::var_os(key))
+}
+
+/// `LNS_HEADLESS` (any value but empty or "0") forces the tray off — for servers and CI hosts where the approval window can never appear.
+fn display_present_with(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    if env("LNS_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0") {
+        return false;
+    }
     if cfg!(target_os = "macos") {
         return true;
     }
-    has_linux_display(|key| std::env::var_os(key).is_some())
+    has_linux_display(|key| env(key).is_some())
 }
 
 fn has_linux_display(present: impl Fn(&str) -> bool) -> bool {
@@ -1960,6 +1968,30 @@ mod tests {
     #[test]
     fn has_linux_display_false_when_no_display_var_is_present() {
         assert!(!has_linux_display(|_| false));
+    }
+
+    #[test]
+    fn lns_headless_forces_the_display_off_on_any_platform() {
+        assert!(!display_present_with(
+            |key| (key == "LNS_HEADLESS").then(|| std::ffi::OsString::from("1"))
+        ));
+        assert!(!display_present_with(|key| match key {
+            "LNS_HEADLESS" => Some(std::ffi::OsString::from("true")),
+            _ => Some(std::ffi::OsString::from(":0")),
+        }));
+    }
+
+    #[test]
+    fn an_empty_or_zero_lns_headless_does_not_force_headless() {
+        let with = |value: &'static str| {
+            move |key: &str| match key {
+                "LNS_HEADLESS" => Some(std::ffi::OsString::from(value)),
+                "DISPLAY" => Some(std::ffi::OsString::from(":0")),
+                _ => None,
+            }
+        };
+        assert!(display_present_with(with("")));
+        assert!(display_present_with(with("0")));
     }
 
     #[test]

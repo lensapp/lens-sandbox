@@ -215,6 +215,11 @@ fn project_requires_credential(world: &mut E2eWorld, id: String, env: String) {
     world.project_credentials.push((id, env, true));
 }
 
+#[given(regex = r#"^the project definition declares credential "([^"]+)" injected as "([^"]+)"$"#)]
+fn project_declares_credential(world: &mut E2eWorld, id: String, env: String) {
+    world.project_credentials.push((id, env, false));
+}
+
 #[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]
 fn project_sets_command(world: &mut E2eWorld, command: String) {
     world.project_command = Some(command);
