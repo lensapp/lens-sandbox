@@ -11,8 +11,6 @@ use crate::declared_rig::DeclaredRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
 use crate::policy_rig::PolicyRig;
-use crate::resolve_rig::ResolveRig;
-use crate::resource_rig::ResourceRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -67,10 +65,6 @@ pub struct BehaviourWorld {
     pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedBundle>,
     pub fileset_problems: Option<Vec<String>>,
     pub fileset_specs: Option<Vec<String>>,
-
-    pub resource: Option<ResourceRig>,
-
-    pub resolve: Option<ResolveRig>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
@@ -137,13 +131,5 @@ impl BehaviourWorld {
 
     pub fn policy(&mut self) -> &mut PolicyRig {
         self.policy.get_or_insert_with(PolicyRig::default)
-    }
-
-    pub fn resource(&mut self) -> &mut ResourceRig {
-        self.resource.get_or_insert_with(ResourceRig::default)
-    }
-
-    pub fn resolve(&mut self) -> &mut ResolveRig {
-        self.resolve.get_or_insert_with(ResolveRig::default)
     }
 }

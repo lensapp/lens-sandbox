@@ -1,9 +1,5 @@
 pub mod approval_flow;
 pub mod artifact_dispatch;
-pub mod bundle_assembly;
-pub mod bundle_overrides;
-pub mod bundle_resolution;
-pub mod bundle_resources;
 pub mod credential_at_boot;
 pub mod credential_flow;
 pub mod declared_integrations;
@@ -18,7 +14,6 @@ pub mod policy_guardrail;
 pub mod run_lifecycle;
 pub mod run_naming;
 pub mod sandbox_filesets;
-pub mod signature_trust;
 pub mod volume_management;
 pub mod volumes;
 pub mod workdir;

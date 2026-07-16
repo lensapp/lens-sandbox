@@ -14,10 +14,6 @@ mod forward_rig;
 mod image_rig;
 #[path = "behaviours/policy_rig.rs"]
 mod policy_rig;
-#[path = "behaviours/resolve_rig.rs"]
-mod resolve_rig;
-#[path = "behaviours/resource_rig.rs"]
-mod resource_rig;
 #[path = "behaviours/runner.rs"]
 mod runner;
 #[path = "behaviours/steps/mod.rs"]
