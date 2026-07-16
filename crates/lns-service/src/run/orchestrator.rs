@@ -126,6 +126,10 @@ async fn orchestrate(
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
                 bundle.as_ref().and_then(|p| p.workload.policy.as_ref()),
+                bundle
+                    .as_ref()
+                    .map(|p| p.workload.credentials.as_slice())
+                    .unwrap_or_default(),
                 guest_tools.root.clone(),
                 args.env.clone(),
             ),

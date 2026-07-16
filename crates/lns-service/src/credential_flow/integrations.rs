@@ -25,7 +25,7 @@ pub struct ConnectableIntegrations {
 }
 
 /// The env/placeholder/injection wiring an integration seeds, taken from whichever block its authKind carries.
-fn wire_provider(integ: &Integration) -> Option<DefProvider> {
+fn wire_provider_def(integ: &Integration) -> Option<ProviderDef> {
     let (env_var, placeholder, injections) = match integ.auth_kind {
         AuthKind::Credential => {
             let c = integ.credential.as_ref()?;
@@ -36,12 +36,16 @@ fn wire_provider(integ: &Integration) -> Option<DefProvider> {
             (&o.env_var, &o.placeholder, &o.injections)
         }
     };
-    Some(DefProvider::new(ProviderDef {
+    Some(ProviderDef {
         id: integ.id.clone(),
         env_var: env_var.clone(),
         placeholder: placeholder.clone(),
         injections: injections.clone(),
-    }))
+    })
+}
+
+fn wire_provider(integ: &Integration) -> Option<DefProvider> {
+    wire_provider_def(integ).map(DefProvider::new)
 }
 
 /// The oauth block usable for a device sign-in: the device flow with a client_id baked in (community builds ship none, so they fall back to the token paste).
@@ -118,6 +122,50 @@ pub fn resolve_applied_integrations(
         }
     }
     out
+}
+
+/// A definition's credential slots resolve like declared integrations, with each slot's env name overriding the catalog default and winning over a same-id declared entry so the remap holds.
+pub fn resolve_applied_with_slots(
+    policy: &Policy,
+    slots: &[lns_artifact::spec::CredentialSlot],
+    catalog: &[Integration],
+) -> AppliedIntegrations {
+    let slot_ids: HashSet<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    let mut base = policy.clone();
+    base.integrations
+        .retain(|id| !slot_ids.contains(id.as_str()));
+    let mut out = resolve_applied_integrations(&base, catalog);
+    for slot in slots {
+        let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
+            continue;
+        };
+        if let Some(mut def) = wire_provider_def(integ) {
+            def.env_var = slot.env.clone();
+            out.providers.push(DefProvider::new(def));
+        }
+        out.routes
+            .extend(integ.routes.iter().map(|r| r.to_route_rule()));
+        if let Some(o) = signin_oauth(integ) {
+            out.oauth_configs.insert(integ.id.clone(), o.clone());
+        }
+        if let Some(o) = signin_pkce(integ) {
+            out.pkce_configs.insert(integ.id.clone(), o.clone());
+        }
+    }
+    out
+}
+
+/// A slot's integration is already reachable through the definition, so it is never offered as a fresh connect.
+pub fn resolve_connectable_with_slots(
+    policy: &Policy,
+    slots: &[lns_artifact::spec::CredentialSlot],
+    catalog: &[Integration],
+) -> ConnectableIntegrations {
+    let mut owned = policy.clone();
+    owned
+        .integrations
+        .extend(slots.iter().map(|s| s.name.clone()));
+    resolve_connectable_integrations(&owned, catalog)
 }
 
 /// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied.
@@ -480,6 +528,149 @@ mod tests {
         assert!(
             out.oauth_configs.is_empty(),
             "an empty client_id can't drive a device flow, so no oauth config is surfaced"
+        );
+    }
+
+    fn slot(name: &str, env: &str, required: bool) -> lns_artifact::spec::CredentialSlot {
+        lns_artifact::spec::CredentialSlot {
+            name: name.into(),
+            env: env.into(),
+            required,
+        }
+    }
+
+    #[test]
+    fn a_slot_seeds_its_provider_under_the_slot_env_name_with_the_catalog_placeholder() {
+        let catalog = vec![cred_integration(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-provider", "PROVIDER_KEY", false)],
+            &catalog,
+        );
+        assert_eq!(out.providers.len(), 1);
+        assert_eq!(out.providers[0].id(), "some-provider");
+        assert_eq!(
+            out.providers[0].env_var(),
+            "PROVIDER_KEY",
+            "the slot's env remap must win over the catalog default"
+        );
+        assert_eq!(
+            out.providers[0].placeholder(),
+            "lns-some-provider-placeholder",
+            "the placeholder stays the catalog's so the boundary still detects it"
+        );
+        assert_eq!(
+            out.routes.len(),
+            1,
+            "a slot allows its routes like a declared id"
+        );
+        assert_eq!(out.routes[0].match_pattern, "api.example.test");
+    }
+
+    #[test]
+    fn a_slot_wins_over_a_same_id_declared_integration_so_the_remap_holds() {
+        let catalog = vec![cred_integration(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&["some-provider"]),
+            &[slot("some-provider", "PROVIDER_KEY", true)],
+            &catalog,
+        );
+        assert_eq!(
+            out.providers.len(),
+            1,
+            "the slot and the declared id must not double-seed"
+        );
+        assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
+    }
+
+    #[test]
+    fn a_slot_alongside_a_different_declared_integration_unions_without_loss() {
+        let catalog = vec![
+            cred_integration("some-provider", "SOME_TOKEN", "api.example.test"),
+            cred_integration("other-provider", "OTHER_TOKEN", "api.other.example"),
+        ];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&["other-provider"]),
+            &[slot("some-provider", "SOME_TOKEN", false)],
+            &catalog,
+        );
+        let mut ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["other-provider", "some-provider"]);
+    }
+
+    #[test]
+    fn a_slot_naming_an_unknown_id_contributes_nothing_here() {
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-unknown", "SOME_TOKEN", true)],
+            &[],
+        );
+        assert!(
+            out.providers.is_empty(),
+            "unknown ids are the refusal's job"
+        );
+        assert!(out.routes.is_empty());
+    }
+
+    #[test]
+    fn an_oauth_slot_surfaces_its_sign_in_config_under_the_slot_env() {
+        let catalog = vec![oauth_integration(
+            "some-oauth",
+            "SOME_OAUTH_TOKEN",
+            "api.some-oauth.example",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-oauth", "OAUTH_KEY", true)],
+            &catalog,
+        );
+        assert_eq!(out.providers[0].env_var(), "OAUTH_KEY");
+        assert!(
+            out.oauth_configs.contains_key("some-oauth"),
+            "the sign-in config must surface for the launch gate"
+        );
+    }
+
+    #[test]
+    fn a_pkce_oauth_slot_surfaces_its_pkce_config() {
+        let catalog = vec![pkce_integration(
+            "somepkce",
+            "SOMEPKCE_TOKEN",
+            "api.somepkce.com",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("somepkce", "SOMEPKCE_TOKEN", false)],
+            &catalog,
+        );
+        assert!(out.pkce_configs.contains_key("somepkce"));
+        assert!(out.oauth_configs.is_empty());
+    }
+
+    #[test]
+    fn a_slot_named_integration_is_not_offered_as_a_fresh_connect() {
+        let catalog = vec![cred_integration(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let c = resolve_connectable_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-provider", "SOME_TOKEN", false)],
+            &catalog,
+        );
+        assert!(
+            c.providers.is_empty(),
+            "a slot's integration is already reachable, never a fresh offer"
         );
     }
 

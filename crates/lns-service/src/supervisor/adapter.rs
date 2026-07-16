@@ -17,7 +17,8 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::integrations::{
-    applied_integration_routes, resolve_applied_integrations, resolve_connectable_integrations,
+    applied_integration_routes, resolve_applied_with_slots, resolve_connectable_integrations,
+    resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -479,6 +480,7 @@ pub(super) async fn start(
     microvm_name: String,
     policy_path: &Path,
     bundle_policy: Option<&Policy>,
+    bundle_credentials: &[lns_artifact::spec::CredentialSlot],
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
@@ -487,9 +489,9 @@ pub(super) async fn start(
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
     let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
-    let applied = resolve_applied_integrations(&policy, &catalog);
+    let applied = resolve_applied_with_slots(&policy, bundle_credentials, &catalog);
     // Un-connected catalog integrations are seeded unarmed so their use offers a live connect.
-    let connectable = resolve_connectable_integrations(&policy, &catalog);
+    let connectable = resolve_connectable_with_slots(&policy, bundle_credentials, &catalog);
     policy.network.allowed_routes.extend(applied.routes);
     let connectable_ids: HashSet<String> = connectable
         .providers

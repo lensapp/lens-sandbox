@@ -12,7 +12,7 @@ use lns_service::artifact::credential_boot::{
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::integrations::{
-    resolve_applied_integrations, unknown_integration_ids, unknown_integrations_refusal,
+    resolve_applied_with_slots, unknown_integration_ids, unknown_integrations_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
 
@@ -96,7 +96,7 @@ fn launch(
         return;
     }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
-    let applied = resolve_applied_integrations(&policy, &rig.catalog);
+    let applied = resolve_applied_with_slots(&policy, &resolved.credentials, &rig.catalog);
     policy
         .network
         .allowed_routes

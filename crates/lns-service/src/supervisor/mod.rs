@@ -75,6 +75,7 @@ impl SupervisorSession {
         microvm_name: String,
         policy: Option<&Path>,
         bundle_policy: Option<&lns_policy::Policy>,
+        bundle_credentials: &[lns_artifact::spec::CredentialSlot],
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
     ) -> Result<Option<Self>> {
@@ -86,6 +87,7 @@ impl SupervisorSession {
             microvm_name,
             policy_path,
             bundle_policy,
+            bundle_credentials,
             guest_tools_root,
             user_env,
         )
@@ -291,6 +293,7 @@ mod tests {
             "vm-42".into(),
             None,
             None,
+            &[],
             PathBuf::from("/tmp"),
             vec![],
         )
@@ -542,6 +545,7 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             None,
+            &[],
             d.path().to_path_buf(),
             vec![],
         )
@@ -578,6 +582,7 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             Some(&bundle_policy),
+            &[],
             d.path().to_path_buf(),
             vec![],
         )
