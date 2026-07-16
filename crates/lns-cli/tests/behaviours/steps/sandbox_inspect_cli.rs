@@ -63,6 +63,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
             },
         ],
         ports: Vec::new(),
+        filesets: Vec::new(),
         integrations: Vec::new(),
         policy_flags: Vec::new(),
     });
@@ -89,6 +90,32 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
                 container: 9090,
             },
         ],
+        filesets: Vec::new(),
+        integrations: Vec::new(),
+        policy_flags: Vec::new(),
+    });
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring a fileset at "([^"]+)"$"#
+)]
+fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, mount: String) {
+    let inspection = ArtifactInspection::Sandbox(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: vec![lns_ipc::SandboxFileset {
+            path: None,
+            reference: Some(format!(
+                "registry.example.test/team/skills@sha256:{}",
+                "a".repeat(64)
+            )),
+            mount_path: mount,
+        }],
         integrations: Vec::new(),
         policy_flags: Vec::new(),
     });

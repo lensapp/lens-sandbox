@@ -277,9 +277,20 @@ pub struct SandboxView {
     #[serde(default)]
     pub ports: Vec<SandboxPort>,
     #[serde(default)]
+    pub filesets: Vec<SandboxFileset>,
+    #[serde(default)]
     pub integrations: Vec<String>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxFileset {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(rename = "ref", default)]
+    pub reference: Option<String>,
+    pub mount_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1362,6 +1373,14 @@ mod tests {
                     container: 9090,
                 },
             ],
+            filesets: vec![SandboxFileset {
+                path: None,
+                reference: Some(format!(
+                    "registry.example.test/team/skills@sha256:{}",
+                    "a".repeat(64)
+                )),
+                mount_path: "/root/.agent/skills".into(),
+            }],
             integrations: Vec::new(),
             policy_flags: Vec::new(),
         };

@@ -727,6 +727,14 @@ fn render_cached_inspect<W: std::io::Write>(
             if !view.ports.is_empty() {
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
+            for fileset in &view.filesets {
+                let source = fileset
+                    .path
+                    .as_deref()
+                    .or(fileset.reference.as_deref())
+                    .unwrap_or_default();
+                writeln!(out, "fileset: {source} -> {}", fileset.mount_path)?;
+            }
             render_integrations(out, &view.integrations)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
@@ -1456,6 +1464,7 @@ mod tests {
                     workdir: None,
                     mounts: Vec::new(),
                     ports: Vec::new(),
+                    filesets: Vec::new(),
                     integrations: vec!["some-provider".into()],
                     policy_flags: Vec::new(),
                 }),

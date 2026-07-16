@@ -120,6 +120,7 @@ fn resolve_published(world: &mut BehaviourWorld, project: String) {
             })
             .collect(),
         ports: Vec::new(),
+        filesets: Vec::new(),
         integrations: Vec::new(),
         policy_flags: Vec::new(),
     };

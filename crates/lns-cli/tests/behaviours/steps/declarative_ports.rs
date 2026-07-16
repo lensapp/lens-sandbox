@@ -51,6 +51,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
                 container: u16::try_from(port.container).expect("fixture container port"),
             })
             .collect(),
+        filesets: Vec::new(),
         integrations: Vec::new(),
         policy_flags: Vec::new(),
     }

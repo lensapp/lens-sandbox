@@ -364,6 +364,16 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
                     })
                     .collect(),
                 ports: declared_view_ports(&def.spec.ports)?,
+                filesets: def
+                    .spec
+                    .filesets
+                    .iter()
+                    .map(|fileset| lns_ipc::SandboxFileset {
+                        path: fileset.path.clone(),
+                        reference: fileset.reference.clone(),
+                        mount_path: fileset.mount_path.clone(),
+                    })
+                    .collect(),
                 integrations: def.spec.integrations,
                 policy_flags: resolved
                     .policy
