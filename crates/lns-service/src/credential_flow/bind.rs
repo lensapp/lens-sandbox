@@ -195,11 +195,9 @@ mod tests {
 
     #[test]
     fn a_timeout_fails_the_bind_instead_of_persisting_anything() {
-        let BindResolution::Failed(reason) =
-            resolve_bind_decision(CredentialDecisionRequest::Timeout)
-        else {
-            panic!("a timeout must not persist a decision");
-        };
-        assert!(reason.contains("timed out"), "got: {reason}");
+        assert_eq!(
+            resolve_bind_decision(CredentialDecisionRequest::Timeout),
+            BindResolution::Failed("the value decision timed out before it was made".into())
+        );
     }
 }

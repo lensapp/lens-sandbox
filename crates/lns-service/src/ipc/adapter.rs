@@ -277,11 +277,22 @@ async fn run_credential_bind(id: &str) -> Response {
             reason: "the approval window is not available to make the value decision".into(),
         };
     };
+    let prompt_id = prompt.id.clone();
+    // A second concurrent bind would coalesce into the first card and, on its own timeout, tear the first client's pending card down — refuse it instead.
+    if window_state
+        .snapshot()
+        .pending_credentials
+        .iter()
+        .any(|card| card.id == prompt_id)
+    {
+        return Response::CredentialBindFailed {
+            reason: format!("a bind for {id:?} is already pending in the approval window"),
+        };
+    }
     let providers: Vec<_> = bind_provider(integ).into_iter().collect();
     let host_value_available =
         crate::credential_flow::registry::detect_for_with(id, &providers).is_some();
     let (decision_tx, mut decision_rx) = mpsc::unbounded_channel();
-    let prompt_id = prompt.id.clone();
     window_state.insert_credential_pending(prompt, host_value_available, decision_tx);
     if let Some(ctx) = crate::approval_flow::window::ctx() {
         ctx.request_repaint();
