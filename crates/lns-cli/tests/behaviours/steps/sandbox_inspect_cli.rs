@@ -110,6 +110,24 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
     cached_artifact(world, &reference, inspection);
 }
 
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox whose policy defaults to allow$"#)]
+fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
+    let inspection = ArtifactInspection::Sandbox(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        integrations: Vec::new(),
+        policy_flags: vec![
+            "permissive defaultVerdict: allow — the sandbox is open by default".into(),
+        ],
+    });
+    cached_artifact(world, &reference, inspection);
+}
+
 #[given(regex = r#"^the service reports "inspect" needs a login for host "([^"]+)"$"#)]
 fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
     world.sandbox.response = Some(not_running("some-registry.example/some-sandbox:research"));
