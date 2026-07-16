@@ -976,6 +976,20 @@ mod tests {
         }
     }
 
+    fn artifact_of(target: &PulledTarget) -> Option<&PulledArtifact> {
+        match target {
+            PulledTarget::Artifact(artifact) => Some(artifact),
+            PulledTarget::Image(_) => None,
+        }
+    }
+
+    fn image_of(target: &PulledTarget) -> Option<&PulledImage> {
+        match target {
+            PulledTarget::Image(image) => Some(image),
+            PulledTarget::Artifact(_) => None,
+        }
+    }
+
     #[tokio::test]
     async fn pull_target_caches_a_published_sandbox_and_names_its_base_image() {
         ensure_global_trace_subscriber();
@@ -984,9 +998,11 @@ mod tests {
         let target = pull_target_with(&registry, "registry.example.test/sb:1", &cache)
             .await
             .unwrap();
-        let PulledTarget::Artifact(artifact) = target else {
-            panic!("a sandbox artifact must take the artifact path, got {target:?}");
-        };
+        assert!(
+            image_of(&target).is_none(),
+            "a sandbox artifact must not also classify as a plain image: {target:?}"
+        );
+        let artifact = artifact_of(&target).expect("a sandbox artifact takes the artifact path");
         assert_eq!(artifact.digest, format!("sha256:{}", "c".repeat(64)));
         assert_eq!(
             artifact.base_image.as_deref(),
@@ -1009,9 +1025,11 @@ mod tests {
         let target = pull_target_with(&registry, "alpine:3.20", &cache)
             .await
             .unwrap();
-        let PulledTarget::Image(pulled) = target else {
-            panic!("a plain OCI image must take the image path, got {target:?}");
-        };
+        assert!(
+            artifact_of(&target).is_none(),
+            "a plain OCI image must not classify as an artifact: {target:?}"
+        );
+        let pulled = image_of(&target).expect("a plain OCI image takes the image path");
         assert_eq!(pulled.layers.len(), 2, "the image pull ran in full");
     }
 
@@ -1069,9 +1087,7 @@ mod tests {
         let target = pull_target_with(&registry, "registry.example.test/bundle:1", &cache)
             .await
             .unwrap();
-        let PulledTarget::Artifact(artifact) = target else {
-            panic!("a bundle artifact must take the artifact path, got {target:?}");
-        };
+        let artifact = artifact_of(&target).expect("a bundle artifact takes the artifact path");
         assert_eq!(
             artifact.base_image, None,
             "bundle base images resolve through the component graph, not at pull time",
