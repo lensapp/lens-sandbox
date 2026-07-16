@@ -806,10 +806,10 @@ mod tests {
     }
 
     #[test]
-    fn run_image_args_volumes_and_binds_survive_postcard_round_trip() {
+    fn run_image_args_declarative_launch_settings_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
-            resolved_image: None,
+            resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             name: None,
             cpus: 1,
             mem: 512,
@@ -822,7 +822,7 @@ mod tests {
             hostname: None,
             cmd: vec![],
             env: vec![],
-            workdir: None,
+            workdir: Some("/workspace".into()),
             debug: false,
             tty: true,
             stdin: true,

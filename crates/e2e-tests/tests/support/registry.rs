@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Default)]
 struct Store {
@@ -28,6 +31,7 @@ struct Manifest {
 #[derive(Debug)]
 pub struct LocalRegistry {
     port: u16,
+    online: Arc<AtomicBool>,
 }
 
 impl LocalRegistry {
@@ -36,20 +40,27 @@ impl LocalRegistry {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local registry");
         let port = listener.local_addr().expect("registry addr").port();
         let store = Arc::new(Mutex::new(Store::default()));
+        let online = Arc::new(AtomicBool::new(true));
+        let server_online = online.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let store = store.clone();
+                let online = server_online.clone();
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &store);
+                    let _ = serve(stream, &store, &online);
                 });
             }
         });
-        Self { port }
+        Self { port, online }
     }
 
     /// The `host:port` a ref should target (e.g. `127.0.0.1:5000/some/repo:1`).
     pub fn host(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    pub fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::SeqCst);
     }
 }
 
@@ -138,10 +149,17 @@ fn route(path: &str) -> Option<(String, Vec<String>)> {
     Some((name, tail))
 }
 
-fn serve(mut stream: TcpStream, store: &Arc<Mutex<Store>>) -> std::io::Result<()> {
+fn serve(
+    mut stream: TcpStream,
+    store: &Arc<Mutex<Store>>,
+    online: &AtomicBool,
+) -> std::io::Result<()> {
     let Some(req) = read_request(&mut stream)? else {
         return Ok(());
     };
+    if !online.load(Ordering::SeqCst) {
+        return respond(&mut stream, "503 Service Unavailable", &[], b"offline");
+    }
     // Version check.
     if req.path == "/v2" || req.path == "/v2/" {
         return respond(&mut stream, "200 OK", &[], b"{}");

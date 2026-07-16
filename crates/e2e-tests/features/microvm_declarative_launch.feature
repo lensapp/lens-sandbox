@@ -11,3 +11,13 @@ Feature: declarative workdir and mounts reach a real guest
     And the output contains "project=visible"
     And the output contains "bind=readonly"
     And the output contains "volume=mounted"
+
+  Scenario: a pulled published sandbox launches offline from the consumer project
+    Given a local registry
+    And the Lens Sandbox service is running
+    When the user pulls a published declarative sandbox and runs it with the registry offline from a consumer project
+    Then the exit code is 0
+    And the output contains "wd=/workspace"
+    And the output contains "consumer=visible"
+    And the output contains "bind=readonly"
+    And the output contains "volume=mounted"

@@ -1034,6 +1034,24 @@ mod tests {
     }
 
     #[test]
+    fn published_sandbox_preflight_refuses_an_unpinned_result() {
+        let err = published_target(
+            "registry.example.test/team/sandbox:1",
+            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: "registry.example.test/team/sandbox:1".into(),
+                digest: String::new(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: Some("/workspace".into()),
+                mounts: Vec::new(),
+                integrations: Vec::new(),
+                policy_flags: Vec::new(),
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no manifest digest"));
+    }
+
+    #[test]
     fn published_preflight_keeps_agent_system_bundles_compatible() {
         let target = published_target(
             "registry.example.test/team/system:1",

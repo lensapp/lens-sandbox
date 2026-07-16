@@ -551,6 +551,119 @@ fn run_command_with_env(world: &mut E2eWorld, cmd_line: String, env: String) {
 }
 
 static RUN_SANDBOX_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PUBLISHED_DECLARATIVE_SEQ: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn mirror_microvm_image(host: &str, seq: usize) -> String {
+    let source: oci_client::Reference = pinned_microvm_image()
+        .parse()
+        .expect("pinned image ref parses");
+    let remote = oci_client::Client::new(oci_client::client::ClientConfig::default());
+    let oci_client::client::ImageData {
+        layers,
+        digest: _,
+        config,
+        manifest,
+    } = remote
+        .pull(
+            &source,
+            &oci_client::secrets::RegistryAuth::Anonymous,
+            vec![
+                oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+            ],
+        )
+        .await
+        .expect("pull the microVM image for the offline registry");
+    let destination: oci_client::Reference = format!("{host}/e2e-offline-base:{seq}")
+        .parse()
+        .expect("offline base ref parses");
+    let local = oci_client::Client::new(oci_client::client::ClientConfig {
+        protocol: oci_client::client::ClientProtocol::Http,
+        ..Default::default()
+    });
+    local
+        .push(
+            &destination,
+            &layers,
+            config,
+            &oci_client::secrets::RegistryAuth::Anonymous,
+            manifest,
+        )
+        .await
+        .expect("push the microVM image into the offline registry");
+    let (_, digest, _) = local
+        .pull_manifest_and_config(&destination, &oci_client::secrets::RegistryAuth::Anonymous)
+        .await
+        .expect("resolve the mirrored image digest");
+    destination.clone_with_digest(digest).whole()
+}
+
+#[when(
+    "the user pulls a published declarative sandbox and runs it with the registry offline from a consumer project"
+)]
+async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .get_or_insert_with(crate::registry::LocalRegistry::start)
+        .host();
+    let seq = PUBLISHED_DECLARATIVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = mirror_microvm_image(&host, seq).await;
+    let reference = format!("{host}/e2e-declarative-sandbox:{seq}");
+    let volume = format!("e2e-declarative-published-{seq}");
+    let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
+    );
+    std::fs::write(publisher.path().join("lns.yaml"), definition)
+        .expect("write published declarative lns.yaml");
+    let pushed = run_cli_with_timeout_in_dir(
+        publisher.path(),
+        vec!["push".to_string(), reference.clone()],
+        std::iter::empty::<(&str, &str)>(),
+        MICROVM_RUN_TIMEOUT,
+    );
+    assert_eq!(
+        pushed.exit_code, 0,
+        "push published declarative sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    let pulled = world.run_with_service_env(&["pull", &reference]);
+    assert_eq!(
+        pulled.exit_code, 0,
+        "pull published declarative sandbox:\n{}\n{}",
+        pulled.stdout, pulled.stderr
+    );
+
+    let consumer = world
+        .project
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("consumer project tempdir"))
+        .path()
+        .to_path_buf();
+    std::fs::write(consumer.join("consumer-marker"), "consumer project\n")
+        .expect("write consumer marker");
+    std::fs::write(
+        consumer.join("lns-policy.yaml"),
+        "network:\n  defaultVerdict: deny\n",
+    )
+    .expect("write consumer policy");
+    track_volume(world, &volume);
+    world
+        .registry
+        .as_ref()
+        .expect("the local registry exists")
+        .set_online(false);
+
+    let command = "/bin/sh -c 'echo wd=$(/.lens/guest-tools/bin/busybox pwd); if [ -f consumer-marker ]; then echo consumer=visible; fi; if echo blocked > consumer-marker 2>/dev/null; then echo bind=writable; else echo bind=readonly; fi; echo volume=mounted > /data/marker; read v < /data/marker; echo $v'";
+    let mut args = vec!["run".to_string(), reference, "--".to_string()];
+    args.extend(split_args(command));
+    let result =
+        run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
 
 // `lns run` refuses a plain OCI image, so image-driven scenarios publish a minimal sandbox over it to the in-process registry and run that reference.
 async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String {
