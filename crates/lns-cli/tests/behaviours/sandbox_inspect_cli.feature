@@ -31,6 +31,14 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "ports: 3003, 8080:9090"
 
+  @todo
+  Scenario: inspecting a sandbox lists its declared filesets
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring a fileset at "/root/.agent/skills"
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "fileset"
+    And the output contains "/root/.agent/skills"
+
   Scenario: inspecting a bundle lists what it composes
     Given the service inspects "some-registry.example/some-agent:research" as a bundle composing:
       | sandbox base | registry.example.test/base:1                    |
