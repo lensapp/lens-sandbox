@@ -116,6 +116,7 @@ fn resolve_host_binds(
 struct PublishedTarget {
     image: String,
     defaults: crate::run::declarative::Defaults,
+    filesets: Vec<(String, String)>,
 }
 
 fn published_target(
@@ -133,11 +134,13 @@ fn published_target(
             Ok(PublishedTarget {
                 image: parsed.clone_with_digest(view.digest.clone()).to_string(),
                 defaults: crate::run::declarative::Defaults::from_view(&view),
+                filesets: crate::run::summary::fileset_summaries_from_view(&view),
             })
         }
         lns_ipc::ArtifactInspection::Bundle(_) => Ok(PublishedTarget {
             image: reference.to_string(),
             defaults: crate::run::declarative::Defaults::default(),
+            filesets: Vec::new(),
         }),
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
             "{reference} is not a sandbox; run `lns init` to author an lns.yaml, or pass a published sandbox reference"
@@ -206,8 +209,8 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
     )?;
     args.publish = composed.published;
     args.declared_unpublished = composed.declared_unpublished;
-    if let crate::run::target::RunTarget::Local { def, .. } = &target {
-        args.filesets = def
+    args.filesets = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => def
             .spec
             .filesets
             .iter()
@@ -217,8 +220,10 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
                     fileset.mount_path.clone(),
                 )
             })
-            .collect();
-    }
+            .collect(),
+        (_, Some(published)) => published.filesets.clone(),
+        _ => Vec::new(),
+    };
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
@@ -1042,7 +1047,14 @@ mod tests {
                     read_only: false,
                 }],
                 ports: Vec::new(),
-                filesets: Vec::new(),
+                filesets: vec![lns_ipc::SandboxFileset {
+                    path: None,
+                    reference: Some(format!(
+                        "registry.example.test/team/skills@sha256:{}",
+                        "b".repeat(64)
+                    )),
+                    mount_path: "/root/.agent/skills".into(),
+                }],
                 integrations: Vec::new(),
                 policy_flags: Vec::new(),
             }),
@@ -1054,6 +1066,16 @@ mod tests {
         );
         assert_eq!(target.defaults.workdir.as_deref(), Some("/workspace"));
         assert_eq!(target.defaults.mounts[0].source, ".");
+        assert_eq!(
+            target.filesets,
+            [(
+                format!(
+                    "registry.example.test/team/skills@sha256:{}…",
+                    "b".repeat(12)
+                ),
+                "/root/.agent/skills".to_string()
+            )]
+        );
     }
 
     #[test]

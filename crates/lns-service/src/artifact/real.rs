@@ -136,6 +136,12 @@ impl crate::artifact::fileset::SnapshotDir for RealSnapshotDir {
                     format!("non-utf8 file name {name:?}"),
                 )
             })?;
+            if entry.file_type()?.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("symlink {name} — filesets carry only regular files"),
+                ));
+            }
             let metadata = entry.metadata()?;
             entries.push(crate::artifact::fileset::SnapshotEntry {
                 name,

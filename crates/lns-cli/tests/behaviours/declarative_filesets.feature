@@ -22,6 +22,11 @@ Feature: declared filesets ship files inside the sandbox artifact
     Then the definition sent to the service carries the fileset ref unchanged
     And the run summary shows a Fileset line `registry.example.test/team/skills@sha256:aaaaaaaaaaaa… -> /root/.agent/skills`
 
+  Scenario: running a pulled sandbox shows its declared filesets in the summary
+    Given a pulled sandbox whose view declares fileset ref "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" mounted at "/root/.agent/skills"
+    When the pulled sandbox run is prepared
+    Then the run summary shows a Fileset line `registry.example.test/team/skills@sha256:aaaaaaaaaaaa… -> /root/.agent/skills`
+
   Scenario: a secret-shaped file in a path fileset refuses the run
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"

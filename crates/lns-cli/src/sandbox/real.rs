@@ -168,9 +168,16 @@ impl super::author::Fs for RealFs {
                     format!("non-utf8 file name {name:?}"),
                 )
             })?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("symlink {name} — filesets carry only regular files"),
+                ));
+            }
             entries.push(super::author::DirEntry {
                 name,
-                dir: entry.file_type()?.is_dir(),
+                dir: file_type.is_dir(),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));

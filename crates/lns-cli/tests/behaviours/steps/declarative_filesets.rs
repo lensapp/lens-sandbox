@@ -70,6 +70,42 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
 }
 
+#[cucumber::given(
+    regex = r#"^a pulled sandbox whose view declares fileset ref "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount: String) {
+    world.pulled_view = Some(lns_ipc::SandboxView {
+        reference: "registry.example.test/team/sandbox:1".into(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: vec![lns_ipc::SandboxFileset {
+            path: None,
+            reference: Some(reference),
+            mount_path: mount,
+        }],
+        integrations: Vec::new(),
+        policy_flags: Vec::new(),
+    });
+}
+
+#[when("the pulled sandbox run is prepared")]
+fn pulled_run_prepared(world: &mut BehaviourWorld) {
+    let view = world.pulled_view.take().expect("a pulled view is staged");
+    let mut args: RunArgs = parse_args(["lns", "run", "registry.example.test/team/sandbox:1"])
+        .expect("run with ref must parse");
+    args.filesets = lns_cli::run::summary::fileset_summaries_from_view(&view);
+    if world.cwd.is_none() {
+        world.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
+    }
+    let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
+    let mut buf = Vec::<u8>::new();
+    print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
+    world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
+}
+
 #[when("the user runs the local sandbox")]
 fn user_runs_local_sandbox(world: &mut BehaviourWorld) {
     world.result = Some(match resolve_local(world) {

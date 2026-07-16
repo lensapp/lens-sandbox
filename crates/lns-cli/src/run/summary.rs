@@ -179,10 +179,27 @@ fn flags_line(args: &RunArgs) -> String {
 
 /// The summary names a fileset by what the author wrote: the path verbatim, or the ref with its digest shortened to the usual 12 characters.
 pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
-    if let Some(path) = &fileset.path {
-        return path.clone();
+    fileset_display(fileset.path.as_deref(), fileset.reference.as_deref())
+}
+
+/// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
+pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, String)> {
+    view.filesets
+        .iter()
+        .map(|fileset| {
+            (
+                fileset_display(fileset.path.as_deref(), fileset.reference.as_deref()),
+                fileset.mount_path.clone(),
+            )
+        })
+        .collect()
+}
+
+fn fileset_display(path: Option<&str>, reference: Option<&str>) -> String {
+    if let Some(path) = path {
+        return path.to_string();
     }
-    let reference = fileset.reference.as_deref().unwrap_or_default();
+    let reference = reference.unwrap_or_default();
     match reference.split_once("@sha256:") {
         Some((repo, digest)) if digest.len() > 12 => {
             format!("{repo}@sha256:{}…", &digest[..12])
