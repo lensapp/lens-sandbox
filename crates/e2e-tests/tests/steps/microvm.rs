@@ -28,11 +28,24 @@ fn linux_host_arch_resolver(entries: &[oci_client::manifest::ImageIndexEntry]) -
         .map(|e| e.digest.clone())
 }
 
-// Resolve the base tag to a digest-pinned reference once per process: pinned refs hit the daemon's manifest cache, so ~45 booted guests cost one registry round-trip instead of a rate-limited flood.
+fn image_pin_cache_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-microvm-image-pin")
+}
+
+fn cached_image_pin() -> Option<String> {
+    let contents = std::fs::read_to_string(image_pin_cache_path()).ok()?;
+    let (tag, pinned) = contents.trim().split_once(' ')?;
+    (tag == MICROVM_IMAGE && pinned.contains("@sha256:")).then(|| pinned.to_string())
+}
+
+// Resolve the base tag to a digest-pinned reference once per checkout (a digest is immutable, and the pin file keeps repeated suite invocations from tripping ECR's rate limit): pinned refs hit the daemon's manifest cache, so ~45 booted guests cost one registry round-trip.
 fn pinned_microvm_image() -> String {
     PINNED_MICROVM_IMAGE
         .get_or_init(|| {
-            tokio::task::block_in_place(|| {
+            if let Some(pin) = cached_image_pin() {
+                return pin;
+            }
+            let pinned = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     let reference: oci_client::Reference =
                         MICROVM_IMAGE.parse().expect("base ref parses");
@@ -54,7 +67,12 @@ fn pinned_microvm_image() -> String {
                         reference.repository()
                     )
                 })
-            })
+            });
+            let _ = std::fs::write(
+                image_pin_cache_path(),
+                format!("{MICROVM_IMAGE} {pinned}\n"),
+            );
+            pinned
         })
         .clone()
 }
@@ -85,9 +103,10 @@ fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
         .unwrap_or_default()
 }
 
+// Anchored to the CLI's "✓ started run <id>" status line: the workload transcript precedes it and legitimately contains phrases like "run as root".
 fn parse_run_id(text: &str) -> Option<String> {
-    let marker = text.find("run ")?;
-    let id: String = text[marker + "run ".len()..]
+    let marker = text.find("started run ")?;
+    let id: String = text[marker + "started run ".len()..]
         .chars()
         .take_while(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         .collect();
