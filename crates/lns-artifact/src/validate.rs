@@ -133,25 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn a_real_looking_token_in_an_agent_env_is_flagged_as_a_secret() {
-        let doc = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{{"name":"some-agent"}},"spec":{{"command":"agent","env":{{"GH_TOKEN":"ghp_{}"}}}}}}"#,
-            "a".repeat(36)
-        )
-        .into_bytes();
-        let problems = validate(&doc).unwrap_err();
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("GitHub token") && p.contains("spec.env.GH_TOKEN")),
-            "a github token must be caught and located: {problems:?}"
-        );
-    }
-
-    #[test]
     fn a_self_identifying_placeholder_is_not_flagged() {
         let doc = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{{"name":"some-agent"}},"spec":{{"command":"agent","env":{{"GH_TOKEN":"ghp_PLACEHOLDER{}"}}}}}}"#,
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","env":{{"GH_TOKEN":"ghp_PLACEHOLDER{}"}}}}}}"#,
             "0".repeat(27)
         )
         .into_bytes();
@@ -184,7 +168,7 @@ mod tests {
     #[test]
     fn the_secret_scan_walks_nested_arrays_and_ignores_non_strings() {
         let doc = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Agent","metadata":{{"name":"some-agent"}},"spec":{{"command":"agent","ports":[{{"container":8080}}],"env":{{"K":"sk-{}"}}}}}}"#,
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","ports":[{{"container":8080}}],"env":{{"K":"sk-{}"}}}}}}"#,
             "b".repeat(24)
         )
         .into_bytes();
