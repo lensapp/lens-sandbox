@@ -119,6 +119,7 @@ fn resolve_published(world: &mut BehaviourWorld, project: String) {
                 read_only: volume.read_only(),
             })
             .collect(),
+        ports: Vec::new(),
         integrations: Vec::new(),
         policy_flags: Vec::new(),
     };

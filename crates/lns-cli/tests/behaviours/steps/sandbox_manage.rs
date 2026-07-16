@@ -39,6 +39,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
             image: "docker.io/library/alpine@sha256:abc".into(),
             workdir: None,
             mounts: Vec::new(),
+            ports: Vec::new(),
             integrations: Vec::new(),
             policy_flags: Vec::new(),
         }),

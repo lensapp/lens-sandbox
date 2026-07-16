@@ -275,9 +275,18 @@ pub struct SandboxView {
     #[serde(default)]
     pub mounts: Vec<SandboxMount>,
     #[serde(default)]
+    pub ports: Vec<SandboxPort>,
+    #[serde(default)]
     pub integrations: Vec<String>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPort {
+    #[serde(default)]
+    pub host: Option<u16>,
+    pub container: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1343,6 +1352,16 @@ mod tests {
                 target: "/workspace".into(),
                 read_only: true,
             }],
+            ports: vec![
+                SandboxPort {
+                    host: None,
+                    container: 3003,
+                },
+                SandboxPort {
+                    host: Some(8080),
+                    container: 9090,
+                },
+            ],
             integrations: Vec::new(),
             policy_flags: Vec::new(),
         };

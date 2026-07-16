@@ -3,7 +3,7 @@ use cucumber::gherkin::Step;
 use cucumber::given;
 use lns_ipc::{
     ArtifactInspection, BundleView, FilesetView, ImageView, Response, SandboxMount,
-    SandboxMountKind, SandboxView, SignatureView,
+    SandboxMountKind, SandboxPort, SandboxView, SignatureView,
 };
 
 fn full_digest() -> String {
@@ -60,6 +60,33 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
                 source: "some-cache".into(),
                 target: "/home/node/.cache".into(),
                 read_only: true,
+            },
+        ],
+        ports: Vec::new(),
+        integrations: Vec::new(),
+        policy_flags: Vec::new(),
+    });
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring ports 3003 and 8080:9090$"#
+)]
+fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
+    let inspection = ArtifactInspection::Sandbox(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: vec![
+            SandboxPort {
+                host: None,
+                container: 3003,
+            },
+            SandboxPort {
+                host: Some(8080),
+                container: 9090,
             },
         ],
         integrations: Vec::new(),

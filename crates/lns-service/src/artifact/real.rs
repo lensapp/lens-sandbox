@@ -256,6 +256,24 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     }
 }
 
+fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc::SandboxPort>> {
+    ports
+        .iter()
+        .map(|port| {
+            Ok(lns_ipc::SandboxPort {
+                host: port
+                    .host
+                    .map(u16::try_from)
+                    .transpose()
+                    .with_context(|| format!("declared host port {:?} out of range", port.host))?,
+                container: u16::try_from(port.container).with_context(|| {
+                    format!("declared container port {} out of range", port.container)
+                })?,
+            })
+        })
+        .collect()
+}
+
 /// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image, filesets, declared integrations, and any over-broad-policy flags; signature trust awaits the verification follow-up.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
     let requested: Reference = image_ref
@@ -306,6 +324,7 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
                         read_only: volume.read_only(),
                     })
                     .collect(),
+                ports: declared_view_ports(&def.spec.ports)?,
                 integrations: def.spec.integrations,
                 policy_flags: resolved
                     .policy

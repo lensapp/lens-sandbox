@@ -723,6 +723,9 @@ fn render_cached_inspect<W: std::io::Write>(
                     mount.source, mount.target
                 )?;
             }
+            if !view.ports.is_empty() {
+                writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
+            }
             render_integrations(out, &view.integrations)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
@@ -734,6 +737,17 @@ fn render_cached_inspect<W: std::io::Write>(
         lns_ipc::ArtifactInspection::Bundle(view) => render_bundle(out, view)?,
     }
     Ok(())
+}
+
+fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
+    ports
+        .iter()
+        .map(|port| match port.host {
+            Some(host) => format!("{host}:{}", port.container),
+            None => port.container.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_bundle<W: std::io::Write>(out: &mut W, view: &lns_ipc::BundleView) -> Result<()> {
@@ -1440,6 +1454,7 @@ mod tests {
                     image: "docker.io/library/alpine@sha256:abc".into(),
                     workdir: None,
                     mounts: Vec::new(),
+                    ports: Vec::new(),
                     integrations: vec!["some-provider".into()],
                     policy_flags: Vec::new(),
                 }),
