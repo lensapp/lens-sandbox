@@ -61,7 +61,7 @@ The `spec` fields:
 | `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
-| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Publishing at launch is flag-driven today — `lns run -p HOST:CONTAINER`. |
+| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 
 Check the definition offline — no network, no service — with `validate` and
 `show`:
@@ -397,6 +397,23 @@ The format is `[host_ip:]hostport:containerport[/proto]`:
   summary flags a non-loopback bind as `(exposed beyond this machine)`.
 - IPv6 host IPs go in brackets: `[::1]:8080:3000`.
 - Only `tcp` is supported today; `udp` is rejected.
+
+Declared `spec.ports` follow the docker family on both sides of the trust line:
+
+- **Your own `./lns.yaml` is `docker compose up`**: every declared port
+  publishes automatically — the `host:` value when present, the container
+  number otherwise. The definition in your directory is policy you wrote;
+  the run summary's `Ports:` line discloses each binding.
+- **A pulled sandbox is `docker run`**: its declared ports are EXPOSE-style
+  disclosure, not a grant — a bare run publishes nothing, and the summary
+  lists them as declared but not published. Opt in to the declared set with
+  `-P`/`--publish-declared` (same mapping). A pulled artifact's definition is
+  policy you run into, so inbound access stays yours to grant.
+- Declared publishing always binds loopback — compose's `0.0.0.0` default is
+  deliberately not copied. To expose wider, name the port explicitly with
+  `-p host_ip:hostport:containerport`.
+- Explicit `-p` entries combine with the declared set; on a container-port
+  conflict the explicit `-p` wins.
 
 ### Interactive, TTY, and detached sessions
 
