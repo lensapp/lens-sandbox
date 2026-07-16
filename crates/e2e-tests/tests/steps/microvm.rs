@@ -98,6 +98,14 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n    - {id}"));
         }
     }
+    if !world.project_credentials.is_empty() {
+        spec_tail.push_str("\n  credentials:");
+        for (name, env, required) in &world.project_credentials {
+            spec_tail.push_str(&format!(
+                "\n    - name: {name}\n      env: {env}\n      required: {required}"
+            ));
+        }
+    }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         pinned_microvm_image()
@@ -200,6 +208,11 @@ fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
 #[given(regex = r#"^the project definition declares integration "([^"]+)"$"#)]
 fn project_declares_integration(world: &mut E2eWorld, id: String) {
     world.project_integrations.push(id);
+}
+
+#[given(regex = r#"^the project definition requires credential "([^"]+)" injected as "([^"]+)"$"#)]
+fn project_requires_credential(world: &mut E2eWorld, id: String, env: String) {
+    world.project_credentials.push((id, env, true));
 }
 
 #[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]

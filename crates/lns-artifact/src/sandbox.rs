@@ -91,6 +91,17 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             bail!("invalid integration id {integration:?}");
         }
     }
+    for slot in &doc.spec.credentials {
+        if !spec::is_valid_name(&slot.name) {
+            bail!("invalid credential integration id {:?}", slot.name);
+        }
+        if slot.env.trim().is_empty() {
+            bail!(
+                "credential {:?} must name the env var it is injected as",
+                slot.name
+            );
+        }
+    }
     for port in &doc.spec.ports {
         if !(1..=65535).contains(&port.container) {
             bail!(
@@ -223,6 +234,39 @@ mod tests {
             format!("{err:#}").contains("invalid integration id"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn parse_rejects_an_invalid_credential_slot_integration_id() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","credentials":[{"name":"Bad_Id","env":"SOME_TOKEN"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid credential integration id"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_credential_slot_with_no_env_target() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":" "}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("env var it is injected as"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_reads_a_required_credential_slot() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}"#,
+        ))
+        .unwrap();
+        assert!(def.spec.credentials[0].required);
     }
 
     #[test]

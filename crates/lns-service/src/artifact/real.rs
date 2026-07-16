@@ -106,12 +106,50 @@ pub(crate) fn plan_local(definition_json: &str) -> Result<BundlePlan> {
     })
 }
 
-/// Refuse a launch whose definition declares an integration this machine's catalog cannot arm — fail-fast at boot instead of an opaque mid-run credential miss.
-pub(crate) fn refuse_unknown_integrations(policy: Option<&lns_policy::Policy>) -> Result<()> {
-    let declared = match policy {
-        Some(p) if !p.integrations.is_empty() => &p.integrations,
-        _ => return Ok(()),
+/// Refuse a launch whose definition declares an integration — under `spec.integrations` or as a credential slot — this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss.
+pub(crate) fn refuse_unknown_integrations(
+    policy: Option<&lns_policy::Policy>,
+    credentials: &[lns_artifact::spec::CredentialSlot],
+) -> Result<()> {
+    let mut declared: Vec<String> = policy.map(|p| p.integrations.clone()).unwrap_or_default();
+    declared.extend(credentials.iter().map(|slot| slot.name.clone()));
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let catalog = effective_machine_catalog();
+    let unknown =
+        crate::credential_flow::integrations::unknown_integration_ids(&declared, &catalog);
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(crate::credential_flow::integrations::unknown_integrations_refusal(&unknown))
+}
+
+/// Refuse a launch whose definition requires a credential slot this machine has not bound (or has denied) — before any microVM boots.
+pub(crate) fn refuse_unbound_required_credentials(
+    credentials: &[lns_artifact::spec::CredentialSlot],
+) -> Result<()> {
+    if credentials.iter().all(|slot| !slot.required) {
+        return Ok(());
+    }
+    let catalog = effective_machine_catalog();
+    let state = {
+        use crate::credential_flow::store::{
+            CredentialStore, JsonFileCredentialStore, default_credentials_path,
+        };
+        JsonFileCredentialStore::new(default_credentials_path())
+            .load()
+            .unwrap_or_default()
     };
+    if let Err(failure) =
+        crate::artifact::credential_boot::gate_required_slots(credentials, &catalog, &state)
+    {
+        anyhow::bail!(failure.as_message());
+    }
+    Ok(())
+}
+
+fn effective_machine_catalog() -> Vec<lns_policy::integrations::Integration> {
     let user = lns_policy::integrations::Catalog::load_or_default(
         &lns_policy::integrations::default_integrations_path(),
     )
@@ -121,12 +159,7 @@ pub(crate) fn refuse_unknown_integrations(policy: Option<&lns_policy::Policy>) -
         );
         lns_policy::integrations::Catalog::default()
     });
-    let catalog = lns_policy::integrations::effective_integrations(&user);
-    let unknown = crate::credential_flow::integrations::unknown_integration_ids(declared, &catalog);
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(crate::credential_flow::integrations::unknown_integrations_refusal(&unknown))
+    lns_policy::integrations::effective_integrations(&user)
 }
 
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the bundle's filesets land in the microVM at their mount paths.

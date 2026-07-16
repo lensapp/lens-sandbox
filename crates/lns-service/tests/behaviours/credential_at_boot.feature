@@ -1,4 +1,3 @@
-@todo
 Feature: a sandbox definition's credential slots gate the launch
   A sandbox definition declares credential slots under `spec.credentials` —
   each naming an integration, the env var it is injected as (a remap of the
@@ -37,6 +36,7 @@ Feature: a sandbox definition's credential slots gate the launch
     And the error says the credential was denied on this machine
     And the error points at `lns integration connect some-provider`
 
+  @todo
   Scenario: A host-detect decision counts as bound for the launch gate
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"
     And the sandbox definition requires a credential slot for "some-provider" injected as "SOME_TOKEN"
@@ -44,6 +44,7 @@ Feature: a sandbox definition's credential slots gate the launch
     When the sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
 
+  @todo
   Scenario: A bound slot arms silently under the slot's env name
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"
     And the sandbox definition declares a credential slot for "some-provider" injected as "PROVIDER_KEY"
@@ -52,6 +53,7 @@ Feature: a sandbox definition's credential slots gate the launch
     Then the workload's environment contains the placeholder under "PROVIDER_KEY"
     And no value-decision prompt is shown before the workload starts
 
+  @todo
   Scenario: An unbound optional slot runs reactively
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"
     And the sandbox definition declares a credential slot for "some-provider" injected as "SOME_TOKEN"
@@ -60,6 +62,7 @@ Feature: a sandbox definition's credential slots gate the launch
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And no value-decision prompt is shown before the workload starts
 
+  @todo
   Scenario: A bound slot is injected only at the boundary, never into the workload
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"
     And the sandbox definition declares a credential slot for "some-provider" injected as "SOME_TOKEN"
@@ -68,6 +71,7 @@ Feature: a sandbox definition's credential slots gate the launch
     Then the workload sees only a placeholder in "SOME_TOKEN"
     And the real value is substituted at the boundary
 
+  @todo
   Scenario: A required oauth-kind slot blocks on the sign-in gate instead of refusing
     Given the machine catalog has an oauth integration "some-oauth"
     And the sandbox definition requires a credential slot for "some-oauth" injected as "SOME_OAUTH_TOKEN"

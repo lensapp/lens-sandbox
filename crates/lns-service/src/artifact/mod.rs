@@ -111,6 +111,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
             network: def.spec.policy.clone(),
             integrations: def.spec.integrations.clone(),
         }),
+        credentials: def.spec.credentials.clone(),
     }
 }
 

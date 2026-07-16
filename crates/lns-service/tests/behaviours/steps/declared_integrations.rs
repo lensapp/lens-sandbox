@@ -6,7 +6,8 @@ use lns_policy::integrations::{
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
-    BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+    BootGate, ConnectChoice, SlotPlan, boot_gate, gate_required_slots, plan_declared_integrations,
+    resolve_connect,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
@@ -71,14 +72,19 @@ fn launch(
             return;
         }
     };
-    let declared = resolved
+    let mut declared = resolved
         .policy
         .as_ref()
         .map(|p| p.integrations.clone())
         .unwrap_or_default();
+    declared.extend(resolved.credentials.iter().map(|slot| slot.name.clone()));
     let unknown = unknown_integration_ids(&declared, &rig.catalog);
     if !unknown.is_empty() {
         rig.error = Some(unknown_integrations_refusal(&unknown));
+        return;
+    }
+    if let Err(failure) = gate_required_slots(&resolved.credentials, &rig.catalog, &rig.store) {
+        rig.error = Some(failure.as_message());
         return;
     }
     let plans = plan_declared_integrations(&declared, &rig.catalog, &rig.store);

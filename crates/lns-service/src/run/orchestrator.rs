@@ -94,7 +94,11 @@ async fn orchestrate(
         (None, None) => None,
     };
     if let Some(plan) = &bundle {
-        crate::artifact::real::refuse_unknown_integrations(plan.workload.policy.as_ref())?;
+        crate::artifact::real::refuse_unknown_integrations(
+            plan.workload.policy.as_ref(),
+            &plan.workload.credentials,
+        )?;
+        crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
         gate_declared_sign_ins(plan.workload.policy.as_ref(), &frame_tx).await?;
     }
     let launch = bundle
