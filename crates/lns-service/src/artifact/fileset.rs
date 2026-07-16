@@ -205,38 +205,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn local_specs_snapshot_nested_directories_as_host_file_specs() {
-        struct TwoLevel;
-        impl SnapshotDir for TwoLevel {
-            fn entries(&self, dir: &Path) -> std::io::Result<Vec<SnapshotEntry>> {
-                if dir == Path::new("/work/skills") {
-                    Ok(vec![
-                        SnapshotEntry {
-                            name: "deep".into(),
-                            dir: true,
-                            mode: 0o755,
-                        },
-                        SnapshotEntry {
-                            name: "prompts.md".into(),
-                            dir: false,
-                            mode: 0o644,
-                        },
-                    ])
-                } else if dir == Path::new("/work/skills/deep") {
-                    Ok(vec![SnapshotEntry {
-                        name: "run.sh".into(),
-                        dir: false,
+    struct TwoLevel;
+    impl SnapshotDir for TwoLevel {
+        fn entries(&self, dir: &Path) -> std::io::Result<Vec<SnapshotEntry>> {
+            if dir == Path::new("/work/skills") {
+                Ok(vec![
+                    SnapshotEntry {
+                        name: "deep".into(),
+                        dir: true,
                         mode: 0o755,
-                    }])
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "no such directory",
-                    ))
-                }
+                    },
+                    SnapshotEntry {
+                        name: "prompts.md".into(),
+                        dir: false,
+                        mode: 0o644,
+                    },
+                ])
+            } else if dir == Path::new("/work/skills/deep") {
+                Ok(vec![SnapshotEntry {
+                    name: "run.sh".into(),
+                    dir: false,
+                    mode: 0o755,
+                }])
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such directory",
+                ))
             }
         }
+    }
+
+    #[test]
+    fn local_specs_snapshot_nested_directories_as_host_file_specs() {
         let specs = local_fileset_specs(
             &TwoLevel,
             &[LocalFileset {
@@ -264,17 +265,8 @@ mod tests {
 
     #[test]
     fn local_specs_surface_a_missing_directory_naming_the_fileset() {
-        struct NoDirs;
-        impl SnapshotDir for NoDirs {
-            fn entries(&self, _: &Path) -> std::io::Result<Vec<SnapshotEntry>> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "no such directory",
-                ))
-            }
-        }
         let err = local_fileset_specs(
-            &NoDirs,
+            &TwoLevel,
             &[LocalFileset {
                 source: "/work/missing".into(),
                 mount_path: "/s".into(),

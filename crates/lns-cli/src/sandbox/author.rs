@@ -184,51 +184,12 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::collections::HashMap;
 
-    #[derive(Default)]
-    struct FakeFs {
-        files: RefCell<HashMap<PathBuf, String>>,
-        fail_write: bool,
-    }
+    use crate::sandbox::test_support::MapFs;
 
-    impl FakeFs {
-        fn with(path: &str, contents: &str) -> Self {
-            let fs = Self::default();
-            fs.files
-                .borrow_mut()
-                .insert(PathBuf::from(path), contents.to_string());
-            fs
-        }
-    }
-
-    impl Fs for FakeFs {
-        fn read_to_string(&self, path: &Path) -> io::Result<String> {
-            self.files
-                .borrow()
-                .get(path)
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
-        }
-        fn write(&self, path: &Path, contents: &str) -> io::Result<()> {
-            if self.fail_write {
-                return Err(io::Error::other("disk full"));
-            }
-            self.files
-                .borrow_mut()
-                .insert(path.to_path_buf(), contents.to_string());
-            Ok(())
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.files.borrow().contains_key(path)
-        }
-        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-            self.read_to_string(path).map(String::into_bytes)
-        }
-        fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-            map_dir_entries(self.files.borrow().keys(), dir)
-        }
+    fn fake(path: &str, contents: &str) -> MapFs {
+        MapFs::with(&[(path, contents)])
     }
 
     fn cwd() -> &'static Path {
@@ -250,7 +211,7 @@ mod tests {
 
     #[test]
     fn init_scaffolds_a_default_definition() {
-        let fs = FakeFs::default();
+        let fs = MapFs::default();
         let mut out = Vec::new();
         let code = init(&fs, cwd(), &mut out).unwrap();
         assert_eq!(code, 0);
@@ -262,7 +223,7 @@ mod tests {
 
     #[test]
     fn init_refuses_to_clobber_an_existing_definition() {
-        let fs = FakeFs::with("/work/lns.yaml", "keep me");
+        let fs = fake("/work/lns.yaml", "keep me");
         let mut out = Vec::new();
         let err = init(&fs, cwd(), &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"));
@@ -271,7 +232,7 @@ mod tests {
 
     #[test]
     fn init_surfaces_a_write_failure() {
-        let fs = FakeFs {
+        let fs = MapFs {
             fail_write: true,
             ..Default::default()
         };
@@ -282,7 +243,7 @@ mod tests {
 
     #[test]
     fn validate_passes_a_well_formed_definition() {
-        let fs = FakeFs::with("/work/lns.yaml", valid_yaml());
+        let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
         let code = validate(&fs, cwd(), &mut out).unwrap();
         assert_eq!(code, 0);
@@ -295,7 +256,7 @@ mod tests {
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  env:\n    GH_TOKEN: ghp_{}\n",
             "a".repeat(36)
         );
-        let fs = FakeFs::with("/work/lns.yaml", &yaml);
+        let fs = fake("/work/lns.yaml", &yaml);
         let mut out = Vec::new();
         let code = validate(&fs, cwd(), &mut out).unwrap();
         assert_eq!(code, 1);
@@ -308,7 +269,7 @@ mod tests {
 
     #[test]
     fn validate_surfaces_a_missing_file() {
-        let fs = FakeFs::default();
+        let fs = MapFs::default();
         let mut out = Vec::new();
         let err = validate(&fs, cwd(), &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("lns init"));
@@ -316,7 +277,7 @@ mod tests {
 
     #[test]
     fn validate_surfaces_malformed_yaml() {
-        let fs = FakeFs::with("/work/lns.yaml", "spec: [unterminated");
+        let fs = fake("/work/lns.yaml", "spec: [unterminated");
         let mut out = Vec::new();
         let err = validate(&fs, cwd(), &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
@@ -324,7 +285,7 @@ mod tests {
 
     #[test]
     fn show_renders_the_effective_definition() {
-        let fs = FakeFs::with("/work/lns.yaml", valid_yaml());
+        let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
         let code = show(&fs, cwd(), &mut out).unwrap();
         assert_eq!(code, 0);
@@ -343,7 +304,7 @@ mod tests {
     #[test]
     fn show_renders_a_command_when_present() {
         let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  command: agent --serve\n";
-        let fs = FakeFs::with("/work/lns.yaml", yaml);
+        let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         show(&fs, cwd(), &mut out).unwrap();
         assert!(
@@ -354,9 +315,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_reports_a_broken_path_fileset_with_its_path() {
+        let fs = fake(
+            "/work/lns.yaml",
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+        );
+        let mut out = Vec::new();
+        let code = validate(&fs, cwd(), &mut out).unwrap();
+        assert_eq!(code, 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("fileset ./skills"), "got: {text}");
+    }
+
+    #[test]
+    fn map_dir_entries_treats_a_file_path_as_no_directory() {
+        let files: HashMap<PathBuf, String> =
+            [(PathBuf::from("/work/skills"), String::new())].into();
+        let err = map_dir_entries(files.keys(), Path::new("/work/skills")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn show_renders_path_and_ref_filesets() {
         let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n";
-        let fs = FakeFs::with("/work/lns.yaml", yaml);
+        let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         show(&fs, cwd(), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -374,7 +356,7 @@ mod tests {
 
     #[test]
     fn show_refuses_an_invalid_definition() {
-        let fs = FakeFs::with(
+        let fs = fake(
             "/work/lns.yaml",
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
         );

@@ -15,6 +15,8 @@ pub mod author;
 pub mod distribute;
 pub mod fileset;
 pub mod real;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[derive(clap::Args)]
 pub struct SandboxArgs {

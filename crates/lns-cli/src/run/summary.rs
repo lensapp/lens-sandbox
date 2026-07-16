@@ -297,6 +297,38 @@ mod tests {
         )
     }
 
+    fn fileset_entry(
+        path: Option<&str>,
+        reference: Option<&str>,
+    ) -> lns_artifact::sandbox::FilesetEntry {
+        lns_artifact::sandbox::FilesetEntry {
+            path: path.map(str::to_string),
+            reference: reference.map(str::to_string),
+            mount_path: "/s".into(),
+        }
+    }
+
+    #[test]
+    fn fileset_display_keeps_a_path_verbatim_and_shortens_a_pinned_digest() {
+        assert_eq!(
+            fileset_source_display(&fileset_entry(Some("./skills"), None)),
+            "./skills"
+        );
+        let long = format!("reg/skills@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            fileset_source_display(&fileset_entry(None, Some(&long))),
+            format!("reg/skills@sha256:{}…", "a".repeat(12))
+        );
+    }
+
+    #[test]
+    fn fileset_display_shows_an_already_short_ref_verbatim() {
+        assert_eq!(
+            fileset_source_display(&fileset_entry(None, Some("reg/skills@sha256:abc"))),
+            "reg/skills@sha256:abc"
+        );
+    }
+
     #[test]
     fn ports_line_says_none_when_nothing_is_published() {
         assert!(summary_with_publish(Vec::new()).contains("Ports:     (none)"));

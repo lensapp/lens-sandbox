@@ -69,49 +69,7 @@ pub fn path_fileset_problems<F: Fs + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::author::DirEntry;
-    use std::collections::BTreeMap;
-    use std::io;
-    use std::path::PathBuf;
-
-    #[derive(Default)]
-    struct MapFs {
-        files: BTreeMap<PathBuf, Vec<u8>>,
-    }
-
-    impl MapFs {
-        fn with(files: &[(&str, &str)]) -> Self {
-            Self {
-                files: files
-                    .iter()
-                    .map(|(path, data)| (PathBuf::from(path), data.as_bytes().to_vec()))
-                    .collect(),
-            }
-        }
-    }
-
-    impl Fs for MapFs {
-        fn read_to_string(&self, path: &Path) -> io::Result<String> {
-            self.read(path)
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        }
-        fn write(&self, _path: &Path, _contents: &str) -> io::Result<()> {
-            Err(io::Error::other("read-only fake"))
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.files.contains_key(path)
-        }
-        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-            self.files
-                .get(path)
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
-        }
-        fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-            let keys: Vec<PathBuf> = self.files.keys().cloned().collect();
-            crate::sandbox::author::map_dir_entries(keys.iter(), dir)
-        }
-    }
+    use crate::sandbox::test_support::MapFs;
 
     #[test]
     fn walk_snapshots_nested_files_with_project_relative_paths() {
@@ -150,32 +108,11 @@ mod tests {
 
     #[test]
     fn walk_surfaces_an_unreadable_file_with_its_path() {
-        struct ListsButCannotRead;
-        impl Fs for ListsButCannotRead {
-            fn read_to_string(&self, _: &Path) -> io::Result<String> {
-                Err(io::Error::other("nope"))
-            }
-            fn write(&self, _: &Path, _: &str) -> io::Result<()> {
-                Err(io::Error::other("nope"))
-            }
-            fn exists(&self, _: &Path) -> bool {
-                true
-            }
-            fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
-                Err(io::Error::other("permission denied"))
-            }
-            fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-                if dir.ends_with("skills") {
-                    Ok(vec![DirEntry {
-                        name: "prompts.md".into(),
-                        dir: false,
-                    }])
-                } else {
-                    Err(io::Error::new(io::ErrorKind::NotFound, "no such directory"))
-                }
-            }
-        }
-        let err = walk(&ListsButCannotRead, Path::new("/work/skills")).unwrap_err();
+        let fs = MapFs {
+            unreadable: true,
+            ..MapFs::with(&[("/work/skills/prompts.md", "p")])
+        };
+        let err = walk(&fs, Path::new("/work/skills")).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading fileset file /work/skills/prompts.md"),
             "got: {err:#}"

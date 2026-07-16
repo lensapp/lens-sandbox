@@ -181,40 +181,10 @@ mod tests {
         }
     }
 
-    struct NoFs;
-    impl Fs for NoFs {
-        fn read_to_string(&self, _: &Path) -> std::io::Result<String> {
-            Err(std::io::Error::other("unused"))
-        }
-        fn write(&self, _: &Path, _: &str) -> std::io::Result<()> {
-            Err(std::io::Error::other("unused"))
-        }
-        fn exists(&self, _: &Path) -> bool {
-            false
-        }
-        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-            if path.ends_with("prompts.md") {
-                Ok(b"p".to_vec())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no file"))
-            }
-        }
-        fn dir_entries(
-            &self,
-            dir: &Path,
-        ) -> std::io::Result<Vec<crate::sandbox::author::DirEntry>> {
-            if dir.ends_with("skills") {
-                Ok(vec![crate::sandbox::author::DirEntry {
-                    name: "prompts.md".into(),
-                    dir: false,
-                }])
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "no such directory",
-                ))
-            }
-        }
+    use crate::sandbox::test_support::MapFs;
+
+    fn fs_with_skills() -> MapFs {
+        MapFs::with(&[("/work/skills/prompts.md", "p")])
     }
 
     const VALID: &[u8] =
@@ -231,7 +201,7 @@ mod tests {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let mut out = Vec::new();
         let code = push(
-            &NoFs,
+            &fs_with_skills(),
             cwd(),
             &producer,
             VALID,
@@ -252,7 +222,7 @@ mod tests {
         let producer = FakeProducer::err("credential for ghcr.io lacks push scope");
         let mut out = Vec::new();
         let err = push(
-            &NoFs,
+            &fs_with_skills(),
             cwd(),
             &producer,
             VALID,
@@ -271,7 +241,7 @@ mod tests {
         let producer = FakeProducer::err("must not reach the producer");
         let mut out = Vec::new();
         let err = push(
-            &NoFs,
+            &fs_with_skills(),
             cwd(),
             &producer,
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#,
@@ -291,7 +261,7 @@ mod tests {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let mut out = Vec::new();
         let code = push(
-            &NoFs,
+            &fs_with_skills(),
             cwd(),
             &producer,
             WITH_PATH_FILESET,
@@ -303,10 +273,10 @@ mod tests {
         assert_eq!(code, 0);
         let prebuilt = producer.prebuilt.borrow();
         assert_eq!(prebuilt.len(), 1);
+        let fileset_ref = &prebuilt[0];
         assert!(
-            prebuilt[0].starts_with("ghcr.io/team/hermes@sha256:"),
-            "got: {}",
-            prebuilt[0]
+            fileset_ref.starts_with("ghcr.io/team/hermes@sha256:"),
+            "got: {fileset_ref}"
         );
         let docs = producer.docs.borrow();
         let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
@@ -321,7 +291,7 @@ mod tests {
         let producer = FakeProducer::err("must not reach the producer");
         let mut out = Vec::new();
         let err = push(
-            &NoFs,
+            &fs_with_skills(),
             cwd(),
             &producer,
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
@@ -340,7 +310,7 @@ mod tests {
     async fn push_keeps_a_digest_pinned_declared_ref_verbatim() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
         let (rewritten, packed) =
-            pack_path_filesets(&NoFs, cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
+            pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
         assert!(packed.is_empty());
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(

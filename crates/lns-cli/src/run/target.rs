@@ -88,49 +88,11 @@ impl RunTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
 
-    #[derive(Default)]
-    struct FakeFs {
-        files: RefCell<HashMap<PathBuf, String>>,
-    }
+    use crate::sandbox::test_support::MapFs;
 
-    impl FakeFs {
-        fn with(path: &str, contents: &str) -> Self {
-            let fs = Self::default();
-            fs.write(&PathBuf::from(path), contents).unwrap();
-            fs
-        }
-    }
-
-    impl Fs for FakeFs {
-        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
-            self.files
-                .borrow()
-                .get(path)
-                .cloned()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
-        }
-        fn write(&self, path: &Path, contents: &str) -> std::io::Result<()> {
-            self.files
-                .borrow_mut()
-                .insert(path.to_path_buf(), contents.to_string());
-            Ok(())
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.files.borrow().contains_key(path)
-        }
-        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-            self.read_to_string(path).map(String::into_bytes)
-        }
-        fn dir_entries(
-            &self,
-            dir: &Path,
-        ) -> std::io::Result<Vec<crate::sandbox::author::DirEntry>> {
-            crate::sandbox::author::map_dir_entries(self.files.borrow().keys(), dir)
-        }
+    fn fake(path: &str, contents: &str) -> MapFs {
+        MapFs::with(&[(path, contents)])
     }
 
     fn cwd() -> &'static Path {
@@ -143,7 +105,7 @@ mod tests {
 
     #[test]
     fn a_reference_is_passed_through_for_the_service_to_classify() {
-        let fs = FakeFs::default();
+        let fs = MapFs::default();
         let target = resolve(Some("ghcr.io/team/hermes:1.4.0"), &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/hermes:1.4.0");
         assert!(
@@ -154,7 +116,7 @@ mod tests {
 
     #[test]
     fn no_reference_resolves_the_local_definition() {
-        let fs = FakeFs::with("/work/lns.yaml", local_yaml());
+        let fs = fake("/work/lns.yaml", local_yaml());
         let target = resolve(None, &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/base:1");
         assert!(
@@ -165,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_local_definition_travels_as_canonical_json() {
-        let fs = FakeFs::with("/work/lns.yaml", local_yaml());
+        let fs = fake("/work/lns.yaml", local_yaml());
         let target = resolve(None, &fs, cwd()).unwrap();
         let json = target
             .definition_json()
@@ -178,22 +140,55 @@ mod tests {
 
     #[test]
     fn a_reference_carries_no_definition() {
-        let fs = FakeFs::default();
+        let fs = MapFs::default();
         let target = resolve(Some("alpine:3.20"), &fs, cwd()).unwrap();
         assert_eq!(target.definition_json(), None);
     }
 
     #[test]
     fn no_reference_without_a_definition_names_lns_init() {
-        let fs = FakeFs::default();
+        let fs = MapFs::default();
         let err = resolve(None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("no lns.yaml"), "got: {err:#}");
         assert!(format!("{err:#}").contains("lns init"), "got: {err:#}");
     }
 
     #[test]
+    fn a_local_path_fileset_is_rooted_in_the_project_on_the_wire() {
+        let fs = MapFs::with(&[
+            (
+                "/work/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            ),
+            ("/work/skills/prompts.md", "p"),
+        ]);
+        let target = resolve(None, &fs, cwd()).unwrap();
+        let json = target.definition_json().expect("local definition");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["filesets"][0]["path"], "/work/skills");
+        assert!(
+            matches!(
+                &target,
+                RunTarget::Local { def, .. }
+                    if def.spec.filesets[0].path.as_deref() == Some("./skills")
+            ),
+            "the parsed definition keeps the author's declared path for display"
+        );
+    }
+
+    #[test]
+    fn a_missing_fileset_directory_refuses_the_local_run() {
+        let fs = fake(
+            "/work/lns.yaml",
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+        );
+        let err = resolve(None, &fs, cwd()).unwrap_err();
+        assert!(format!("{err:#}").contains("./skills"), "got: {err:#}");
+    }
+
+    #[test]
     fn an_invalid_local_definition_surfaces_the_parse_error() {
-        let fs = FakeFs::with(
+        let fs = fake(
             "/work/lns.yaml",
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
         );
