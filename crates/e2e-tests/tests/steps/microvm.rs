@@ -82,8 +82,18 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         .project
         .get_or_insert_with(|| tempfile::TempDir::new().expect("project tempdir"));
     let root = dir.path().to_path_buf();
+    let integrations = if world.project_integrations.is_empty() {
+        String::new()
+    } else {
+        let ids: String = world
+            .project_integrations
+            .iter()
+            .map(|id| format!("\n    - {id}"))
+            .collect();
+        format!("\n  integrations:{ids}")
+    };
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}\n",
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{integrations}\n",
         pinned_microvm_image()
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
@@ -166,6 +176,24 @@ fn host_bind_source(world: &E2eWorld) -> String {
         .path()
         .to_string_lossy()
         .into_owned()
+}
+
+#[given(regex = r#"^the home's integration catalog declares "([^"]+)" managing "([^"]+)"$"#)]
+fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home before writing a catalog");
+    let catalog = format!(
+        "integrations:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
+    );
+    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
+        .expect("write the user integration catalog");
+}
+
+#[given(regex = r#"^the project definition declares integration "([^"]+)"$"#)]
+fn project_declares_integration(world: &mut E2eWorld, id: String) {
+    world.project_integrations.push(id);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)"$"#)]
