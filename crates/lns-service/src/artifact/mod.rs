@@ -96,8 +96,10 @@ fn flatten(components: &BundleComponents) -> BundleSpec {
     }
 }
 
-/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble.
+/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor integrations plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedBundle {
+    let ships_policy = def.spec.policy != lns_policy::NetworkPolicy::default()
+        || !def.spec.integrations.is_empty();
     ResolvedBundle {
         base_image: def.spec.image.clone(),
         base_paths: Vec::new(),
@@ -105,7 +107,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         command: def.spec.command.clone(),
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
-        policy: Some(lns_policy::Policy {
+        policy: ships_policy.then(|| lns_policy::Policy {
             network: def.spec.policy.clone(),
             integrations: def.spec.integrations.clone(),
         }),
@@ -400,6 +402,19 @@ mod tests {
             .expect("a flat sandbox carries its inline policy");
         assert_eq!(policy.network.default_verdict, lns_policy::Verdict::Deny);
         assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+    }
+
+    #[test]
+    fn a_definition_shipping_no_policy_or_integrations_plans_without_a_baseline() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved_from_sandbox(&def).policy,
+            None,
+            "a plain definition must leave the directory overlay governing verbatim, defaultVerdict included"
+        );
     }
 
     #[test]

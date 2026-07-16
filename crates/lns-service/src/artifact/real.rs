@@ -211,7 +211,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     };
     crate::log::info!(
         "policy",
-        "this bundle ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
+        "this sandbox ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
     );
     let summary =
         crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));
