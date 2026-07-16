@@ -7,7 +7,9 @@ Feature: lns run publishes guest ports to the host (docker `-p` grammar)
   not 0.0.0.0, so an untrusted workload is never silently exposed to the
   LAN. These scenarios pin the CLI grammar, the loopback default, and the
   run-summary surface against the in-process `Cli`; the live host→guest
-  byte-path is a microVM concern, out of scope here.
+  byte-path is a microVM concern, out of scope here. -p is the explicit
+  side of publishing — how a definition's declared spec.ports become
+  launch defaults is pinned in declarative_ports.feature.
 
   Scenario: Publishing a port maps host to guest with a loopback default
     Given the command is `lns run -p 3003:3003 prism`

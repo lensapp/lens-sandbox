@@ -198,6 +198,14 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
     )?;
     args.workdir = resolved.workdir;
     args.mounts = resolved.mounts;
+    let local_definition = matches!(&target, crate::run::target::RunTarget::Local { .. });
+    let composed = crate::run::declarative::compose_ports(
+        &defaults.ports,
+        std::mem::take(&mut args.publish),
+        local_definition || args.publish_declared,
+    )?;
+    args.publish = composed.published;
+    args.declared_unpublished = composed.declared_unpublished;
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;

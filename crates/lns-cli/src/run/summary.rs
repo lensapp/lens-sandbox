@@ -92,6 +92,18 @@ pub fn format_summary(
     .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
+    if !args.declared_unpublished.is_empty() {
+        writeln!(
+            s,
+            "  Declared:  {} (not published; opt in with -P)",
+            args.declared_unpublished
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .unwrap();
+    }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
     writeln!(
@@ -239,6 +251,8 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
+            publish_declared: false,
+            declared_unpublished: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
             cmd: Vec::new(),

@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config_cli;
+pub mod declarative_ports;
 pub mod declarative_run;
 pub mod env_file;
 pub mod host_bind;

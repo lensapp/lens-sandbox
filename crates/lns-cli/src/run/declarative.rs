@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountDefault {
@@ -11,10 +12,17 @@ pub struct MountDefault {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortDefault {
+    pub host: Option<i64>,
+    pub container: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Defaults {
     pub workdir: Option<String>,
     pub mounts: Vec<MountDefault>,
+    pub ports: Vec<PortDefault>,
 }
 
 impl Defaults {
@@ -30,6 +38,15 @@ impl Defaults {
                     source: volume.source().to_string(),
                     target: volume.target.clone(),
                     read_only: volume.read_only(),
+                })
+                .collect(),
+            ports: definition
+                .spec
+                .ports
+                .iter()
+                .map(|port| PortDefault {
+                    host: port.host,
+                    container: port.container,
                 })
                 .collect(),
         }
@@ -48,8 +65,75 @@ impl Defaults {
                     read_only: mount.read_only,
                 })
                 .collect(),
+            ports: view
+                .ports
+                .iter()
+                .map(|port| PortDefault {
+                    host: port.host.map(i64::from),
+                    container: i64::from(port.container),
+                })
+                .collect(),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct ComposedPorts {
+    pub published: Vec<lns_ipc::PortPublish>,
+    pub declared_unpublished: Vec<u16>,
+}
+
+/// Explicit -p entries win a container-port conflict; without publish_declared the declared set is disclosure only.
+pub fn compose_ports(
+    declared: &[PortDefault],
+    explicit: Vec<lns_ipc::PortPublish>,
+    publish_declared: bool,
+) -> Result<ComposedPorts> {
+    let explicit_containers: BTreeSet<u16> =
+        explicit.iter().map(|port| port.container_port).collect();
+    let mut published = Vec::new();
+    let mut declared_unpublished = Vec::new();
+    let mut substituted = BTreeSet::new();
+    for port in declared {
+        let container = declared_port(port.container, "container")?;
+        if explicit_containers.contains(&container) {
+            published.extend(
+                explicit
+                    .iter()
+                    .filter(|explicit| explicit.container_port == container)
+                    .copied(),
+            );
+            substituted.insert(container);
+        } else if publish_declared {
+            published.push(lns_ipc::PortPublish {
+                host_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                host_port: match port.host {
+                    Some(host) => declared_port(host, "host")?,
+                    None => container,
+                },
+                container_port: container,
+                protocol: lns_ipc::Protocol::Tcp,
+            });
+        } else {
+            declared_unpublished.push(container);
+        }
+    }
+    published.extend(
+        explicit
+            .into_iter()
+            .filter(|port| !substituted.contains(&port.container_port)),
+    );
+    Ok(ComposedPorts {
+        published,
+        declared_unpublished,
+    })
+}
+
+fn declared_port(value: i64, side: &str) -> Result<u16> {
+    u16::try_from(value)
+        .ok()
+        .filter(|port| *port != 0)
+        .with_context(|| format!("declared {side} port {value} is out of range (1-65535)"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,5 +249,40 @@ mod tests {
     fn normalization_rejects_parent_traversal_above_root() {
         let err = normalize_absolute(Path::new("/../work")).unwrap_err();
         assert!(format!("{err:#}").contains("escapes"));
+    }
+
+    fn declared(host: Option<i64>, container: i64) -> PortDefault {
+        PortDefault { host, container }
+    }
+
+    #[test]
+    fn composition_rejects_an_out_of_range_declared_container_port() {
+        let err = compose_ports(&[declared(None, 70000)], Vec::new(), true).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declared container port 70000 is out of range"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn composition_rejects_an_out_of_range_declared_host_port() {
+        let err = compose_ports(&[declared(Some(0), 3003)], Vec::new(), true).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declared host port 0 is out of range"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_entry_also_settles_an_unpublished_declared_port() {
+        let explicit = vec![lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port: 4000,
+            container_port: 3003,
+            protocol: lns_ipc::Protocol::Tcp,
+        }];
+        let composed = compose_ports(&[declared(None, 3003)], explicit, false).unwrap();
+        assert_eq!(composed.published.len(), 1);
+        assert!(composed.declared_unpublished.is_empty());
     }
 }

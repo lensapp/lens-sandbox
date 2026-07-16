@@ -1,4 +1,3 @@
-@todo
 Feature: declared ports publish like compose locally and like docker run when pulled
   spec.ports follows the docker family on both sides of the publish
   decision. Running the definition in your own directory is `docker

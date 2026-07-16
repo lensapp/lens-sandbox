@@ -191,6 +191,17 @@ pub struct RunArgs {
     pub publish: Vec<PortPublish>,
 
     #[arg(
+        short = 'P',
+        long = "publish-declared",
+        default_value_t = false,
+        help = "Publish the definition's declared spec.ports on loopback (host value when present, the container number otherwise). Automatic for a local ./lns.yaml run; opt-in for a pulled sandbox."
+    )]
+    pub publish_declared: bool,
+
+    #[arg(skip)]
+    pub declared_unpublished: Vec<u16>,
+
+    #[arg(
         short = 'v',
         long = "volume",
         visible_alias = "mount",

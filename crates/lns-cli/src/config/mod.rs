@@ -647,6 +647,8 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
+            publish_declared: false,
+            declared_unpublished: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
             cmd: Vec::new(),
