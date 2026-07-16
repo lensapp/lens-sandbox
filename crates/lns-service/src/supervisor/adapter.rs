@@ -17,8 +17,7 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::integrations::{
-    applied_integration_routes, resolve_applied_with_slots, resolve_connectable_integrations,
-    resolve_connectable_with_slots,
+    applied_integration_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -1185,7 +1184,10 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
             }),
         }];
-        let connectable = resolve_connectable_integrations(&Policy::default(), &catalog);
+        let connectable = crate::credential_flow::integrations::resolve_connectable_integrations(
+            &Policy::default(),
+            &catalog,
+        );
         let offerable = build_offerable(&connectable, &catalog);
         assert_eq!(offerable.len(), 1);
         assert_eq!(offerable[0].id, "some-oauth");
