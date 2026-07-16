@@ -371,15 +371,12 @@ pub fn bind_mount(
     ev.build()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn sandbox_run(
     ctx: &Context,
     reference: &str,
     digest: &str,
-    overrides: &[String],
     integrations: &[String],
     policy_hash: &str,
-    signature_verdict: &str,
 ) -> Value {
     let mut ev = Event::new(
         "sandbox_run",
@@ -396,11 +393,7 @@ pub fn sandbox_run(
     .note("lns_origin", "host".into())
     .note("lns_sandbox", reference.into())
     .note("lns_sandbox_digest", digest.into())
-    .note("lns_policy_hash", policy_hash.into())
-    .note("lns_signature", signature_verdict.into());
-    if !overrides.is_empty() {
-        ev = ev.note("lns_overrides", json!(overrides));
-    }
+    .note("lns_policy_hash", policy_hash.into());
     if !integrations.is_empty() {
         ev = ev.note("lns_integrations", json!(integrations));
     }
@@ -631,15 +624,13 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_run_records_the_reference_resolved_digest_integrations_and_verdict() {
+    fn sandbox_run_records_the_reference_resolved_digest_and_integrations() {
         let ev = sandbox_run(
             &ctx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
-            &["some-registry.example/skills/deep@sha256:abcd".into()],
             &["some-integration".into()],
             "sha256:po1icy",
-            "unverified",
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 1007);
@@ -655,28 +646,14 @@ mod tests {
         );
         assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
         assert_eq!(ev["unmapped"]["lns_integrations"][0], "some-integration");
-        assert_eq!(ev["unmapped"]["lns_signature"], "unverified");
-        assert_eq!(
-            ev["unmapped"]["lns_overrides"][0],
-            "some-registry.example/skills/deep@sha256:abcd"
-        );
     }
 
     #[test]
-    fn sandbox_run_omits_the_overrides_and_integrations_notes_when_there_are_none() {
-        let ev = sandbox_run(
-            &ctx(),
-            "reg/some-agent:1",
-            "sha256:beef",
-            &[],
-            &[],
-            "sha256:p",
-            "verified",
-        );
+    fn sandbox_run_omits_the_integrations_note_when_there_are_none() {
+        let ev = sandbox_run(&ctx(), "reg/some-agent:1", "sha256:beef", &[], "sha256:p");
         assert_schema_valid(&ev);
-        assert!(ev["unmapped"].get("lns_overrides").is_none());
         assert!(ev["unmapped"].get("lns_integrations").is_none());
-        assert_eq!(ev["unmapped"]["lns_signature"], "verified");
+        assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:p");
     }
 
     #[test]

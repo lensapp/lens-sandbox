@@ -223,17 +223,12 @@ pub(crate) async fn pull_target_with<R: Registry>(
         return Ok(PulledTarget::Image(Box::new(pulled)));
     }
     verify_digest_pin(&reference, &manifest_digest, image)?;
-    let base_image = if path == crate::artifact::RunPath::Sandbox {
-        let def = lns_artifact::sandbox::parse(config_str.as_bytes())
-            .with_context(|| format!("parsing published sandbox {image}"))?;
-        Some(def.spec.image)
-    } else {
-        None
-    };
+    let def = lns_artifact::sandbox::parse(config_str.as_bytes())
+        .with_context(|| format!("parsing published sandbox {image}"))?;
     Ok(PulledTarget::Artifact(PulledArtifact {
         reference,
         digest: manifest_digest,
-        base_image,
+        base_image: Some(def.spec.image),
     }))
 }
 
@@ -1078,23 +1073,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_target_caches_a_bundle_artifact_without_a_base_image() {
-        ensure_global_trace_subscriber();
-        let mut artifact = build_sandbox_artifact();
-        artifact.manifest.artifact_type = Some("application/vnd.lens.bundle.v1+json".into());
-        let registry = artifact.into_registry();
-        let (_dir, cache) = cache();
-        let target = pull_target_with(&registry, "registry.example.test/bundle:1", &cache)
-            .await
-            .unwrap();
-        let artifact = artifact_of(&target).expect("a bundle artifact takes the artifact path");
-        assert_eq!(
-            artifact.base_image, None,
-            "bundle base images resolve through the component graph, not at pull time",
-        );
-    }
-
-    #[tokio::test]
     async fn pull_target_refuses_an_unpullable_artifact_kind_naming_the_type() {
         ensure_global_trace_subscriber();
         let mut artifact = build_sandbox_artifact();
@@ -1145,18 +1123,18 @@ mod tests {
     async fn pull_inner_threads_manifest_artifact_type_and_config_media_type() {
         ensure_global_trace_subscriber();
         let mut img = build_two_layer_image();
-        img.manifest.artifact_type = Some("application/vnd.lens.bundle.v1+json".into());
-        img.manifest.config.media_type = "application/vnd.lens.bundle.config.v1+json".into();
+        img.manifest.artifact_type = Some("application/vnd.lens.sandbox.v1+json".into());
+        img.manifest.config.media_type = "application/vnd.lens.sandbox.config.v1+json".into();
         let registry = img.into_registry();
         let (_dir, cache) = cache();
-        let pulled = pull_inner(&registry, "reg/bundle:1", &cache).await.unwrap();
+        let pulled = pull_inner(&registry, "reg/sandbox:1", &cache).await.unwrap();
         assert_eq!(
             pulled.artifact_type.as_deref(),
-            Some("application/vnd.lens.bundle.v1+json"),
+            Some("application/vnd.lens.sandbox.v1+json"),
             "the manifest's artifactType must be carried on the pulled image so run can dispatch",
         );
         assert_eq!(
-            pulled.config_media_type, "application/vnd.lens.bundle.config.v1+json",
+            pulled.config_media_type, "application/vnd.lens.sandbox.config.v1+json",
             "the config descriptor's mediaType must be carried for the oras empty-artifactType fallback",
         );
     }

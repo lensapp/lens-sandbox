@@ -1,27 +1,16 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_service::artifact::spec::Kind;
-use lns_service::artifact::{BUNDLE_ARTIFACT_TYPE, RunPath, dispatch_run};
+use lns_service::artifact::{RunPath, dispatch_run};
 
 #[given("a pulled reference whose manifest has no artifact type")]
 async fn no_artifact_type(world: &mut BehaviourWorld) {
     world.artifact().artifact_type = None;
 }
 
-#[given(regex = r#"^a pulled reference whose manifest is an "([^"]+)" bundle$"#)]
-async fn bundle_artifact(world: &mut BehaviourWorld, _kind: String) {
-    world.artifact().artifact_type = Some(BUNDLE_ARTIFACT_TYPE.to_string());
-}
-
 #[given(regex = r#"^a pulled reference whose manifest artifact type is "([^"]+)"$"#)]
 async fn explicit_artifact_type(world: &mut BehaviourWorld, artifact_type: String) {
     world.artifact().artifact_type = Some(artifact_type);
-}
-
-#[given("a pulled reference with no artifact type but a bundle config media type")]
-async fn bundle_by_config_media_type(world: &mut BehaviourWorld) {
-    world.artifact().artifact_type = None;
-    world.artifact().config_media_type = Some(Kind::AgentSystem.config_media_type());
 }
 
 #[given("a pulled reference whose manifest is a fileset artifact")]
@@ -73,11 +62,6 @@ async fn refusal_points_at(world: &mut BehaviourWorld, hint: String) {
         err.contains(&hint),
         "refusal should mention {hint}, got: {err}"
     );
-}
-
-#[then("the run assembles the bundle before launching")]
-async fn assembles_bundle(world: &mut BehaviourWorld) {
-    assert_eq!(world.artifact().path, Some(RunPath::AssembleBundle));
 }
 
 #[then("the run launches the sandbox directly")]

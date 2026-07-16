@@ -113,9 +113,7 @@ mod tests {
             "ghcr.io/team/hermes:1.4.0",
             "sha256:abc",
             &[],
-            &[],
             "policyhash",
-            "skipped",
         )
         .to_string();
         for data in ["Library/Application Support", ".local/share"] {

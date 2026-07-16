@@ -1,43 +1,21 @@
-use crate::artifact::assembly::{self, AssembledWorkload, Override, ResolvedBundle};
-use crate::artifact::fetch::fetch_component;
+use crate::artifact::assembly::{self, AssembledWorkload, ResolvedBundle};
 use crate::artifact::fileset::fileset_runtime_specs;
-use crate::artifact::resolve::{ComponentFetcher, FetchError, FetchedComponent};
-use crate::artifact::signature::{self, SignatureStatus, Verdict};
-use crate::artifact::{RunPath, dispatch, dispatch_run, plan_bundle, resolved_from_sandbox};
-use crate::image::{RealRegistry, Registry, registry_auth_for, want_arch};
+use crate::artifact::{RunPath, dispatch, dispatch_run, resolved_from_sandbox};
+use crate::image::{RealRegistry, Registry, registry_auth_for};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
-use lns_ipc::{
-    ArtifactInspection, BundleView, FilesetView, ImageView, SandboxMount, SandboxMountKind,
-    SignatureView,
-};
+use lns_ipc::{ArtifactInspection, ImageView, SandboxMount, SandboxMountKind};
 use oci_client::Reference;
 
-/// A resolved bundle ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
+/// A resolved sandbox ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
 pub(crate) struct BundlePlan {
     pub workload: AssembledWorkload,
     pub fileset_specs: Vec<RuntimeFileSpec>,
 }
 
-pub struct RealComponentFetcher;
-
-impl ComponentFetcher for RealComponentFetcher {
-    async fn fetch(&self, reference: &str) -> Result<FetchedComponent, FetchError> {
-        let auth = registry_auth_for(reference);
-        let registry = match reference.parse::<Reference>() {
-            Ok(parsed) => RealRegistry::for_reference(&parsed, auth),
-            Err(_) => RealRegistry::with_auth(auth),
-        };
-        fetch_component(&registry, reference).await
-    }
-}
-
-/// Peek a run reference's manifest and, when it is an AgentSystem bundle, verify its signature then resolve + assemble it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
+/// Peek a run reference's manifest and, when it is a published sandbox, resolve + assemble it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
 pub(crate) async fn peek_and_plan(
     image_ref: &str,
-    host_arch: &str,
-    overrides: &[Override],
-    insecure: bool,
     verify_sandbox: bool,
     run_id: &str,
     microvm: &str,
@@ -62,39 +40,12 @@ pub(crate) async fn peek_and_plan(
             let def = lns_artifact::sandbox::parse(config_json.as_bytes())
                 .with_context(|| format!("parsing published sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
-            record_sandbox_run(
-                run_id,
-                microvm,
-                image_ref,
-                &digest,
-                &[],
-                &resolved,
-                &Verdict::Skipped,
-            );
+            record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             disclose_effective_policy(resolved.policy.as_ref());
             let problems = crate::artifact::published_fileset_problems(&resolved);
             if !problems.is_empty() {
                 anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
             }
-            let fileset_specs = materialize_filesets(&resolved).await?;
-            Ok(Some(BundlePlan {
-                workload: assembly::assemble(&resolved),
-                fileset_specs,
-            }))
-        }
-        RunPath::AssembleBundle => {
-            let verdict = enforce_signature(image_ref, insecure)?;
-            let resolved = plan_bundle(
-                config_json.as_bytes(),
-                &RealComponentFetcher,
-                host_arch,
-                overrides,
-            )
-            .await?;
-            record_sandbox_run(
-                run_id, microvm, image_ref, &digest, overrides, &resolved, &verdict,
-            );
-            disclose_effective_policy(resolved.policy.as_ref());
             let fileset_specs = materialize_filesets(&resolved).await?;
             Ok(Some(BundlePlan {
                 workload: assembly::assemble(&resolved),
@@ -255,11 +206,8 @@ fn record_sandbox_run(
     microvm: &str,
     image_ref: &str,
     digest: &str,
-    overrides: &[Override],
     resolved: &ResolvedBundle,
-    verdict: &Verdict,
 ) {
-    let override_refs: Vec<String> = overrides.iter().map(|o| o.reference.clone()).collect();
     let integrations = resolved
         .policy
         .as_ref()
@@ -275,10 +223,8 @@ fn record_sandbox_run(
         microvm,
         image_ref,
         digest,
-        &override_refs,
         &integrations,
         &policy_hash,
-        &crate::artifact::audit::verdict_label(verdict),
         &crate::oauth::RealClock,
     ) {
         crate::log::warn!("failed to record sandbox-run audit event: {e:#}");
@@ -319,7 +265,7 @@ fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc
         .collect()
 }
 
-/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a bundle reports its base image, filesets, declared integrations, and any over-broad-policy flags; signature trust awaits the verification follow-up.
+/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared integrations, and any over-broad-policy flags.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
     let requested: Reference = image_ref
         .parse()
@@ -393,59 +339,5 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
                     .unwrap_or_default(),
             }))
         }
-        RunPath::AssembleBundle => {
-            let resolved = plan_bundle(
-                config_json.as_bytes(),
-                &RealComponentFetcher,
-                &want_arch().to_string(),
-                &[],
-            )
-            .await?;
-            Ok(ArtifactInspection::Bundle(BundleView {
-                reference: image_ref.to_string(),
-                sandbox_base_image: Some(resolved.base_image.clone()),
-                filesets: resolved
-                    .filesets
-                    .iter()
-                    .map(|f| FilesetView {
-                        name: f.name.clone(),
-                        mount_path: f.paths.first().cloned().unwrap_or_default(),
-                    })
-                    .collect(),
-                integrations: resolved
-                    .policy
-                    .as_ref()
-                    .map(|p| p.integrations.clone())
-                    .unwrap_or_default(),
-                signature: SignatureView::Unsigned,
-                policy_flags: resolved
-                    .policy
-                    .as_ref()
-                    .map(|p| {
-                        crate::artifact::policy::guardrail_flags(p)
-                            .iter()
-                            .map(|f| f.message().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            }))
-        }
     }
-}
-
-/// Consult the signature-trust gate before running a bundle. Reading the trusted-signer set from `lns config` and verifying the cosign referrer are Layer-1 follow-ups; until they land no key is configured, so an unsigned bundle proceeds with a warning and `--insecure` short-circuits.
-fn enforce_signature(image_ref: &str, insecure: bool) -> Result<Verdict> {
-    let trusted_keys_configured = false;
-    let verdict = signature::gate(insecure, trusted_keys_configured, SignatureStatus::Unsigned);
-    match &verdict {
-        Verdict::Verified | Verdict::Skipped => {}
-        Verdict::ProceedUnverified { warning } => crate::log::warn!("{warning}"),
-        Verdict::Refused(reason) => {
-            anyhow::bail!(
-                "refusing to run bundle {image_ref}: {}",
-                reason.as_message()
-            )
-        }
-    }
-    Ok(verdict)
 }

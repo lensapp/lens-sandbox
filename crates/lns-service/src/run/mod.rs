@@ -90,17 +90,6 @@ pub(super) struct BundleLaunch {
     pub env: Vec<String>,
 }
 
-/// Map the wire `--with` overrides onto assembly overrides; each carries a component reference that resolves through the graph.
-pub(super) fn bundle_overrides(
-    with: &[lns_ipc::WithOverride],
-) -> Vec<crate::artifact::assembly::Override> {
-    with.iter()
-        .map(|w| crate::artifact::assembly::Override {
-            reference: w.reference.clone(),
-        })
-        .collect()
-}
-
 /// Size a bundle run's VM: the bundle's Sandbox resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
 pub(super) fn bundle_vm_size(
     resources: Option<&lns_artifact::spec::Resources>,
@@ -490,25 +479,6 @@ mod tests {
             ..Default::default()
         };
         crate::artifact::assembly::assemble(&resolved)
-    }
-
-    #[test]
-    fn bundle_overrides_maps_wire_withs_to_reference_overrides() {
-        let with = vec![
-            lns_ipc::WithOverride {
-                reference: "some-registry.example/skills/deep@sha256:abcd".into(),
-            },
-            lns_ipc::WithOverride {
-                reference: "some-registry.example/settings:1".into(),
-            },
-        ];
-        let overrides = bundle_overrides(&with);
-        assert_eq!(overrides.len(), 2);
-        assert_eq!(
-            overrides[0].reference,
-            "some-registry.example/skills/deep@sha256:abcd"
-        );
-        assert_eq!(overrides[1].reference, "some-registry.example/settings:1");
     }
 
     #[test]

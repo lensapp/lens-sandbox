@@ -75,22 +75,13 @@ async fn orchestrate(
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
-    // A local definition plans directly; a bundle reference resolves its component graph and boots its sandbox base image; a plain image passes through unchanged.
-    let overrides = super::bundle_overrides(&args.with);
+    // A local definition plans directly; a published sandbox reference boots its base image; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
     let bundle = match (args.definition.as_deref(), resolved_image) {
         (Some(definition), _) => Some(crate::artifact::real::plan_local(definition).await?),
         (None, Some(image_ref)) => {
-            crate::artifact::real::peek_and_plan(
-                image_ref,
-                &image::want_arch().to_string(),
-                &overrides,
-                args.insecure,
-                args.verify_sandbox,
-                &run_id,
-                &microvm,
-            )
-            .await?
+            crate::artifact::real::peek_and_plan(image_ref, args.verify_sandbox, &run_id, &microvm)
+                .await?
         }
         (None, None) => None,
     };

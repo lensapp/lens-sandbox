@@ -250,41 +250,27 @@ pub fn record_run_launched(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn record_sandbox_run_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
     reference: &str,
     digest: &str,
-    overrides: &[String],
     integrations: &[String],
     policy_hash: &str,
-    signature_verdict: &str,
 ) -> Result<()> {
     append_ocsf_at(
         path,
-        crate::ocsf_audit::sandbox_run_event(
-            cx,
-            reference,
-            digest,
-            overrides,
-            integrations,
-            policy_hash,
-            signature_verdict,
-        ),
+        crate::ocsf_audit::sandbox_run_event(cx, reference, digest, integrations, policy_hash),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn record_sandbox_run(
     run_id: &str,
     microvm: &str,
     reference: &str,
     digest: &str,
-    overrides: &[String],
     integrations: &[String],
     policy_hash: &str,
-    signature_verdict: &str,
     clock: &dyn Clock,
 ) -> Result<()> {
     record_sandbox_run_at(
@@ -292,10 +278,8 @@ pub fn record_sandbox_run(
         &run_ctx(run_id, microvm, clock),
         reference,
         digest,
-        overrides,
         integrations,
         policy_hash,
-        signature_verdict,
     )
 }
 
@@ -409,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn record_sandbox_run_writes_the_reference_overrides_and_verdict() {
+    fn record_sandbox_run_writes_the_reference_digest_integrations_and_policy_hash() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
         record_sandbox_run_at(
@@ -417,10 +401,8 @@ mod tests {
             &cx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
-            &["some-registry.example/skills/deep@sha256:abcd".to_string()],
             &["some-integration".to_string()],
             "sha256:po1icy",
-            "unverified",
         )
         .unwrap();
 
@@ -445,11 +427,6 @@ mod tests {
             content.contains("\"lns_integrations\":[\"some-integration\"]"),
             "{content}"
         );
-        assert!(
-            content.contains("\"lns_signature\":\"unverified\""),
-            "{content}"
-        );
-        assert!(content.contains("skills/deep@sha256:abcd"), "{content}");
         assert!(content.contains("\"lns_origin\":\"host\""), "{content}");
     }
 
@@ -465,9 +442,7 @@ mod tests {
             "reg/some-agent:1",
             "sha256:beef",
             &[],
-            &[],
             "sha256:po1icy",
-            "verified",
             &CLOCK,
         )
         .unwrap();
@@ -481,7 +456,7 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.contains("\"lns_signature\":\"verified\""),
+            content.contains("\"lns_policy_hash\":\"sha256:po1icy\""),
             "{content}"
         );
     }

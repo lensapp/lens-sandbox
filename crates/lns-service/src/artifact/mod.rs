@@ -3,26 +3,19 @@ use anyhow::{Context, Result, bail};
 pub mod assembly;
 pub mod audit;
 pub mod credential_boot;
-pub mod fetch;
 pub mod fileset;
 pub mod policy;
 pub mod real;
-pub mod resolve;
 pub mod resources;
-pub mod signature;
 
 pub use lns_artifact::spec;
 
-use assembly::{Override, ResolvedBundle};
-use resolve::{BundleSpec, ComponentFetcher, DeclaredComponent};
-use spec::{ArtifactRef, BundleComponents, Kind};
-
-pub const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.lens.bundle.v1+json";
+use assembly::ResolvedBundle;
+use spec::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunPath {
     SingleImage,
-    AssembleBundle,
     Sandbox,
 }
 
@@ -36,10 +29,8 @@ pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) ->
     };
     match kind {
         Some(Kind::Sandbox) => Ok(RunPath::Sandbox),
-        Some(Kind::AgentSystem) => Ok(RunPath::AssembleBundle),
         Some(other) => bail!(
-            "a {} artifact is not directly runnable; \
-             lns run takes a published sandbox or an AgentSystem bundle",
+            "a {} artifact is not directly runnable; lns run takes a published sandbox",
             other.as_str()
         ),
         None => match artifact_type {
@@ -69,40 +60,12 @@ pub fn dispatch_run(
     Ok(path)
 }
 
-fn declared(name: String, reference: &ArtifactRef) -> DeclaredComponent {
-    let reference = match &reference.digest {
-        Some(digest) => format!("{}@{}", reference.reference, digest),
-        None => reference.reference.clone(),
-    };
-    DeclaredComponent { name, reference }
-}
-
-fn flatten(components: &BundleComponents) -> BundleSpec {
-    let mut declared_components = Vec::new();
-    if let Some(sandbox) = &components.sandbox {
-        declared_components.push(declared("sandbox".to_string(), sandbox));
-    }
-    for (i, agent) in components.agents.iter().enumerate() {
-        declared_components.push(declared(format!("agent-{i}"), agent));
-    }
-    for (i, fileset) in components.filesets.iter().enumerate() {
-        declared_components.push(declared(format!("fileset-{i}"), fileset));
-    }
-    for (i, policy) in components.policies.iter().enumerate() {
-        declared_components.push(declared(format!("policy-{i}"), policy));
-    }
-    BundleSpec {
-        components: declared_components,
-    }
-}
-
 /// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor integrations plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedBundle {
     let ships_policy = def.spec.policy != lns_policy::NetworkPolicy::default()
         || !def.spec.integrations.is_empty();
     ResolvedBundle {
         base_image: def.spec.image.clone(),
-        base_paths: Vec::new(),
         local_filesets: def
             .spec
             .filesets
@@ -174,240 +137,9 @@ pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedBundle> {
     Ok(resolved_from_sandbox(&def))
 }
 
-pub async fn plan_bundle<F: ComponentFetcher>(
-    config_json: &[u8],
-    fetcher: &F,
-    host_arch: &str,
-    overrides: &[Override],
-) -> Result<ResolvedBundle> {
-    let bundle = spec::parse_bundle(config_json)?;
-    let mut spec = flatten(&bundle.spec.components);
-    for (i, over) in overrides.iter().enumerate() {
-        spec.components.push(DeclaredComponent {
-            name: format!("with-{i}"),
-            reference: over.reference.clone(),
-        });
-    }
-    resolve::resolve(&spec, fetcher, host_arch)
-        .await
-        .with_context(|| format!("resolving bundle {}", bundle.metadata.name))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::resolve::{FetchError, FetchedComponent};
-    use std::collections::HashMap;
-
-    struct MapFetcher(HashMap<String, FetchedComponent>);
-
-    impl ComponentFetcher for MapFetcher {
-        async fn fetch(
-            &self,
-            reference: &str,
-        ) -> std::result::Result<FetchedComponent, FetchError> {
-            self.0.get(reference).cloned().ok_or(FetchError::NotFound)
-        }
-    }
-
-    fn bundle_json(components: &str) -> Vec<u8> {
-        format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"AgentSystem","metadata":{{"name":"some-bundle"}},"spec":{{"components":{components}}}}}"#
-        )
-        .into_bytes()
-    }
-
-    fn sandbox(reference: &str) -> (String, FetchedComponent) {
-        (
-            reference.to_string(),
-            FetchedComponent {
-                kind: "Sandbox".into(),
-                name: "some-sandbox".into(),
-                base_image: Some("registry.example.test/base@sha256:abc".into()),
-                ..Default::default()
-            },
-        )
-    }
-
-    fn agent(reference: &str) -> (String, FetchedComponent) {
-        (
-            reference.to_string(),
-            FetchedComponent {
-                kind: "Agent".into(),
-                name: "some-agent".into(),
-                command: Some("agent --serve".into()),
-                ..Default::default()
-            },
-        )
-    }
-
-    fn policy(reference: &str) -> (String, FetchedComponent) {
-        (
-            reference.to_string(),
-            FetchedComponent {
-                kind: "Policy".into(),
-                name: "some-policy".into(),
-                ..Default::default()
-            },
-        )
-    }
-
-    fn fileset(reference: &str, name: &str, path: &str) -> (String, FetchedComponent) {
-        (
-            reference.to_string(),
-            FetchedComponent {
-                kind: "FileSet".into(),
-                name: name.into(),
-                mount_path: Some(path.into()),
-                ..Default::default()
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_resolves_a_config_into_a_composed_workload() {
-        let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/skills:1"}],"policies":[{"ref":"reg/policy:1"}]}"#,
-        );
-        let fetcher = MapFetcher(HashMap::from([
-            sandbox("reg/base:1"),
-            agent("reg/agent:1"),
-            fileset("reg/skills:1", "skills", "/root/.some-agent/skills"),
-            policy("reg/policy:1"),
-        ]));
-        let resolved = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap();
-        assert_eq!(resolved.base_image, "registry.example.test/base@sha256:abc");
-        assert_eq!(resolved.command.as_deref(), Some("agent --serve"));
-        assert!(resolved.filesets.iter().any(|f| f.name == "skills"));
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_flattens_a_digest_pinned_ref_into_a_pinned_fetch() {
-        let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"agents":[{"ref":"reg/agent:1"}]}"#,
-        );
-        let pinned =
-            "reg/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let fetcher = MapFetcher(HashMap::from([sandbox(pinned), agent("reg/agent:1")]));
-        let resolved = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap();
-        assert_eq!(resolved.base_image, "registry.example.test/base@sha256:abc");
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_gives_multiple_filesets_distinct_names_so_none_collide() {
-        let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/a:1"},{"ref":"reg/b:1"}]}"#,
-        );
-        let fetcher = MapFetcher(HashMap::from([
-            sandbox("reg/base:1"),
-            agent("reg/agent:1"),
-            fileset("reg/a:1", "skills", "/a"),
-            fileset("reg/b:1", "settings", "/b"),
-        ]));
-        let resolved = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap();
-        assert_eq!(
-            resolved.filesets.len(),
-            2,
-            "both filesets must survive flattening"
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_folds_a_with_override_ref_in_as_a_trailing_fileset() {
-        let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"filesets":[{"ref":"reg/shipped:1"}]}"#,
-        );
-        let fetcher = MapFetcher(HashMap::from([
-            sandbox("reg/base:1"),
-            agent("reg/agent:1"),
-            fileset("reg/shipped:1", "shipped", "/shared"),
-            fileset("reg/override:1", "override", "/shared"),
-        ]));
-        let over = Override {
-            reference: "reg/override:1".into(),
-        };
-        let resolved = plan_bundle(&config, &fetcher, "test-arch", std::slice::from_ref(&over))
-            .await
-            .unwrap();
-        let last = resolved.filesets.last().expect("a resolved fileset");
-        assert_eq!(
-            last.name, "override",
-            "the --with override must land last so it overlays the bundle fileset"
-        );
-        assert_eq!(
-            assembly::assemble(&resolved).source_of("/shared"),
-            Some(&assembly::FileSource::Fileset("override".into()))
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_refuses_a_with_override_that_is_not_a_mountable_component() {
-        let config =
-            bundle_json(r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}]}"#);
-        let fetcher = MapFetcher(HashMap::from([
-            sandbox("reg/base:1"),
-            agent("reg/agent:1"),
-            sandbox("reg/second-sandbox:1"),
-        ]));
-        let over = Override {
-            reference: "reg/second-sandbox:1".into(),
-        };
-        let err = plan_bundle(&config, &fetcher, "test-arch", std::slice::from_ref(&over))
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("sandbox"),
-            "a non-mountable --with override must be refused: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_refuses_a_bundle_shipping_more_than_one_policy() {
-        let config = bundle_json(
-            r#"{"sandbox":{"ref":"reg/base:1"},"agents":[{"ref":"reg/agent:1"}],"policies":[{"ref":"reg/p1:1"},{"ref":"reg/p2:1"}]}"#,
-        );
-        let fetcher = MapFetcher(HashMap::from([
-            sandbox("reg/base:1"),
-            agent("reg/agent:1"),
-            policy("reg/p1:1"),
-            policy("reg/p2:1"),
-        ]));
-        let err = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("exactly one policy"),
-            "a bundle must not ship an ambiguous second policy: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_propagates_a_parse_refusal() {
-        let config = bundle_json(r#"{"model":{"ref":"reg/model:1"}}"#);
-        let fetcher = MapFetcher(HashMap::new());
-        let err = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("unimplemented component kind"));
-    }
-
-    #[tokio::test]
-    async fn plan_bundle_propagates_a_resolution_refusal_with_bundle_context() {
-        let config = bundle_json(r#"{"agents":[{"ref":"reg/agent:1"}]}"#);
-        let fetcher = MapFetcher(HashMap::from([agent("reg/agent:1")]));
-        let err = plan_bundle(&config, &fetcher, "test-arch", &[])
-            .await
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("resolving bundle some-bundle"), "got: {msg}");
-        assert!(msg.contains("exactly one sandbox"), "got: {msg}");
-    }
 
     #[test]
     fn resolved_from_sandbox_splits_path_and_ref_filesets() {
@@ -451,20 +183,6 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("not a sandbox"), "got: {msg}");
         assert!(msg.contains("lns init"), "got: {msg}");
-    }
-
-    #[test]
-    fn dispatch_run_lets_a_bundle_reference_through_for_assembly() {
-        assert_eq!(
-            dispatch_run(
-                Some(BUNDLE_ARTIFACT_TYPE),
-                None,
-                "ghcr.io/team/hermes:1",
-                true
-            )
-            .unwrap(),
-            RunPath::AssembleBundle
-        );
     }
 
     #[test]
@@ -550,10 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn a_present_unknown_artifact_type_is_refused_even_with_a_bundle_config_media_type() {
+    fn a_present_unknown_artifact_type_is_refused_even_with_a_known_config_media_type() {
         let err = dispatch(
             Some("application/vnd.oci.image.config.v1+json"),
-            Some("application/vnd.lens.bundle.config.v1+json"),
+            Some(&Kind::Sandbox.config_media_type()),
         )
         .unwrap_err();
         assert!(
