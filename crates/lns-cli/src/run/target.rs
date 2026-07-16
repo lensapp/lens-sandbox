@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::sandbox::author::{Fs, LNS_YAML, load_definition_json};
 
@@ -8,7 +8,10 @@ use crate::sandbox::author::{Fs, LNS_YAML, load_definition_json};
 #[derive(Debug)]
 pub enum RunTarget {
     Reference(String),
-    Local(Box<lns_artifact::sandbox::Definition>),
+    Local {
+        def: Box<lns_artifact::sandbox::Definition>,
+        json: String,
+    },
 }
 
 /// Resolve the run reference: a given REF is a registry coordinate; an omitted REF runs the current directory's `lns.yaml`.
@@ -19,8 +22,13 @@ pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<Run
             if !fs.exists(&cwd.join(LNS_YAML)) {
                 bail!("no lns.yaml in the current directory; run `lns init` to create one");
             }
-            let def = lns_artifact::sandbox::parse(&load_definition_json(fs, cwd)?)?;
-            Ok(RunTarget::Local(Box::new(def)))
+            let json = load_definition_json(fs, cwd)?;
+            let def = lns_artifact::sandbox::parse(&json)?;
+            let json = String::from_utf8(json).context("definition json was not utf-8")?;
+            Ok(RunTarget::Local {
+                def: Box::new(def),
+                json,
+            })
         }
     }
 }
@@ -35,37 +43,15 @@ impl RunTarget {
     pub fn image(&self) -> String {
         match self {
             RunTarget::Reference(reference) => reference.clone(),
-            RunTarget::Local(def) => def.spec.image.clone(),
+            RunTarget::Local { def, .. } => def.spec.image.clone(),
         }
     }
 
-    /// The workload command: an explicit trailing `lns run … <cmd>` wins; otherwise a local definition's `spec.command`, split on whitespace.
-    pub fn command(&self, explicit: Vec<String>) -> Vec<String> {
-        if !explicit.is_empty() {
-            return explicit;
-        }
+    /// The local definition's canonical JSON for the wire, so the service applies its command, env, policy, integrations, and resources like a published sandbox's.
+    pub fn definition_json(&self) -> Option<String> {
         match self {
-            RunTarget::Reference(_) => Vec::new(),
-            RunTarget::Local(def) => def
-                .spec
-                .command
-                .as_deref()
-                .map(|c| c.split_whitespace().map(str::to_string).collect())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// The workload env: a local definition's `spec.env` first, then the CLI's `-e` entries so an explicit flag wins on a duplicate key.
-    pub fn env(&self, explicit: Vec<String>) -> Vec<String> {
-        match self {
-            RunTarget::Reference(_) => explicit,
-            RunTarget::Local(def) => def
-                .spec
-                .env
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .chain(explicit)
-                .collect(),
+            RunTarget::Reference(_) => None,
+            RunTarget::Local { json, .. } => Some(json.clone()),
         }
     }
 }
@@ -133,8 +119,6 @@ mod tests {
         let fs = FakeFs::with("/work/lns.yaml", local_yaml());
         let target = resolve(None, &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/base:1");
-        assert_eq!(target.command(Vec::new()), vec!["agent", "--serve"]);
-        assert_eq!(target.env(Vec::new()), vec!["MODE=research"]);
         assert!(
             !target.verify_sandbox(),
             "a local sandbox's base image runs directly, not re-classified"
@@ -142,14 +126,23 @@ mod tests {
     }
 
     #[test]
-    fn a_local_definition_without_a_command_yields_no_workload_command() {
-        let fs = FakeFs::with(
-            "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n",
-        );
+    fn a_local_definition_travels_as_canonical_json() {
+        let fs = FakeFs::with("/work/lns.yaml", local_yaml());
         let target = resolve(None, &fs, cwd()).unwrap();
-        assert!(target.command(Vec::new()).is_empty());
-        assert!(target.env(Vec::new()).is_empty());
+        let json = target
+            .definition_json()
+            .expect("a local run carries its definition");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["image"], "ghcr.io/team/base:1");
+        assert_eq!(value["spec"]["command"], "agent --serve");
+        assert_eq!(value["spec"]["env"]["MODE"], "research");
+    }
+
+    #[test]
+    fn a_reference_carries_no_definition() {
+        let fs = FakeFs::default();
+        let target = resolve(Some("alpine:3.20"), &fs, cwd()).unwrap();
+        assert_eq!(target.definition_json(), None);
     }
 
     #[test]
@@ -171,26 +164,5 @@ mod tests {
             format!("{err:#}").contains("must carry an image"),
             "got: {err:#}"
         );
-    }
-
-    #[test]
-    fn an_explicit_trailing_command_and_env_win_over_the_definition() {
-        let fs = FakeFs::with("/work/lns.yaml", local_yaml());
-        let target = resolve(None, &fs, cwd()).unwrap();
-        assert_eq!(target.command(vec!["sh".to_string()]), vec!["sh"]);
-        assert_eq!(
-            target.env(vec!["MODE=prod".to_string()]),
-            vec!["MODE=research", "MODE=prod"],
-            "the definition's env lands first so the explicit -e entry wins on a duplicate key",
-        );
-    }
-
-    #[test]
-    fn a_reference_carries_no_definition_command_or_env() {
-        let fs = FakeFs::default();
-        let target = resolve(Some("alpine:3.20"), &fs, cwd()).unwrap();
-        assert!(target.command(Vec::new()).is_empty());
-        assert!(target.env(Vec::new()).is_empty());
-        assert_eq!(target.env(vec!["X=1".to_string()]), vec!["X=1"]);
     }
 }

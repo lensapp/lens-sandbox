@@ -556,6 +556,7 @@ mod tests {
                 with: vec![],
                 insecure: false,
                 verify_sandbox: false,
+                definition: None,
             })),
             Instant::now(),
         )

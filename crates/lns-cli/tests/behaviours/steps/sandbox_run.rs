@@ -97,6 +97,7 @@ fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: 
     }
     w.sandbox_run.request_image = Some(target.image());
     w.sandbox_run.verify_sandbox = Some(target.verify_sandbox());
+    w.sandbox_run.definition = target.definition_json();
     if let Some(policy) = args.policy.as_deref() {
         w.summary_output = format_summary(
             &args,
@@ -124,6 +125,33 @@ fn surface_service_refusal(message: &str) -> CliRun {
         exit_code: 1,
         output: format!("{err:#}"),
     }
+}
+
+#[given("a valid lns.yaml declaring a policy, integrations, and resources")]
+fn lns_yaml_with_policy_integrations_resources(w: &mut BehaviourWorld) {
+    w.author_files.insert(
+        PathBuf::from("/work/lns.yaml"),
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  policy:\n    defaultVerdict: ask\n  integrations:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
+            .to_string(),
+    );
+}
+
+#[then("the service request carries the definition's policy, integrations, and resources")]
+fn request_carries_definition(w: &mut BehaviourWorld) -> Result<(), String> {
+    let json = w
+        .sandbox_run
+        .definition
+        .as_deref()
+        .ok_or("the run request carried no definition")?;
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("definition was not json: {e}"))?;
+    let spec = &value["spec"];
+    if spec["policy"].is_null() || spec["integrations"].is_null() || spec["resources"].is_null() {
+        return Err(format!(
+            "expected policy, integrations, and resources in the definition, got: {spec}"
+        ));
+    }
+    Ok(())
 }
 
 #[then("the service received a request to run a sandbox")]

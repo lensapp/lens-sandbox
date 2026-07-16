@@ -81,6 +81,7 @@ pub struct VolumeCliRig {
 pub struct SandboxRunRig {
     pub request_image: Option<String>,
     pub verify_sandbox: Option<bool>,
+    pub definition: Option<String>,
     pub refusal: Option<String>,
 }
 

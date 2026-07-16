@@ -156,8 +156,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         mem: args.effective_mem(),
         cpus_explicit: args.cpus.is_some(),
         mem_explicit: args.mem.is_some(),
-        cmd: target.command(args.cmd),
-        env: target.env(args.env),
+        cmd: args.cmd,
+        env: args.env,
         image: Some(target.image()),
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
@@ -178,6 +178,7 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         with: Vec::new(),
         insecure: false,
         verify_sandbox: target.verify_sandbox(),
+        definition: target.definition_json(),
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
