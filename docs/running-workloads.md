@@ -49,6 +49,10 @@ The `spec` fields:
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `policy`       | The network policy — `defaultVerdict` and `allowedRoutes` (see [Policy](policy.md)). |
 | `integrations` | Ids of the [integrations](integrations.md) whose credentials and routes the sandbox needs. Declared ids arm at launch on any machine — no `lns integration connect` step; an id the machine's catalog doesn't know refuses the launch. |
+| `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
+| `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
+| `volumes`      | Named volume mounts (`name`, `target`), validated offline. Attaching volumes at launch is flag-driven today — `lns run -v name:/path`. |
+| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Publishing at launch is flag-driven today — `lns run -p HOST:CONTAINER`. |
 
 Check the definition offline — no network, no service — with `validate` and
 `show`:

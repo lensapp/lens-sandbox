@@ -292,7 +292,7 @@ lns integration disconnect <ID> [--policy <PATH>]
 | `add`        | Declare a credential integration in your machine-global catalog.              |
 | `list`       | List the bundled and user-declared integrations and their auth kind.          |
 | `remove`     | Remove a user-declared integration; bundled ones cannot be removed.           |
-| `connect`    | Connect an integration to this directory's policy (`oauth` integrations sign in). Unneeded for ids a definition already declares, except as the `oauth` sign-in vehicle. |
+| `connect`    | Bind an integration's per-machine value decision: a credential integration prompts in the approval window (use the host value, store one, or deny) and an `oauth` integration signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
 | `disconnect` | Disconnect an integration from this directory's policy.                       |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,

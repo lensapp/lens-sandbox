@@ -50,7 +50,7 @@ lns integration remove acme
 
 ## Reaching a workload
 
-An integration reaches a project's workloads in either of two ways:
+An integration reaches a project's workloads in any of three ways:
 
 - **Declared in the sandbox definition.** List its id under `spec.integrations`
   in [`./lns.yaml`](running-workloads.md#defining-a-sandbox). Declaring is
@@ -58,9 +58,20 @@ An integration reaches a project's workloads in either of two ways:
   definition or a published copy — gets the integration armed at launch, with no
   per-directory setup. An id the machine's catalog doesn't know refuses the
   launch and points at `lns integration add`.
-- **Connected to the directory.** `lns integration connect` records the id in
-  that directory's [`lns-policy.yaml`](policy.md) — the way to arm a directory
-  that has no definition, and the sign-in vehicle for `oauth` integrations:
+- **Required as a credential slot.** A definition's `spec.credentials` entry
+  names an integration, the env var it is injected as (remapping the catalog
+  default), and whether the workload requires it. A slot arms like a declared
+  integration under the slot's env name. A **required** slot with no value
+  bound on the machine refuses the launch before any microVM boots — naming
+  the credential, its injection target, and the `lns integration connect` fix —
+  and a credential you've denied refuses distinctly. An optional slot runs
+  reactively. A required `oauth`-kind slot blocks on the sign-in instead.
+- **Connected to the directory.** `lns integration connect` binds the
+  integration's per-machine [value decision](credentials.md#value-decisions) —
+  the approval-window card for a credential integration, the sign-in for an
+  `oauth` one — and records the id in that directory's
+  [`lns-policy.yaml`](policy.md), which is also how a directory with no
+  definition arms an integration:
 
 ```bash
 lns integration connect gitlab
