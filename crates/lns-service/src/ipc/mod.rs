@@ -114,6 +114,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::BeginIntegrationSignIn must be dispatched via handle_integration_sign_in, not handle_request"
             )
         }
+        Request::BindIntegrationCredential { .. } => {
+            unreachable!(
+                "Request::BindIntegrationCredential must be dispatched via handle_credential_bind, not handle_request"
+            )
+        }
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(run_id) {
                 Response::CancelAccepted
@@ -571,6 +576,20 @@ mod tests {
         let _ = handle_request(
             &Request::BeginIntegrationSignIn {
                 id: "some-oauth".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "BindIntegrationCredential must be dispatched via handle_credential_bind"
+    )]
+    async fn bind_integration_credential_via_handle_request_panics() {
+        let _ = handle_request(
+            &Request::BindIntegrationCredential {
+                id: "some-provider".into(),
             },
             Instant::now(),
         )

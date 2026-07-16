@@ -7,7 +7,7 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_as
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use super::sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 use crate::command::{RunCtx, RunFuture};
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -78,6 +78,39 @@ impl IntegrationSignIn for RealIntegrationSignIn {
                     Response::Error { message } => return Ok(SignInOutcome::Failed(message)),
                     other => bail!("unexpected response during sign-in: {other:?}"),
                 }
+            }
+        })
+    }
+
+    fn bind_credential<'a>(
+        &'a self,
+        id: &'a str,
+        out: &'a mut dyn Write,
+    ) -> LocalBoxFuture<'a, Result<BindOutcome>> {
+        Box::pin(async move {
+            let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
+                return Ok(BindOutcome::ServiceUnavailable);
+            };
+            let frame = encode_frame(&Request::BindIntegrationCredential { id: id.to_string() })
+                .context("encoding bind request")?;
+            stream
+                .write_all(&frame)
+                .await
+                .context("writing bind request")?;
+            writeln!(
+                out,
+                "Decide how \"{id}\" binds in the approval window (use the host value, store one, or deny)…"
+            )?;
+            let bytes = read_frame_bytes_async(&mut stream)
+                .await
+                .context("reading bind response")?;
+            match decode_frame::<Response, _>(&mut &bytes[..]).context("decoding bind response")? {
+                Response::CredentialBindComplete { decision } => {
+                    Ok(BindOutcome::Completed(decision))
+                }
+                Response::CredentialBindFailed { reason } => Ok(BindOutcome::Failed(reason)),
+                Response::Error { message } => Ok(BindOutcome::Failed(message)),
+                other => bail!("unexpected response during bind: {other:?}"),
             }
         })
     }

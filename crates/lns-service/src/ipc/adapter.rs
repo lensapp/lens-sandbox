@@ -153,6 +153,7 @@ async fn handle_connection(
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
+        Request::BindIntegrationCredential { id } => handle_credential_bind(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
 }
@@ -236,6 +237,85 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
     }
     stream.write_all(&encode_frame(&terminal)?).await?;
     Ok(())
+}
+
+/// Presents a connect-time value-decision card on the approval window and closes the stream with the terminal response.
+async fn handle_credential_bind(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+    let terminal = run_credential_bind(&id).await;
+    stream.write_all(&encode_frame(&terminal)?).await?;
+    Ok(())
+}
+
+const CREDENTIAL_BIND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Drive a credential integration's value decision through the approval window card and persist the outcome — a value, host-detect, or an explicit deny — to the per-machine store.
+async fn run_credential_bind(id: &str) -> Response {
+    use crate::credential_flow::bind::{
+        BindResolution, bind_prompt, bind_provider, resolve_bind_decision,
+    };
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let Some(integ) = catalog.iter().find(|i| i.id == id) else {
+        return Response::CredentialBindFailed {
+            reason: format!("{id:?} is not in this machine's integration catalog"),
+        };
+    };
+    let Some(prompt) = bind_prompt(integ) else {
+        return Response::CredentialBindFailed {
+            reason: format!("{id:?} is not a credential integration"),
+        };
+    };
+    let Some(window_state) = crate::approval_flow::window::get() else {
+        return Response::CredentialBindFailed {
+            reason: "the approval window is not available to make the value decision".into(),
+        };
+    };
+    let providers: Vec<_> = bind_provider(integ).into_iter().collect();
+    let host_value_available =
+        crate::credential_flow::registry::detect_for_with(id, &providers).is_some();
+    let (decision_tx, mut decision_rx) = mpsc::unbounded_channel();
+    let prompt_id = prompt.id.clone();
+    window_state.insert_credential_pending(prompt, host_value_available, decision_tx);
+    if let Some(ctx) = crate::approval_flow::window::ctx() {
+        ctx.request_repaint();
+    }
+    let delivery = match timeout(CREDENTIAL_BIND_TIMEOUT, decision_rx.recv()).await {
+        Ok(Some(delivery)) => delivery,
+        Ok(None) | Err(_) => {
+            window_state.remove_credential_pending(&prompt_id);
+            return Response::CredentialBindFailed {
+                reason: "the value decision timed out before it was made".into(),
+            };
+        }
+    };
+    match resolve_bind_decision(delivery.request) {
+        BindResolution::Persist(entry, decision) => {
+            let store = JsonFileCredentialStore::new(default_credentials_path());
+            let mut state = match store.load() {
+                Ok(state) => state,
+                Err(e) => {
+                    return Response::CredentialBindFailed {
+                        reason: format!("reading the credential store failed: {e}"),
+                    };
+                }
+            };
+            state.insert(id.to_string(), entry);
+            match store.save(&state) {
+                Ok(()) => Response::CredentialBindComplete { decision },
+                Err(e) => Response::CredentialBindFailed {
+                    reason: format!("storing the decision failed: {e}"),
+                },
+            }
+        }
+        BindResolution::Failed(reason) => Response::CredentialBindFailed { reason },
+    }
 }
 
 /// Drive an integration's oauth sign-in host-side — dispatching on its `flow`, emitting progress via `progress`, persisting the obtained credential — and return the terminal response. Shared by the connect verb and the run launch gate.

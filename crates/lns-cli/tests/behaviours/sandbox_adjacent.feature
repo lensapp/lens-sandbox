@@ -5,7 +5,6 @@ Feature: adjacent commands reshaped around the sandbox
   sandbox GC. (The audit chain's bundle_run→sandbox_run rename is pinned at
   Layer 3 in audit/mod.rs, since the audit CLI reads the on-disk chain.)
 
-  @todo
   Scenario: integration connect binds a credential and does not declare
     Given the integration "some-provider" is in the catalog
     When the user runs integration command "connect some-provider"

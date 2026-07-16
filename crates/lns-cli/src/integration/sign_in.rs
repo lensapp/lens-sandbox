@@ -13,11 +13,25 @@ pub enum SignInOutcome {
     ServiceUnavailable,
 }
 
-/// Drives an oauth integration's device sign-in through the running service, rendering the verification URL and code to `out` as they arrive.
+/// The result of driving a credential integration's value decision through the service's approval window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindOutcome {
+    Completed(lns_ipc::CredentialBindDecision),
+    Failed(String),
+    ServiceUnavailable,
+}
+
+/// Drives an oauth integration's device sign-in — or a credential integration's value-decision bind — through the running service, rendering progress to `out`.
 pub trait IntegrationSignIn {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
         out: &'a mut dyn Write,
     ) -> LocalBoxFuture<'a, anyhow::Result<SignInOutcome>>;
+
+    fn bind_credential<'a>(
+        &'a self,
+        id: &'a str,
+        out: &'a mut dyn Write,
+    ) -> LocalBoxFuture<'a, anyhow::Result<BindOutcome>>;
 }

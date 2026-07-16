@@ -65,6 +65,9 @@ pub enum Request {
     BeginIntegrationSignIn {
         id: String,
     },
+    BindIntegrationCredential {
+        id: String,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -96,6 +99,15 @@ pub enum Request {
         username: String,
         secret: String,
     },
+}
+
+/// The value decision a credential bind resolved to: a stored value, the host-detected value, or an explicit deny — all three persist per machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialBindDecision {
+    Stored,
+    HostDetect,
+    Denied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +169,12 @@ pub enum Response {
     },
     OauthSignInComplete,
     OauthSignInFailed {
+        reason: String,
+    },
+    CredentialBindComplete {
+        decision: CredentialBindDecision,
+    },
+    CredentialBindFailed {
         reason: String,
     },
     RegistryLoginVerified,
@@ -1121,6 +1139,38 @@ mod tests {
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn bind_integration_credential_survives_a_request_round_trip() {
+        let req = Request::BindIntegrationCredential {
+            id: "some-provider".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn credential_bind_responses_survive_round_trips() {
+        for resp in [
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::Stored,
+            },
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::HostDetect,
+            },
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::Denied,
+            },
+            Response::CredentialBindFailed {
+                reason: "the value decision timed out".into(),
+            },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     #[test]
