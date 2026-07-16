@@ -62,7 +62,7 @@ fn definition_declaring(ids: &[&str]) -> String {
 
 fn launch(
     w: &mut BehaviourWorld,
-    resolved: anyhow::Result<lns_service::artifact::assembly::ResolvedBundle>,
+    resolved: anyhow::Result<lns_service::artifact::assembly::ResolvedSandbox>,
 ) {
     let rig = w.declared.get_or_insert_with(Default::default);
     let resolved = match resolved {

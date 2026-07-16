@@ -1466,7 +1466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_cached_renders_image_and_bundle_kinds() {
+    async fn inspect_cached_renders_the_image_kind() {
         let image = CannedService::with_inspect_image(
             Response::Error {
                 message: "not running".into(),

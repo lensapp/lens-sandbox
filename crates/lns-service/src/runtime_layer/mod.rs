@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn for_run_materializes_a_bundles_fileset_files_into_the_layer() {
+    fn for_run_materializes_a_sandbox_fileset_into_the_layer() {
         let d = tempdir();
         let s = store(&d);
         let gt = fake_guest_tools(&d);
@@ -880,7 +880,7 @@ mod tests {
         let layer = for_run(false, &s, &gt, None, &fileset).unwrap().unwrap();
         assert!(
             paths(&layer).contains(&"root/.some-agent/skills/deep.md"),
-            "a bundle's fileset file must land in the runtime layer"
+            "a sandbox's fileset file must land in the runtime layer"
         );
     }
 }

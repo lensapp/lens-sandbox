@@ -203,7 +203,7 @@ pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>
     }
 }
 
-/// Record the VM size a bundle run resolved to (from its Sandbox resources) so `lns inspect` reports what actually booted, not the pre-resolution request.
+/// Record the VM size a sandbox run resolved to (from its resources) so `lns inspect` reports what actually booted, not the pre-resolution request.
 pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {

@@ -3,31 +3,31 @@ use cucumber::{given, then, when};
 use lns_policy::{RouteRule, Verdict};
 use lns_service::artifact::policy::{guardrail_flags, run_summary};
 
-#[given(r#"a bundle whose policy has defaultVerdict "allow""#)]
+#[given(r#"a sandbox whose policy has defaultVerdict "allow""#)]
 async fn default_verdict_allow(world: &mut BehaviourWorld) {
     let rig = world.policy();
-    rig.bundle_ships_policy = true;
-    rig.bundle_policy.network.default_verdict = Verdict::Allow;
+    rig.sandbox_ships_policy = true;
+    rig.sandbox_policy.network.default_verdict = Verdict::Allow;
 }
 
-#[given(regex = r#"^a bundle whose policy allows the CIDR "([^"]+)"$"#)]
+#[given(regex = r#"^a sandbox whose policy allows the CIDR "([^"]+)"$"#)]
 async fn allows_cidr(world: &mut BehaviourWorld, cidr: String) {
     let rig = world.policy();
-    rig.bundle_ships_policy = true;
-    rig.bundle_policy.add_rule(RouteRule::allow_host(cidr));
+    rig.sandbox_ships_policy = true;
+    rig.sandbox_policy.add_rule(RouteRule::allow_host(cidr));
 }
 
-#[given(regex = r#"^a bundle whose policy allows "([^"]+)"$"#)]
+#[given(regex = r#"^a sandbox whose policy allows "([^"]+)"$"#)]
 async fn allows_host(world: &mut BehaviourWorld, host: String) {
     let rig = world.policy();
-    rig.bundle_ships_policy = true;
-    rig.bundle_policy.add_rule(RouteRule::allow_host(host));
+    rig.sandbox_ships_policy = true;
+    rig.sandbox_policy.add_rule(RouteRule::allow_host(host));
 }
 
 #[when("the first-run summary is produced")]
 async fn first_run_summary(world: &mut BehaviourWorld) {
     let rig = world.policy();
-    let flags = guardrail_flags(&rig.bundle_policy);
+    let flags = guardrail_flags(&rig.sandbox_policy);
     rig.summary = Some(run_summary(&flags));
 }
 

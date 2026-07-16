@@ -58,7 +58,7 @@ pub fn run_summary(flags: &[GuardrailFlag]) -> String {
     summary
 }
 
-/// Merge a bundle's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: every layer's denies are ordered first so a first-match gate stays deny-dominant, `defaultVerdict` never exceeds `ask` (a permissive bundle default is backstopped, a `deny` default is honored), and connected integrations union.
+/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: every layer's denies are ordered first so a first-match gate stays deny-dominant, `defaultVerdict` never exceeds `ask` (a permissive baseline default is backstopped, a `deny` default is honored), and connected integrations union.
 // Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
@@ -158,14 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_backstops_a_permissive_bundle_default_to_ask() {
+    fn merge_backstops_a_permissive_baseline_default_to_ask() {
         let mut baseline = Policy::default();
         baseline.network.default_verdict = Verdict::Allow;
         let merged = merge_effective(Some(&baseline), &Policy::default());
         assert_eq!(
             merged.network.default_verdict,
             Verdict::Ask,
-            "a bundle's allow-by-default must never survive the merge"
+            "a baseline's allow-by-default must never survive the merge"
         );
     }
 
@@ -175,7 +175,7 @@ mod tests {
         overlay.network.default_verdict = Verdict::Deny;
         overlay.connect("some-overlay-integration");
         let mut baseline = Policy::default();
-        baseline.connect("some-bundle-integration");
+        baseline.connect("some-baseline-integration");
         let merged = merge_effective(Some(&baseline), &overlay);
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
         assert!(
@@ -186,7 +186,7 @@ mod tests {
         assert!(
             merged
                 .integrations
-                .contains(&"some-bundle-integration".to_string())
+                .contains(&"some-baseline-integration".to_string())
         );
     }
 

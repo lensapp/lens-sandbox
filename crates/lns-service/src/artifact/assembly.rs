@@ -8,7 +8,7 @@ pub struct LocalFileset {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct ResolvedBundle {
+pub struct ResolvedSandbox {
     pub base_image: String,
     pub local_filesets: Vec<LocalFileset>,
     pub filesets: Vec<ResolvedFileset>,
@@ -37,13 +37,13 @@ pub struct AssembledWorkload {
     pub credentials: Vec<crate::artifact::spec::CredentialSlot>,
 }
 
-pub fn assemble(bundle: &ResolvedBundle) -> AssembledWorkload {
+pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
     AssembledWorkload {
-        base_image: bundle.base_image.clone(),
-        command: bundle.command.clone(),
-        env: bundle.env.clone(),
-        resources: bundle.resources.clone(),
-        policy: bundle.policy.clone(),
-        credentials: bundle.credentials.clone(),
+        base_image: sandbox.base_image.clone(),
+        command: sandbox.command.clone(),
+        env: sandbox.env.clone(),
+        resources: sandbox.resources.clone(),
+        policy: sandbox.policy.clone(),
+        credentials: sandbox.credentials.clone(),
     }
 }

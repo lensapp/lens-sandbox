@@ -13,19 +13,22 @@ pub struct ResourceOverrides {
 }
 
 pub fn resolve_size(
-    bundle: Option<&Resources>,
+    sandbox: Option<&Resources>,
     overrides: &ResourceOverrides,
     defaults: VmSize,
 ) -> VmSize {
-    let bundle_cpus = bundle
+    let sandbox_cpus = sandbox
         .and_then(|r| r.cpu.as_ref())
         .and_then(quantity_to_cpus);
-    let bundle_mem = bundle
+    let sandbox_mem = sandbox
         .and_then(|r| r.memory.as_ref())
         .and_then(quantity_to_mib);
     VmSize {
-        cpus: overrides.cpus.or(bundle_cpus).unwrap_or(defaults.cpus),
-        mem_mib: overrides.mem_mib.or(bundle_mem).unwrap_or(defaults.mem_mib),
+        cpus: overrides.cpus.or(sandbox_cpus).unwrap_or(defaults.cpus),
+        mem_mib: overrides
+            .mem_mib
+            .or(sandbox_mem)
+            .unwrap_or(defaults.mem_mib),
     }
 }
 
@@ -75,7 +78,7 @@ mod tests {
     };
 
     #[test]
-    fn an_absent_bundle_size_falls_back_to_defaults() {
+    fn an_absent_sandbox_size_falls_back_to_defaults() {
         let size = resolve_size(None, &ResourceOverrides::default(), DEFAULTS);
         assert_eq!(size, DEFAULTS);
     }

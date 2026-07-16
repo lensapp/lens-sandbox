@@ -1,5 +1,5 @@
 Feature: managing running sandboxes from the CLI
-  `lns sandbox` bundles the lifecycle verbs for runs you have already
+  `lns sandbox` groups the lifecycle verbs for runs you have already
   started: stop them gracefully, read or follow their output, re-attach,
   inspect their state, and sample their resource usage.
 

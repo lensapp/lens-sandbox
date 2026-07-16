@@ -15,7 +15,7 @@ use lns_policy::{Policy, PolicyStore, RouteRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
-/// Supplies the registry credentials bundled into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
+/// Supplies the registry credentials packed into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
 pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 
 /// Maps a reloaded policy's `integrations:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
@@ -140,7 +140,7 @@ impl ApprovalSession {
         let _ = self.integration_routes.set(deriver);
     }
 
-    /// Installs a bundle's shipped policy as an always-merged floor, so a watcher reload of the local overlay can never drop the bundle's rules; idempotent, the first wins.
+    /// Installs a sandbox's shipped policy as an always-merged floor, so a watcher reload of the local overlay can never drop the sandbox's rules; idempotent, the first wins.
     pub fn set_policy_floor(&self, floor: Policy) {
         let _ = self.policy_floor.set(floor);
     }
@@ -1178,7 +1178,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn allow_always_policy_frame_bundles_registry_credentials_when_provider_set() {
+    fn allow_always_policy_frame_packs_registry_credentials_when_provider_set() {
         let (s, _n, _store, mut rx) = fixture();
         s.set_credentials_provider(Box::new(|| {
             vec![Credential {
@@ -1202,7 +1202,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn apply_external_policy_bundles_registry_credentials_when_provider_set() {
+    fn apply_external_policy_packs_registry_credentials_when_provider_set() {
         let (s, _n, _store, mut rx) = fixture();
         s.set_credentials_provider(Box::new(|| {
             vec![Credential {

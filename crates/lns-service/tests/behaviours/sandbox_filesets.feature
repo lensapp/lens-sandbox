@@ -1,8 +1,8 @@
 Feature: a sandbox's declared filesets are planned into the launch
   A sandbox definition may ship files via spec.filesets. The service
   plans them into the run: a published sandbox's fileset refs join the
-  resolved plan (materialized into the guest by the same machinery a
-  bundle uses), and a local definition's path filesets are walked into
+  resolved plan (materialized into the guest by the fileset-pull
+  machinery), and a local definition's path filesets are walked into
   guest-write specs at plan time — a launch-time snapshot. The trust
   story is digest pinning plus disclosure, not signatures: a published
   sandbox whose fileset ref is not digest-pinned (or that smuggles a

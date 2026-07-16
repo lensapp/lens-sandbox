@@ -10,7 +10,7 @@ pub mod resources;
 
 pub use lns_artifact::spec;
 
-use assembly::ResolvedBundle;
+use assembly::ResolvedSandbox;
 use spec::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +61,10 @@ pub fn dispatch_run(
 }
 
 /// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor integrations plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
-pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedBundle {
+pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
     let ships_policy = def.spec.policy != lns_policy::NetworkPolicy::default()
         || !def.spec.integrations.is_empty();
-    ResolvedBundle {
+    ResolvedSandbox {
         base_image: def.spec.image.clone(),
         local_filesets: def
             .spec
@@ -104,7 +104,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
 }
 
 /// The digest-pin trust gate for a published sandbox's filesets: a local path has no meaning off the author's machine, and a floating ref defeats pinning — both refuse the plan.
-pub fn published_fileset_problems(resolved: &ResolvedBundle) -> Vec<String> {
+pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
     let mut problems: Vec<String> = resolved
         .local_filesets
         .iter()
@@ -131,7 +131,7 @@ pub fn published_fileset_problems(resolved: &ResolvedBundle) -> Vec<String> {
 }
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, integrations, and resources apply identically.
-pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedBundle> {
+pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
     Ok(resolved_from_sandbox(&def))

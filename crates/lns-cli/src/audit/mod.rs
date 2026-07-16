@@ -303,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn the_json_flag_labels_a_sandbox_run_not_a_bundle_run() {
+    async fn the_json_flag_labels_a_sandbox_run() {
         let home = tempfile::TempDir::new().unwrap();
         write_sandbox_run_chain(home.path(), "5a5a5a");
         let _env = home_env(home.path());
@@ -314,7 +314,6 @@ mod tests {
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("sandbox_run"), "got: {text}");
-        assert!(!text.contains("bundle_run"), "got: {text}");
     }
 
     #[tokio::test]

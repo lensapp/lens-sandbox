@@ -593,8 +593,8 @@ primarily a live view of its output.
 and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
 the contents of its policy file when that file is readable on this machine. For a
 **cached** reference it prints the artifact's kind and definition — a plain `Image`,
-or an `AgentSystem` bundle's base image, filesets, integrations, and signature/trust
-status, flagging a permissive default policy.
+or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and integrations,
+flagging a permissive default policy.
 
 ### Listing resource use
 

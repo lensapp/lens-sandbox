@@ -14,8 +14,6 @@ Feature: a sandbox definition's credential slots gate the launch
   enters the artifact or the workload — only the boundary sees it.
 
   NOTE: this contract covers the flat sandbox definition's `spec.credentials`.
-  Gating a bundle Agent's credential slots through the same seams remains a
-  tracked follow-up.
 
   Scenario: A required slot with no bound value refuses the launch before boot
     Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN"

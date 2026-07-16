@@ -77,7 +77,7 @@ async fn orchestrate(
 
     // A local definition plans directly; a published sandbox reference boots its base image; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
-    let bundle = match (args.definition.as_deref(), resolved_image) {
+    let sandbox_plan = match (args.definition.as_deref(), resolved_image) {
         (Some(definition), _) => Some(crate::artifact::real::plan_local(definition).await?),
         (None, Some(image_ref)) => {
             crate::artifact::real::peek_and_plan(image_ref, args.verify_sandbox, &run_id, &microvm)
@@ -85,7 +85,7 @@ async fn orchestrate(
         }
         (None, None) => None,
     };
-    if let Some(plan) = &bundle {
+    if let Some(plan) = &sandbox_plan {
         crate::artifact::real::refuse_unknown_integrations(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,
@@ -98,9 +98,9 @@ async fn orchestrate(
         )
         .await?;
     }
-    let launch = bundle
+    let launch = sandbox_plan
         .as_ref()
-        .map(|plan| super::bundle_launch(&plan.workload, &args.cmd, &args.env));
+        .map(|plan| super::sandbox_launch(&plan.workload, &args.cmd, &args.env));
     let image_ref: Option<String> = match &launch {
         Some(l) => Some(l.image.clone()),
         None => resolved_image.map(str::to_string),
@@ -122,8 +122,10 @@ async fn orchestrate(
                 run_id.clone(),
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
-                bundle.as_ref().and_then(|p| p.workload.policy.as_ref()),
-                bundle
+                sandbox_plan
+                    .as_ref()
+                    .and_then(|p| p.workload.policy.as_ref()),
+                sandbox_plan
                     .as_ref()
                     .map(|p| p.workload.credentials.as_slice())
                     .unwrap_or_default(),
@@ -219,7 +221,7 @@ async fn orchestrate(
     }
 
     let imageless = args.image.is_none();
-    let fileset_specs: &[runtime_layer::RuntimeFileSpec] = bundle
+    let fileset_specs: &[runtime_layer::RuntimeFileSpec] = sandbox_plan
         .as_ref()
         .map(|p| p.fileset_specs.as_slice())
         .unwrap_or_default();
@@ -298,8 +300,10 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
-    let (cpus, memory_mib) = super::bundle_vm_size(
-        bundle.as_ref().and_then(|p| p.workload.resources.as_ref()),
+    let (cpus, memory_mib) = super::sandbox_vm_size(
+        sandbox_plan
+            .as_ref()
+            .and_then(|p| p.workload.resources.as_ref()),
         args.cpus,
         args.cpus_explicit,
         args.mem,

@@ -1,4 +1,4 @@
-use crate::artifact::assembly::{self, AssembledWorkload, ResolvedBundle};
+use crate::artifact::assembly::{self, AssembledWorkload, ResolvedSandbox};
 use crate::artifact::fileset::fileset_runtime_specs;
 use crate::artifact::{RunPath, dispatch, dispatch_run, resolved_from_sandbox};
 use crate::image::{RealRegistry, Registry, registry_auth_for};
@@ -8,7 +8,7 @@ use lns_ipc::{ArtifactInspection, ImageView, SandboxMount, SandboxMountKind};
 use oci_client::Reference;
 
 /// A resolved sandbox ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
-pub(crate) struct BundlePlan {
+pub(crate) struct SandboxPlan {
     pub workload: AssembledWorkload,
     pub fileset_specs: Vec<RuntimeFileSpec>,
 }
@@ -19,7 +19,7 @@ pub(crate) async fn peek_and_plan(
     verify_sandbox: bool,
     run_id: &str,
     microvm: &str,
-) -> Result<Option<BundlePlan>> {
+) -> Result<Option<SandboxPlan>> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -47,7 +47,7 @@ pub(crate) async fn peek_and_plan(
                 anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
             }
             let fileset_specs = materialize_filesets(&resolved).await?;
-            Ok(Some(BundlePlan {
+            Ok(Some(SandboxPlan {
                 workload: assembly::assemble(&resolved),
                 fileset_specs,
             }))
@@ -56,7 +56,7 @@ pub(crate) async fn peek_and_plan(
 }
 
 /// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run.
-pub(crate) async fn plan_local(definition_json: &str) -> Result<BundlePlan> {
+pub(crate) async fn plan_local(definition_json: &str) -> Result<SandboxPlan> {
     let resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
     disclose_effective_policy(resolved.policy.as_ref());
     let mut fileset_specs = materialize_filesets(&resolved).await?;
@@ -64,7 +64,7 @@ pub(crate) async fn plan_local(definition_json: &str) -> Result<BundlePlan> {
         &RealSnapshotDir,
         &resolved.local_filesets,
     )?);
-    Ok(BundlePlan {
+    Ok(SandboxPlan {
         workload: assembly::assemble(&resolved),
         fileset_specs,
     })
@@ -161,8 +161,8 @@ fn effective_machine_catalog() -> Vec<lns_policy::integrations::Integration> {
     lns_policy::integrations::effective_integrations(&user)
 }
 
-/// Pull each resolved fileset's content layer and expand it into guest-write specs, so the bundle's filesets land in the microVM at their mount paths.
-async fn materialize_filesets(resolved: &ResolvedBundle) -> Result<Vec<RuntimeFileSpec>> {
+/// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
+async fn materialize_filesets(resolved: &ResolvedSandbox) -> Result<Vec<RuntimeFileSpec>> {
     let mut specs = Vec::new();
     for fileset in &resolved.filesets {
         let Some(mount) = fileset.paths.first() else {
@@ -206,7 +206,7 @@ fn record_sandbox_run(
     microvm: &str,
     image_ref: &str,
     digest: &str,
-    resolved: &ResolvedBundle,
+    resolved: &ResolvedSandbox,
 ) {
     let integrations = resolved
         .policy
@@ -231,7 +231,7 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the bundle's shipped network policy at boot: name it as the deny-dominant baseline under the local overlay, and warn prominently if it is over-broad (permissive default / wildcard / broad CIDR).
+/// Disclose the sandbox's shipped network policy at boot: name it as the deny-dominant baseline under the local overlay, and warn prominently if it is over-broad (permissive default / wildcard / broad CIDR).
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;

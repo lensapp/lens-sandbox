@@ -62,7 +62,7 @@ pub struct BehaviourWorld {
     pub fileset_definition: Option<Vec<u8>>,
     /// The staged file name inside the scenario's path fileset directory.
     pub fileset_snapshot_file: Option<String>,
-    pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedBundle>,
+    pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedSandbox>,
     pub fileset_problems: Option<Vec<String>>,
     pub fileset_specs: Option<Vec<String>>,
 

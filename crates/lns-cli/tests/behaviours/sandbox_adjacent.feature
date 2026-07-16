@@ -2,8 +2,8 @@ Feature: adjacent commands reshaped around the sandbox
   The own-top-level groups keep their mechanisms but are reframed around the
   single sandbox noun: integration connect only binds credentials, config
   keeps only the run gap-fillers, and volumes stay durable and never swept by
-  sandbox GC. (The audit chain's bundle_run→sandbox_run rename is pinned at
-  Layer 3 in audit/mod.rs, since the audit CLI reads the on-disk chain.)
+  sandbox GC. (The audit chain labels a run `sandbox_run`, pinned at Layer 3
+  in audit/mod.rs, since the audit CLI reads the on-disk chain.)
 
   Scenario: integration connect binds a credential and does not declare
     Given the integration "some-provider" is in the catalog

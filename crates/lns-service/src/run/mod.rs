@@ -83,15 +83,15 @@ pub(super) fn exec_env_strings(
     )
 }
 
-/// The image ref, command, and env a bundle run boots with, once its components are resolved.
-pub(super) struct BundleLaunch {
+/// The image ref, command, and env a sandbox run boots with, once its definition is resolved.
+pub(super) struct SandboxLaunch {
     pub image: String,
     pub cmd: Vec<String>,
     pub env: Vec<String>,
 }
 
-/// Size a bundle run's VM: the bundle's Sandbox resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
-pub(super) fn bundle_vm_size(
+/// Size a sandbox run's VM: the sandbox's resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
+pub(super) fn sandbox_vm_size(
     resources: Option<&lns_artifact::spec::Resources>,
     requested_cpus: u8,
     cpus_explicit: bool,
@@ -116,12 +116,12 @@ pub(super) fn bundle_vm_size(
     (size.cpus, size.mem_mib)
 }
 
-/// Merge a resolved bundle's workload with the user's run args: boot the sandbox base image, take the agent command unless the user gave one after `--`, and layer env base-image < bundle-agent < user `-e`.
-pub(super) fn bundle_launch(
+/// Merge a resolved sandbox's workload with the user's run args: boot the sandbox base image, take the sandbox command unless the user gave one after `--`, and layer env base-image < sandbox < user `-e`.
+pub(super) fn sandbox_launch(
     workload: &crate::artifact::assembly::AssembledWorkload,
     user_cmd: &[String],
     user_env: &[String],
-) -> BundleLaunch {
+) -> SandboxLaunch {
     let cmd = if user_cmd.is_empty() {
         workload
             .command
@@ -137,7 +137,7 @@ pub(super) fn bundle_launch(
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
     env.extend(user_env.iter().cloned());
-    BundleLaunch {
+    SandboxLaunch {
         image: workload.base_image.clone(),
         cmd,
         env,
@@ -178,31 +178,31 @@ mod tests {
     }
 
     #[test]
-    fn bundle_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
+    fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
-        assert_eq!(bundle_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
+        assert_eq!(sandbox_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
     }
 
     #[test]
-    fn bundle_vm_size_lets_an_explicit_request_override_the_bundle() {
+    fn sandbox_vm_size_lets_an_explicit_request_override_the_sandbox() {
         let res = resources(4, 2048);
-        assert_eq!(bundle_vm_size(Some(&res), 2, true, 1024, true), (2, 1024));
+        assert_eq!(sandbox_vm_size(Some(&res), 2, true, 1024, true), (2, 1024));
     }
 
     #[test]
-    fn bundle_vm_size_honors_an_explicit_request_that_equals_the_builtin_default() {
+    fn sandbox_vm_size_honors_an_explicit_request_that_equals_the_builtin_default() {
         let res = resources(4, 2048);
         assert_eq!(
-            bundle_vm_size(Some(&res), 1, true, 512, true),
+            sandbox_vm_size(Some(&res), 1, true, 512, true),
             (1, 512),
-            "a user who explicitly asks for the default size must be able to constrain a greedy bundle"
+            "a user who explicitly asks for the default size must be able to constrain a greedy sandbox"
         );
     }
 
     #[test]
-    fn bundle_vm_size_falls_back_to_the_request_when_the_bundle_is_silent() {
-        assert_eq!(bundle_vm_size(None, 1, false, 512, false), (1, 512));
-        assert_eq!(bundle_vm_size(None, 8, true, 4096, true), (8, 4096));
+    fn sandbox_vm_size_falls_back_to_the_request_when_the_sandbox_is_silent() {
+        assert_eq!(sandbox_vm_size(None, 1, false, 512, false), (1, 512));
+        assert_eq!(sandbox_vm_size(None, 8, true, 4096, true), (8, 4096));
     }
 
     #[tokio::test]
@@ -469,7 +469,7 @@ mod tests {
         command: Option<&str>,
         env: &[(&str, &str)],
     ) -> crate::artifact::assembly::AssembledWorkload {
-        let resolved = crate::artifact::assembly::ResolvedBundle {
+        let resolved = crate::artifact::assembly::ResolvedSandbox {
             base_image: "registry.example.test/base@sha256:abc".into(),
             command: command.map(str::to_string),
             env: env
@@ -482,17 +482,17 @@ mod tests {
     }
 
     #[test]
-    fn bundle_launch_boots_the_base_image_with_the_agent_command() {
+    fn sandbox_launch_boots_the_base_image_with_the_agent_command() {
         let w = workload(Some("agent --serve"), &[]);
-        let launch = bundle_launch(&w, &[], &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
         assert_eq!(launch.image, "registry.example.test/base@sha256:abc");
         assert_eq!(launch.cmd, vec!["agent".to_string(), "--serve".to_string()]);
     }
 
     #[test]
-    fn bundle_launch_keeps_a_quoted_agent_argument_as_one_token() {
+    fn sandbox_launch_keeps_a_quoted_agent_argument_as_one_token() {
         let w = workload(Some(r#"agent --prompt "hello world" --flag"#), &[]);
-        let launch = bundle_launch(&w, &[], &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
         assert_eq!(
             launch.cmd,
             vec![
@@ -506,9 +506,9 @@ mod tests {
     }
 
     #[test]
-    fn bundle_launch_falls_back_to_whitespace_on_an_unbalanced_quote() {
+    fn sandbox_launch_falls_back_to_whitespace_on_an_unbalanced_quote() {
         let w = workload(Some(r#"agent "unclosed"#), &[]);
-        let launch = bundle_launch(&w, &[], &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
         assert_eq!(
             launch.cmd,
             vec!["agent".to_string(), "\"unclosed".to_string()]
@@ -516,16 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn bundle_launch_lets_a_user_command_after_dashdash_override_the_agent() {
+    fn sandbox_launch_lets_a_user_command_after_dashdash_override_the_agent() {
         let w = workload(Some("agent --serve"), &[]);
-        let launch = bundle_launch(&w, &["bash".to_string()], &[]);
+        let launch = sandbox_launch(&w, &["bash".to_string()], &[]);
         assert_eq!(launch.cmd, vec!["bash".to_string()]);
     }
 
     #[test]
-    fn bundle_launch_leaves_the_command_empty_when_the_agent_declares_none() {
+    fn sandbox_launch_leaves_the_command_empty_when_the_agent_declares_none() {
         let w = workload(None, &[]);
-        let launch = bundle_launch(&w, &[], &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
         assert!(
             launch.cmd.is_empty(),
             "no agent command → fall back to image"
@@ -533,9 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn bundle_launch_layers_user_env_after_the_agent_env_so_the_user_wins() {
+    fn sandbox_launch_layers_user_env_after_the_agent_env_so_the_user_wins() {
         let w = workload(Some("agent"), &[("MODE", "research"), ("PORT", "3003")]);
-        let launch = bundle_launch(&w, &[], &["PORT=4000".to_string()]);
+        let launch = sandbox_launch(&w, &[], &["PORT=4000".to_string()]);
         assert_eq!(
             launch.env,
             vec![

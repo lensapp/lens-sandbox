@@ -74,8 +74,8 @@ impl SupervisorSession {
         run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
-        bundle_policy: Option<&lns_policy::Policy>,
-        bundle_credentials: &[lns_artifact::spec::CredentialSlot],
+        sandbox_policy: Option<&lns_policy::Policy>,
+        sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
     ) -> Result<Option<Self>> {
@@ -86,8 +86,8 @@ impl SupervisorSession {
             run_id,
             microvm_name,
             policy_path,
-            bundle_policy,
-            bundle_credentials,
+            sandbox_policy,
+            sandbox_credentials,
             guest_tools_root,
             user_env,
         )
@@ -559,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn start_if_policy_merges_a_bundle_policy_floor_under_the_local_overlay() {
+    async fn start_if_policy_merges_a_sandbox_policy_floor_under_the_local_overlay() {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
@@ -574,21 +574,21 @@ mod tests {
             "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
         )
         .expect("policy");
-        let mut bundle_policy = lns_policy::Policy::default();
-        bundle_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
+        let mut sandbox_policy = lns_policy::Policy::default();
+        sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 
         let result = SupervisorSession::start_if_policy(
             "deadbeef00000000000000000000aa98".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
-            Some(&bundle_policy),
+            Some(&sandbox_policy),
             &[],
             d.path().to_path_buf(),
             vec![],
         )
         .await
         .expect("start_if_policy");
-        let session = result.expect("Some(session) with a bundle policy floor");
+        let session = result.expect("Some(session) with a sandbox policy floor");
         assert_eq!(session.assets.supervisor_bin, supervisor_bin);
         drop(session);
         tokio::task::yield_now().await;

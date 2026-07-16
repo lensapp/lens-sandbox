@@ -1,4 +1,4 @@
-//! A minimal in-process OCI distribution registry for the bundle-boot e2e.
+//! A minimal in-process OCI distribution registry for the sandbox round-trip e2e.
 //!
 //! Serves exactly the subset `lns build --push` (chunked blob upload +
 //! manifest PUT) and `lns run` (manifest/blob GET) exercise, over plaintext
