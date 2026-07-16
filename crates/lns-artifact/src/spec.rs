@@ -14,24 +14,15 @@ pub enum Class {
 pub enum Kind {
     Sandbox,
     FileSet,
-    Policy,
-    Integration,
 }
 
-const ALL_KINDS: [Kind; 4] = [
-    Kind::Sandbox,
-    Kind::FileSet,
-    Kind::Policy,
-    Kind::Integration,
-];
+const ALL_KINDS: [Kind; 2] = [Kind::Sandbox, Kind::FileSet];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Sandbox => "Sandbox",
             Kind::FileSet => "FileSet",
-            Kind::Policy => "Policy",
-            Kind::Integration => "Integration",
         }
     }
 
@@ -39,8 +30,6 @@ impl Kind {
         match self {
             Kind::Sandbox => "sandbox",
             Kind::FileSet => "fileset",
-            Kind::Policy => "policy",
-            Kind::Integration => "integration",
         }
     }
 
@@ -73,28 +62,6 @@ impl Kind {
 
     pub fn from_kind_str(kind: &str) -> Option<Kind> {
         ALL_KINDS.into_iter().find(|k| k.as_str() == kind)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ArtifactRef {
-    #[serde(rename = "ref")]
-    pub reference: String,
-    #[serde(default)]
-    pub digest: Option<String>,
-}
-
-impl ArtifactRef {
-    pub fn validate(&self) -> Result<()> {
-        if self.reference.is_empty() {
-            bail!("artifact ref must not be empty");
-        }
-        if let Some(digest) = &self.digest
-            && !is_sha256_digest(digest)
-        {
-            bail!("artifact ref digest {digest} is not a sha256 digest");
-        }
-        Ok(())
     }
 }
 
@@ -168,22 +135,10 @@ pub struct Sandbox {
     pub spec: SandboxSpec,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-pub struct PolicySpec {
-    #[serde(default)]
-    pub integrations: Vec<ArtifactRef>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSet {
     pub metadata: Metadata,
     pub mount: Mount,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Policy {
-    pub metadata: Metadata,
-    pub spec: PolicySpec,
 }
 
 #[derive(Deserialize)]
@@ -268,23 +223,6 @@ pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
     })
 }
 
-pub fn parse_policy(config_json: &[u8]) -> Result<Policy> {
-    let doc = parse_doc(config_json, Kind::Policy)?;
-    let spec: PolicySpec = serde_json::from_value(doc.spec).context("parsing policy spec")?;
-    for integration in &spec.integrations {
-        integration.validate()?;
-    }
-    Ok(Policy {
-        metadata: doc.metadata,
-        spec,
-    })
-}
-
-pub fn validate_envelope(config_json: &[u8], expected: Kind) -> Result<()> {
-    parse_doc(config_json, expected)?;
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct KindOnly {
     #[serde(default)]
@@ -305,12 +243,6 @@ pub fn validate_any(config_json: &[u8]) -> Result<()> {
         }
         Kind::FileSet => {
             parse_fileset(config_json)?;
-        }
-        Kind::Policy => {
-            parse_policy(config_json)?;
-        }
-        Kind::Integration => {
-            validate_envelope(config_json, Kind::Integration)?;
         }
     }
     Ok(())
@@ -388,40 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_ref_validate_accepts_bare_ref_and_pinned_digest() {
-        ArtifactRef {
-            reference: "reg/x:1".into(),
-            digest: None,
-        }
-        .validate()
-        .unwrap();
-        ArtifactRef {
-            reference: "reg/x:1".into(),
-            digest: Some(format!("sha256:{}", "a".repeat(64))),
-        }
-        .validate()
-        .unwrap();
-    }
-
-    #[test]
-    fn artifact_ref_validate_rejects_empty_ref_and_bad_digest() {
-        let err = ArtifactRef {
-            reference: String::new(),
-            digest: None,
-        }
-        .validate()
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("must not be empty"));
-        let err = ArtifactRef {
-            reference: "reg/x:1".into(),
-            digest: Some("sha256:nothex".into()),
-        }
-        .validate()
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("not a sha256 digest"));
-    }
-
-    #[test]
     fn is_valid_name_matches_the_dns_label_pattern() {
         assert!(is_valid_name("a"));
         assert!(is_valid_name("some-agent"));
@@ -448,15 +346,15 @@ mod tests {
 
     #[test]
     fn parse_doc_rejects_wrong_api_version_kind_name_and_mount() {
-        let bad_api = br#"{"apiVersion":"v0","kind":"Policy","metadata":{"name":"x"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_policy(bad_api).unwrap_err()).contains("apiVersion"));
-        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"x"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_policy(bad_kind).unwrap_err()).contains("expected kind"));
-        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"-bad"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_policy(bad_name).unwrap_err()).contains("metadata.name"));
-        let runtime_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"x"},"mount":{"path":"/x"},"spec":{}}"#;
+        let bad_api = br#"{"apiVersion":"v0","kind":"Sandbox","metadata":{"name":"x"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_sandbox(bad_api).unwrap_err()).contains("apiVersion"));
+        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"x"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_sandbox(bad_kind).unwrap_err()).contains("expected kind"));
+        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"-bad"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_sandbox(bad_name).unwrap_err()).contains("metadata.name"));
+        let runtime_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"x"},"mount":{"path":"/x"},"spec":{}}"#;
         assert!(
-            format!("{:#}", parse_policy(runtime_mount).unwrap_err())
+            format!("{:#}", parse_sandbox(runtime_mount).unwrap_err())
                 .contains("must not carry a mount")
         );
     }
@@ -464,7 +362,7 @@ mod tests {
     #[test]
     fn parse_doc_rejects_malformed_json() {
         assert!(
-            format!("{:#}", parse_policy(b"not json").unwrap_err()).contains("parsing artifact")
+            format!("{:#}", parse_sandbox(b"not json").unwrap_err()).contains("parsing artifact")
         );
     }
 
@@ -554,39 +452,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_policy_surfaces_the_integration_refs_it_declares() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"ask"},"integrations":[{"ref":"reg/some-integration:1"}]}}"#;
-        let policy = parse_policy(json).unwrap();
-        assert_eq!(policy.metadata.name, "some-policy");
-        assert_eq!(policy.spec.integrations.len(), 1);
-        assert_eq!(
-            policy.spec.integrations[0].reference,
-            "reg/some-integration:1"
-        );
-    }
-
-    #[test]
-    fn parse_policy_without_integrations_is_allowed() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"network":{"defaultVerdict":"ask"}}}"#;
-        let policy = parse_policy(json).unwrap();
-        assert!(policy.spec.integrations.is_empty());
-    }
-
-    #[test]
-    fn parse_policy_rejects_an_integration_ref_with_a_bad_digest() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{"integrations":[{"ref":"reg/some-integration:1","digest":"sha256:bad"}]}}"#;
-        let err = parse_policy(json).unwrap_err();
-        assert!(format!("{err:#}").contains("not a sha256 digest"));
-    }
-
-    #[test]
-    fn parse_policy_rejects_a_mislabeled_envelope() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"x"},"spec":{}}"#;
-        let err = parse_policy(json).unwrap_err();
-        assert!(format!("{err:#}").contains("expected kind"), "got: {err:#}");
-    }
-
-    #[test]
     fn from_kind_str_round_trips_and_rejects_unknown() {
         for kind in ALL_KINDS {
             assert_eq!(Kind::from_kind_str(kind.as_str()), Some(kind));
@@ -602,8 +467,6 @@ mod tests {
         );
         validate_any(sandbox.as_bytes()).unwrap();
         validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills"},"spec":{}}"#).unwrap();
-        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Policy","metadata":{"name":"some-policy"},"spec":{}}"#).unwrap();
-        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Integration","metadata":{"name":"some-integration"},"spec":{"authKind":"credential"}}"#).unwrap();
     }
 
     #[test]
