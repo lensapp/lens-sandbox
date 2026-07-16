@@ -267,7 +267,6 @@ async fn orchestrate(
             .as_ref()
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
-        imageless,
     );
     let exec = vm::ExecSpec::for_run(
         &run_as,

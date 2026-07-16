@@ -83,13 +83,13 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Run-as user inside the sandbox. Defaults to the image's USER (root when the image sets none); imageless runs default to `sandbox`."
+        help = "Run-as user inside the sandbox. Defaults to the image's USER; the unprivileged `sandbox` user when the image sets none."
     )]
     pub sandbox_user: Option<String>,
 
     #[arg(
         long,
-        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; imageless runs default to 65534."
+        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; 65534 (the `sandbox` user) when the image sets none."
     )]
     pub sandbox_uid: Option<u32>,
 

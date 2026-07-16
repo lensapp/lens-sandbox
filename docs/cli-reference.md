@@ -74,7 +74,7 @@ run (`lns run -- echo hi`).
 | `--rm`                       | `false`          | Remove the run record once the workload exits (Docker-style `--rm`).    |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
 | `-u`, `--user <USER[:GROUP]>`|                  | Run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`; a numeric segment is used as the uid. |
-| `--sandbox-user <NAME>`      | image `USER`     | Username the workload runs as inside the guest (root when the image sets none; `sandbox` for an imageless run). |
+| `--sandbox-user <NAME>`      | image `USER`     | Username the workload runs as inside the guest (the unprivileged `sandbox` user when the image sets none). |
 | `--sandbox-uid <UID>`        | image `USER` uid | UID the workload runs as inside the guest (`65534` for an imageless run). |
 | `--entrypoint <COMMAND>`     | image `ENTRYPOINT` | Override the image `ENTRYPOINT`; the `COMMAND` after the reference is kept as its arguments. Pass `--entrypoint ""` to clear the image entrypoint. |
 | `-h`, `--hostname <NAME>`    |                  | Set the guest hostname for this run.                                    |
