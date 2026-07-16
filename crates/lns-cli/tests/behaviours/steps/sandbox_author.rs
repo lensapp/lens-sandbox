@@ -42,6 +42,58 @@ fn secret_lns_yaml(w: &mut BehaviourWorld) {
     seed(w, &yaml);
 }
 
+fn fileset_yaml(entries: &str) -> String {
+    format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n{entries}"
+    )
+}
+
+#[given(regex = r#"^an lns\.yaml declaring fileset "([^"]+)" mounted at "([^"]+)"$"#)]
+fn lns_yaml_with_path_fileset(w: &mut BehaviourWorld, path: String, mount: String) {
+    seed(
+        w,
+        &fileset_yaml(&format!("    - path: {path}\n      mountPath: {mount}\n")),
+    );
+}
+
+#[given(regex = r#"^an lns\.yaml declaring fileset ref "([^"]+)" mounted at "([^"]+)"$"#)]
+fn lns_yaml_with_ref_fileset(w: &mut BehaviourWorld, reference: String, mount: String) {
+    seed(
+        w,
+        &fileset_yaml(&format!(
+            "    - ref: {reference}\n      mountPath: {mount}\n"
+        )),
+    );
+}
+
+#[given("an lns.yaml declaring a fileset entry with both path and ref")]
+fn lns_yaml_with_conflicting_fileset(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        &fileset_yaml(
+            "    - path: ./skills\n      ref: registry.example.test/team/skills@sha256:abc\n      mountPath: /root/.agent/skills\n",
+        ),
+    );
+}
+
+#[given(regex = r#"^an lns\.yaml declaring two filesets mounted at "([^"]+)"$"#)]
+fn lns_yaml_with_duplicate_filesets(w: &mut BehaviourWorld, mount: String) {
+    seed(
+        w,
+        &fileset_yaml(&format!(
+            "    - path: ./a\n      mountPath: {mount}\n    - path: ./b\n      mountPath: {mount}\n"
+        )),
+    );
+}
+
+#[given(regex = r#"^the project directory "([^"]+)" contains "([^"]+)"$"#)]
+fn project_directory_contains(w: &mut BehaviourWorld, dir: String, file: String) {
+    let path = PathBuf::from("/work")
+        .join(dir.trim_start_matches("./"))
+        .join(&file);
+    w.author_files.insert(path, "fixture contents".to_string());
+}
+
 #[then(regex = r#"^a file "lns\.yaml" is created$"#)]
 fn file_created(w: &mut BehaviourWorld) -> Result<(), String> {
     if w.author_files.contains_key(&yaml_key()) {

@@ -93,6 +93,15 @@ mod tests {
         fn exists(&self, path: &Path) -> bool {
             self.files.borrow().contains_key(path)
         }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.read_to_string(path).map(String::into_bytes)
+        }
+        fn dir_entries(
+            &self,
+            dir: &Path,
+        ) -> std::io::Result<Vec<crate::sandbox::author::DirEntry>> {
+            crate::sandbox::author::map_dir_entries(self.files.borrow().keys(), dir)
+        }
     }
 
     fn cwd() -> &'static Path {

@@ -147,6 +147,27 @@ impl super::author::Fs for RealFs {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+    fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<super::author::DirEntry>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|name| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("non-utf8 file name {name:?}"),
+                )
+            })?;
+            entries.push(super::author::DirEntry {
+                name,
+                dir: entry.file_type()?.is_dir(),
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
 }
 
 pub struct RealSandboxService {

@@ -46,42 +46,36 @@ Feature: authoring a sandbox
     And the output contains "policy"
     And the service received no request
 
-  @todo
   Scenario: validate accepts a path fileset whose directory exists
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
     When the user runs sandbox command "validate"
     Then the exit code is 0
 
-  @todo
   Scenario: validate refuses a path fileset whose directory is missing
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
     And the output contains "./skills"
 
-  @todo
   Scenario: validate refuses a fileset entry with both path and ref, or neither
     Given an lns.yaml declaring a fileset entry with both path and ref
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
     And the output contains "either path or ref"
 
-  @todo
   Scenario: validate refuses a relative fileset mountPath
     Given an lns.yaml declaring fileset "./skills" mounted at "skills"
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
     And the output contains "absolute"
 
-  @todo
   Scenario: validate refuses a duplicate fileset mountPath or one colliding with a volume target
     Given an lns.yaml declaring two filesets mounted at "/root/.agent/skills"
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
     And the output contains "duplicate"
 
-  @todo
   Scenario: validate refuses a secret-shaped file inside a path fileset
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"

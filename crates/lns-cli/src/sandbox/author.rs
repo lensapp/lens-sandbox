@@ -35,6 +35,43 @@ pub trait Fs {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub dir: bool,
+}
+
+/// Derive a directory listing from a flat path-keyed map, so every in-memory fake Fs shares one implementation.
+pub fn map_dir_entries<'a>(
+    paths: impl Iterator<Item = &'a PathBuf>,
+    dir: &Path,
+) -> io::Result<Vec<DirEntry>> {
+    let mut seen: std::collections::BTreeMap<String, bool> = Default::default();
+    for key in paths {
+        let Ok(rest) = key.strip_prefix(dir) else {
+            continue;
+        };
+        let mut components = rest.components();
+        let Some(std::path::Component::Normal(first)) = components.next() else {
+            continue;
+        };
+        let nested = components.next().is_some();
+        let slot = seen
+            .entry(first.to_string_lossy().into_owned())
+            .or_default();
+        *slot = *slot || nested;
+    }
+    if seen.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "no such directory"));
+    }
+    Ok(seen
+        .into_iter()
+        .map(|(name, dir)| DirEntry { name, dir })
+        .collect())
 }
 
 /// The author verbs run offline, against the working directory rather than the service.
@@ -72,19 +109,24 @@ pub fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
 
 pub fn validate<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
     let json = load_definition_json(fs, cwd)?;
-    match lns_artifact::validate::validate(&json) {
-        Ok(()) => {
-            writeln!(out, "{LNS_YAML} is valid.")?;
-            Ok(0)
-        }
-        Err(problems) => {
-            writeln!(out, "{LNS_YAML} is not valid:")?;
-            for problem in &problems {
-                writeln!(out, "  - {problem}")?;
-            }
-            Ok(1)
-        }
+    let mut problems = match lns_artifact::validate::validate(&json) {
+        Ok(()) => Vec::new(),
+        Err(problems) => problems,
+    };
+    if problems.is_empty()
+        && let Ok(def) = lns_artifact::sandbox::parse(&json)
+    {
+        problems.extend(super::fileset::path_fileset_problems(fs, cwd, &def));
     }
+    if problems.is_empty() {
+        writeln!(out, "{LNS_YAML} is valid.")?;
+        return Ok(0);
+    }
+    writeln!(out, "{LNS_YAML} is not valid:")?;
+    for problem in &problems {
+        writeln!(out, "  - {problem}")?;
+    }
+    Ok(1)
 }
 
 pub fn show<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
@@ -180,6 +222,12 @@ mod tests {
         }
         fn exists(&self, path: &Path) -> bool {
             self.files.borrow().contains_key(path)
+        }
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.read_to_string(path).map(String::into_bytes)
+        }
+        fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
+            map_dir_entries(self.files.borrow().keys(), dir)
         }
     }
 

@@ -13,6 +13,7 @@ use crate::service::client::BoxFuture;
 
 pub mod author;
 pub mod distribute;
+pub mod fileset;
 pub mod real;
 
 #[derive(clap::Args)]
