@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use lns_policy::NetworkPolicy;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::spec::{self, CredentialSlot, Metadata, Port, Resources, Volume};
+use crate::spec::{self, CredentialSlot, Metadata, Port, Resources};
 
 pub const API_VERSION: &str = "lns.run/v1";
 pub const KIND: &str = "Sandbox";
@@ -26,6 +26,44 @@ pub struct Definition {
     pub spec: SandboxSpec,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeType {
+    Bind,
+    Volume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Volume {
+    #[serde(rename = "type", default)]
+    volume_type: Option<VolumeType>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    pub target: String,
+    #[serde(default)]
+    read_only: bool,
+}
+
+impl Volume {
+    pub fn source(&self) -> &str {
+        self.source
+            .as_deref()
+            .or(self.name.as_deref())
+            .unwrap_or_default()
+    }
+
+    pub fn is_bind(&self) -> bool {
+        self.volume_type == Some(VolumeType::Bind)
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+}
+
 /// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the integration ids it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +72,8 @@ pub struct SandboxSpec {
     pub image: String,
     #[serde(default)]
     pub command: Option<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -82,9 +122,17 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     if doc.spec.image.trim().is_empty() {
         bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
     }
+    if let Some(workdir) = &doc.spec.workdir {
+        spec::validate_mount_path(workdir).context("workdir")?;
+    }
+    let mut targets = BTreeSet::new();
     for volume in &doc.spec.volumes {
         spec::validate_mount_path(&volume.target)
-            .with_context(|| format!("volume {}", volume.name))?;
+            .with_context(|| format!("volume targeting {}", volume.target))?;
+        validate_volume(volume)?;
+        if !targets.insert(&volume.target) {
+            bail!("duplicate volume target {}", volume.target);
+        }
     }
     for integration in &doc.spec.integrations {
         if !spec::is_valid_name(integration) {
@@ -116,6 +164,61 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     })
 }
 
+fn validate_volume(volume: &Volume) -> Result<()> {
+    match volume.volume_type {
+        Some(VolumeType::Bind) => {
+            if volume.name.is_some() {
+                bail!("bind volume must use source, not name");
+            }
+            validate_bind_source(volume.source.as_deref().unwrap_or_default())
+        }
+        Some(VolumeType::Volume) => {
+            if volume.source.is_some() && volume.name.is_some() {
+                bail!("named volume must use either source or name, not both");
+            }
+            validate_volume_name(volume.source())
+        }
+        None => {
+            if volume.source.is_some() {
+                bail!("volume with source must declare type: bind or type: volume");
+            }
+            validate_volume_name(volume.name.as_deref().unwrap_or_default())
+        }
+    }
+}
+
+fn validate_bind_source(source: &str) -> Result<()> {
+    if source.is_empty() {
+        bail!("bind source must not be empty");
+    }
+    if source
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '"')
+    {
+        bail!("bind source {source:?} must not contain whitespace, quotes, or control characters");
+    }
+    if source.split('/').any(|segment| segment == "..") {
+        bail!("bind source {source:?} must not contain a `..` path segment");
+    }
+    Ok(())
+}
+
+fn validate_volume_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("named volume source must not be empty");
+    }
+    if name == "." || name == ".." {
+        bail!("invalid named volume source {name:?}: reserved");
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+    {
+        bail!("invalid named volume source {name:?}: character {bad:?} not allowed");
+    }
+    Ok(())
+}
+
 /// Schema + cross-field guards for a sandbox definition (the secret guard runs separately in `validate`).
 pub fn validate(config_json: &[u8]) -> Result<()> {
     parse(config_json).map(|_| ())
@@ -136,12 +239,13 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","allowedRoutes":[{"match":"api.example.test","verdict":"allow"}]},"integrations":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"name":"home","target":"/root/.home"}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","allowedRoutes":[{"match":"api.example.test","verdict":"allow"}]},"integrations":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
         assert_eq!(def.metadata.name, "hermes");
         assert_eq!(def.spec.image, "ghcr.io/team/base:1");
         assert_eq!(def.spec.command.as_deref(), Some("agent --serve"));
+        assert_eq!(def.spec.workdir.as_deref(), Some("/workspace"));
         assert_eq!(
             def.spec.env.get("MODE").map(String::as_str),
             Some("research")
@@ -150,7 +254,10 @@ mod tests {
         assert_eq!(def.spec.policy.allowed_routes.len(), 1);
         assert_eq!(def.spec.integrations, vec!["some-provider".to_string()]);
         assert_eq!(def.spec.credentials[0].env, "SOME_TOKEN");
-        assert_eq!(def.spec.volumes[0].target, "/root/.home");
+        assert_eq!(def.spec.volumes[0].source(), ".");
+        assert!(def.spec.volumes[0].is_bind());
+        assert_eq!(def.spec.volumes[1].source(), "home");
+        assert!(def.spec.volumes[1].read_only());
         assert_eq!(def.spec.ports[0].container, 8080);
     }
 
@@ -216,6 +323,92 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("`..` segment"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_accepts_the_legacy_named_volume_shape() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"home","target":"/root/.home","readOnly":true}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.volumes[0].source(), "home");
+        assert!(!def.spec.volumes[0].is_bind());
+        assert!(def.spec.volumes[0].read_only());
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_workdir() {
+        let err = parse(&def_json(r#"{"image":"x:1","workdir":"workspace"}"#)).unwrap_err();
+        assert!(format!("{err:#}").contains("workdir"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("absolute"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_mount_targets() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"cache","target":"/workspace"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate volume target /workspace"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_bind_source_that_escapes_the_project() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"../outside","target":"/workspace"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("bind source"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("`..`"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_ambiguous_or_invalid_volume_sources() {
+        let cases = [
+            (
+                r#"{"type":"bind","name":"some-bind","target":"/data"}"#,
+                "bind volume must use source",
+            ),
+            (
+                r#"{"type":"volume","source":"some-cache","name":"other-cache","target":"/data"}"#,
+                "either source or name",
+            ),
+            (
+                r#"{"source":"some-cache","target":"/data"}"#,
+                "must declare type",
+            ),
+            (
+                r#"{"type":"bind","target":"/data"}"#,
+                "bind source must not be empty",
+            ),
+            (
+                r#"{"type":"bind","source":"project files","target":"/data"}"#,
+                "must not contain whitespace",
+            ),
+            (
+                r#"{"type":"volume","target":"/data"}"#,
+                "named volume source must not be empty",
+            ),
+            (
+                r#"{"type":"volume","source":".","target":"/data"}"#,
+                "reserved",
+            ),
+            (
+                r#"{"type":"volume","source":"some/cache","target":"/data"}"#,
+                "character '/' not allowed",
+            ),
+        ];
+        for (volume, expected) in cases {
+            let spec = format!(r#"{{"image":"x:1","volumes":[{volume}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(expected),
+                "expected {expected:?}, got: {err:#}"
+            );
+        }
     }
 
     #[test]

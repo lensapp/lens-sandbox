@@ -63,7 +63,7 @@ run (`lns run -- echo hi`).
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare image reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
-| `-w`, `--workdir <DIR>`      | image `WORKDIR`  | Working directory inside the sandbox (absolute path; created if missing). |
+| `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
 | `-v`, `--volume`, `--mount <SPEC>` |            | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). Also accepts Docker keyed syntax: `type=bind\|volume,source=...,target=...[,readonly]`. |
@@ -142,7 +142,9 @@ interchangeable everywhere a run is addressed.
 
 The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: Sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
-`env`, `policy`, and `integrations`. See
+`workdir`, `volumes`, `env`, `policy`, and `integrations`. Declarative mounts
+accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
+`readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).
 
 ## `lns volume`

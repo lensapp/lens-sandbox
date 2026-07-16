@@ -15,11 +15,19 @@ spec:
   # The base OCI image this sandbox runs; pin it by digest before you publish.
   image: docker.io/library/alpine:3.20
   # command: sh
+  # workdir: /workspace
   # env:
   #   MODE: production
   # policy:
   #   defaultVerdict: ask
   # integrations: []
+  # volumes:
+  #   - type: bind
+  #     source: .
+  #     target: /workspace
+  #   - type: volume
+  #     source: sandbox-cache
+  #     target: /home/sandbox/.cache
 ";
 
 /// A minimal filesystem seam so the author verbs are host-tested with an in-memory fake; `RealFs` in `real.rs` is the std::fs leaf.
@@ -93,6 +101,23 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     writeln!(out, "  image:        {}", def.spec.image)?;
     if let Some(command) = &def.spec.command {
         writeln!(out, "  command:      {command}")?;
+    }
+    if let Some(workdir) = &def.spec.workdir {
+        writeln!(out, "  workdir:      {workdir}")?;
+    }
+    for volume in &def.spec.volumes {
+        let kind = if volume.is_bind() { "bind" } else { "volume" };
+        let mode = if volume.read_only() {
+            "read-only"
+        } else {
+            "read-write"
+        };
+        writeln!(
+            out,
+            "  mount:        {kind} {} -> {} ({mode})",
+            volume.source(),
+            volume.target
+        )?;
     }
     writeln!(
         out,

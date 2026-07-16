@@ -1,7 +1,10 @@
 use crate::world::BehaviourWorld;
 use cucumber::gherkin::Step;
 use cucumber::given;
-use lns_ipc::{ArtifactInspection, BundleView, FilesetView, ImageView, Response, SignatureView};
+use lns_ipc::{
+    ArtifactInspection, BundleView, FilesetView, ImageView, Response, SandboxMount,
+    SandboxMountKind, SandboxView, SignatureView,
+};
 
 fn full_digest() -> String {
     format!("sha256:{}", "a".repeat(64))
@@ -34,6 +37,33 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Image(ImageView {
         reference: reference.clone(),
         digest: full_digest(),
+    });
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
+fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
+    let inspection = ArtifactInspection::Sandbox(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: Some("/workspace".into()),
+        mounts: vec![
+            SandboxMount {
+                kind: SandboxMountKind::Bind,
+                source: ".".into(),
+                target: "/workspace".into(),
+                read_only: false,
+            },
+            SandboxMount {
+                kind: SandboxMountKind::Volume,
+                source: "some-cache".into(),
+                target: "/home/node/.cache".into(),
+                read_only: true,
+            },
+        ],
+        integrations: Vec::new(),
+        policy_flags: Vec::new(),
     });
     cached_artifact(world, &reference, inspection);
 }

@@ -33,11 +33,19 @@ spec:
   # The base OCI image this sandbox runs; pin it by digest before you publish.
   image: docker.io/library/alpine:3.20
   # command: sh
+  # workdir: /workspace
   # env:
   #   MODE: production
   # policy:
   #   defaultVerdict: ask
   # integrations: []
+  # volumes:
+  #   - type: bind
+  #     source: .
+  #     target: /workspace
+  #   - type: volume
+  #     source: sandbox-cache
+  #     target: /home/sandbox/.cache
 ```
 
 The `spec` fields:
@@ -46,12 +54,13 @@ The `spec` fields:
 | -------------- | --------------------------------------------------------------------------- |
 | `image`        | The base OCI image the sandbox runs (**required**). Pin it by digest before publishing. |
 | `command`      | Command to run in the workload, replacing the image's default command.       |
+| `workdir`      | Absolute guest working directory. It is created when missing.                 |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `policy`       | The network policy — `defaultVerdict` and `allowedRoutes` (see [Policy](policy.md)). |
 | `integrations` | Ids of the [integrations](integrations.md) whose credentials and routes the sandbox needs. Declared ids arm at launch on any machine — no `lns integration connect` step; an id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
-| `volumes`      | Named volume mounts (`name`, `target`), validated offline. Attaching volumes at launch is flag-driven today — `lns run -v name:/path`. |
+| `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Publishing at launch is flag-driven today — `lns run -p HOST:CONTAINER`. |
 
 Check the definition offline — no network, no service — with `validate` and
@@ -180,8 +189,15 @@ lns run --mem 2048 ghcr.io/acme/builder        # same thing, in MiB
 
 ### Working directory
 
-The workload starts in the image's `WORKDIR`, like `docker run`. Override it
-with `-w` (an absolute guest path, created inside the sandbox if missing):
+Set a portable working directory in `lns.yaml`, or override it for one run with
+`-w`. The precedence is explicit `--workdir`, then `spec.workdir`, then the
+image's `WORKDIR`. Every form must be an absolute guest path, and the directory
+is created inside the sandbox when it is missing.
+
+```yaml
+spec:
+  workdir: /workspace
+```
 
 ```bash
 lns run -w /workspace ghcr.io/acme/agent
@@ -273,6 +289,40 @@ asks for confirmation unless you pass `-f`/`--force`. Everything else in a
 sandbox is ephemeral by design — volumes are the one place data persists, so
 removing one is permanent.
 
+### Declarative mounts
+
+Mounts that are part of the sandbox belong in `spec.volumes`. A named volume
+uses `type: volume`; a host bind uses `type: bind`:
+
+```yaml
+spec:
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+    - type: volume
+      source: agent-config
+      target: /home/node/.config/agent
+      readOnly: true
+```
+
+`target` is always an absolute guest path. A named-volume `source` follows the
+same naming rules as `lns run -v name:/path`. The older
+`{name: agent-config, target: /path, readOnly: true}` shape remains accepted.
+Duplicate targets in one `lns.yaml` are rejected.
+
+A relative bind source is resolved from the directory containing the local
+`lns.yaml`. For a published sandbox it is resolved from the directory where the
+consumer invokes `lns run`; this keeps `source: .` aligned with one directory =
+one project. Sources are paths, not shell expressions: Lens Sandbox performs no
+shell or environment-variable interpolation, so use `source: .`, not `$PWD`.
+Paths are normalized, and a relative source cannot escape the project with
+`..`.
+
+Launch flags are the final override layer. Lens Sandbox starts with the mounts
+from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
+`--mount` targets the same guest path, and keeps mounts with other targets.
+
 ### Host bind mounts
 
 When the source of a `-v` is an **absolute host path** rather than a name, it's a
@@ -317,6 +367,11 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
 
 The run summary lists each bind, its mode, and the disposition of every detected
 secret (`kept (exposed)` / `dropped`).
+
+Declarative binds use this exact scan, prompt, remembered KEEP/DROP decision,
+masking, validation, and audit path. A published sandbox is inspected and pinned
+before launch so its bind declarations can be shown and approved on the consumer
+host; publishing a sandbox never grants it silent access to host files.
 
 > **The automatic scan is top-level only.** Only the immediate contents of the bind
 > root are scanned for secret shapes, so a secret nested in a subdirectory
@@ -397,6 +452,12 @@ the local cache, and `lns run` can boot it straight from the reference:
 lns pull ghcr.io/acme/reviewer:1.0.0     # pre-warm the cache
 lns run  ghcr.io/acme/reviewer:1.0.0     # run it
 ```
+
+`lns push` preserves `workdir` and every mount declaration in the artifact.
+Consumers resolve relative binds against their own project directory, not the
+publisher's. Preflight pins the resolved artifact digest; after `lns pull` has
+cached that artifact and its referenced OCI content, the published sandbox can
+start offline from the cached snapshot.
 
 Re-reference a cached sandbox under another tag with `lns tag` (docker-tag style):
 

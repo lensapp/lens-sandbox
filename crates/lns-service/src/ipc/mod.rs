@@ -536,6 +536,7 @@ mod tests {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
                 image: None,
+                resolved_image: None,
                 name: None,
                 cpus: 1,
                 mem: 0,

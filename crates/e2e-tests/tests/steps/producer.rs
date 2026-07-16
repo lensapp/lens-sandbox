@@ -90,7 +90,7 @@ async fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
     let reference = format!("{host}/e2e-cache-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: {base}\n"
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n    - type: volume\n      source: e2e-cache\n      target: /home/sandbox/.cache\n      readOnly: true\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();

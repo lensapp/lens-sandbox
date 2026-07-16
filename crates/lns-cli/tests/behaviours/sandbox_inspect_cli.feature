@@ -17,6 +17,14 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "Image"
 
+  Scenario: inspecting a sandbox shows its workdir and declared mounts
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox with launch settings
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "workdir: /workspace"
+    And the output contains "bind . -> /workspace"
+    And the output contains "volume some-cache -> /home/node/.cache"
+
   Scenario: inspecting a bundle lists what it composes
     Given the service inspects "some-registry.example/some-agent:research" as a bundle composing:
       | sandbox base | registry.example.test/base:1                    |

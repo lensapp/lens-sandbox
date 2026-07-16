@@ -104,9 +104,10 @@ lns run
 You run Lens Sandbox from a project directory — that's where it looks for
 `lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
 give the workload your actual project files, bind-mount the directory with
-`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for scratch
-space that persists across runs instead, attach a named volume. The workload's own
-working directory comes from the image.
+`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
+portable definition use a declarative bind with `source: .`; for scratch
+space that persists across runs instead, attach a named volume. The workload's
+working directory comes from `spec.workdir` when declared, otherwise from the image.
 
 ## Define a sandbox
 
@@ -129,11 +130,16 @@ spec:
   # The base OCI image this sandbox runs; pin it by digest before you publish.
   image: docker.io/library/alpine:3.20
   # command: sh
+  # workdir: /workspace
   # env:
   #   MODE: production
   # policy:
   #   defaultVerdict: ask
   # integrations: []
+  # volumes:
+  #   - type: bind
+  #     source: .
+  #     target: /workspace
 ```
 
 Edit `spec.image` (and uncomment the fields you need), then check it offline —

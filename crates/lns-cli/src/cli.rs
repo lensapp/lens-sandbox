@@ -162,7 +162,7 @@ pub struct RunArgs {
         long,
         value_name = "DIR",
         value_parser = parse_workdir_arg,
-        help = "Working directory inside the sandbox (absolute path; created if missing). Defaults to the image's WORKDIR."
+        help = "Working directory inside the sandbox (absolute path; created if missing). Overrides spec.workdir and the image's WORKDIR."
     )]
     pub workdir: Option<String>,
 

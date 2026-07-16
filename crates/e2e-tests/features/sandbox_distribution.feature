@@ -35,6 +35,9 @@ Feature: distributing a sandbox through a registry end to end
     Then the exit code is 0
     And the output contains "kind: Sandbox"
     And the output contains the pushed reference
+    And the output contains "workdir: /workspace"
+    And the output contains "bind . -> /workspace"
+    And the output contains "volume e2e-cache -> /home/sandbox/.cache"
 
   Scenario: rm removes the cached sandbox
     When I run lns "pull <pushed-ref>" against the service

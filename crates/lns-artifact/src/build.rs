@@ -324,6 +324,21 @@ mod tests {
     }
 
     #[test]
+    fn build_artifact_preserves_declarative_workdir_and_mounts() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/workspace","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"some-cache","target":"/home/node/.cache","readOnly":true}]}}"#;
+        let built = build_artifact(doc).unwrap();
+        let config = built
+            .blobs
+            .iter()
+            .find(|blob| blob.media_type.contains("sandbox.config"))
+            .expect("the sandbox config blob must be present");
+        let value: Value = serde_json::from_slice(&config.data).unwrap();
+        assert_eq!(value["spec"]["workdir"], "/workspace");
+        assert_eq!(value["spec"]["volumes"][0]["source"], ".");
+        assert_eq!(value["spec"]["volumes"][1]["readOnly"], true);
+    }
+
+    #[test]
     fn build_artifact_attaches_the_oci_empty_layer() {
         let built = build_artifact(&sandbox()).unwrap();
         let empty = built
