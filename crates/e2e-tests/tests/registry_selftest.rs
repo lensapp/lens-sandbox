@@ -11,6 +11,8 @@ use oci_client::{
     client::{ClientConfig, ClientProtocol},
     secrets::RegistryAuth,
 };
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 fn sandbox_manifest() -> Vec<u8> {
     format!(
@@ -58,4 +60,19 @@ async fn build_push_and_pull_round_trip_through_the_local_registry() {
     let parsed = lns_artifact::spec::parse_sandbox(config.as_bytes())
         .expect("the pulled config is the sandbox spec");
     assert_eq!(parsed.metadata.name, "some-sandbox");
+}
+
+#[test]
+fn registry_offline_mode_rejects_requests() {
+    let reg = registry::LocalRegistry::start();
+    reg.set_online(false);
+    let mut stream = TcpStream::connect(reg.host()).expect("connect to offline registry");
+    stream
+        .write_all(b"GET /v2/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write registry request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read registry response");
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
 }
