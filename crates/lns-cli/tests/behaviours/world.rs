@@ -31,6 +31,10 @@ pub struct BehaviourWorld {
     pub sandbox_run: SandboxRunRig,
     /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
     pub push_outcome: Option<Result<String, String>>,
+    /// FileSet artifact refs the push uploaded, in order.
+    pub pushed_filesets: Vec<String>,
+    /// The definition doc the push handed to build_and_push, when it got that far.
+    pub pushed_doc: Option<Vec<u8>>,
     pub host_bind: HostBindRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,

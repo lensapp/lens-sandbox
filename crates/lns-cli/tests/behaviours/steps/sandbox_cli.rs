@@ -244,16 +244,30 @@ impl author::Fs for StepFs {
     }
 }
 
-struct StepProducer(Result<String, String>);
+struct StepProducer {
+    outcome: Result<String, String>,
+    docs: RefCell<Vec<Vec<u8>>>,
+    filesets: RefCell<Vec<String>>,
+}
 
 impl distribute::Producer for StepProducer {
     fn build_and_push<'a>(
         &'a self,
-        _doc: &'a [u8],
+        doc: &'a [u8],
         _reference: &'a str,
     ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
-        let outcome = self.0.clone().map_err(|m| anyhow::anyhow!(m));
+        self.docs.borrow_mut().push(doc.to_vec());
+        let outcome = self.outcome.clone().map_err(|m| anyhow::anyhow!(m));
         Box::pin(async move { outcome })
+    }
+
+    fn push_prebuilt<'a>(
+        &'a self,
+        _built: &'a lns_artifact::build::BuiltArtifact,
+        reference: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        self.filesets.borrow_mut().push(reference.to_string());
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -297,16 +311,30 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
         let fs = StepFs {
             files: RefCell::new(w.author_files.clone()),
         };
-        let producer = StepProducer(
-            w.push_outcome
-                .clone()
-                .expect("scenario must set a push outcome"),
-        );
+        let producer = StepProducer {
+            outcome: w.push_outcome.clone().unwrap_or(Err(
+                "the push must refuse before reaching the producer".into(),
+            )),
+            docs: RefCell::new(Vec::new()),
+            filesets: RefCell::new(Vec::new()),
+        };
         let mut out: Vec<u8> = Vec::new();
         let result = match author::load_definition_json(&fs, Path::new("/work")) {
-            Ok(doc) => distribute::push(&producer, &doc, &push_args.reference, &mut out).await,
+            Ok(doc) => {
+                distribute::push(
+                    &fs,
+                    Path::new("/work"),
+                    &producer,
+                    &doc,
+                    &push_args.reference,
+                    &mut out,
+                )
+                .await
+            }
             Err(e) => Err(e),
         };
+        w.pushed_filesets = producer.filesets.into_inner();
+        w.pushed_doc = producer.docs.into_inner().into_iter().next();
         w.result = Some(match result {
             Ok(exit_code) => CliRun {
                 exit_code,

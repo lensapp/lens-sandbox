@@ -105,7 +105,7 @@ pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture
 async fn push_local(reference: &str, cwd: PathBuf) -> Result<i32> {
     let doc = super::author::load_definition_json(&RealFs, &cwd)?;
     let mut out = std::io::stdout();
-    super::distribute::push(&RealProducer, &doc, reference, &mut out).await
+    super::distribute::push(&RealFs, &cwd, &RealProducer, &doc, reference, &mut out).await
 }
 
 struct RealProducer;
@@ -121,6 +121,14 @@ impl super::distribute::Producer for RealProducer {
             crate::build::push::push_artifact(&built, reference).await?;
             Ok(built.manifest_digest)
         })
+    }
+
+    fn push_prebuilt<'a>(
+        &'a self,
+        built: &'a lns_artifact::build::BuiltArtifact,
+        reference: &'a str,
+    ) -> crate::integration::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
     }
 }
 

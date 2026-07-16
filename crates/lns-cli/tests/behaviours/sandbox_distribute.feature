@@ -25,7 +25,6 @@ Feature: distributing a sandbox
     And the output contains "push scope"
     And the output contains "ghcr.io"
 
-  @todo
   Scenario: push packs each path fileset and pins it into the published config
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
@@ -35,7 +34,6 @@ Feature: distributing a sandbox
     And a FileSet artifact is pushed alongside the sandbox
     And the published sandbox config carries the fileset as a digest-pinned ref, not a path
 
-  @todo
   Scenario: a secret-shaped file in a path fileset refuses the push
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"
