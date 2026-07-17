@@ -13,8 +13,8 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    CountingSink, PulledImage, PulledTarget, Registry, enforce_manifest_doc_size,
-    linux_platform_resolver, pull_inner, pull_target_with, serialized_len,
+    CountingSink, PulledArtifact, PulledImage, Registry, enforce_manifest_doc_size,
+    linux_platform_resolver, pull_inner, pull_sandbox_with, serialized_len,
 };
 
 pub struct RealRegistry {
@@ -193,16 +193,10 @@ pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> 
     Ok(pulled)
 }
 
-pub async fn pull_target(image: &str, layer_cache: &LayerCache) -> Result<PulledTarget> {
+pub async fn pull_sandbox(image: &str) -> Result<PulledArtifact> {
     let _shared = crate::image_store::lock_shared().await;
     let registry = caching_registry_for(image)?;
-    let target = pull_target_with(&registry, image, layer_cache).await?;
-    if let PulledTarget::Image(pulled) = &target
-        && let Err(e) = crate::image_store::record(pulled).await
-    {
-        crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
-    }
-    Ok(target)
+    pull_sandbox_with(&registry, image).await
 }
 
 pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {

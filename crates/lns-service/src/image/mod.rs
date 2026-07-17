@@ -11,7 +11,7 @@ use crate::oci_layer_cache::LayerCache;
 pub(crate) mod manifest_cache;
 mod real;
 pub(crate) use real::{RealRegistry, caching_registry_for, registry_auth_for};
-pub use real::{pull, pull_target, verify_login};
+pub use real::{pull, pull_sandbox, verify_login};
 
 pub(crate) trait Registry: Send + Sync {
     fn pull_manifest_and_config(
@@ -205,17 +205,10 @@ pub struct PulledArtifact {
     pub base_image: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum PulledTarget {
-    Image(Box<PulledImage>),
-    Artifact(PulledArtifact),
-}
-
-pub(crate) async fn pull_target_with<R: Registry>(
+pub(crate) async fn pull_sandbox_with<R: Registry>(
     client: &R,
     image: &str,
-    layer_cache: &LayerCache,
-) -> Result<PulledTarget> {
+) -> Result<PulledArtifact> {
     let reference: Reference = image
         .parse()
         .with_context(|| format!("invalid image reference: {image}"))?;
@@ -227,21 +220,22 @@ pub(crate) async fn pull_target_with<R: Registry>(
     )
     .map_err(sandbox_pull_error)?;
     if path == crate::artifact::RunPath::SingleImage {
-        let pulled = pull_inner(client, image, layer_cache).await?;
-        return Ok(PulledTarget::Image(Box::new(pulled)));
+        anyhow::bail!(
+            "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` only accepts published Sandbox artifacts"
+        );
     }
     verify_digest_pin(&reference, &manifest_digest, image)?;
     let def = lns_artifact::sandbox::parse(config_str.as_bytes())
         .with_context(|| format!("parsing published sandbox {image}"))?;
-    Ok(PulledTarget::Artifact(PulledArtifact {
+    Ok(PulledArtifact {
         reference,
         digest: manifest_digest,
         base_image: Some(def.spec.image),
-    }))
+    })
 }
 
 fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
-    anyhow::anyhow!("{e:#}").context("this reference is not a pullable sandbox or OCI image")
+    anyhow::anyhow!("{e:#}").context("this reference is not a supported Lens Sandbox artifact")
 }
 
 fn verify_digest_pin(reference: &Reference, manifest_digest: &str, image: &str) -> Result<()> {
@@ -991,33 +985,13 @@ mod tests {
         }
     }
 
-    fn artifact_of(target: &PulledTarget) -> Option<&PulledArtifact> {
-        match target {
-            PulledTarget::Artifact(artifact) => Some(artifact),
-            PulledTarget::Image(_) => None,
-        }
-    }
-
-    fn image_of(target: &PulledTarget) -> Option<&PulledImage> {
-        match target {
-            PulledTarget::Image(image) => Some(image),
-            PulledTarget::Artifact(_) => None,
-        }
-    }
-
     #[tokio::test]
-    async fn pull_target_caches_a_published_sandbox_and_names_its_base_image() {
+    async fn pull_sandbox_accepts_a_published_sandbox_and_names_its_base_image() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let (_dir, cache) = cache();
-        let target = pull_target_with(&registry, "registry.example.test/sb:1", &cache)
+        let artifact = pull_sandbox_with(&registry, "registry.example.test/sb:1")
             .await
             .unwrap();
-        assert!(
-            image_of(&target).is_none(),
-            "a sandbox artifact must not also classify as a plain image: {target:?}"
-        );
-        let artifact = artifact_of(&target).expect("a sandbox artifact takes the artifact path");
         assert_eq!(artifact.digest, format!("sha256:{}", "c".repeat(64)));
         assert_eq!(
             artifact.base_image.as_deref(),
@@ -1033,30 +1007,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_target_delegates_a_plain_image_to_the_image_pull_path() {
+    async fn pull_sandbox_rejects_a_plain_oci_image_before_pulling_layers() {
         ensure_global_trace_subscriber();
         let registry = build_two_layer_image().into_registry();
-        let (_dir, cache) = cache();
-        let target = pull_target_with(&registry, "alpine:3.20", &cache)
+        let err = pull_sandbox_with(&registry, "alpine:3.20")
             .await
-            .unwrap();
+            .unwrap_err();
+        let rendered = format!("{err:#}");
         assert!(
-            artifact_of(&target).is_none(),
-            "a plain OCI image must not classify as an artifact: {target:?}"
+            rendered.contains("OCI image, not a Lens Sandbox artifact"),
+            "got: {rendered}"
         );
-        let pulled = image_of(&target).expect("a plain OCI image takes the image path");
-        assert_eq!(pulled.layers.len(), 2, "the image pull ran in full");
+        assert_eq!(
+            registry.calls.lock().unwrap().as_slice(),
+            ["manifest"],
+            "rejection must happen before any image layer is fetched",
+        );
     }
 
     #[tokio::test]
-    async fn pull_target_refuses_a_digest_pinned_artifact_on_mismatch() {
+    async fn pull_sandbox_refuses_a_digest_pinned_artifact_on_mismatch() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let (_dir, cache) = cache();
         let pinned = format!("registry.example.test/sb@sha256:{}", "d".repeat(64));
-        let err = pull_target_with(&registry, &pinned, &cache)
-            .await
-            .unwrap_err();
+        let err = pull_sandbox_with(&registry, &pinned).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("manifest digest mismatch"),
             "got: {err:#}"
@@ -1064,26 +1038,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_target_accepts_a_digest_pinned_artifact_that_matches() {
+    async fn pull_sandbox_accepts_a_digest_pinned_artifact_that_matches() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let (_dir, cache) = cache();
         let pinned = format!("registry.example.test/sb@sha256:{}", "c".repeat(64));
-        let target = pull_target_with(&registry, &pinned, &cache).await.unwrap();
-        assert!(
-            matches!(target, PulledTarget::Artifact(_)),
-            "got {target:?}"
-        );
+        pull_sandbox_with(&registry, &pinned).await.unwrap();
     }
 
     #[tokio::test]
-    async fn pull_target_rejects_a_corrupt_sandbox_definition() {
+    async fn pull_sandbox_rejects_a_corrupt_definition() {
         ensure_global_trace_subscriber();
         let mut artifact = build_sandbox_artifact();
         artifact.config_json = "{}".into();
         let registry = artifact.into_registry();
-        let (_dir, cache) = cache();
-        let err = pull_target_with(&registry, "registry.example.test/sb:1", &cache)
+        let err = pull_sandbox_with(&registry, "registry.example.test/sb:1")
             .await
             .unwrap_err();
         assert!(
@@ -1093,31 +1061,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_target_refuses_an_unpullable_artifact_kind_naming_the_type() {
+    async fn pull_sandbox_refuses_an_unpullable_artifact_kind_naming_the_type() {
         ensure_global_trace_subscriber();
         let mut artifact = build_sandbox_artifact();
         artifact.manifest.artifact_type = Some("application/vnd.acme.surprise.v1+json".into());
         let registry = artifact.into_registry();
-        let (_dir, cache) = cache();
-        let err = pull_target_with(&registry, "registry.example.test/odd:1", &cache)
+        let err = pull_sandbox_with(&registry, "registry.example.test/odd:1")
             .await
             .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("not a pullable sandbox or OCI image")
+            rendered.contains("not a supported Lens Sandbox artifact")
                 && rendered.contains("vnd.acme.surprise"),
             "got: {rendered}"
         );
     }
 
     #[tokio::test]
-    async fn pull_target_refuses_an_unparseable_reference() {
+    async fn pull_sandbox_refuses_an_unparseable_reference() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let (_dir, cache) = cache();
-        let err = pull_target_with(&registry, "###", &cache)
-            .await
-            .unwrap_err();
+        let err = pull_sandbox_with(&registry, "###").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid image reference"),
             "got: {err:#}"

@@ -284,17 +284,13 @@ pub async fn pull_with<F: Fs>(
 
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let record = match crate::image::pull_target(image, &layer_cache).await? {
-        crate::image::PulledTarget::Image(pulled) => record_for(&pulled, now_unix_secs()),
-        crate::image::PulledTarget::Artifact(artifact) => {
-            if let Some(base) = &artifact.base_image {
-                crate::image::pull(base, &layer_cache)
-                    .await
-                    .with_context(|| format!("fetching the sandbox's base image {base}"))?;
-            }
-            artifact_record_for(&artifact, now_unix_secs())
-        }
-    };
+    let artifact = crate::image::pull_sandbox(image).await?;
+    if let Some(base) = &artifact.base_image {
+        crate::image::pull(base, &layer_cache)
+            .await
+            .with_context(|| format!("fetching the sandbox's base image {base}"))?;
+    }
+    let record = artifact_record_for(&artifact, now_unix_secs());
     pull_with(
         &real::RealFs,
         &images_root()?,
