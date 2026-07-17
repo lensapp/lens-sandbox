@@ -367,6 +367,8 @@ type CredentialSubsystem = (
 /// A device-flow access token within this many seconds of expiry is refreshed at run start rather than served stale.
 const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
+const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
+
 /// The per-integration oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by integration id.
 struct OauthWiring {
     configs: HashMap<String, crate::oauth::OauthConfig>,
@@ -500,13 +502,17 @@ pub(super) async fn start(
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let mut custom = applied.providers;
-    custom.extend(connectable.providers);
+    // Connectable (undeclared) integrations stay known for an on-domain connect offer but are detect-only, so they never seed a phantom placeholder into the workload env.
+    custom.extend(
+        connectable
+            .providers
+            .into_iter()
+            .map(DefProvider::detect_only),
+    );
     let custom_providers = Arc::new(custom);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
-    let window_state = window::get().context(
-        "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts",
-    )?;
+    let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
     let notifier = Arc::new(WindowNotifier::new(
         window_state,

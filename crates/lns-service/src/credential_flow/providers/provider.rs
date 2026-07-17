@@ -17,4 +17,7 @@ pub trait Provider: Send + Sync + 'static {
 
     /// Same per-domain shape with an empty `value`, so the guest declares the domain and gates the placeholder's first, pre-arm use instead of leaking it past an un-intercepted host.
     fn unarmed_injections(&self) -> Vec<CredentialInjection>;
+
+    /// Whether the guest seeds this provider's placeholder into the workload env; a declared integration seeds, a merely-connectable one stays detect/offer-only so undeclared services don't pollute the workload env.
+    fn seeds_env(&self) -> bool;
 }
