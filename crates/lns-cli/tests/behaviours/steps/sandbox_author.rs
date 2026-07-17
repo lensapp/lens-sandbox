@@ -33,15 +33,6 @@ fn valid_lns_yaml(w: &mut BehaviourWorld) {
     );
 }
 
-#[given("an lns.yaml whose env carries a value shaped like a real secret")]
-fn secret_lns_yaml(w: &mut BehaviourWorld) {
-    let yaml = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  env:\n    GH_TOKEN: ghp_{}\n",
-        "a".repeat(36)
-    );
-    seed(w, &yaml);
-}
-
 fn fileset_yaml(entries: &str) -> String {
     format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n{entries}"

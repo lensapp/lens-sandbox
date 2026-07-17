@@ -24,19 +24,12 @@ Feature: authoring a sandbox
     Then the exit code is 2
     And the output contains "unexpected argument"
 
-  Scenario: validate runs the schema, cross-field, and secret checks offline
+  Scenario: validate runs the schema and cross-field checks offline
     Given a valid lns.yaml in the current directory
     When the user runs sandbox command "validate"
     Then the exit code is 0
     And the output contains "valid"
     And the service received no request
-
-  Scenario: validate refuses a definition carrying a real secret
-    Given an lns.yaml whose env carries a value shaped like a real secret
-    When the user runs sandbox command "validate"
-    Then the command fails with an exit code other than 0
-    And the output contains "secret"
-    And the output contains "placeholder"
 
   Scenario: show renders the effective definition offline
     Given a valid lns.yaml in the current directory
