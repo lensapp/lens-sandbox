@@ -11,7 +11,7 @@ You drive it on two tiers:
   `lns stop`, `lns pull`, `lns push`, and so on. Each (except `run`) is an exact
   shortcut into the `lns sandbox` namespace.
 - **`lns sandbox <verb>`** is the complete surface. The lns-native verbs that have
-  no docker analogue — `validate`, `show`, `ls`, `prune` — live only there.
+  no docker analogue — `validate`, `ls`, `prune` — live only there.
 
 The background service must be running first (`lns service start`).
 
@@ -70,13 +70,17 @@ The `spec` fields:
 | `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 
-Check the definition offline — no network, no service — with `validate` and
-`show`:
+Check the definition offline — no network, no service — with `validate` and a
+target-less `lns inspect`:
 
 ```bash
 lns sandbox validate     # schema, cross-field, and secret checks -> "lns.yaml is valid."
-lns sandbox show         # render the effective definition (merged config, resolved values)
+lns inspect              # render the effective definition (merged config, resolved values)
 ```
+
+`lns inspect` also takes a path (`.`, `lns.yaml`, `./dir`) to render another
+directory's definition, still offline; a run id or registry reference inspects
+live or cached state instead — see [`lns sandbox`](cli-reference.md#lns-sandbox).
 
 `validate` reports each problem with its cause and exits non-zero when the
 definition is broken:

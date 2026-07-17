@@ -151,11 +151,12 @@ Every `spec` field is present with its default so editing is filling in a blank,
 not learning a schema. Edit `spec.image` (and the fields you need), then check it
 offline —
 `validate` runs schema, cross-field, and secret checks without touching the
-network or the service, and `show` renders the effective definition:
+network or the service, and a target-less `lns inspect` renders the effective
+definition:
 
 ```bash
 lns sandbox validate     # -> lns.yaml is valid.
-lns sandbox show         # -> the merged, resolved definition
+lns inspect              # -> the merged, resolved definition (offline)
 ```
 
 Run it by omitting the reference — `lns run` with no argument runs the

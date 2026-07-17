@@ -30,8 +30,6 @@ pub enum SandboxCommand {
     Init,
     #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
     Validate,
-    #[command(about = "Render ./lns.yaml's effective definition (merged config, resolved values).")]
-    Show,
     #[command(
         about = "Build ./lns.yaml and upload it to a registry as a sandbox artifact, in one step."
     )]
@@ -58,7 +56,7 @@ pub enum SandboxCommand {
     #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
     Attach(SandboxAttachArgs),
     #[command(
-        about = "Inspect a sandbox: a running run's live state as JSON, or a cached artifact's kind and definition."
+        about = "Inspect a sandbox: a running run's live state as JSON, a cached artifact's kind and definition, or a local lns.yaml's effective definition (offline)."
     )]
     Inspect(SandboxInspectArgs),
     #[command(
@@ -159,9 +157,9 @@ pub struct SandboxAttachArgs {
 pub struct SandboxInspectArgs {
     #[arg(
         value_name = "TARGET",
-        help = "A running run's id/name (live state), or a cached sandbox reference (its definition)."
+        help = "A running run's id/name (live state), a cached sandbox reference (its definition), or a path to a local definition (., lns.yaml, ./dir — rendered offline). Omit to render ./lns.yaml."
     )]
-    pub run: String,
+    pub run: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -347,7 +345,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
-        SandboxCommand::Init | SandboxCommand::Validate | SandboxCommand::Show => {
+        SandboxCommand::Init | SandboxCommand::Validate => {
             bail!("author commands run offline, not through the service dispatch")
         }
         SandboxCommand::Push(_) => {
@@ -360,7 +358,12 @@ where
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
-        SandboxCommand::Inspect(args) => inspect(svc, args, out).await,
+        SandboxCommand::Inspect(args) => {
+            let Some(target) = &args.run else {
+                bail!("a local definition inspect runs offline, not through the service dispatch")
+            };
+            inspect(svc, target, out).await
+        }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
@@ -660,12 +663,12 @@ async fn prune<W: std::io::Write>(
 
 async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
-    args: &SandboxInspectArgs,
+    target: &str,
     out: &mut W,
 ) -> Result<i32> {
     match svc
         .one_shot(Request::InspectRun {
-            run: args.run.clone(),
+            run: target.to_string(),
         })
         .await?
     {
@@ -679,7 +682,7 @@ async fn inspect<W: std::io::Write>(
             Ok(0)
         }
         // Not a running sandbox — fall through to the cached artifact's definition.
-        Response::Error { .. } => inspect_cached(svc, &args.run, out).await,
+        Response::Error { .. } => inspect_cached(svc, target, out).await,
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -1096,7 +1099,7 @@ mod tests {
         for cmd in [
             SandboxCommand::Init,
             SandboxCommand::Validate,
-            SandboxCommand::Show,
+            SandboxCommand::Inspect(SandboxInspectArgs { run: None }),
         ] {
             let mut out = Vec::new();
             let mut stdout = Vec::new();
@@ -1413,9 +1416,7 @@ mod tests {
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -1425,9 +1426,7 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
@@ -1452,15 +1451,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(
-            &svc,
-            &SandboxInspectArgs {
-                run: "hermes:1.4.0".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap();
+        let code = inspect(&svc, "hermes:1.4.0", &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Sandbox"), "got: {text}");
@@ -1485,9 +1476,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        inspect(&image, &SandboxInspectArgs { run: "x".into() }, &mut out)
-            .await
-            .unwrap();
+        inspect(&image, "x", &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
@@ -1502,9 +1491,7 @@ mod tests {
             Response::Pong,
         );
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run: "x".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(&svc, "x", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -1890,9 +1877,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap();
+        let code = inspect(&svc, "1", &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

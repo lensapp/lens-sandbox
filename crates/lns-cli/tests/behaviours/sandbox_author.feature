@@ -1,6 +1,7 @@
 Feature: authoring a sandbox
   A sandbox is authored on disk as `./lns.yaml` (kind: Sandbox). The author
-  verbs scaffold it, validate it offline, and render its effective definition.
+  verbs scaffold it and validate it offline; `inspect` with no target (or a
+  path-shaped one) renders its effective definition, also offline.
 
   Scenario: init scaffolds a default sandbox definition with every spec field
     Given the current directory has no lns.yaml
@@ -46,13 +47,25 @@ Feature: authoring a sandbox
     And the output contains "valid"
     And the service received no request
 
-  Scenario: show renders the effective definition offline
+  Scenario: inspect with no target renders the effective definition offline
     Given a valid lns.yaml in the current directory
-    When the user runs sandbox command "show"
+    When the user runs sandbox command "inspect"
     Then the exit code is 0
     And the output contains "image"
     And the output contains "policy"
     And the service received no request
+
+  Scenario: inspect of a path-shaped target renders the definition offline
+    Given a valid lns.yaml in the current directory
+    When the user runs sandbox command "inspect ."
+    Then the exit code is 0
+    And the output contains "image"
+    And the service received no request
+
+  Scenario: there is no standalone show command
+    When I run "lns sandbox show"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
 
   Scenario: validate accepts a path fileset whose directory exists
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
@@ -91,11 +104,11 @@ Feature: authoring a sandbox
     Then the command fails with an exit code other than 0
     And the output contains ".env"
 
-  Scenario: validate and show understand declarative workdir and mounts
+  Scenario: validate and inspect understand declarative workdir and mounts
     Given an lns.yaml declaring workdir and declarative mounts
     When the user runs sandbox command "validate"
     Then the exit code is 0
-    When the user runs sandbox command "show"
+    When the user runs sandbox command "inspect"
     Then the exit code is 0
     And the output contains "/workspace"
     And the output contains "bind ."

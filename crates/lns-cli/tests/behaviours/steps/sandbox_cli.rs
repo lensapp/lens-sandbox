@@ -280,7 +280,9 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
     let result = match cmd {
         SandboxCommand::Init => author::init(&fs, cwd, &mut out),
         SandboxCommand::Validate => author::validate(&fs, cwd, &mut out),
-        SandboxCommand::Show => author::show(&fs, cwd, &mut out),
+        SandboxCommand::Inspect(args) => {
+            author::inspect_local(&fs, cwd, args.run.as_deref(), &mut out)
+        }
         _ => unreachable!("run_author_verb is only called for the offline author verbs"),
     };
     w.author_files = fs.files.into_inner();
@@ -426,7 +428,9 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
-        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs { run: reference }),
+        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+            run: Some(reference),
+        }),
         &svc,
         TermInfo::default(),
         &mut out,

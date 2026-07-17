@@ -50,7 +50,7 @@ pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<Run
 }
 
 /// Docker-familiar muscle memory types `lns run .` or `lns run lns.yaml`; a conservative path shape keeps every plausible registry coordinate (even `team/config.yaml`) a reference.
-fn is_definition_path(reference: &str) -> bool {
+pub(crate) fn is_definition_path(reference: &str) -> bool {
     reference == "."
         || reference == ".."
         || reference == LNS_YAML
@@ -60,7 +60,7 @@ fn is_definition_path(reference: &str) -> bool {
         || reference.ends_with(&format!("/{LNS_YAML}"))
 }
 
-fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
+pub(crate) fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
     let path = normalize(&cwd.join(reference));
     if path.file_name() == Some(LNS_YAML.as_ref()) {
         path

@@ -1,8 +1,8 @@
 Feature: authoring a sandbox definition offline
-  The author verbs (init, validate, show) work on ./lns.yaml in the
+  The author verbs (init, validate, offline inspect) work on ./lns.yaml in the
   working directory — no daemon, no network. These scenarios drive the
   real binary against a real project directory: init scaffolds the
-  definition, validate judges it offline, and show renders the effective
+  definition, validate judges it offline, and a target-less inspect renders the effective
   definition. `lns init` is the top-level shortcut for `lns sandbox init`.
 
   Scenario: init scaffolds a default lns.yaml
@@ -30,9 +30,9 @@ Feature: authoring a sandbox definition offline
     Then the exit code is non-zero
     And the output contains "run `lns init` to scaffold one"
 
-  Scenario: show renders the effective definition
+  Scenario: inspect with no target renders the effective definition
     When I run "lns init" in the project directory
-    And I run "lns sandbox show" in the project directory
+    And I run "lns sandbox inspect" in the project directory
     Then the exit code is 0
     And the output contains "Sandbox: sandbox"
     And the output contains "docker.io/library/alpine:3.20"

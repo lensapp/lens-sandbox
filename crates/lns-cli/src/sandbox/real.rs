@@ -60,10 +60,14 @@ pub fn run_rm<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<
     })
 }
 
-pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxInspectArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Inspect(args)).await
+        let command = super::SandboxCommand::Inspect(args);
+        if super::author::is_offline(&command) {
+            return run_author(&command, ctx);
+        }
+        dispatch_command(command).await
     })
 }
 
@@ -141,7 +145,9 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
     match command {
         super::SandboxCommand::Init => super::author::init(&RealFs, &cwd, &mut out),
         super::SandboxCommand::Validate => super::author::validate(&RealFs, &cwd, &mut out),
-        super::SandboxCommand::Show => super::author::show(&RealFs, &cwd, &mut out),
+        super::SandboxCommand::Inspect(args) => {
+            super::author::inspect_local(&RealFs, &cwd, args.run.as_deref(), &mut out)
+        }
         _ => unreachable!("run_author is only called for offline author verbs"),
     }
 }

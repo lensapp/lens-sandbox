@@ -2,7 +2,7 @@ Feature: the sandbox is the one noun, on a two-tier surface
   `lns` exposes a single user-facing noun — the sandbox. The top level
   carries only docker-familiar verbs, each an exact shortcut into the
   complete `lns sandbox` namespace; lns-native verbs with no docker
-  analog (validate, show, ls, prune) live only under `lns sandbox`.
+  analog (validate, ls, prune) live only under `lns sandbox`.
 
   Scenario: the front page lists only the docker verbs and the own groups
     When I run "lns --help"
@@ -29,7 +29,6 @@ Feature: the sandbox is the one noun, on a two-tier surface
     Then the exit code is 0
     And the output contains "init"
     And the output contains "validate"
-    And the output contains "show"
     And the output contains "pull"
     And the output contains "push"
     And the output contains "tag"
