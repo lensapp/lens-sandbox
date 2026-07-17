@@ -168,16 +168,29 @@ pub fn resolve_connectable_with_slots(
     resolve_connectable_integrations(&owned, catalog)
 }
 
-/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied.
+/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied integration's domain.
 pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
     let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
+    // An applied integration owns its route domains; a connectable that shares one must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com).
+    let owned_domains: HashSet<&str> = catalog
+        .iter()
+        .filter(|integ| owned.contains(integ.id.as_str()))
+        .flat_map(|integ| integ.routes.iter().map(|r| r.match_pattern.as_str()))
+        .collect();
 
     let mut out = ConnectableIntegrations::default();
     for integ in catalog {
         if owned.contains(integ.id.as_str()) {
+            continue;
+        }
+        if integ
+            .routes
+            .iter()
+            .any(|r| owned_domains.contains(r.match_pattern.as_str()))
+        {
             continue;
         }
         if let Some(p) = wire_provider(integ) {
@@ -423,6 +436,35 @@ mod tests {
             "an applied integration is not connectable"
         );
         assert!(c.routes.is_empty());
+    }
+
+    #[test]
+    fn connectable_excludes_a_catalog_entry_that_collides_with_an_applied_domain() {
+        let catalog = vec![
+            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_integration("some-other", "OTHER_TOKEN", "api.example.test"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert!(
+            c.providers.is_empty(),
+            "a connectable that shares the applied integration's domain must be suppressed so its machine-global stored value can't inject over the declared credential"
+        );
+        assert!(c.routes.is_empty());
+    }
+
+    #[test]
+    fn connectable_on_a_distinct_domain_survives_an_applied_integration() {
+        let catalog = vec![
+            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_integration("some-other", "OTHER_TOKEN", "api.other.test"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert_eq!(
+            c.providers.len(),
+            1,
+            "a connectable on its own domain is unaffected by an applied integration elsewhere"
+        );
+        assert_eq!(c.providers[0].id(), "some-other");
     }
 
     #[test]
