@@ -3,7 +3,7 @@ use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::integration::IntegrationArgs;
-use lns_cli::integration::{self, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use lns_cli::integration::{self, BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 use lns_policy::Policy;
 use std::io::Write;
 use std::path::PathBuf;
@@ -45,6 +45,24 @@ impl IntegrationSignIn for FakeSignIn {
                 )?;
             }
             Ok(outcome)
+        })
+    }
+
+    fn bind_credential<'a>(
+        &'a self,
+        id: &'a str,
+        out: &'a mut dyn Write,
+    ) -> LocalBoxFuture<'a, anyhow::Result<BindOutcome>> {
+        let bind = match &self.outcome {
+            SignInOutcome::Completed => {
+                BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored)
+            }
+            SignInOutcome::Failed(reason) => BindOutcome::Failed(reason.clone()),
+            SignInOutcome::ServiceUnavailable => BindOutcome::ServiceUnavailable,
+        };
+        Box::pin(async move {
+            writeln!(out, "Decide how \"{id}\" binds in the approval window…")?;
+            Ok(bind)
         })
     }
 }
@@ -172,6 +190,94 @@ fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
     }
     .save_atomic(&dir.join(".lns-integrations.yaml"))
     .unwrap();
+}
+
+fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::integrations::{
+        AuthKind, Catalog, CredentialAuth, Integration, IntegrationRoute,
+    };
+    use lns_policy::providers::{InjectionDef, InjectionKind};
+    let dir = cwd(world);
+    Catalog {
+        integrations: vec![Integration {
+            id: id.clone(),
+            name: None,
+            auth_kind: AuthKind::Credential,
+            routes: vec![IntegrationRoute {
+                match_pattern: format!("api.{id}.example"),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: Some(CredentialAuth {
+                env_var: "SOME_TOKEN".into(),
+                placeholder: format!("{id}-LNSPLACEHOLDER0000000000"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: format!("api.{id}.example"),
+                    header: None,
+                }],
+            }),
+            oauth: None,
+            token_fallback: None,
+        }],
+    }
+    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .unwrap();
+}
+
+#[given(regex = r#"^a user catalog declares the "([^"]+)" credential integration$"#)]
+fn given_user_credential_integration(world: &mut BehaviourWorld, id: String) {
+    write_credential_catalog(world, id);
+}
+
+#[given(regex = r#"^the integration "([^"]+)" is in the catalog$"#)]
+fn given_integration_in_catalog(world: &mut BehaviourWorld, id: String) {
+    write_credential_catalog(world, id);
+}
+
+#[when(regex = r#"^the user runs integration command "([^"]+)"$"#)]
+async fn run_integration_command(world: &mut BehaviourWorld, command: String) {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    run_integration(world, &parts).await;
+}
+
+#[then("the output describes binding a credential value")]
+fn output_describes_binding(world: &mut BehaviourWorld) {
+    let out = &world
+        .result
+        .as_ref()
+        .expect("a run must have happened")
+        .output;
+    assert!(
+        out.contains("Bound a value") && out.contains("on this machine"),
+        "expected a machine-scoped bind description, got: {out}"
+    );
+}
+
+#[then("the output does not claim to add the integration to a sandbox")]
+fn output_claims_no_sandbox_effect(world: &mut BehaviourWorld) {
+    let out = &world
+        .result
+        .as_ref()
+        .expect("a run must have happened")
+        .output;
+    assert!(
+        !out.contains("relaunch any running sandbox") && !out.contains("Connected"),
+        "a bind must not claim a sandbox effect: {out}"
+    );
+}
+
+#[then("the command fails noting the service is needed to bind")]
+fn fails_needs_service_to_bind(world: &mut BehaviourWorld) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_ne!(run.exit_code, 0, "expected a non-zero exit");
+    assert!(
+        run.output.contains("service must be running to bind"),
+        "got: {}",
+        run.output
+    );
 }
 
 #[given("the background service is available to sign in")]

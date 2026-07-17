@@ -80,6 +80,9 @@ pub fn format_summary(
     for bind in &binds {
         writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
+    for (source, mount) in &args.filesets {
+        writeln!(s, "  Fileset:   {source} -> {mount}").unwrap();
+    }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
@@ -92,6 +95,18 @@ pub fn format_summary(
     .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
+    if !args.declared_unpublished.is_empty() {
+        writeln!(
+            s,
+            "  Declared:  {} (not published; opt in with -P)",
+            args.declared_unpublished
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .unwrap();
+    }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
     writeln!(
@@ -109,7 +124,7 @@ pub fn format_summary(
 fn image_line(args: &RunArgs) -> String {
     match &args.image {
         Some(image) => format!("{image} (resolving…)"),
-        None => "<imageless>".to_string(),
+        None => "./lns.yaml (resolving…)".to_string(),
     }
 }
 
@@ -159,6 +174,37 @@ fn flags_line(args: &RunArgs) -> String {
         "(none)".to_string()
     } else {
         flags.join(" ")
+    }
+}
+
+/// The summary names a fileset by what the author wrote: the path verbatim, or the ref with its digest shortened to the usual 12 characters.
+pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
+    fileset_display(fileset.path.as_deref(), fileset.reference.as_deref())
+}
+
+/// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
+pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, String)> {
+    view.filesets
+        .iter()
+        .map(|fileset| {
+            (
+                fileset_display(fileset.path.as_deref(), fileset.reference.as_deref()),
+                fileset.mount_path.clone(),
+            )
+        })
+        .collect()
+}
+
+fn fileset_display(path: Option<&str>, reference: Option<&str>) -> String {
+    if let Some(path) = path {
+        return path.to_string();
+    }
+    let reference = reference.unwrap_or_default();
+    match reference.split_once("@sha256:") {
+        Some((repo, digest)) if digest.len() > 12 => {
+            format!("{repo}@sha256:{}…", &digest[..12])
+        }
+        _ => reference.to_string(),
     }
 }
 
@@ -239,6 +285,9 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
+            publish_declared: false,
+            declared_unpublished: Vec::new(),
+            filesets: Vec::new(),
             mounts: Vec::new(),
             quiet: false,
             cmd: Vec::new(),
@@ -263,6 +312,38 @@ mod tests {
             Path::new("./lns-policy.yaml"),
             &PolicySource::FoundInCwd,
         )
+    }
+
+    fn fileset_entry(
+        path: Option<&str>,
+        reference: Option<&str>,
+    ) -> lns_artifact::sandbox::FilesetEntry {
+        lns_artifact::sandbox::FilesetEntry {
+            path: path.map(str::to_string),
+            reference: reference.map(str::to_string),
+            mount_path: "/s".into(),
+        }
+    }
+
+    #[test]
+    fn fileset_display_keeps_a_path_verbatim_and_shortens_a_pinned_digest() {
+        assert_eq!(
+            fileset_source_display(&fileset_entry(Some("./skills"), None)),
+            "./skills"
+        );
+        let long = format!("reg/skills@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            fileset_source_display(&fileset_entry(None, Some(&long))),
+            format!("reg/skills@sha256:{}…", "a".repeat(12))
+        );
+    }
+
+    #[test]
+    fn fileset_display_shows_an_already_short_ref_verbatim() {
+        assert_eq!(
+            fileset_source_display(&fileset_entry(None, Some("reg/skills@sha256:abc"))),
+            "reg/skills@sha256:abc"
+        );
     }
 
     #[test]
@@ -488,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn imageless_run_displays_imageless_marker_instead_of_image_placeholder() {
+    fn no_reference_run_shows_the_local_definition_as_the_image() {
         let args = run_args(None);
         let s = format_summary(
             &args,
@@ -496,10 +577,10 @@ mod tests {
             Path::new("/x/lns-policy.yaml"),
             &PolicySource::FoundInCwd,
         );
-        assert!(s.contains("<imageless>"), "no imageless marker: {s}");
+        assert!(s.contains("./lns.yaml (resolving…)"), "got: {s}");
         assert!(
-            !s.contains("resolving"),
-            "no resolving placeholder on imageless: {s}"
+            !s.contains("imageless"),
+            "the imageless marker is retired: {s}"
         );
     }
 

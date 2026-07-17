@@ -7,11 +7,16 @@ use lns_ipc::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::cli::{DetachChord, ExecArgs, KillArgs, parse_detach_keys_arg};
+use crate::cli::{DetachChord, ExecArgs, KillArgs, RunArgs, parse_detach_keys_arg};
 use crate::command::{CommandSpec, subcommand};
 use crate::service::client::BoxFuture;
 
+pub mod author;
+pub mod distribute;
+pub mod fileset;
 pub mod real;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[derive(clap::Args)]
 pub struct SandboxArgs {
@@ -21,11 +26,27 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
+    #[command(about = "Scaffold a default ./lns.yaml (kind: Sandbox) in this directory.")]
+    Init,
+    #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
+    Validate,
+    #[command(
+        about = "Build ./lns.yaml and upload it to a registry as a sandbox artifact, in one step."
+    )]
+    Push(SandboxPushArgs),
+    #[command(about = "Fetch a published sandbox and its base image into the local cache.")]
+    Pull(SandboxPullArgs),
+    #[command(about = "Add a tag to a cached sandbox within its current repository.")]
+    Tag(SandboxTagArgs),
+    #[command(about = "List running sandboxes with their CPU and memory (`docker ps`-style).")]
+    Ps,
     #[command(
         visible_alias = "list",
-        about = "List active runs (`docker ps`-style)."
+        about = "List cached sandboxes (pulled or built) in the local store."
     )]
     Ls,
+    #[command(about = "Run a sandbox in a microVM (the top-level `lns run`).")]
+    Run(Box<RunArgs>),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
     Exec(ExecArgs),
     #[command(about = "Send a signal to a running run (`docker kill`-style).")]
@@ -36,25 +57,58 @@ pub enum SandboxCommand {
     Logs(SandboxLogsArgs),
     #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
     Attach(SandboxAttachArgs),
-    #[command(about = "Print a run's state and launch configuration as JSON.")]
-    Inspect(SandboxInspectArgs),
-    #[command(about = "Show a run's CPU and memory usage, sampled over one second.")]
-    Stats(SandboxStatsArgs),
     #[command(
-        about = "Remove a finished run from the list (`docker rm`-style; refuses running runs)."
+        about = "Inspect a sandbox: a running run's live state as JSON, a cached artifact's kind and definition, or a local lns.yaml's effective definition (offline)."
+    )]
+    Inspect(SandboxInspectArgs),
+    #[command(
+        about = "Remove a cached sandbox and free its now-unreferenced layers; refuses a running one."
     )]
     Rm(SandboxRmArgs),
-    #[command(about = "Rename a run (`docker rename`-style); the new name resolves immediately.")]
-    Rename(SandboxRenameArgs),
-    #[command(about = "Remove all finished runs from the list (`docker container prune`-style).")]
-    Prune,
+    #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
+    Prune(SandboxPruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPushArgs {
+    #[arg(
+        value_name = "REF",
+        help = "Registry reference to publish the sandbox at, e.g. ghcr.io/team/hermes:1.4.0."
+    )]
+    pub reference: String,
+    #[arg(
+        long = "dry-run",
+        help = "Validate, pack, and build everything push would upload, print the digests, and upload nothing."
+    )]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPullArgs {
+    #[arg(
+        value_name = "REF",
+        help = "Published sandbox reference to fetch, e.g. ghcr.io/team/hermes:1.4.0."
+    )]
+    pub reference: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxTagArgs {
+    #[arg(value_name = "SOURCE", help = "Cached sandbox to re-reference.")]
+    pub from: String,
+
+    #[arg(
+        value_name = "TARGET",
+        help = "New tag in the source sandbox's registry and repository."
+    )]
+    pub to: String,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxStopArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -71,7 +125,7 @@ pub struct SandboxStopArgs {
 pub struct SandboxLogsArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -88,7 +142,7 @@ pub struct SandboxLogsArgs {
 pub struct SandboxAttachArgs {
     #[arg(
         value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        help = "Target run id or name surfaced by `lns ps`."
     )]
     pub run: String,
 
@@ -104,46 +158,38 @@ pub struct SandboxAttachArgs {
 #[derive(clap::Args)]
 pub struct SandboxInspectArgs {
     #[arg(
-        value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
+        value_name = "TARGET",
+        help = "A running run's id/name (live state), a cached sandbox reference (its definition), or a path to a local definition (., lns.yaml, ./dir — rendered offline). Omit to render ./lns.yaml."
     )]
-    pub run: String,
-}
-
-#[derive(clap::Args)]
-pub struct SandboxStatsArgs {
-    #[arg(
-        value_name = "RUN",
-        help = "Target run id or name surfaced by `lns sandbox ls`."
-    )]
-    pub run: String,
+    pub run: Option<String>,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
     #[arg(
-        value_name = "RUN",
-        help = "Target finished run id or name surfaced by `lns sandbox ls`."
+        value_name = "REF",
+        help = "Cached sandbox reference (or a running sandbox's id/name, which is refused)."
     )]
     pub run: String,
 }
 
 #[derive(clap::Args)]
-pub struct SandboxRenameArgs {
-    #[arg(value_name = "RUN", help = "Run to rename, by current id or name.")]
-    pub run: String,
-
+pub struct SandboxPruneArgs {
     #[arg(
-        value_name = "NEW_NAME",
-        help = "New name; must not be all digits and must be unique among listed runs."
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Required: confirm removing every cached sandbox not held by a running one."
     )]
-    pub new_name: String,
+    pub force: bool,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<SandboxArgs>("sandbox").about(
-        "Manage running sandboxes: ls, exec, kill, stop, logs, attach, inspect, stats, rm, rename, prune.",
-    ))
+    app.subcommand(
+        subcommand::<SandboxArgs>("sandbox")
+            .about("The sandbox — author, distribute, run, and manage it (the complete surface).")
+            .mut_subcommand("run", crate::run::long_help_only),
+    )
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
@@ -151,8 +197,132 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run,
     announces_update_check: true,
+    owns_terminal: true,
+};
+
+pub fn augment_init(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        clap::Command::new("init")
+            .about("Scaffold a default ./lns.yaml (shortcut for `lns sandbox init`)."),
+    )
+}
+
+pub const INIT_SPEC: CommandSpec = CommandSpec {
+    name: "init",
+    augment: augment_init,
+    run: real::run_init,
+    announces_update_check: true,
     owns_terminal: false,
 };
+
+pub fn augment_ps(app: clap::Command) -> clap::Command {
+    app.subcommand(
+        clap::Command::new("ps").about(
+            "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
+        ),
+    )
+}
+
+pub const PS_SPEC: CommandSpec = CommandSpec {
+    name: "ps",
+    augment: augment_ps,
+    run: real::run_ps,
+    announces_update_check: true,
+    owns_terminal: false,
+};
+
+macro_rules! shortcut_spec {
+    ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal) => {
+        shortcut_spec!($augment, $const_name, $args, $name, $run, $about, false);
+    };
+    ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal, $owns_terminal:literal) => {
+        pub fn $augment(app: clap::Command) -> clap::Command {
+            app.subcommand(subcommand::<$args>($name).about($about))
+        }
+        pub const $const_name: CommandSpec = CommandSpec {
+            name: $name,
+            augment: $augment,
+            run: $run,
+            announces_update_check: true,
+            owns_terminal: $owns_terminal,
+        };
+    };
+}
+
+shortcut_spec!(
+    augment_stop,
+    STOP_SPEC,
+    SandboxStopArgs,
+    "stop",
+    real::run_stop,
+    "Stop a running sandbox gracefully (shortcut for `lns sandbox stop`)."
+);
+shortcut_spec!(
+    augment_kill,
+    KILL_SPEC,
+    crate::cli::KillArgs,
+    "kill",
+    real::run_kill,
+    "Send a signal to a running sandbox (shortcut for `lns sandbox kill`)."
+);
+shortcut_spec!(
+    augment_rm,
+    RM_SPEC,
+    SandboxRmArgs,
+    "rm",
+    real::run_rm,
+    "Remove a sandbox (shortcut for `lns sandbox rm`)."
+);
+shortcut_spec!(
+    augment_inspect,
+    INSPECT_SPEC,
+    SandboxInspectArgs,
+    "inspect",
+    real::run_inspect,
+    "Inspect a sandbox (shortcut for `lns sandbox inspect`)."
+);
+shortcut_spec!(
+    augment_logs,
+    LOGS_SPEC,
+    SandboxLogsArgs,
+    "logs",
+    real::run_logs,
+    "Print a running sandbox's output (shortcut for `lns sandbox logs`).",
+    true
+);
+shortcut_spec!(
+    augment_attach,
+    ATTACH_SPEC,
+    SandboxAttachArgs,
+    "attach",
+    real::run_attach,
+    "Re-attach to a running sandbox (shortcut for `lns sandbox attach`).",
+    true
+);
+shortcut_spec!(
+    augment_push,
+    PUSH_SPEC,
+    SandboxPushArgs,
+    "push",
+    real::run_push,
+    "Build and publish ./lns.yaml as a sandbox artifact (shortcut for `lns sandbox push`)."
+);
+shortcut_spec!(
+    augment_pull,
+    PULL_SPEC,
+    SandboxPullArgs,
+    "pull",
+    real::run_pull,
+    "Fetch a published sandbox into the cache (shortcut for `lns sandbox pull`)."
+);
+shortcut_spec!(
+    augment_tag,
+    TAG_SPEC,
+    SandboxTagArgs,
+    "tag",
+    real::run_tag,
+    "Re-reference a cached sandbox (shortcut for `lns sandbox tag`)."
+);
 
 pub trait SandboxService: Send + Sync {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
@@ -183,17 +353,30 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
+        SandboxCommand::Init | SandboxCommand::Validate => {
+            bail!("author commands run offline, not through the service dispatch")
+        }
+        SandboxCommand::Push(_) => {
+            bail!("push builds and uploads locally, not through the service dispatch")
+        }
+        SandboxCommand::Pull(args) => pull(svc, args, out).await,
+        SandboxCommand::Tag(args) => tag(svc, args, out).await,
+        SandboxCommand::Ps => ps(svc, out).await,
         SandboxCommand::Ls => ls(svc, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
+        SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
-        SandboxCommand::Inspect(args) => inspect(svc, args, out).await,
-        SandboxCommand::Stats(args) => stats(svc, args, out).await,
+        SandboxCommand::Inspect(args) => {
+            let Some(target) = &args.run else {
+                bail!("a local definition inspect runs offline, not through the service dispatch")
+            };
+            inspect(svc, target, out).await
+        }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
-        SandboxCommand::Rename(args) => rename(svc, args, out).await,
-        SandboxCommand::Prune => prune(svc, out).await,
+        SandboxCommand::Prune(args) => prune(svc, args, out).await,
     }
 }
 
@@ -201,17 +384,136 @@ pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
 }
 
-async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::ListRuns).await?;
+async fn pull<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxPullArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::PullImage {
+            image: args.reference.clone(),
+        })
+        .await?;
     match response {
-        Response::RunList { mut runs } => {
-            runs.sort_by(|a, b| b.started.cmp(&a.started));
-            crate::service::render_ls_table(out, &runs)?;
+        Response::ImagePulled { image } => {
+            writeln!(out, "pulled {}", image.reference)?;
+            writeln!(out, "digest: {}", image.digest)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+async fn tag<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxTagArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let response = svc
+        .one_shot(Request::TagImage {
+            from: args.from.clone(),
+            to: args.to.clone(),
+        })
+        .await?;
+    match response {
+        Response::ImageTagged { from, to } => {
+            writeln!(out, "tagged {from} as {to}")?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+    let running = match svc.one_shot(Request::ListRuns).await? {
+        Response::RunList { runs } => runs
+            .into_iter()
+            .filter(|r| matches!(r.status, lns_ipc::RunStatus::Running))
+            .collect::<Vec<_>>(),
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    };
+    let mut rows = Vec::with_capacity(running.len());
+    for run in &running {
+        let stats = match svc
+            .one_shot(Request::RunStats {
+                run: run.id.clone(),
+            })
+            .await?
+        {
+            Response::RunStats { stats } => stats,
+            Response::Error { message } => bail!("daemon error: {message}"),
+            other => bail!("unexpected response from daemon: {other:?}"),
+        };
+        rows.push((run, stats));
+    }
+    render_ps_table(&running, &rows, out)
+}
+
+fn render_ps_table<W: std::io::Write>(
+    running: &[lns_ipc::RunSummary],
+    rows: &[(&lns_ipc::RunSummary, RunStatsInfo)],
+    out: &mut W,
+) -> Result<i32> {
+    let id_w = "ID".len().max(
+        running
+            .iter()
+            .map(|r| lns_ipc::short_run_id(&r.id).len())
+            .max()
+            .unwrap_or(0),
+    );
+    let name_w = "NAME"
+        .len()
+        .max(running.iter().map(|r| r.name.len()).max().unwrap_or(0));
+    let image_w = "IMAGE"
+        .len()
+        .max(running.iter().map(|r| r.image.len()).max().unwrap_or(0));
+    writeln!(
+        out,
+        "{:<id_w$}  {:<name_w$}  {:<image_w$}  CPU %   MEM",
+        "ID", "NAME", "IMAGE",
+    )?;
+    for (run, stats) in rows {
+        writeln!(
+            out,
+            "{:<id_w$}  {:<name_w$}  {:<image_w$}  {:<6}  {} / {}",
+            lns_ipc::short_run_id(&run.id),
+            run.name,
+            run.image,
+            format_permille(stats.cpu_permille),
+            format_bytes(stats.mem_used_bytes),
+            format_bytes(stats.mem_total_bytes),
+        )?;
+    }
+    Ok(0)
+}
+
+async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+    match svc.one_shot(Request::ListImages).await? {
+        Response::ImageList { mut images } => {
+            images.sort_by(|a, b| a.reference.cmp(&b.reference));
+            render_cached_table(out, &images)?;
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+fn render_cached_table<W: std::io::Write>(
+    out: &mut W,
+    images: &[lns_ipc::ImageInfo],
+) -> Result<()> {
+    let ref_w = "SANDBOX"
+        .len()
+        .max(images.iter().map(|i| i.reference.len()).max().unwrap_or(0));
+    writeln!(out, "{:<ref_w$}  STATE", "SANDBOX")?;
+    for image in images {
+        writeln!(out, "{:<ref_w$}  cached", image.reference)?;
+    }
+    Ok(())
 }
 
 async fn kill<W: std::io::Write>(
@@ -271,14 +573,41 @@ async fn rm<W: std::io::Write>(
     args: &SandboxRmArgs,
     out: &mut W,
 ) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RemoveRun {
+    match svc
+        .one_shot(Request::InspectRun {
             run: args.run.clone(),
         })
-        .await?;
-    match response {
+        .await?
+    {
+        Response::RunInspect { details }
+            if matches!(details.summary.status, lns_ipc::RunStatus::Running) =>
+        {
+            bail!(
+                "{} is a running sandbox; stop it first with `lns stop {}`",
+                args.run,
+                args.run
+            )
+        }
+        // An exited run is a spent record; a reference the service knows no run for is a cached sandbox.
+        Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
+        Response::Error { .. } => remove_cached(svc, &args.run, out).await,
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn remove_run<W: std::io::Write>(
+    svc: &impl SandboxService,
+    run: &str,
+    out: &mut W,
+) -> Result<i32> {
+    match svc
+        .one_shot(Request::RemoveRun {
+            run: run.to_string(),
+        })
+        .await?
+    {
         Response::Acknowledged => {
-            writeln!(out, "removed run {}", run_label(&args.run))?;
+            writeln!(out, "removed run {run}")?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -286,24 +615,26 @@ async fn rm<W: std::io::Write>(
     }
 }
 
-async fn rename<W: std::io::Write>(
+async fn remove_cached<W: std::io::Write>(
     svc: &impl SandboxService,
-    args: &SandboxRenameArgs,
+    reference: &str,
     out: &mut W,
 ) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RenameRun {
-            run: args.run.clone(),
-            new_name: args.new_name.clone(),
+    match svc
+        .one_shot(Request::RemoveImage {
+            image: reference.to_string(),
         })
-        .await?;
-    match response {
-        Response::Acknowledged => {
+        .await?
+    {
+        Response::ImageRemoved {
+            reference,
+            reclaimed_bytes,
+        } => {
+            writeln!(out, "removed {reference}")?;
             writeln!(
                 out,
-                "renamed run {} to {}",
-                run_label(&args.run),
-                args.new_name
+                "freed {} of base-image layers",
+                format_bytes(reclaimed_bytes)
             )?;
             Ok(0)
         }
@@ -312,18 +643,26 @@ async fn rename<W: std::io::Write>(
     }
 }
 
-async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
-    let response = svc.one_shot(Request::PruneRuns).await?;
-    match response {
-        Response::RunsPruned { mut removed } => {
-            if removed.is_empty() {
-                writeln!(out, "no finished runs to remove")?;
-            } else {
-                removed.sort_unstable();
-                for id in removed {
-                    writeln!(out, "removed run {}", lns_ipc::short_run_id(&id))?;
-                }
+async fn prune<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxPruneArgs,
+    out: &mut W,
+) -> Result<i32> {
+    if !args.force {
+        bail!(
+            "this removes every cached sandbox not held by a running one; pass --force to confirm"
+        );
+    }
+    match svc.one_shot(Request::PruneImages).await? {
+        Response::ImagesPruned {
+            mut removed,
+            reclaimed_bytes,
+        } => {
+            removed.sort_unstable();
+            for reference in &removed {
+                writeln!(out, "removed {reference}")?;
             }
+            writeln!(out, "reclaimed {}", format_bytes(reclaimed_bytes))?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -333,15 +672,15 @@ async fn prune<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Res
 
 async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
-    args: &SandboxInspectArgs,
+    target: &str,
     out: &mut W,
 ) -> Result<i32> {
-    let response = svc
+    match svc
         .one_shot(Request::InspectRun {
-            run: args.run.clone(),
+            run: target.to_string(),
         })
-        .await?;
-    match response {
+        .await?
+    {
         Response::RunInspect { details } => {
             let policy = details
                 .config
@@ -351,9 +690,105 @@ async fn inspect<W: std::io::Write>(
             render_inspect(&details, policy, out)?;
             Ok(0)
         }
+        // Not a running sandbox — fall through to the cached artifact's definition.
+        Response::Error { .. } => inspect_cached(svc, target, out).await,
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn inspect_cached<W: std::io::Write>(
+    svc: &impl SandboxService,
+    reference: &str,
+    out: &mut W,
+) -> Result<i32> {
+    match svc
+        .one_shot(Request::InspectImage {
+            image: reference.to_string(),
+        })
+        .await?
+    {
+        Response::ImageInspected { inspection } => {
+            render_cached_inspect(&inspection, out)?;
+            Ok(0)
+        }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+fn render_cached_inspect<W: std::io::Write>(
+    inspection: &lns_ipc::ArtifactInspection,
+    out: &mut W,
+) -> Result<()> {
+    match inspection {
+        lns_ipc::ArtifactInspection::Sandbox(view) => {
+            writeln!(out, "kind: Sandbox")?;
+            writeln!(out, "reference: {}", view.reference)?;
+            if !view.digest.is_empty() {
+                writeln!(out, "digest: {}", view.digest)?;
+            }
+            writeln!(out, "image: {}", view.image)?;
+            if let Some(workdir) = &view.workdir {
+                writeln!(out, "workdir: {workdir}")?;
+            }
+            for mount in &view.mounts {
+                let kind = match mount.kind {
+                    lns_ipc::SandboxMountKind::Bind => "bind",
+                    lns_ipc::SandboxMountKind::Volume => "volume",
+                };
+                let mode = if mount.read_only { " (read-only)" } else { "" };
+                writeln!(
+                    out,
+                    "mount: {kind} {} -> {}{mode}",
+                    mount.source, mount.target
+                )?;
+            }
+            if !view.ports.is_empty() {
+                writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
+            }
+            for fileset in &view.filesets {
+                let source = fileset
+                    .path
+                    .as_deref()
+                    .or(fileset.reference.as_deref())
+                    .unwrap_or_default();
+                writeln!(out, "fileset: {source} -> {}", fileset.mount_path)?;
+            }
+            render_integrations(out, &view.integrations)?;
+            render_policy_flags(out, &view.policy_flags)?;
+        }
+        lns_ipc::ArtifactInspection::Image(view) => {
+            writeln!(out, "kind: Image")?;
+            writeln!(out, "reference: {}", view.reference)?;
+            writeln!(out, "digest: {}", view.digest)?;
+        }
+    }
+    Ok(())
+}
+
+fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
+    ports
+        .iter()
+        .map(|port| match port.host {
+            Some(host) => format!("{host}:{}", port.container),
+            None => port.container.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_integrations<W: std::io::Write>(out: &mut W, integrations: &[String]) -> Result<()> {
+    for id in integrations {
+        writeln!(out, "integration: {id}")?;
+    }
+    Ok(())
+}
+
+fn render_policy_flags<W: std::io::Write>(out: &mut W, flags: &[String]) -> Result<()> {
+    for flag in flags {
+        writeln!(out, "⚠ {flag}")?;
+    }
+    Ok(())
 }
 
 fn policy_doc(path: &str, loaded: Option<serde_json::Value>) -> serde_json::Value {
@@ -372,6 +807,10 @@ fn render_inspect<W: std::io::Write>(
     config.insert("cpus".into(), details.config.cpus.into());
     config.insert("memMib".into(), details.config.mem_mib.into());
     config.insert("env".into(), serde_json::to_value(&details.config.env)?);
+    config.insert(
+        "workdir".into(),
+        serde_json::to_value(&details.config.workdir)?,
+    );
     config.insert(
         "publishedPorts".into(),
         serde_json::to_value(&details.config.published_ports)?,
@@ -400,42 +839,14 @@ fn render_inspect<W: std::io::Write>(
         serde_json::to_value(details.summary.status)?,
     );
     doc.insert("started".into(), details.summary.started.clone().into());
+    doc.insert(
+        "uptime".into(),
+        format!("since {}", details.summary.started).into(),
+    );
     doc.insert("config".into(), config.into());
     doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
     let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(doc))?;
     writeln!(out, "{rendered}")?;
-    Ok(())
-}
-
-async fn stats<W: std::io::Write>(
-    svc: &impl SandboxService,
-    args: &SandboxStatsArgs,
-    out: &mut W,
-) -> Result<i32> {
-    let response = svc
-        .one_shot(Request::RunStats {
-            run: args.run.clone(),
-        })
-        .await?;
-    match response {
-        Response::RunStats { stats } => {
-            render_stats(&stats, out)?;
-            Ok(0)
-        }
-        Response::Error { message } => bail!("daemon error: {message}"),
-        other => bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
-fn render_stats<W: std::io::Write>(stats: &RunStatsInfo, out: &mut W) -> Result<()> {
-    writeln!(out, "CPU %   MEM USAGE / LIMIT")?;
-    writeln!(
-        out,
-        "{:<6}  {} / {}",
-        format_permille(stats.cpu_permille),
-        format_bytes(stats.mem_used_bytes),
-        format_bytes(stats.mem_total_bytes),
-    )?;
     Ok(())
 }
 
@@ -558,6 +969,10 @@ mod tests {
 
     struct CannedService {
         response: Response,
+        stats_response: Option<Response>,
+        inspect_image_response: Option<Response>,
+        remove_image_response: Option<Response>,
+        remove_run_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -566,16 +981,47 @@ mod tests {
         fn new(response: Response) -> Self {
             Self {
                 response,
+                stats_response: None,
+                inspect_image_response: None,
+                remove_image_response: None,
+                remove_run_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
+        fn with_stats(response: Response, stats_response: Response) -> Self {
+            Self {
+                stats_response: Some(stats_response),
+                ..Self::new(response)
+            }
+        }
+
+        fn with_inspect_image(run_response: Response, image_response: Response) -> Self {
+            Self {
+                inspect_image_response: Some(image_response),
+                ..Self::new(run_response)
+            }
+        }
+
+        fn with_remove_image(run_response: Response, remove_response: Response) -> Self {
+            Self {
+                remove_image_response: Some(remove_response),
+                ..Self::new(run_response)
+            }
+        }
+
+        fn with_remove_run(run_response: Response, remove_response: Response) -> Self {
+            Self {
+                remove_run_response: Some(remove_response),
+                ..Self::new(run_response)
+            }
+        }
+
         fn with_frames(frames: Vec<Vec<u8>>) -> Self {
             Self {
-                response: Response::Pong,
                 frames,
-                requests: Arc::new(Mutex::new(Vec::new())),
+                ..Self::new(Response::Pong)
             }
         }
     }
@@ -583,8 +1029,26 @@ mod tests {
     impl SandboxService for CannedService {
         type Stream = tokio::io::DuplexStream;
         fn one_shot(&self, request: Request) -> BoxFuture<'_, Result<Response>> {
+            let response = match &request {
+                Request::RunStats { .. } => self
+                    .stats_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::InspectImage { .. } => self
+                    .inspect_image_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::RemoveImage { .. } => self
+                    .remove_image_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::RemoveRun { .. } => self
+                    .remove_run_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                _ => self.response.clone(),
+            };
             self.requests.lock().unwrap().push(request);
-            let response = self.response.clone();
             Box::pin(async move { Ok(response) })
         }
         fn open_stream(&self, _request: Request) -> BoxFuture<'_, Result<Self::Stream>> {
@@ -639,6 +1103,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_with_writers_refuses_the_interactive_run_verb() {
+        let svc = CannedService::new(Response::Pong);
+        let run_args: RunArgs = crate::command::parse_args(["lns", "run", "alpine"]).unwrap();
+        let cmd = SandboxCommand::Run(Box::new(run_args));
+        let mut out = Vec::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("interactive"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn run_with_writers_refuses_the_offline_author_verbs() {
+        let svc = CannedService::new(Response::Pong);
+        for cmd in [
+            SandboxCommand::Init,
+            SandboxCommand::Validate,
+            SandboxCommand::Inspect(SandboxInspectArgs { run: None }),
+        ] {
+            let mut out = Vec::new();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let err = run_with_writers(
+                &cmd,
+                &svc,
+                TermInfo::default(),
+                &mut out,
+                &mut stdout,
+                &mut stderr,
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("offline"), "got: {err:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_writers_refuses_push_which_runs_locally() {
+        let svc = CannedService::new(Response::Pong);
+        let cmd = SandboxCommand::Push(SandboxPushArgs {
+            reference: "ghcr.io/team/hermes:1.4.0".into(),
+            dry_run: false,
+        });
+        let mut out = Vec::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("locally"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn pull_reports_the_pulled_reference_and_digest() {
+        let svc = CannedService::new(Response::ImagePulled {
+            image: lns_ipc::ImageInfo {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 1024,
+                layers: 1,
+                pulled: "2026-01-01T00:00:00Z".into(),
+                in_use_by: None,
+            },
+        });
+        let mut out = Vec::new();
+        let code = pull(
+            &svc,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("sha256:"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn pull_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = pull(
+            &CannedService::new(Response::Error {
+                message: "registry unreachable".into(),
+            }),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry unreachable"));
+
+        let err = pull(
+            &CannedService::new(Response::Pong),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn tag_confirms_the_new_reference() {
+        let svc = CannedService::new(Response::ImageTagged {
+            from: "hermes:1.4.0".into(),
+            to: "hermes:latest".into(),
+        });
+        let mut out = Vec::new();
+        let code = tag(
+            &svc,
+            &SandboxTagArgs {
+                from: "hermes:1.4.0".into(),
+                to: "hermes:latest".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "tagged hermes:1.4.0 as hermes:latest\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = tag(
+            &CannedService::new(Response::Error {
+                message: "no such cached sandbox".into(),
+            }),
+            &SandboxTagArgs {
+                from: "a:1".into(),
+                to: "a:2".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such cached sandbox"));
+
+        let err = tag(
+            &CannedService::new(Response::Pong),
+            &SandboxTagArgs {
+                from: "a:1".into(),
+                to: "a:2".into(),
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn ls_surfaces_a_daemon_error() {
         let svc = CannedService::new(Response::Error {
             message: "registry poisoned".into(),
@@ -653,6 +1293,108 @@ mod tests {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
         let err = ls(&svc, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    fn running_run() -> lns_ipc::RunSummary {
+        lns_ipc::RunSummary {
+            id: "1a2b3c4d0000000000000000000000aa".into(),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "cmd".into(),
+            status: lns_ipc::RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ps_renders_running_sandboxes_with_cpu_and_memory() {
+        let svc = CannedService::with_stats(
+            Response::RunList {
+                runs: vec![running_run()],
+            },
+            Response::RunStats {
+                stats: RunStatsInfo {
+                    cpu_permille: 125,
+                    mem_used_bytes: 92_274_688,
+                    mem_total_bytes: 536_870_912,
+                },
+            },
+        );
+        let mut out = Vec::new();
+        let code = ps(&svc, &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("CPU") && text.contains("MEM"), "got: {text}");
+        assert!(text.contains("12.5%"), "got: {text}");
+        assert!(text.contains("88.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn ps_renders_only_the_header_when_nothing_is_running() {
+        let svc = CannedService::new(Response::RunList {
+            runs: vec![lns_ipc::RunSummary {
+                status: lns_ipc::RunStatus::Exited { code: 0 },
+                ..running_run()
+            }],
+        });
+        let mut out = Vec::new();
+        let code = ps(&svc, &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("CPU"), "got: {text}");
+        assert!(
+            !text.contains("reviewer"),
+            "an exited run must not list: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ps_surfaces_a_listing_error_and_rejects_an_unrelated_variant() {
+        let err = ps(
+            &CannedService::new(Response::Error {
+                message: "registry poisoned".into(),
+            }),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+
+        let err = ps(&CannedService::new(Response::Pong), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn ps_surfaces_a_stats_error_and_rejects_an_unrelated_stats_variant() {
+        let err = ps(
+            &CannedService::with_stats(
+                Response::RunList {
+                    runs: vec![running_run()],
+                },
+                Response::Error {
+                    message: "stats probe failed".into(),
+                },
+            ),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("stats probe failed"));
+
+        let err = ps(
+            &CannedService::with_stats(
+                Response::RunList {
+                    runs: vec![running_run()],
+                },
+                Response::Pong,
+            ),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -704,9 +1446,7 @@ mod tests {
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -716,53 +1456,199 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
     #[tokio::test]
-    async fn stats_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
+    async fn inspect_falls_back_to_a_cached_sandbox_definition() {
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "no active run with id hermes:1.4.0".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                    reference: "hermes:1.4.0".into(),
+                    digest: format!("sha256:{}", "a".repeat(64)),
+                    image: "docker.io/library/alpine@sha256:abc".into(),
+                    workdir: None,
+                    mounts: Vec::new(),
+                    ports: Vec::new(),
+                    filesets: Vec::new(),
+                    integrations: vec!["some-provider".into()],
+                    policy_flags: Vec::new(),
+                }),
+            },
+        );
         let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let code = inspect(&svc, "hermes:1.4.0", &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("kind: Sandbox"), "got: {text}");
+        assert!(
+            text.contains("image: docker.io/library/alpine"),
+            "got: {text}"
+        );
+        assert!(text.contains("integration: some-provider"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn inspect_cached_renders_the_image_kind() {
+        let image = CannedService::with_inspect_image(
+            Response::Error {
+                message: "not running".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
+                    reference: "alpine:3.20".into(),
+                    digest: "sha256:abc".into(),
+                }),
+            },
+        );
+        let mut out = Vec::new();
+        inspect(&image, "x", &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("kind: Image"), "got: {text}");
+        assert!(text.contains("digest: sha256:abc"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn inspect_cached_rejects_an_unrelated_image_response() {
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "not running".into(),
+            },
+            Response::Pong,
+        );
+        let mut out = Vec::new();
+        let err = inspect(&svc, "x", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
-    #[tokio::test]
-    async fn stats_surfaces_a_daemon_error() {
-        let svc = CannedService::new(Response::Error {
-            message: "macOS-only".into(),
-        });
-        let mut out = Vec::new();
-        let err = stats(&svc, &SandboxStatsArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("macOS-only"));
+    fn running_inspect(status: lns_ipc::RunStatus) -> Response {
+        Response::RunInspect {
+            details: Box::new(RunDetails {
+                summary: lns_ipc::RunSummary {
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
+                    name: "reviewer".into(),
+                    image: "some-image".into(),
+                    command: String::new(),
+                    status,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: lns_ipc::RunConfig::default(),
+            }),
+        }
     }
 
     #[tokio::test]
-    async fn rm_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
+    async fn rm_refuses_a_running_sandbox_naming_stop() {
+        let svc = CannedService::new(running_inspect(lns_ipc::RunStatus::Running));
         let mut out = Vec::new();
-        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rename_rejects_an_unrelated_response_variant() {
-        let svc = CannedService::new(Response::Pong);
-        let mut out = Vec::new();
-        let err = rename(
+        let err = rm(
             &svc,
-            &SandboxRenameArgs {
+            &SandboxRmArgs {
                 run: "reviewer".into(),
-                new_name: "auditor".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("running"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("lns stop"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn rm_removes_a_cached_sandbox_and_reports_freed_layers() {
+        let svc = CannedService::with_remove_image(
+            Response::Error {
+                message: "no active run with id hermes:1.4.0".into(),
+            },
+            Response::ImageRemoved {
+                reference: "hermes:1.4.0".into(),
+                reclaimed_bytes: 3 * 1024 * 1024,
+            },
+        );
+        let mut out = Vec::new();
+        let code = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "hermes:1.4.0".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("removed hermes:1.4.0"), "got: {text}");
+        assert!(text.contains("freed 3.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_removes_the_spent_run_record() {
+        let svc = CannedService::with_remove_run(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Acknowledged,
+        );
+        let mut out = Vec::new();
+        let code = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("removed run reviewer"),
+            "an exited run must be dropped via RemoveRun"
+        );
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, Request::RemoveRun { .. })),
+            "rm of an exited run must issue RemoveRun, not RemoveImage: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_surfaces_the_daemon_error() {
+        let svc = CannedService::with_remove_run(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Error {
+                message: "run vanished mid-remove".into(),
+            },
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("run vanished mid-remove"));
+    }
+
+    #[tokio::test]
+    async fn rm_of_an_exited_run_rejects_an_unrelated_remove_response() {
+        let svc = CannedService::with_remove_run(
+            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
+            Response::Pong,
+        );
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
             },
             &mut out,
         )
@@ -772,41 +1658,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_confirms_with_the_handle_and_new_name() {
-        let svc = CannedService::new(Response::Acknowledged);
+    async fn rm_rejects_an_unrelated_inspect_response() {
+        let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let code = rename(
+        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn rm_of_a_cached_sandbox_surfaces_the_daemon_error() {
+        let svc = CannedService::with_remove_image(
+            Response::Error {
+                message: "no active run with id ghcr.io/team/x:1".into(),
+            },
+            Response::Error {
+                message: "no such image: ghcr.io/team/x:1".into(),
+            },
+        );
+        let mut out = Vec::new();
+        let err = rm(
             &svc,
-            &SandboxRenameArgs {
-                run: "reviewer".into(),
-                new_name: "auditor".into(),
+            &SandboxRmArgs {
+                run: "ghcr.io/team/x:1".into(),
             },
             &mut out,
         )
         .await
-        .unwrap();
-        assert_eq!(code, 0);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "renamed run reviewer to auditor\n"
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such image"));
+    }
+
+    #[tokio::test]
+    async fn rm_rejects_an_unrelated_remove_response() {
+        let svc = CannedService::with_remove_image(
+            Response::Error {
+                message: "no active run with id reviewer".into(),
+            },
+            Response::Pong,
         );
-    }
-
-    #[tokio::test]
-    async fn prune_surfaces_a_daemon_error() {
-        let svc = CannedService::new(Response::Error {
-            message: "registry poisoned".into(),
-        });
         let mut out = Vec::new();
-        let err = prune(&svc, &mut out).await.unwrap_err();
-        assert!(format!("{err:#}").contains("registry poisoned"));
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]
-    async fn prune_rejects_an_unrelated_response_variant() {
+    async fn prune_requires_force_before_touching_the_cache() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = prune(&svc, &mut out).await.unwrap_err();
+        let err = prune(&svc, &SandboxPruneArgs { force: false }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("--force"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn prune_with_force_lists_removed_sandboxes_and_reclaimed_bytes() {
+        let svc = CannedService::new(Response::ImagesPruned {
+            removed: vec!["b:2".into(), "a:1".into()],
+            reclaimed_bytes: 64 * 1024 * 1024,
+        });
+        let mut out = Vec::new();
+        let code = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("removed a:1") && text.contains("removed b:2"),
+            "got: {text}"
+        );
+        assert!(text.contains("reclaimed 64.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn prune_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let err = prune(
+            &CannedService::new(Response::Error {
+                message: "registry poisoned".into(),
+            }),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+
+        let err = prune(
+            &CannedService::new(Response::Pong),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -954,9 +1907,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, &SandboxInspectArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap();
+        let code = inspect(&svc, "1", &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

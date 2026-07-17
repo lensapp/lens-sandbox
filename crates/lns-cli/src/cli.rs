@@ -16,7 +16,7 @@ pub enum LogLevel {
 #[command(
     name = "lns",
     version,
-    about = "Lens Sandbox — run OCI images in microVMs via Cloud Hypervisor (Linux) and Apple Vz (macOS)"
+    about = "Lens Sandbox — run AI agents, commands, and OCI images in local microVMs. Control access into and out of the sandbox."
 )]
 pub struct Cli {
     #[arg(
@@ -32,7 +32,8 @@ pub struct Cli {
 #[derive(clap::Args)]
 pub struct RunArgs {
     #[arg(
-        help = "OCI image reference (e.g. alpine:3.20); omit for imageless mode, which requires a command after `--`."
+        value_name = "REF",
+        help = "Sandbox reference: a registry coordinate (e.g. ghcr.io/team/hermes:1.4.0) or a path to a local definition (., lns.yaml, ./dir, /abs/path). Omit to run ./lns.yaml in the current directory."
     )]
     pub image: Option<String>,
 
@@ -82,13 +83,13 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Run-as user inside the sandbox. Defaults to the image's USER (root when the image sets none); imageless runs default to `sandbox`."
+        help = "Run-as user inside the sandbox. Defaults to the image's USER; the unprivileged `sandbox` user when the image sets none."
     )]
     pub sandbox_user: Option<String>,
 
     #[arg(
         long,
-        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; imageless runs default to 65534."
+        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; 65534 (the `sandbox` user) when the image sets none."
     )]
     pub sandbox_uid: Option<u32>,
 
@@ -144,7 +145,7 @@ pub struct RunArgs {
         long,
         default_value_t = false,
         conflicts_with_all = ["interactive", "tty"],
-        help = "Return immediately after starting; the run continues in the daemon and is reachable via `lns exec`, `lns kill`, `lns ls`."
+        help = "Return immediately after starting; the run continues in the daemon and is reachable via `lns exec`, `lns kill`, `lns ps`."
     )]
     pub detach: bool,
 
@@ -161,7 +162,7 @@ pub struct RunArgs {
         long,
         value_name = "DIR",
         value_parser = parse_workdir_arg,
-        help = "Working directory inside the sandbox (absolute path; created if missing). Defaults to the image's WORKDIR."
+        help = "Working directory inside the sandbox (absolute path; created if missing). Overrides spec.workdir and the image's WORKDIR."
     )]
     pub workdir: Option<String>,
 
@@ -188,6 +189,20 @@ pub struct RunArgs {
         help = "Publish a guest port to the host: `[host_ip:]hostport:containerport[/proto]`. Host bind defaults to loopback (127.0.0.1) — pass an explicit host_ip to expose wider."
     )]
     pub publish: Vec<PortPublish>,
+
+    #[arg(
+        short = 'P',
+        long = "publish-declared",
+        default_value_t = false,
+        help = "Publish the definition's declared spec.ports on loopback (host value when present, the container number otherwise). Automatic for a local ./lns.yaml run; opt-in for a pulled sandbox."
+    )]
+    pub publish_declared: bool,
+
+    #[arg(skip)]
+    pub declared_unpublished: Vec<u16>,
+
+    #[arg(skip)]
+    pub filesets: Vec<(String, String)>,
 
     #[arg(
         short = 'v',

@@ -18,22 +18,15 @@ Feature: addressing runs by name from the CLI
     And the output contains "stopped run 3"
     And the service received a StopRun request for run "3" with timeout 10
 
-  Scenario: the run list shows a NAME column with each run's name
-    Given the service reports a run listing with run 3 named "reviewer" of image "some-image" running
-    When the user runs sandbox command "ls"
+  Scenario: the running list shows a NAME column with each run's name
+    Given the service reports one running sandbox using 125 permille cpu and 92274688 bytes
+    When the user runs "lns ps"
     Then the exit code is 0
     And the output contains "NAME"
     And the output contains "reviewer"
 
-  Scenario: rename forwards the old and new names to the service
-    Given the service will answer Acknowledged
-    When the user runs sandbox command "rename reviewer auditor"
-    Then the exit code is 0
-    And the output contains "renamed run reviewer to auditor"
-    And the service received a RenameRun request for run "reviewer" to "auditor"
-
   Scenario: a naming error from the service is surfaced verbatim
-    Given the service will answer an error "name reviewer already in use by run #7"
-    When the user runs sandbox command "rename auditor reviewer"
+    Given the service will answer an error "no active run with id reviewer"
+    When the user runs sandbox command "stop reviewer"
     Then the command fails with an exit code other than 0
-    And the output contains "already in use by run #7"
+    And the output contains "no active run with id reviewer"

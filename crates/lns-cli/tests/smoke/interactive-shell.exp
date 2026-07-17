@@ -13,7 +13,7 @@
 #      returns 0 and the run keeps executing in the background. No
 #      SIGHUP is sent to the workload (an earlier revision sent
 #      SIGHUP and reported 129 — terminate-and-exit, not detach).
-#   4. The detached run is still listed by `lns sandbox ls` and
+#   4. The detached run is still listed by `lns ps` and
 #      `lns sandbox attach` re-joins its shell.
 #
 # Run with `expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`
@@ -34,7 +34,18 @@ if {![file executable $wrapper]} {
     exit 1
 }
 
-spawn $wrapper run --name detach-smoke alpine:latest -- sh
+# A plain image REF is refused, so author a throwaway sandbox definition over the e2e suite's rate-limit-safe alpine mirror.
+set project [exec mktemp -d]
+set def [open "$project/lns.yaml" w]
+puts $def "apiVersion: lns.run/v1"
+puts $def "kind: Sandbox"
+puts $def "metadata:"
+puts $def "  name: detach-smoke"
+puts $def "spec:"
+puts $def "  image: public.ecr.aws/docker/library/alpine:3.20"
+close $def
+
+spawn $wrapper run --name detach-smoke $project -- sh
 
 # --- (1) shell comes up and echoes a command ------------------------------
 
@@ -43,7 +54,7 @@ expect {
         puts "\nFAIL: timed out waiting for initial shell prompt"
         exit 1
     }
-    "~ # "
+    -re {[/~] [#$] }
 }
 
 set timeout 15
@@ -60,7 +71,7 @@ expect {
         puts "\nFAIL: no prompt after `echo hi`"
         exit 1
     }
-    "~ # "
+    -re {[/~] [#$] }
 }
 
 # --- (2) Ctrl+C must reprompt, NOT detach --------------------------------
@@ -78,7 +89,7 @@ expect {
         puts "\nFAIL: shell did not reprompt after Ctrl+C — chord may have absorbed it"
         exit 1
     }
-    "~ # "
+    -re {[/~] [#$] }
 }
 
 # --- (3) Ctrl+P Ctrl+Q detaches, leaving the run running -----------------
@@ -110,23 +121,25 @@ if {$value != 0} {
 # --- (4) the detached run is still listed and re-attachable --------------
 
 set timeout 15
-spawn $wrapper sandbox ls
+spawn $wrapper ps
 expect {
     timeout {
-        puts "\nFAIL: `lns sandbox ls` did not list the detached run as running"
+        puts "\nFAIL: `lns ps` did not list the detached run"
         exit 1
     }
-    -re "detach-smoke.*(?i)running"
+    "detach-smoke"
 }
 catch wait
 
 spawn $wrapper sandbox attach detach-smoke
+# Attach follows from the tail (no history replay), so an idle shell shows nothing until a keystroke provokes a fresh prompt.
+send "\r"
 expect {
     timeout {
         puts "\nFAIL: `lns sandbox attach` did not re-join the detached run's shell"
         exit 1
     }
-    "~ # "
+    -re {[/~] [#$] }
 }
 send "echo rejoined\r"
 expect {

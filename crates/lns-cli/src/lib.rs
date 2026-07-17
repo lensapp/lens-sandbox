@@ -1,9 +1,9 @@
 pub mod audit;
+pub mod build;
 pub mod chord;
 pub mod cli;
 pub mod command;
 pub mod config;
-pub mod image;
 pub mod integration;
 pub mod log;
 pub mod login;

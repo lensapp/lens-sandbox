@@ -16,7 +16,7 @@ mod real;
 mod sign_in;
 
 pub use real::RealIntegrationSignIn;
-pub use sign_in::{IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+pub use sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
 
 #[derive(clap::Args)]
 pub struct IntegrationArgs {
@@ -33,7 +33,7 @@ pub enum IntegrationCommand {
     #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
     Remove(IntegrationRemoveArgs),
     #[command(
-        about = "Connect an integration to this directory's policy (oauth integrations sign in)."
+        about = "Bind an integration's per-machine value decision (oauth integrations sign in); records the id in this directory's policy."
     )]
     Connect(ConnectArgs),
     #[command(about = "Disconnect an integration from this directory's policy.")]
@@ -303,8 +303,8 @@ pub async fn connect(
             args.id
         );
     };
-    // An oauth integration authenticates by an interactive sign-in the service drives (a device code or a pkce browser redirect); only on success do we record it in the policy.
-    if integ.auth_kind == AuthKind::Oauth {
+    // An oauth integration authenticates by an interactive sign-in; a credential integration binds its per-machine value decision through the approval-window card. Either way the id is recorded only on success.
+    let closing = if integ.auth_kind == AuthKind::Oauth {
         match signin.sign_in(&args.id, writer).await? {
             SignInOutcome::ServiceUnavailable => bail!(
                 "the background service must be running to sign in to {:?}; start it with `lns service start`",
@@ -313,9 +313,23 @@ pub async fn connect(
             SignInOutcome::Failed(reason) => {
                 bail!("sign-in to {:?} did not complete: {reason}", args.id)
             }
-            SignInOutcome::Completed => {}
+            SignInOutcome::Completed => format!(
+                "Connected {:?}; relaunch any running sandbox to pick it up.",
+                args.id
+            ),
         }
-    }
+    } else {
+        match signin.bind_credential(&args.id, writer).await? {
+            BindOutcome::ServiceUnavailable => bail!(
+                "the background service must be running to bind {:?}; start it with `lns service start`",
+                args.id
+            ),
+            BindOutcome::Failed(reason) => {
+                bail!("binding {:?} did not complete: {reason}", args.id)
+            }
+            BindOutcome::Completed(decision) => bind_message(&args.id, decision),
+        }
+    };
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
@@ -323,12 +337,23 @@ pub async fn connect(
     policy
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
-    writeln!(
-        writer,
-        "Connected {:?}; relaunch any running sandbox to pick it up.",
-        args.id
-    )?;
+    writeln!(writer, "{closing}")?;
     Ok(0)
+}
+
+/// Each completed value decision reads back what was bound on this machine — never an effect on any sandbox definition.
+fn bind_message(id: &str, decision: lns_ipc::CredentialBindDecision) -> String {
+    match decision {
+        lns_ipc::CredentialBindDecision::Stored => format!(
+            "Bound a value for {id:?} on this machine; the boundary injects it where a workload presents the placeholder."
+        ),
+        lns_ipc::CredentialBindDecision::HostDetect => format!(
+            "Bound {id:?} to the host-detected value on this machine; it resolves at the boundary at request time."
+        ),
+        lns_ipc::CredentialBindDecision::Denied => format!(
+            "Recorded a deny for {id:?} on this machine; requests carrying its placeholder will fail at the boundary."
+        ),
+    }
 }
 
 pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -667,15 +692,26 @@ mod tests {
 
     struct FakeSignIn {
         outcome: SignInOutcome,
+        bind: BindOutcome,
     }
     impl FakeSignIn {
         fn completed() -> Self {
             Self {
                 outcome: SignInOutcome::Completed,
+                bind: BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored),
             }
         }
         fn returning(outcome: SignInOutcome) -> Self {
-            Self { outcome }
+            Self {
+                outcome,
+                bind: BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored),
+            }
+        }
+        fn binding(bind: BindOutcome) -> Self {
+            Self {
+                outcome: SignInOutcome::Completed,
+                bind,
+            }
         }
     }
     impl IntegrationSignIn for FakeSignIn {
@@ -688,6 +724,18 @@ mod tests {
             Box::pin(async move {
                 writeln!(out, "(signing in to {id})")?;
                 Ok(outcome)
+            })
+        }
+
+        fn bind_credential<'a>(
+            &'a self,
+            id: &'a str,
+            out: &'a mut dyn Write,
+        ) -> super::sign_in::LocalBoxFuture<'a, Result<BindOutcome>> {
+            let bind = self.bind.clone();
+            Box::pin(async move {
+                writeln!(out, "(binding {id})")?;
+                Ok(bind)
             })
         }
     }
@@ -778,6 +826,101 @@ mod tests {
         assert!(
             policy.integrations.is_empty(),
             "a failed sign-in must not record the integration"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_binds_a_credential_and_describes_the_machine_scope() {
+        let dir = TempDir::new().unwrap();
+        let mut out = Vec::new();
+        connect(
+            &ConnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::binding(BindOutcome::Completed(
+                lns_ipc::CredentialBindDecision::HostDetect,
+            )),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("host-detected value on this machine"),
+            "got: {text}"
+        );
+        assert!(
+            !text.contains("relaunch any running sandbox"),
+            "a bind must not claim a sandbox effect: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_records_an_explicit_deny_distinctly() {
+        let dir = TempDir::new().unwrap();
+        let mut out = Vec::new();
+        connect(
+            &ConnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::binding(BindOutcome::Completed(
+                lns_ipc::CredentialBindDecision::Denied,
+            )),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Recorded a deny"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn connect_to_credential_fails_without_recording_when_the_bind_does_not_complete() {
+        let dir = TempDir::new().unwrap();
+        let err = connect(
+            &ConnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::binding(BindOutcome::Failed("the value decision timed out".into())),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
+        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        assert!(
+            policy.integrations.is_empty(),
+            "a failed bind must not record the integration"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_to_credential_reports_when_the_service_is_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let err = connect(
+            &ConnectArgs {
+                id: "gitlab".into(),
+                policy: None,
+            },
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::binding(BindOutcome::ServiceUnavailable),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("service must be running"),
+            "got: {err:#}"
         );
     }
 

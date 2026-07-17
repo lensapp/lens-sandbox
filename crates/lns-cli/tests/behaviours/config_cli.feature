@@ -14,18 +14,12 @@ Feature: lns config stores persistent run defaults
     When the developer gets the default "run.cpus"
     Then the command exits 1 with no output
 
-  Scenario: Setting a list default replaces all of its previous values
-    Given the default "run.env" is "TZ=UTC"
-    When the developer sets the default "run.env" to "CI=1 NO_COLOR=1"
-    Then getting "run.env" prints "CI=1" and "NO_COLOR=1" but not "TZ=UTC"
-
   Scenario: Listing shows every configured default
     Given the default "run.cpus" is "4"
-    And the default "run.env" is "TZ=UTC CI=1"
+    And the default "run.registry" is "ghcr.io"
     When the developer lists the configured defaults
     Then the listing shows "run.cpus = 4"
-    And the listing shows "run.env = TZ=UTC"
-    And the listing shows "run.env = CI=1"
+    And the listing shows "run.registry = ghcr.io"
 
   Scenario: Listing with nothing configured says so
     When the developer lists the configured defaults
@@ -59,15 +53,3 @@ Feature: lns config stores persistent run defaults
   Scenario: A zero memory default is rejected when set
     When the developer sets the default "run.mem" to "0"
     Then the command fails mentioning "run.mem"
-
-  Scenario: A malformed env default is rejected when set
-    When the developer sets the default "run.env" to "BARE"
-    Then the command fails mentioning "KEY=VALUE"
-
-  Scenario: A malformed volume default is rejected when set
-    When the developer sets the default "run.volume" to "data:relative"
-    Then the command fails mentioning "absolute"
-
-  Scenario: A malformed publish default is rejected when set
-    When the developer sets the default "run.publish" to "nonsense"
-    Then the command fails mentioning "nonsense"

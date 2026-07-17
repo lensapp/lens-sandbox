@@ -65,23 +65,20 @@ impl RealServiceClient {
 }
 
 pub(crate) async fn send_request(socket: &Path, request: &Request) -> Option<Response> {
-    let attempt = async {
-        let mut stream = UnixStream::connect(socket).await.ok()?;
-        let frame = encode_frame(request).ok()?;
-        stream.write_all(&frame).await.ok()?;
-        stream.shutdown().await.ok()?;
+    let mut stream = UnixStream::connect(socket).await.ok()?;
+    let frame = encode_frame(request).ok()?;
+    stream.write_all(&frame).await.ok()?;
+    stream.shutdown().await.ok()?;
 
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.ok()?;
-        decode_frame(&mut &buf[..]).ok()
-    };
-    timeout(PROBE_TIMEOUT, attempt).await.ok().flatten()
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.ok()?;
+    decode_frame(&mut &buf[..]).ok()
 }
 
 async fn try_ping_impl(socket: &Path) -> bool {
     matches!(
-        send_request(socket, &Request::Ping).await,
-        Some(Response::Pong)
+        timeout(PROBE_TIMEOUT, send_request(socket, &Request::Ping)).await,
+        Ok(Some(Response::Pong))
     )
 }
 

@@ -122,6 +122,51 @@ fn prune_plan_empty(world: &mut BehaviourWorld) {
     world.volume.prune_plan = Some((Vec::new(), 0));
 }
 
+#[given(expr = "the volume {string} is held by a running sandbox")]
+fn volume_held_by_running_sandbox(world: &mut BehaviourWorld, name: String) {
+    world.volume.refuse_message = Some(format!(
+        "volume {name:?} is held by a running sandbox; stop it first"
+    ));
+}
+
+#[given(expr = "the volume {string} is held by no running sandbox and named by no cached sandbox")]
+fn volume_is_prunable(world: &mut BehaviourWorld, name: String) {
+    let plan = world
+        .volume
+        .prune_plan
+        .get_or_insert((Vec::new(), 67_108_864));
+    plan.0.push(name);
+}
+
+#[given(expr = "the volume {string} is named by a cached sandbox")]
+fn volume_named_by_cached_sandbox(_world: &mut BehaviourWorld, _name: String) {
+    // no-op: a volume a cached sandbox names is not in the prune plan, so it is kept.
+}
+
+#[then(expr = "the volume {string} is removed")]
+fn volume_is_removed(world: &mut BehaviourWorld, name: String) -> Result<(), String> {
+    let output = &world.result.as_ref().ok_or("no CLI run captured")?.output;
+    if output.contains(&name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {name:?} in the pruned output, got {output:?}"
+        ))
+    }
+}
+
+#[then(expr = "the volume {string} is kept")]
+fn volume_is_kept(world: &mut BehaviourWorld, name: String) -> Result<(), String> {
+    let output = &world.result.as_ref().ok_or("no CLI run captured")?.output;
+    if output.contains(&name) {
+        Err(format!(
+            "{name:?} must be kept, but it was reported removed: {output:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[given(expr = "the service will fail to prune {string} with {string}")]
 fn prune_failure(world: &mut BehaviourWorld, name: String, error: String) {
     world
