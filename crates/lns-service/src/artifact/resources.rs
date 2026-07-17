@@ -50,17 +50,21 @@ fn parse_cpu_text(text: &str) -> Option<u32> {
     }
 }
 
+/// Ceiling on an artifact-declared VM memory size; a greedy or adversarial sandbox can't size the guest past this and starve the host (a user who genuinely needs more passes `-m` explicitly).
+const MAX_MEM_MIB: usize = 256 * 1024;
+
 fn quantity_to_mib(quantity: &Quantity) -> Option<usize> {
-    match quantity {
-        Quantity::Int(n) => (*n > 0).then_some(*n as usize),
-        Quantity::Text(text) => parse_mem_text(text),
-    }
+    let mib = match quantity {
+        Quantity::Int(n) => usize::try_from(*n).ok()?,
+        Quantity::Text(text) => parse_mem_text(text)?,
+    };
+    (1..=MAX_MEM_MIB).contains(&mib).then_some(mib)
 }
 
 fn parse_mem_text(text: &str) -> Option<usize> {
     let text = text.trim();
     if let Some(gib) = text.strip_suffix("Gi") {
-        return gib.trim().parse::<usize>().ok().map(|v| v * 1024);
+        return gib.trim().parse::<usize>().ok()?.checked_mul(1024);
     }
     if let Some(mib) = text.strip_suffix("Mi") {
         return mib.trim().parse::<usize>().ok();
@@ -140,6 +144,48 @@ mod tests {
         assert_eq!(
             resolve_size(Some(&too_many), &ResourceOverrides::default(), DEFAULTS),
             DEFAULTS
+        );
+    }
+
+    #[test]
+    fn a_memory_request_over_the_ceiling_or_that_overflows_falls_back_to_defaults() {
+        let over_ceiling = Resources {
+            cpu: None,
+            memory: Some(Quantity::Text("999999Gi".into())),
+        };
+        assert_eq!(
+            resolve_size(Some(&over_ceiling), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+            DEFAULTS.mem_mib,
+            "an artifact must not size the guest past the ceiling and starve the host"
+        );
+
+        let overflowing = Resources {
+            cpu: None,
+            memory: Some(Quantity::Text(format!("{}Gi", usize::MAX))),
+        };
+        assert_eq!(
+            resolve_size(Some(&overflowing), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+            DEFAULTS.mem_mib,
+            "a Gi value whose *1024 overflows must fall back, not wrap to garbage"
+        );
+
+        let huge_int = Resources {
+            cpu: None,
+            memory: Some(Quantity::Int(i64::MAX)),
+        };
+        assert_eq!(
+            resolve_size(Some(&huge_int), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+            DEFAULTS.mem_mib
+        );
+
+        let at_ceiling = Resources {
+            cpu: None,
+            memory: Some(Quantity::Int(MAX_MEM_MIB as i64)),
+        };
+        assert_eq!(
+            resolve_size(Some(&at_ceiling), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+            MAX_MEM_MIB,
+            "a request exactly at the ceiling is honored"
         );
     }
 }
