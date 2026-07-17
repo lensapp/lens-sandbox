@@ -2,14 +2,16 @@ Feature: authoring a sandbox
   A sandbox is authored on disk as `./lns.yaml` (kind: Sandbox). The author
   verbs scaffold it, validate it offline, and render its effective definition.
 
-  Scenario: init scaffolds a default sandbox definition with every spec field
+  Scenario: init scaffolds an agent example with every spec field
     Given the current directory has no lns.yaml
     When the user runs sandbox command "init"
     Then the exit code is 0
     And a file "lns.yaml" is created
     And the file "lns.yaml" contains "kind: Sandbox"
     And the file "lns.yaml" contains "apiVersion: lns.run/v1"
-    And the file "lns.yaml" contains "workdir: /workspace"
+    And the file "lns.yaml" contains "image: docker.io/nousresearch/hermes-agent:latest"
+    And the file "lns.yaml" contains "command: gateway run"
+    And the file "lns.yaml" contains "workdir: /opt/data"
     And the file "lns.yaml" contains "volumes:"
     And the file "lns.yaml" contains "env:"
     And the file "lns.yaml" contains "resources:"
@@ -19,6 +21,14 @@ Feature: authoring a sandbox
     And the file "lns.yaml" contains "credentials:"
     And the file "lns.yaml" contains "filesets:"
     And the file "lns.yaml" contains "ports:"
+    And a file "skills/SKILL.md" is created
+
+  Scenario: init keeps an existing skills directory untouched
+    Given the current directory has no lns.yaml
+    And the project directory "./skills" contains "SKILL.md"
+    When the user runs sandbox command "init"
+    Then the exit code is 0
+    And the file "skills/SKILL.md" contains "fixture contents"
 
   Scenario: the scaffolded definition is valid as written
     Given the current directory has no lns.yaml

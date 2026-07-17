@@ -28,31 +28,43 @@ lns init
 apiVersion: lns.run/v1
 kind: Sandbox
 metadata:
-  name: sandbox
+  name: hermes
 spec:
-  image: docker.io/library/alpine:3.20
-  command: sh
-  workdir: /workspace
-  env: {}
+  image: docker.io/nousresearch/hermes-agent:latest
+  command: gateway run
+  workdir: /opt/data
+  env:
+    HERMES_DASHBOARD: "1"
   resources:
-    cpu: 1
-    memory: 512Mi
+    cpu: 2
+    memory: 4Gi
   policy:
     defaultVerdict: ask
     allowedRoutes: []
-  integrations: []
+  integrations:
+    - anthropic
   credentials: []
   volumes:
-    - type: bind
-      source: .
-      target: /workspace
-  filesets: []
-  ports: []
+    - type: volume
+      source: hermes-data
+      target: /opt/data
+  filesets:
+    - path: ./skills
+      mountPath: /opt/data/skills
+  ports:
+    - container: 8642
+      host: 8642
+    - container: 9119
+      host: 9119
 ```
 
-The scaffold carries every `spec` field with its default value, so the file
-validates and runs as written: the current directory is bound at `/workspace`
-and every network request asks for approval.
+The scaffold is a working example — the open-source
+[Hermes agent](https://hermes-agent.nousresearch.com/) — exercising every `spec`
+field: agent state in a named volume, a scaffolded `./skills` directory (created
+next to `lns.yaml`) mounted into the agent, the `anthropic` integration injecting
+its key placeholder, published gateway and dashboard ports, and `ask` as the
+default network verdict. Swap the image and fields for your own workload; the
+file validates as written.
 
 The `spec` fields:
 

@@ -124,7 +124,7 @@ interchangeable everywhere a run is addressed.
 
 | Subcommand | Shortcut       | Meaning |
 | ---------- | -------------- | ------- |
-| `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
+| `init`     | `lns init`     | Scaffold a `./lns.yaml` (`kind: Sandbox`, a working agent example with every `spec` field) plus an example `./skills/SKILL.md` in this directory. |
 | `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. |
 | `show`     | —              | Render `./lns.yaml`'s effective definition (merged config, resolved values). |
 | `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. |

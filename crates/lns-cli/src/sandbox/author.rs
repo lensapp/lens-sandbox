@@ -10,26 +10,45 @@ pub const LNS_YAML: &str = "lns.yaml";
 const SCAFFOLD: &str = "apiVersion: lns.run/v1
 kind: Sandbox
 metadata:
-  name: sandbox
+  name: hermes
 spec:
-  image: docker.io/library/alpine:3.20
-  command: sh
-  workdir: /workspace
-  env: {}
+  image: docker.io/nousresearch/hermes-agent:latest
+  command: gateway run
+  workdir: /opt/data
+  env:
+    HERMES_DASHBOARD: \"1\"
   resources:
-    cpu: 1
-    memory: 512Mi
+    cpu: 2
+    memory: 4Gi
   policy:
     defaultVerdict: ask
     allowedRoutes: []
-  integrations: []
+  integrations:
+    - anthropic
   credentials: []
   volumes:
-    - type: bind
-      source: .
-      target: /workspace
-  filesets: []
-  ports: []
+    - type: volume
+      source: hermes-data
+      target: /opt/data
+  filesets:
+    - path: ./skills
+      mountPath: /opt/data/skills
+  ports:
+    - container: 8642
+      host: 8642
+    - container: 9119
+      host: 9119
+";
+
+pub const SKILLS_SKILL_MD: &str = "skills/SKILL.md";
+
+const SKILL_SCAFFOLD: &str = "---
+name: hello-sandbox
+description: Confirms mounted skills load by greeting from inside the sandbox.
+---
+
+When the user says hello, mention you are running inside a Lens Sandbox
+microVM and that this skill was mounted from the project's skills/ directory.
 ";
 
 /// A minimal filesystem seam so the author verbs are host-tested with an in-memory fake; `RealFs` in `real.rs` is the std::fs leaf.
@@ -97,7 +116,20 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
         .with_context(|| format!("writing {}", path.display()))?;
     writeln!(
         out,
-        "✓ created {LNS_YAML} — your sandbox definition, every field ready to edit\n\n  1. set spec.image (scaffolded to alpine:3.20)\n  2. boot it with `lns run`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-sandbox:1.0.0`"
+        "✓ created {LNS_YAML} — a Hermes agent sandbox, every field ready to edit"
+    )?;
+    let skill_path = cwd.join(SKILLS_SKILL_MD);
+    if !fs.exists(&skill_path) {
+        fs.write(&skill_path, SKILL_SCAFFOLD)
+            .with_context(|| format!("writing {}", skill_path.display()))?;
+        writeln!(
+            out,
+            "✓ created {SKILLS_SKILL_MD} — an example skill, mounted into the agent"
+        )?;
+    }
+    writeln!(
+        out,
+        "\n  1. connect your model key: `lns integration connect anthropic`\n  2. boot it: `lns run`\n  3. share it: `lns push`, e.g. `lns push ghcr.io/acme/hermes:1.0.0`"
     )?;
     Ok(0)
 }
@@ -215,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn init_scaffolds_a_default_definition() {
+    fn init_scaffolds_an_agent_example_with_a_skill() {
         let fs = MapFs::default();
         let mut out = Vec::new();
         let code = init(&fs, cwd(), &mut out).unwrap();
@@ -223,9 +255,26 @@ mod tests {
         let written = fs.read_to_string(&yaml_path(cwd())).unwrap();
         assert!(written.contains("kind: Sandbox"));
         assert!(written.contains("apiVersion: lns.run/v1"));
+        let skill = fs.read_to_string(&cwd().join(SKILLS_SKILL_MD)).unwrap();
+        assert!(skill.contains("name: hello-sandbox"), "got: {skill}");
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("✓ created lns.yaml"), "got: {text}");
+        assert!(text.contains("✓ created skills/SKILL.md"), "got: {text}");
         assert!(text.contains("`lns run`"), "got: {text}");
+    }
+
+    #[test]
+    fn init_keeps_an_existing_skill_file() {
+        let fs = fake("/work/skills/SKILL.md", "mine");
+        let mut out = Vec::new();
+        let code = init(&fs, cwd(), &mut out).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            fs.read_to_string(&cwd().join(SKILLS_SKILL_MD)).unwrap(),
+            "mine"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("✓ created skills/SKILL.md"), "got: {text}");
     }
 
     #[test]
