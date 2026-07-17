@@ -1,15 +1,113 @@
 # Running workloads
 
-Everything that runs inside a sandbox goes through `lns run`. Once a run is up,
-the `lns sandbox` family manages it: list runs, open extra sessions, read logs,
-and stop them. The model is deliberately close to `docker`.
+Lens Sandbox has one user-facing noun: the **sandbox**. A sandbox is defined by a
+`./lns.yaml` file that pins a base OCI image plus its command, environment, policy,
+and integrations. One directory is one sandbox. A sandbox is either **cached**
+(pulled or built, sitting in the local cache) or **running**.
+
+You drive it on two tiers:
+
+- The **top level** carries the docker-familiar verbs — `lns run`, `lns ps`,
+  `lns stop`, `lns pull`, `lns push`, and so on. Each (except `run`) is an exact
+  shortcut into the `lns sandbox` namespace.
+- **`lns sandbox <verb>`** is the complete surface. The lns-native verbs that have
+  no docker analogue — `validate`, `ls`, `prune` — live only there.
 
 The background service must be running first (`lns service start`).
+
+## Defining a sandbox
+
+Scaffold a `./lns.yaml` in the current directory with `lns init` (a shortcut for
+`lns sandbox init`):
+
+```bash
+lns init
+```
+
+```yaml
+apiVersion: lns.run/v1
+kind: Sandbox
+metadata:
+  name: sandbox
+spec:
+  image: docker.io/library/alpine:3.20
+  command: sh
+  workdir: /workspace
+  env: {}
+  resources:
+    cpu: 1
+    memory: 512Mi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes: []
+  integrations: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []
+```
+
+The scaffold carries every `spec` field with its default value, so the file
+validates and runs as written: the current directory is bound at `/workspace`
+and every network request asks for approval.
+
+The `spec` fields:
+
+| Field          | Meaning                                                                     |
+| -------------- | --------------------------------------------------------------------------- |
+| `image`        | The base OCI image the sandbox runs (**required**). Pin it by digest before publishing. |
+| `command`      | Command to run in the workload, replacing the image's default command.       |
+| `workdir`      | Absolute guest working directory. It is created when missing.                 |
+| `env`          | Non-secret environment variables seeded into the workload.                   |
+| `policy`       | The network policy — `defaultVerdict` and `allowedRoutes` (see [Policy](policy.md)). |
+| `integrations` | Ids of the [integrations](integrations.md) whose credentials and routes the sandbox needs. Declared ids arm at launch on any machine — no `lns integration connect` step; an id the machine's catalog doesn't know refuses the launch. |
+| `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
+| `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
+| `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
+| `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
+| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
+
+Check the definition offline — no network, no service — with `validate` and a
+target-less `lns inspect`:
+
+```bash
+lns sandbox validate     # schema, cross-field, and secret checks -> "lns.yaml is valid."
+lns inspect              # render the effective definition (merged config, resolved values)
+```
+
+`lns inspect` also takes a path (`.`, `lns.yaml`, `./dir`) to render another
+directory's definition, still offline; a run id or registry reference inspects
+live or cached state instead — see [`lns sandbox`](cli-reference.md#lns-sandbox).
+
+`validate` reports each problem with its cause and exits non-zero when the
+definition is broken:
+
+```text
+lns.yaml is not valid:
+  - schema: sandbox must carry an image; it is the base OCI image the sandbox runs
+```
 
 ## `lns run`
 
 ```bash
-lns run [OPTIONS] [IMAGE] [COMMAND...]
+lns run [OPTIONS] [REF] [-- COMMAND...]
+```
+
+`REF` is a sandbox reference: a **registry coordinate** (`ghcr.io/team/hermes:1.4.0`)
+or a **path to a local definition**. Omit it to run the `./lns.yaml` in the current
+directory; `.`, `lns.yaml`, and `./lns.yaml` mean the same thing, and a relative or
+absolute path runs another directory's definition (its relative binds and filesets
+root at that directory, compose-style, while the policy still comes from where you
+run):
+
+```bash
+lns run                                  # run ./lns.yaml in this directory
+lns run .                                # same
+lns run ../other-project                 # run that directory's lns.yaml
+lns run ghcr.io/acme/agent:latest        # run a published sandbox / image by reference
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
@@ -18,10 +116,21 @@ workload, bind-mount a directory with `-v /host/path:/guest/path` (see
 [Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
 attach a named volume instead.
 
-### Running an image
+### Running a definition vs. a reference
+
+The primary workflow is definition-first — `init`, edit `./lns.yaml`, `run`, then
+`push` to share:
 
 ```bash
 cd ~/dev/my-app
+lns init                                 # scaffold ./lns.yaml
+$EDITOR lns.yaml                         # set spec.image and the fields you need
+lns run                                  # run it
+```
+
+The quick path skips the file and names a reference directly:
+
+```bash
 lns run ghcr.io/acme/agent:latest
 ```
 
@@ -31,36 +140,20 @@ the microVM.
 ### Pinning an image by digest
 
 A tag like `:latest` is mutable — the registry can republish it at any time. To run
-exactly the bytes you vetted, pin the image by digest:
+exactly the bytes you vetted, pin the reference by digest, either in `spec.image`
+or on the command line:
 
 ```bash
 lns run ghcr.io/acme/agent@sha256:8a2c…
 ```
 
-`lns image pull` resolves and prints the pinnable reference for you. Pinned
-manifests are cached, so reruns of a pinned image don't re-consult the registry.
-
-### Managing the image cache
-
-Every pull lands in the service's content-addressed cache so the next run boots
-without re-downloading. Manage it with `lns image`:
-
-```bash
-lns image pull ghcr.io/acme/agent:latest  # pre-warm + resolve a pinnable digest
-lns image ls                              # cached images: digest, size, pull time, user
-lns image rm ghcr.io/acme/agent:latest    # drop one image (refused while a run uses it)
-lns image prune                           # drop every image no running sandbox uses
-```
-
-`rm` and `prune` never touch an image a live run is using, and only delete layers
-that no remaining cached image shares. `prune` asks for confirmation unless you
-pass `-f`/`--force`. Removing a cached image is always safe in the durable sense —
-the next `lns run` simply pulls it again.
+Pinned manifests are cached, so reruns of a pinned reference don't re-consult the
+registry. `lns pull` pre-warms the cache ahead of a run.
 
 ### Overriding the command
 
-A command after the image replaces the image's default command (Docker-style); an
-explicit `--` separator is still accepted:
+A command after the reference replaces the image's default command (Docker-style)
+while keeping its `ENTRYPOINT`; an explicit `--` separator is still accepted:
 
 ```bash
 lns run alpine:3.20 sh -c 'echo hello && uname -a'
@@ -68,20 +161,18 @@ lns run alpine:3.20 -- sh -c 'echo hello && uname -a'
 ```
 
 To replace the image's `ENTRYPOINT` as well, pass `--entrypoint`; the command after
-the image becomes its arguments (`--entrypoint ""` clears the entrypoint entirely):
+the reference becomes its arguments (`--entrypoint ""` clears the entrypoint
+entirely):
 
 ```bash
 lns run --entrypoint /bin/sh alpine:3.20 -c 'echo hi'
 ```
 
-### Imageless runs
+### A command with no reference
 
-Omit the image to boot a minimal guest and run a command directly. A command after
-`--` is required in this mode:
-
-```bash
-lns run -- /bin/sh
-```
+`lns run -- <command>` (or `lns run <command>` for an unambiguous word) runs the
+`./lns.yaml` definition with its command overridden — there is no imageless mode;
+a run always boots a sandbox definition or a published reference.
 
 ### Setting the run user and hostname
 
@@ -109,8 +200,15 @@ lns run --mem 2048 ghcr.io/acme/builder        # same thing, in MiB
 
 ### Working directory
 
-The workload starts in the image's `WORKDIR`, like `docker run`. Override it
-with `-w` (an absolute guest path, created inside the sandbox if missing):
+Set a portable working directory in `lns.yaml`, or override it for one run with
+`-w`. The precedence is explicit `--workdir`, then `spec.workdir`, then the
+image's `WORKDIR`. Every form must be an absolute guest path, and the directory
+is created inside the sandbox when it is missing.
+
+```yaml
+spec:
+  workdir: /workspace
+```
 
 ```bash
 lns run -w /workspace ghcr.io/acme/agent
@@ -124,20 +222,19 @@ handle works anywhere a run id is accepted:
 
 ```bash
 lns run -d --name reviewer ghcr.io/acme/agent
-lns sandbox logs reviewer
-lns sandbox stop reviewer
+lns logs reviewer
+lns stop reviewer
 ```
 
 A name may contain letters, digits, `_`, `.`, and `-`, and must not be all
 digits (so it is never mistaken for an id). Names are unique among the runs
-`lns sandbox ls` shows, and free up once the run is removed. Rename a run at any
-time with `lns sandbox rename <run> <new-name>`.
+`lns ps` shows, and free up once the run is removed.
 
 ### Persistent defaults
 
-Settings you'd otherwise repeat on every run can be stored once with
-[`lns config`](cli-reference.md#lns-config). A per-run flag always overrides its
-configured default:
+The resource gap-fillers you'd otherwise repeat on every run can be stored once
+with [`lns config`](cli-reference.md#lns-config). A per-run flag always overrides
+its configured default:
 
 ```bash
 lns config set run.cpus 4
@@ -146,10 +243,10 @@ lns run ghcr.io/acme/builder            # boots with 4 vCPUs · 2048 MiB
 lns run --cpus 2 ghcr.io/acme/builder   # per-run flag wins: 2 vCPUs
 ```
 
-Defaults exist for `run.cpus`, `run.mem`, `run.env`, `run.volume`, and
-`run.publish`. For the list keys, a flag overrides only the conflicting
-configured entry (same variable name, mount target, or host bind) — the rest
-still apply.
+The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment
+variables, volumes, and ports are properties of the sandbox itself — set them per
+run with the flags below, or bake the ones that always apply into the sandbox
+definition's `spec` (`env`, and so on).
 
 ### Environment variables
 
@@ -168,7 +265,8 @@ lns run --env-file app.env ghcr.io/acme/agent
 An env file holds one `KEY=VALUE` per line; blank lines and `#` comments are
 skipped. When the same variable appears more than once, later files win and
 `-e` beats every file. A bare `KEY` line with no `=` is rejected — passing
-host variables through implicitly would be a silent leak channel.
+host variables through implicitly would be a silent leak channel. Environment that
+should always apply belongs in the sandbox definition's `spec.env`.
 
 Secrets do **not** belong in either flag — `-e` and `--env-file` values are
 plain environment variables visible to the workload. Use the
@@ -201,6 +299,81 @@ lns volume prune               # delete every volume no running sandbox holds
 asks for confirmation unless you pass `-f`/`--force`. Everything else in a
 sandbox is ephemeral by design — volumes are the one place data persists, so
 removing one is permanent.
+
+### Declarative mounts
+
+Mounts that are part of the sandbox belong in `spec.volumes`. A named volume
+uses `type: volume`; a host bind uses `type: bind`:
+
+```yaml
+spec:
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+    - type: volume
+      source: agent-config
+      target: /home/node/.config/agent
+      readOnly: true
+```
+
+`target` is always an absolute guest path. A named-volume `source` follows the
+same naming rules as `lns run -v name:/path`. The older
+`{name: agent-config, target: /path, readOnly: true}` shape remains accepted.
+Duplicate targets in one `lns.yaml` are rejected.
+
+A relative bind source is resolved from the directory containing the local
+`lns.yaml`. For a published sandbox it is resolved from the directory where the
+consumer invokes `lns run`; this keeps `source: .` aligned with one directory =
+one project. Sources are paths, not shell expressions: Lens Sandbox performs no
+shell or environment-variable interpolation, so use `source: .`, not `$PWD`.
+Paths are normalized, and a relative source cannot escape the project with
+`..`.
+
+Launch flags are the final override layer. Lens Sandbox starts with the mounts
+from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
+`--mount` targets the same guest path, and keeps mounts with other targets.
+
+### Filesets — files shipped inside the artifact
+
+`spec.volumes` attaches the *consumer's* files: live host binds and named
+volumes on the machine where the sandbox runs. `spec.filesets` is the opposite
+direction — files the *author* ships **inside** the published artifact (agent
+settings, skills, prompt libraries), materialized into the guest at launch as a
+read-only snapshot:
+
+```yaml
+spec:
+  filesets:
+    - path: ./skills              # a directory in the author's project
+      mountPath: /root/.agent/skills
+    - ref: ghcr.io/team/settings@sha256:…   # a pre-published FileSet artifact
+      mountPath: /root/.agent/settings
+```
+
+- **`path`** names a directory in the authoring project. A local `lns run`
+  snapshots it at launch — the guest sees exactly what a consumer of the
+  published artifact would see (live files are `spec.volumes`' job). At
+  `lns push`, each `path` directory is packed into a deterministic FileSet
+  artifact, uploaded alongside the sandbox, and rewritten to a digest-pinned
+  `ref` in the published config — the same publish-time pinning `spec.image`
+  gets.
+- **`ref`** names a pre-published FileSet artifact, always pinned by digest. A
+  pulled sandbox's filesets are fetched and materialized at launch; `lns
+  inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
+  review what a sandbox ships before running it, and the run summary
+  discloses them as `Fileset:` lines.
+- Each entry sets exactly one of `path`/`ref`. `mountPath` is an absolute
+  guest path; duplicates — including collisions with a volume `target` — are
+  rejected offline.
+- A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
+  fileset refuses `validate`, `run`, and `push` outright: a fileset is baked
+  into an artifact, so there is no keep/drop prompt to catch it later — real
+  secrets stay outside the workload.
+
+The trust model is pinning plus disclosure: a published sandbox whose fileset
+ref is not digest-pinned is refused, and what a sandbox ships is always
+visible in `lns inspect` before anything runs.
 
 ### Host bind mounts
 
@@ -247,6 +420,11 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
 The run summary lists each bind, its mode, and the disposition of every detected
 secret (`kept (exposed)` / `dropped`).
 
+Declarative binds use this exact scan, prompt, remembered KEEP/DROP decision,
+masking, validation, and audit path. A published sandbox is inspected and pinned
+before launch so its bind declarations can be shown and approved on the consumer
+host; publishing a sandbox never grants it silent access to host files.
+
 > **The automatic scan is top-level only.** Only the immediate contents of the bind
 > root are scanned for secret shapes, so a secret nested in a subdirectory
 > (`packages/api/.env`, a key under `server/certs/`, credentials embedded in
@@ -272,6 +450,23 @@ The format is `[host_ip:]hostport:containerport[/proto]`:
 - IPv6 host IPs go in brackets: `[::1]:8080:3000`.
 - Only `tcp` is supported today; `udp` is rejected.
 
+Declared `spec.ports` follow the docker family on both sides of the trust line:
+
+- **Your own `./lns.yaml` is `docker compose up`**: every declared port
+  publishes automatically — the `host:` value when present, the container
+  number otherwise. The definition in your directory is policy you wrote;
+  the run summary's `Ports:` line discloses each binding.
+- **A pulled sandbox is `docker run`**: its declared ports are EXPOSE-style
+  disclosure, not a grant — a bare run publishes nothing, and the summary
+  lists them as declared but not published. Opt in to the declared set with
+  `-P`/`--publish-declared` (same mapping). A pulled artifact's definition is
+  policy you run into, so inbound access stays yours to grant.
+- Declared publishing always binds loopback — compose's `0.0.0.0` default is
+  deliberately not copied. To expose wider, name the port explicitly with
+  `-p host_ip:hostport:containerport`.
+- Explicit `-p` entries combine with the declared set; on a container-port
+  conflict the explicit `-p` wins.
+
 ### Interactive, TTY, and detached sessions
 
 | Flag                  | Default | Meaning                                                              |
@@ -289,7 +484,7 @@ lns run -d ghcr.io/acme/long-job
 ```
 
 A detached run is reachable later via the
-[`lns sandbox` lifecycle verbs](#lns-sandbox--managing-runs-youve-started).
+[running-sandbox lifecycle verbs](#managing-running-sandboxes).
 `-d` cannot be combined with `-i`/`-t`.
 
 ### Detaching from an attached run
@@ -297,8 +492,8 @@ A detached run is reachable later via the
 While attached, the detach chord (default `ctrl-p,ctrl-q`) is a docker-style
 detach: `lns` returns `0` and the run keeps executing in the background — no
 signal is sent to the workload. Re-join it any time with
-[`lns sandbox attach`](#attaching), and detach again with the same chord. Change
-the chord with `--detach-keys`:
+[`lns attach`](#attaching), and detach again with the same chord. Change the chord
+with `--detach-keys`:
 
 ```bash
 lns run --detach-keys ctrl-x,ctrl-x ghcr.io/acme/agent
@@ -310,84 +505,156 @@ A deliberate detach is distinct from the `lns` process dying unexpectedly: if th
 CLI is killed (or its connection drops) without the chord, the attached run is
 cancelled. Use the chord — or start the run with `-d` — to step away safely.
 
-## `lns sandbox` — managing runs you've started
+## Distributing a sandbox
 
-Everything you do to a run after starting it lives under `lns sandbox`:
+Publishing is one step. `lns push` (a shortcut for `lns sandbox push`) builds
+`./lns.yaml` and uploads it to a registry as a sandbox artifact:
 
 ```bash
-lns sandbox ls                 # list active runs
-lns sandbox exec 7 -- bash     # open another session inside a run
-lns sandbox kill 7             # send one signal (default SIGTERM)
-lns sandbox stop 7             # SIGTERM, wait up to 10s, then SIGKILL
-lns sandbox stop 7 -t 30       # give it longer to clean up
-lns sandbox logs 7             # print the captured output so far
-lns sandbox logs -f 7          # ...and keep following until it exits
-lns sandbox attach 7           # re-join a detached run live
-lns sandbox inspect 7          # state + launch config as JSON
-lns sandbox stats 7            # CPU share and memory, sampled over 1s
-lns sandbox rename 7 reviewer  # name a run (or rename it), docker-rename style
-lns sandbox rm 7               # drop one finished run from the list
-lns sandbox prune              # drop every finished run from the list
+lns push ghcr.io/acme/reviewer:1.0.0
 ```
 
-Every verb takes a run's **name** as readily as its numeric id — `lns sandbox
-stop reviewer` and `lns sandbox stop 7` are equivalent. The pre-namespace
-spellings `lns ls`, `lns exec`, and `lns kill` keep working as hidden aliases.
+`lns push --dry-run` does everything short of uploading — validates the
+definition, packs the filesets, builds the artifact — and prints the digests
+that would publish (`npm publish --dry-run`-style), so you can preview a
+release offline.
+
+Pushing needs a stored login with **push access** for the registry — sign in once
+with `lns login`. For `ghcr.io` that's a GitHub token with the `write:packages`
+scope, pushed to a repository path you own; the GitHub CLI mints one directly:
+
+```bash
+gh auth refresh --scopes write:packages
+gh auth token | lns login ghcr.io --username <YOUR-GITHUB-USER> --password-stdin
+```
+
+For any other registry, pipe a push-scoped token the same way:
+
+```bash
+echo "$TOKEN" | lns login registry.example.com --username <USER> --password-stdin
+```
+
+A refused push says which of the two it is — no stored login, or a stored login
+the registry rejected (expired, missing push scope, or the wrong repository
+path) — and prints the sign-in recipe to fix it.
+
+On the other side, `lns pull` fetches a published sandbox and its base image into
+the local cache, and `lns run` can boot it straight from the reference:
+
+```bash
+lns pull ghcr.io/acme/reviewer:1.0.0     # pre-warm the cache
+lns run  ghcr.io/acme/reviewer:1.0.0     # run it
+```
+
+`lns push` preserves `workdir` and every mount declaration in the artifact.
+Consumers resolve relative binds against their own project directory, not the
+publisher's. Preflight pins the resolved artifact digest; after `lns pull` has
+cached that artifact and its referenced OCI content, the published sandbox can
+start offline from the cached snapshot.
+
+Re-reference a cached sandbox under another tag with `lns tag` (docker-tag style):
+
+```bash
+lns tag ghcr.io/acme/reviewer:1.0.0 ghcr.io/acme/reviewer:stable
+```
+
+## Managing running sandboxes
+
+Everything you do to a run after starting it is a top-level docker-style verb, each
+an exact shortcut into `lns sandbox`:
+
+```bash
+lns ps                     # list running sandboxes with their CPU and memory
+lns exec 7 -- bash         # open another session inside a run
+lns kill 7                 # send one signal (default SIGTERM)
+lns stop 7                 # SIGTERM, wait up to 10s, then SIGKILL
+lns stop 7 -t 30           # give it longer to clean up
+lns logs 7                 # print the captured output so far
+lns logs -f 7              # ...and keep following until it exits
+lns attach 7               # re-join a detached run live
+lns inspect 7              # state + launch config as JSON
+```
+
+The full namespace holds the same verbs plus the lns-native `ls` — the
+alias-bearing list of **cached** sandboxes (`lns sandbox ls` / `lns sandbox list`),
+the counterpart to `lns ps`'s list of running ones:
+
+```bash
+lns sandbox ls             # list cached sandboxes (pulled or built)
+lns sandbox exec 7 -- bash # (identical to `lns exec 7 -- bash`)
+```
+
+Every verb takes a run's **name** as readily as its numeric id — `lns stop
+reviewer` and `lns stop 7` are equivalent. `exec` is also reachable as the bare
+`lns exec`.
 
 ### Exec — another session inside a run
 
-`lns sandbox exec 7 -- bash` opens a second session, like `docker exec`. The
-run id is shown by `lns run -d` and `lns sandbox ls`. `-i`, `-t`, and
-`--detach-keys` work as they do for `lns run`; detaching from an exec session
-closes only that session — the run and any other sessions keep going. This is
-also how you open a debugging shell alongside a misbehaving workload without
-disturbing it.
+`lns exec 7 -- bash` opens a second session, like `docker exec`. The run id is
+shown by `lns run -d` and `lns ps`. `-i`, `-t`, and `--detach-keys` work as they do
+for `lns run`; detaching from an exec session closes only that session — the run
+and any other sessions keep going. This is also how you open a debugging shell
+alongside a misbehaving workload without disturbing it.
 
 ### Stopping vs killing
 
-`lns sandbox kill` sends one signal (case-insensitive, bare or
-`SIG`-prefixed: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and returns.
-`lns sandbox stop` owns the whole shutdown: it sends `SIGTERM`, waits up to
-the timeout for the workload to exit, and only then sends `SIGKILL`. The
-command reports which of the two happened — `stopped run #7` for a graceful
-exit, `killed run #7` when it had to escalate.
+`lns kill` sends one signal (case-insensitive, bare or `SIG`-prefixed: `TERM`,
+`INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and returns. `lns stop` owns the whole
+shutdown: it sends `SIGTERM`, waits up to the timeout for the workload to exit, and
+only then sends `SIGKILL`. The command reports which of the two happened —
+`stopped run #7` for a graceful exit, `killed run #7` when it had to escalate.
 
 ### Logs
 
 The service keeps a rolling capture of every run's stdout and stderr — the most
-recent 2 MiB — for as long as the run is listed by `lns sandbox ls`. `lns sandbox logs`
-prints what's buffered; `-f` streams new output until the run exits. Output of
-exec sessions is not captured, only the run's primary session.
+recent 2 MiB — for as long as the run is listed. `lns logs` prints what's buffered;
+`-f` streams new output until the run exits. Output of exec sessions is not
+captured, only the run's primary session.
 
 ### Attaching
 
-`lns sandbox attach` joins a run's output from now on (no history replay) and
-forwards your keystrokes when the run was started with stdin open. The detach
-chord (default `ctrl-p,ctrl-q`) leaves the run running and returns you to your
-shell — docker-attach style, no signal is sent — so it's safe to step away from
-a `-d` run you want to keep alive. A run started with `-d` has stdin closed, so
-attach is primarily a live view of its output.
+`lns attach` joins a run's output from now on (no history replay) and forwards your
+keystrokes when the run was started with stdin open. The detach chord (default
+`ctrl-p,ctrl-q`) leaves the run running and returns you to your shell —
+docker-attach style, no signal is sent — so it's safe to step away from a `-d` run
+you want to keep alive. A run started with `-d` has stdin closed, so attach is
+primarily a live view of its output.
 
 ### Inspecting
 
-`lns sandbox inspect` prints one JSON document with the run's status, image,
-command, and launch configuration (cpus, memory, env, ports, volumes, run-as
-identity), plus the contents of its policy file when that file is readable on
-this machine.
+`lns inspect <target>` reads whichever kind of sandbox the target names. For a
+**running** run it prints one JSON document with the run's status, image, command,
+and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
+the contents of its policy file when that file is readable on this machine. For a
+**cached** reference it prints the artifact's kind and definition — a plain `Image`,
+or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and integrations,
+flagging a permissive default policy.
 
-### Stats
+### Listing resource use
 
-`lns sandbox stats` samples `/proc` inside the guest over one second and
-reports the sandbox's CPU share and memory use — the microVM is the workload,
-so the numbers cover everything the run is doing.
+`lns ps` lists running sandboxes with their CPU share and memory — the microVM is
+the workload, so the numbers cover everything the run is doing.
 
-### Cleaning up the list
+## Cleaning up the cache
 
-A finished run lingers in `lns sandbox ls` (as `exited`) until its teardown
-completes, so you can still read its captured logs. To drop it sooner, `lns
-sandbox rm 7` removes one finished run; `lns sandbox prune` removes every
-finished run at once. Both refuse to touch a run that is still running — stop it
-first with `lns sandbox stop`. Removing a run also discards its buffered logs.
+Cached sandboxes accumulate as you pull and build. Remove one with `lns rm` (a
+shortcut for `lns sandbox rm`); it frees the layers no remaining cached sandbox
+shares and refuses a reference that a run is still using:
+
+```bash
+lns rm ghcr.io/acme/reviewer:1.0.0
+```
+
+`lns sandbox prune` removes every cached sandbox not held by a running one,
+reclaiming the disk at once. It requires `-f`/`--force` — there is no interactive
+prompt, so nothing is swept until you ask for it explicitly:
+
+```bash
+lns sandbox prune --force
+```
+
+Removing a cached sandbox is always safe in the durable sense — the next `lns run`
+or `lns pull` simply fetches or rebuilds it again.
 
 ## See also
 

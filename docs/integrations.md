@@ -48,10 +48,30 @@ Remove a user integration (bundled ones can't be removed):
 lns integration remove acme
 ```
 
-## Connecting
+## Reaching a workload
 
-An integration only affects a project once you **connect** it, which records it in
-that directory's [`lns-policy.yaml`](policy.md):
+An integration reaches a project's workloads in any of three ways:
+
+- **Declared in the sandbox definition.** List its id under `spec.integrations`
+  in [`./lns.yaml`](running-workloads.md#defining-a-sandbox). Declaring is
+  disclosure and arming in one: anyone who runs the sandbox — from the local
+  definition or a published copy — gets the integration armed at launch, with no
+  per-directory setup. An id the machine's catalog doesn't know refuses the
+  launch and points at `lns integration add`.
+- **Required as a credential slot.** A definition's `spec.credentials` entry
+  names an integration, the env var it is injected as (remapping the catalog
+  default), and whether the workload requires it. A slot arms like a declared
+  integration under the slot's env name. A **required** slot with no value
+  bound on the machine refuses the launch before any microVM boots — naming
+  the credential, its injection target, and the `lns integration connect` fix —
+  and a credential you've denied refuses distinctly. An optional slot runs
+  reactively. A required `oauth`-kind slot blocks on the sign-in instead.
+- **Connected to the directory.** `lns integration connect` binds the
+  integration's per-machine [value decision](credentials.md#value-decisions) —
+  the approval-window card for a credential integration, the sign-in for an
+  `oauth` one — and records the id in that directory's
+  [`lns-policy.yaml`](policy.md), which is also how a directory with no
+  definition arms an integration:
 
 ```bash
 lns integration connect gitlab
@@ -69,12 +89,15 @@ integrations:
   - gitlab
 ```
 
-When a connected integration's run starts, its declared routes are allowed and its
-placeholder is seeded. The first request carrying that placeholder follows the
-ordinary credential [value decision](credentials.md#value-decisions) — it pauses for
-approval if you haven't bound a value yet, where you choose to use the host value,
-store one, or deny. A new integration reaches a workload only at launch, so relaunch
-a running sandbox to pick it up.
+The two sources union at launch. However an integration is armed — declared or
+connected — its declared routes are allowed and its placeholder is seeded. The
+first request carrying that placeholder follows the ordinary credential
+[value decision](credentials.md#value-decisions) — it pauses for approval if you
+haven't bound a value yet, where you choose to use the host value, store one, or
+deny. A declared `oauth` integration with no sign-in on this machine blocks the
+launch until the sign-in completes, so the workload never starts half-armed. A
+new integration reaches a workload only at launch, so relaunch a running sandbox
+to pick it up.
 
 ## The catalog file
 

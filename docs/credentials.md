@@ -29,9 +29,10 @@ routes it needs. `openai`, `anthropic`, `bedrock`, `linear`, `telegram`, `gitlab
 and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
 (device sign-in) and `openrouter` as an `oauth` integration (pkce browser sign-in).
 Declare your own for an internal API with `lns integration add`
-(see [Integrations](integrations.md)). Connect one to a project with
-`lns integration connect <id>`, which records it under `integrations:` in that
-directory's `lns-policy.yaml`.
+(see [Integrations](integrations.md)). A sandbox definition that lists a provider
+under `spec.integrations` arms it at launch on any machine; for a directory
+without a definition, `lns integration connect <id>` records it under
+`integrations:` in that directory's `lns-policy.yaml`.
 
 ## Value decisions
 
@@ -39,11 +40,19 @@ A provider's *value decision* is per-machine — it's how the real secret (or th
 choice to deny) is bound on your machine. It's stored in `~/.lns-credentials.json`,
 separate from the shareable `lns-policy.yaml`, so secrets are never committed.
 
-Decisions are made interactively: the first request that carries a placeholder
-pauses for an approval — the same allow / deny / ask flow as
-[network policy](policy.md) — where you choose to use the value Lens Sandbox detects
-on the host, store a specific value at the boundary, or deny (requests carrying the
-placeholder then fail at the boundary). The decision is remembered for next time.
+Decisions are made interactively, at either of two moments:
+
+- **Reactively** — the first request that carries a placeholder pauses for an
+  approval, the same allow / deny / ask flow as [network policy](policy.md).
+- **Proactively** — `lns integration connect <id>` raises the same card in the
+  approval window before any run, which is how you bind a credential a sandbox
+  definition **requires**: a required slot (`spec.credentials` with
+  `required: true`) with no decision on your machine refuses the launch and
+  names this command as the fix. A denied credential refuses distinctly.
+
+Either way you choose to use the value Lens Sandbox detects on the host, store a
+specific value at the boundary, or deny (requests carrying the placeholder then
+fail at the boundary). The decision is remembered for next time.
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
 than a pasted secret it's obtained by an interactive **sign-in**
