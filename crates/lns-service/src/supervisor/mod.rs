@@ -80,6 +80,13 @@ impl SupervisorSession {
         user_env: Vec<String>,
     ) -> Result<Option<Self>> {
         let Some(policy_path) = policy else {
+            if sandbox_policy.is_some() {
+                bail!(
+                    "this sandbox ships a network policy but no local policy path was resolved to \
+                     layer it under; refusing to launch it unsupervised (its policy would go \
+                     unenforced)"
+                );
+            }
             return Ok(None);
         };
         adapter::start(
@@ -302,6 +309,30 @@ mod tests {
         assert!(
             result.is_none(),
             "no policy → unsupervised, no relay spun up"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_policy_refuses_a_shipped_policy_with_no_local_path() {
+        let mut sandbox_policy = lns_policy::Policy::default();
+        sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
+        let result = SupervisorSession::start_if_policy(
+            "aa42".to_string(),
+            "vm-42".into(),
+            None,
+            Some(&sandbox_policy),
+            &[],
+            PathBuf::from("/tmp"),
+            vec![],
+        )
+        .await;
+        let err = match result {
+            Ok(_) => panic!("a sandbox that ships a policy must not boot unsupervised"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("refusing to launch it unsupervised"),
+            "got: {err:#}"
         );
     }
 
