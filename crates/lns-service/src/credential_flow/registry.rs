@@ -29,7 +29,7 @@ pub fn expand_credentials_with_custom(
         .map(|p| p as &dyn Provider)
         .map(|p| Credential {
             id: p.id().to_string(),
-            env_var: Some(p.env_var().to_string()),
+            env_var: p.seeds_env().then(|| p.env_var().to_string()),
             placeholder: Some(p.placeholder().to_string()),
             injections: match resolve(p, state, detect_host) {
                 Some(v) => p.injections(&v),
@@ -79,6 +79,25 @@ mod tests {
                 c.id
             );
         }
+    }
+
+    #[test]
+    fn a_detect_only_provider_carries_its_placeholder_and_injections_but_no_env_var() {
+        let custom = vec![DefProvider::new(acme_def()).detect_only()];
+        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let acme = creds.iter().find(|c| c.id == "acme").unwrap();
+        assert_eq!(
+            acme.env_var, None,
+            "a connectable provider must not seed an env var into the workload"
+        );
+        assert!(
+            acme.placeholder.is_some(),
+            "the MITM still needs the placeholder to detect it on the wire"
+        );
+        assert!(
+            !acme.injections.is_empty(),
+            "the domain stays declared so an on-domain connect offer can still fire"
+        );
     }
 
     #[test]

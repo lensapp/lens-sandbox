@@ -13,12 +13,23 @@ use crate::credential_flow::detection::{EnvVarDetector, HostDetector};
 pub struct DefProvider {
     def: ProviderDef,
     detector: EnvVarDetector,
+    seed_env: bool,
 }
 
 impl DefProvider {
     pub fn new(def: ProviderDef) -> Self {
         let detector = EnvVarDetector::new(def.env_var.clone());
-        Self { def, detector }
+        Self {
+            def,
+            detector,
+            seed_env: true,
+        }
+    }
+
+    /// Mark a connectable (undeclared) provider so its placeholder is known to the MITM for an on-domain connect offer but never seeded into the workload env.
+    pub fn detect_only(mut self) -> Self {
+        self.seed_env = false;
+        self
     }
 }
 
@@ -70,6 +81,9 @@ impl Provider for DefProvider {
     }
     fn unarmed_injections(&self) -> Vec<CredentialInjection> {
         self.def.injections.iter().flat_map(unarmed).collect()
+    }
+    fn seeds_env(&self) -> bool {
+        self.seed_env
     }
 }
 
@@ -234,6 +248,25 @@ mod tests {
         assert_eq!(p.id(), "test");
         assert_eq!(p.env_var(), "TEST_TOKEN");
         assert_eq!(p.placeholder(), "test_LNSPLACEHOLDER");
+    }
+
+    #[test]
+    fn a_provider_seeds_its_env_by_default_and_detect_only_opts_out() {
+        let p = single(InjectionKind::BearerHeader, "api.test");
+        assert!(
+            p.seeds_env(),
+            "a declared provider seeds its placeholder env"
+        );
+        let connectable = single(InjectionKind::BearerHeader, "api.test").detect_only();
+        assert!(
+            !connectable.seeds_env(),
+            "a connectable provider must not seed the workload env"
+        );
+        assert_eq!(
+            connectable.unarmed_injections().len(),
+            1,
+            "detect-only keeps its injection so an on-domain connect offer still fires"
+        );
     }
 
     #[test]
