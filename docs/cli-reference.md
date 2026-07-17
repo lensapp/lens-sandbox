@@ -49,8 +49,11 @@ Run a sandbox in a microVM.
 lns run [OPTIONS] [REF] [-- COMMAND...]
 ```
 
-`REF` is a **registry coordinate** (`ghcr.io/team/hermes:1.4.0`) or a local
-**`lns.yaml`**; omit it to run the `./lns.yaml` in the current directory. A
+`REF` is a **registry coordinate** (`ghcr.io/team/hermes:1.4.0`) or a **path to a
+local definition** — `.`, `lns.yaml`, `./lns.yaml`, or a relative/absolute path to
+a directory holding one; omit it to run the `./lns.yaml` in the current directory.
+A path-named definition's relative binds and filesets root at its own directory,
+compose-style; the policy still comes from where you run. A
 `COMMAND` after the reference overrides the image's default command (Docker-style
 `lns run alpine echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
 separator is still accepted, and a command after `--` with no `REF` is an imageless

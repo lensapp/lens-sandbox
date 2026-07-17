@@ -1,41 +1,86 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::sandbox::author::{Fs, LNS_YAML, load_definition_json};
+use crate::sandbox::author::{Fs, LNS_YAML, load_definition_json_at};
 
-/// What `lns run` launches: a registry reference the service resolves and classifies, or the local `./lns.yaml` sandbox definition run directly.
+/// What `lns run` launches: a registry reference the service resolves and classifies, or a local `lns.yaml` sandbox definition run directly, rooted at its own directory.
 #[derive(Debug)]
 pub enum RunTarget {
     Reference(String),
     Local {
         def: Box<lns_artifact::sandbox::Definition>,
         json: String,
+        project_dir: PathBuf,
     },
 }
 
-/// Resolve the run reference: a given REF is a registry coordinate; an omitted REF runs the current directory's `lns.yaml`.
+/// Resolve the run reference: a path-shaped REF (`.`, `lns.yaml`, `./…`, `../…`, `/…`) names a local definition, an omitted REF runs the current directory's `lns.yaml`, and anything else is a registry coordinate.
 pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<RunTarget> {
-    match reference {
-        Some(reference) => Ok(RunTarget::Reference(reference.to_string())),
-        None => {
-            if !fs.exists(&cwd.join(LNS_YAML)) {
-                bail!("no lns.yaml in the current directory; run `lns init` to create one");
+    let file = match reference {
+        Some(reference) if !is_definition_path(reference) => {
+            return Ok(RunTarget::Reference(reference.to_string()));
+        }
+        Some(reference) => definition_file(reference, cwd),
+        None => cwd.join(LNS_YAML),
+    };
+    let project_dir = file
+        .parent()
+        .context("resolving the definition's directory")?
+        .to_path_buf();
+    if !fs.exists(&file) {
+        bail!(
+            "no {LNS_YAML} in {}; run `lns init` there to create one",
+            project_dir.display()
+        );
+    }
+    let json = load_definition_json_at(fs, &file)?;
+    let def = lns_artifact::sandbox::parse(&json)?;
+    let problems = crate::sandbox::fileset::path_fileset_problems(fs, &project_dir, &def);
+    if !problems.is_empty() {
+        bail!("{}", problems.join("\n"));
+    }
+    let json = absolutize_fileset_paths(json, &def, &project_dir)?;
+    let json = String::from_utf8(json).context("definition json was not utf-8")?;
+    Ok(RunTarget::Local {
+        def: Box::new(def),
+        json,
+        project_dir,
+    })
+}
+
+/// Docker-familiar muscle memory types `lns run .` or `lns run lns.yaml`; a conservative path shape keeps every plausible registry coordinate (even `team/config.yaml`) a reference.
+fn is_definition_path(reference: &str) -> bool {
+    reference == "."
+        || reference == ".."
+        || reference == LNS_YAML
+        || reference.starts_with("./")
+        || reference.starts_with("../")
+        || reference.starts_with('/')
+        || reference.ends_with(&format!("/{LNS_YAML}"))
+}
+
+fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
+    let path = normalize(&cwd.join(reference));
+    if path.file_name() == Some(LNS_YAML.as_ref()) {
+        path
+    } else {
+        path.join(LNS_YAML)
+    }
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
             }
-            let json = load_definition_json(fs, cwd)?;
-            let def = lns_artifact::sandbox::parse(&json)?;
-            let problems = crate::sandbox::fileset::path_fileset_problems(fs, cwd, &def);
-            if !problems.is_empty() {
-                bail!("{}", problems.join("\n"));
-            }
-            let json = absolutize_fileset_paths(json, &def, cwd)?;
-            let json = String::from_utf8(json).context("definition json was not utf-8")?;
-            Ok(RunTarget::Local {
-                def: Box::new(def),
-                json,
-            })
+            other => out.push(other),
         }
     }
+    out
 }
 
 /// The wire definition roots each path fileset in the consumer's project, the same way bind sources resolve, so the service snapshots exactly the directories this machine declared.
@@ -66,6 +111,14 @@ impl RunTarget {
     /// True when the service must classify the reference and refuse a plain image; false for a local base-image run the CLI already validated.
     pub fn verify_sandbox(&self) -> bool {
         matches!(self, RunTarget::Reference(_))
+    }
+
+    /// A local definition's relative bind sources and filesets root at its own directory, compose-style.
+    pub fn project_dir(&self) -> Option<&Path> {
+        match self {
+            RunTarget::Reference(_) => None,
+            RunTarget::Local { project_dir, .. } => Some(project_dir),
+        }
     }
 
     /// The base OCI image the service boots: the reference itself, or the local definition's declared base image.
@@ -151,6 +204,63 @@ mod tests {
         let err = resolve(None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("no lns.yaml"), "got: {err:#}");
         assert!(format!("{err:#}").contains("lns init"), "got: {err:#}");
+    }
+
+    #[test]
+    fn dot_and_yaml_shaped_references_resolve_the_local_definition() {
+        let fs = fake("/work/lns.yaml", local_yaml());
+        for reference in [".", "lns.yaml", "./lns.yaml", "./"] {
+            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
+            assert!(!target.verify_sandbox(), "ref {reference:?}");
+            assert_eq!(target.project_dir(), Some(Path::new("/work")));
+        }
+    }
+
+    #[test]
+    fn a_relative_or_absolute_path_resolves_that_directorys_definition() {
+        let fs = fake("/other/lns.yaml", local_yaml());
+        for reference in ["../other", "../other/lns.yaml", "/other", "/other/lns.yaml"] {
+            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
+            assert_eq!(
+                target.project_dir(),
+                Some(Path::new("/other")),
+                "ref {reference:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_definitions_filesets_root_at_its_own_directory() {
+        let fs = MapFs::with(&[
+            (
+                "/other/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            ),
+            ("/other/skills/prompts.md", "p"),
+        ]);
+        let target = resolve(Some("/other"), &fs, cwd()).unwrap();
+        let json = target.definition_json().expect("local definition");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["filesets"][0]["path"], "/other/skills");
+    }
+
+    #[test]
+    fn a_path_shaped_reference_without_a_definition_names_its_directory() {
+        let fs = MapFs::default();
+        let err = resolve(Some("../other"), &fs, cwd()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("no lns.yaml in /other"), "got: {text}");
+        assert!(text.contains("lns init"), "got: {text}");
+    }
+
+    #[test]
+    fn a_repository_name_ending_in_yaml_stays_a_registry_reference() {
+        let fs = MapFs::default();
+        let target = resolve(Some("team/config.yaml"), &fs, cwd()).unwrap();
+        assert!(target.verify_sandbox());
+        assert_eq!(target.image(), "team/config.yaml");
     }
 
     #[test]

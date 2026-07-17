@@ -103,9 +103,12 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
 }
 
 pub fn load_definition_json<F: Fs>(fs: &F, cwd: &Path) -> Result<Vec<u8>> {
-    let path = yaml_path(cwd);
+    load_definition_json_at(fs, &yaml_path(cwd))
+}
+
+pub fn load_definition_json_at<F: Fs>(fs: &F, path: &Path) -> Result<Vec<u8>> {
     let yaml = fs
-        .read_to_string(&path)
+        .read_to_string(path)
         .with_context(|| format!("reading {}; run `lns init` to scaffold one", path.display()))?;
     let value: serde_json::Value =
         serde_yaml::from_str(&yaml).with_context(|| format!("parsing {}", path.display()))?;

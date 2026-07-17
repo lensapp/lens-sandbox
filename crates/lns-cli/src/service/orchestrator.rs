@@ -179,7 +179,13 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
         crate::run::target::RunTarget::Reference(reference) => {
             Some(preflight_published(client.socket(), reference).await?)
         }
-        crate::run::target::RunTarget::Local { .. } => None,
+        crate::run::target::RunTarget::Local { .. } => {
+            // A path-shaped REF resolved to a definition; the summary names its image, not the path.
+            if args.image.is_some() {
+                args.image = Some(target.image());
+            }
+            None
+        }
     };
     let defaults = match (&target, &published) {
         (crate::run::target::RunTarget::Local { def, .. }, _) => {
@@ -190,7 +196,7 @@ pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
     };
     let resolved = crate::run::declarative::resolve(
         &defaults,
-        &cwd,
+        target.project_dir().unwrap_or(&cwd),
         args.workdir.take(),
         std::mem::take(&mut args.mounts),
     )?;

@@ -33,7 +33,7 @@ pub struct Cli {
 pub struct RunArgs {
     #[arg(
         value_name = "REF",
-        help = "Sandbox reference: a registry coordinate (e.g. ghcr.io/team/hermes:1.4.0) or a local lns.yaml. Omit to run ./lns.yaml in the current directory."
+        help = "Sandbox reference: a registry coordinate (e.g. ghcr.io/team/hermes:1.4.0) or a path to a local definition (., lns.yaml, ./dir, /abs/path). Omit to run ./lns.yaml in the current directory."
     )]
     pub image: Option<String>,
 
