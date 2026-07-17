@@ -8,7 +8,7 @@ Feature: authoring a sandbox definition offline
   Scenario: init scaffolds a default lns.yaml
     When I run "lns init" in the project directory
     Then the exit code is 0
-    And the output contains "Created lns.yaml"
+    And the output contains "created lns.yaml"
     And the project file "lns.yaml" contains "kind: Sandbox"
     And the project file "lns.yaml" contains "workdir: /workspace"
     And the project file "lns.yaml" contains "volumes:"

@@ -1,0 +1,23 @@
+apiVersion: lns.run/v1
+kind: Sandbox
+metadata:
+  name: sandbox
+spec:
+  image: docker.io/library/alpine:3.20
+  command: sh
+  workdir: /workspace
+  env: {}
+  resources:
+    cpu: 1
+    memory: 512Mi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes: []
+  integrations: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []

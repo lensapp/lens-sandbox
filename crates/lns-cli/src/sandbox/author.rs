@@ -95,7 +95,10 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
     }
     fs.write(&path, SCAFFOLD)
         .with_context(|| format!("writing {}", path.display()))?;
-    writeln!(out, "Created {LNS_YAML} — edit spec.image, then `lns run`.")?;
+    writeln!(
+        out,
+        "✓ created {LNS_YAML} — your sandbox definition, every field ready to edit\n\n  1. set spec.image (scaffolded to alpine:3.20)\n  2. check it with `lns sandbox validate`\n  3. boot it with `lns run`"
+    )?;
     Ok(0)
 }
 
@@ -220,7 +223,9 @@ mod tests {
         let written = fs.read_to_string(&yaml_path(cwd())).unwrap();
         assert!(written.contains("kind: Sandbox"));
         assert!(written.contains("apiVersion: lns.run/v1"));
-        assert!(String::from_utf8(out).unwrap().contains("Created lns.yaml"));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("✓ created lns.yaml"), "got: {text}");
+        assert!(text.contains("`lns run`"), "got: {text}");
     }
 
     #[test]
