@@ -16,5 +16,6 @@ pub mod sandbox_distribute;
 pub mod sandbox_inspect_cli;
 pub mod sandbox_manage;
 pub mod sandbox_run;
+pub mod sandbox_surface;
 pub mod update_check;
 pub mod volume_cli;

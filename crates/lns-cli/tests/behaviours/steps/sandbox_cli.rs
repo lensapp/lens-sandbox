@@ -17,7 +17,7 @@ use lns_ipc::{
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 
-struct FakeSandboxService {
+pub(crate) struct FakeSandboxService {
     response: Option<Response>,
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
@@ -408,7 +408,7 @@ fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
     });
 }
 
-fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
+pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
     FakeSandboxService {
         response: w.sandbox.response.clone(),
         stats_response: w.sandbox.stats_response.clone(),

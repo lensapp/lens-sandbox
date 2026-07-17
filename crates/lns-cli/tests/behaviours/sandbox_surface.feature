@@ -58,15 +58,14 @@ Feature: the sandbox is the one noun, on a two-tier surface
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
 
-  @todo
   Scenario Outline: a top-level verb is an exact shortcut into its sandbox form
     Given the service is ready to record the request
-    When the user runs "lns <verb> <args>"
-    And the user runs "lns sandbox <verb> <args>"
+    When the user runs the shortcut "lns <verb> <args>"
+    And the user runs its sandbox form "lns sandbox <verb> <args>"
     Then both invocations issue the same request to the service
+    # run's two spellings share the interactive launch path; pinned in sandbox_run.feature.
     Examples:
       | verb    | args        |
-      | run     | some-ref    |
       | pull    | some-ref    |
       | ps      |             |
       | stop    | 3           |

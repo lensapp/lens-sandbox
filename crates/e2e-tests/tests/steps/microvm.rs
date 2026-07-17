@@ -173,8 +173,12 @@ fn run_microvm_of(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &st
 }
 
 fn run_lns_microvm(world: &mut E2eWorld, tail: Vec<String>) {
+    run_lns_microvm_as(world, &["run"], tail);
+}
+
+fn run_lns_microvm_as(world: &mut E2eWorld, verb: &[&str], tail: Vec<String>) {
     let project = microvm_project(world);
-    let mut args = vec!["run".to_string()];
+    let mut args: Vec<String> = verb.iter().map(|s| s.to_string()).collect();
     if let Some(policy) = &world.policy_path {
         args.push("--policy".to_string());
         args.push(policy.to_string_lossy().into_owned());
@@ -959,6 +963,35 @@ fn logs_top_level(world: &mut E2eWorld, needle: String) -> Result<(), String> {
 )]
 fn logs_sandbox_namespace(world: &mut E2eWorld, needle: String) -> Result<(), String> {
     logs_until(world, &["sandbox", "logs"], &needle)
+}
+
+#[when("the user follows that run's logs until it exits")]
+fn follow_logs_until_exit(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    world.result = Some(run_cli_with_timeout(
+        vec!["logs".to_string(), "-f".to_string(), id],
+        socket_env(world),
+        STREAM_VERB_TIMEOUT,
+    ));
+    Ok(())
+}
+
+#[when("the user attaches to that run until it exits")]
+fn attach_until_exit(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    world.result = Some(run_cli_with_timeout(
+        vec!["attach".to_string(), id],
+        socket_env(world),
+        STREAM_VERB_TIMEOUT,
+    ));
+    Ok(())
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" via the sandbox namespace$"#)]
+fn run_command_sandbox_namespace(world: &mut E2eWorld, cmd_line: String) {
+    let mut tail = vec!["--".to_string()];
+    tail.extend(split_args(&cmd_line));
+    run_lns_microvm_as(world, &["sandbox", "run"], tail);
 }
 
 #[when("the user stops that run")]

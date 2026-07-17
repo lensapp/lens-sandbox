@@ -42,6 +42,8 @@ pub struct BehaviourWorld {
     pub host_bind: HostBindRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
+    /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
+    pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
 }
 
 use lns_policy::host_bind_decisions::SecretDisposition;

@@ -1,10 +1,10 @@
 @microvm
 Feature: session streaming verbs reach a real guest without wedging the terminal
-  exec and logs stream over tokio stdin/stdout, so their dispatch must run
-  with the std stdin/stdout locks free. These scenarios drive both spellings
-  of each verb (`lns exec` / `lns sandbox exec`, `lns logs` / `lns sandbox logs`)
-  through the real binaries against a booted guest — a terminal-ownership
-  regression deadlocks the CLI and trips the harness timeout.
+  run, exec, logs, and attach stream over tokio stdin/stdout, so their
+  dispatch must run with the std stdin/stdout locks free. These scenarios
+  drive the streaming verbs — both spellings where each has two — through
+  the real binaries against a booted guest — a terminal-ownership regression
+  deadlocks the CLI and trips the harness timeout.
 
   Scenario: a non-interactive exec through the top level returns the command's output
     Given the Lens Sandbox service is running
@@ -37,3 +37,26 @@ Feature: session streaming verbs reach a real guest without wedging the terminal
     When the user prints that run's logs via the sandbox namespace until they contain "hello-logs"
     Then the exit code is 0
     And the output contains "hello-logs"
+
+  Scenario: logs -f follows a detached run's output and returns when it exits
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c 'echo follow-hi && /.lens/guest-tools/bin/busybox sleep 5 && echo follow-bye'"
+    Then the exit code is 0
+    When the user follows that run's logs until it exits
+    Then the exit code is 0
+    And the output contains "follow-hi"
+    And the output contains "follow-bye"
+
+  Scenario: attach re-joins a detached run's live output and adopts its exit code
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 5 && echo attach-bye && exit 7'"
+    Then the exit code is 0
+    When the user attaches to that run until it exits
+    Then the exit code is 7
+    And the output contains "attach-bye"
+
+  Scenario: sandbox run boots the definition exactly like its top-level shortcut
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/echo sandbox-run-hi" via the sandbox namespace
+    Then the exit code is 0
+    And the output contains "sandbox-run-hi"
