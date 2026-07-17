@@ -109,6 +109,7 @@ pub fn fileset_runtime_specs<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn tar_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
@@ -147,11 +148,14 @@ mod tests {
             .iter()
             .find(|s| s.guest_path.ends_with("deep.md"))
             .unwrap();
-        let RuntimeSource::Content { digest, .. } = &deep.source else {
-            panic!("fileset entries must reference streamed content")
-        };
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"research")));
+        assert!(
+            matches!(&deep.source, RuntimeSource::Content { digest: actual, size: 8, .. } if actual == &digest),
+            "fileset entries must reference streamed content, got {:?}",
+            deep.source
+        );
         assert_eq!(
-            std::fs::read(ContentStore::new(dir.path()).path_for(digest).unwrap()).unwrap(),
+            std::fs::read(ContentStore::new(dir.path()).path_for(&digest).unwrap()).unwrap(),
             b"research"
         );
     }

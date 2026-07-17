@@ -754,6 +754,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn registry_path_pull_writes_the_blob_and_reports_streamed_bytes() {
+        let registry = build_two_layer_image().into_registry();
+        let descriptor = registry.manifest.layers[0].clone();
+        let expected = registry
+            .blobs
+            .iter()
+            .find(|(digest, _)| digest == &descriptor.digest)
+            .unwrap()
+            .1
+            .clone();
+        let reference: Reference = "registry.example.test/team/image:1".parse().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let received = std::sync::atomic::AtomicU64::new(0);
+
+        registry
+            .pull_blob_to_path(&reference, &descriptor, &path, &|bytes| {
+                received.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        assert_eq!(
+            received.load(std::sync::atomic::Ordering::Relaxed),
+            expected.len() as u64
+        );
+    }
+
     #[test]
     fn want_arch_returns_arm64_or_amd64_for_known_hosts() {
         let arch = want_arch();

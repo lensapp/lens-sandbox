@@ -1995,7 +1995,7 @@ mod tests {
         let layer_bytes = b"offline layer".to_vec();
         let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer_bytes));
 
-        let manifest = oci_client::manifest::OciImageManifest {
+        let base_manifest = oci_client::manifest::OciImageManifest {
             layers: vec![oci_client::manifest::OciDescriptor {
                 digest: layer_digest.clone(),
                 size: layer_bytes.len() as i64,
@@ -2004,11 +2004,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let manifest_digest = format!(
+        let base_digest = format!(
             "sha256:{:x}",
-            sha2::Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+            sha2::Sha256::digest(serde_json::to_vec(&base_manifest).unwrap())
         );
-        let reference = format!("registry.example.test/cov/pinned@{manifest_digest}");
+        let base_ref = format!("registry.example.test/cov/base@{base_digest}");
 
         let cache_root = crate::cache::root().unwrap();
         let layer_cache = crate::oci_layer_cache::LayerCache::new(cache_root.join("layers"));
@@ -2018,13 +2018,43 @@ mod tests {
         let config = format!(
             r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
         );
-        crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"))
+        let manifest_cache =
+            crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"));
+        manifest_cache
+            .put(
+                &base_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: base_manifest,
+                    manifest_digest: base_digest.clone(),
+                    config,
+                },
+            )
+            .unwrap();
+        let definition = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"cached-lifecycle"}},"spec":{{"image":"{base_ref}"}}}}"#
+        );
+        let artifact_manifest = oci_client::manifest::OciImageManifest {
+            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            config: oci_client::manifest::OciDescriptor {
+                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
+                size: definition.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let manifest_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&artifact_manifest).unwrap())
+        );
+        let reference = format!("registry.example.test/cov/pinned@{manifest_digest}");
+        manifest_cache
             .put(
                 &reference,
                 &crate::image::manifest_cache::CachedManifest {
-                    manifest,
+                    manifest: artifact_manifest,
                     manifest_digest: manifest_digest.clone(),
-                    config,
+                    config: definition,
                 },
             )
             .unwrap();
@@ -2041,12 +2071,19 @@ mod tests {
         assert_eq!(pulled["type"], "ImagePulled", "got {pulled}");
         assert_eq!(pulled["image"]["reference"], reference);
         assert_eq!(pulled["image"]["digest"], manifest_digest);
-        assert_eq!(pulled["image"]["layers"], 1);
-        assert_eq!(pulled["image"]["size_bytes"], layer_bytes.len() as u64);
+        assert_eq!(pulled["image"]["layers"], 0);
+        assert_eq!(pulled["image"]["size_bytes"], 0);
 
         let listed = as_json(handle_request(&Request::ListImages, now).await);
         assert_eq!(listed["type"], "ImageList", "got {listed}");
-        assert_eq!(listed["images"][0]["reference"], reference);
+        assert!(
+            listed["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|image| image["reference"] == reference),
+            "got {listed}"
+        );
 
         let tagged = as_json(
             handle_request(
@@ -2062,8 +2099,8 @@ mod tests {
         let after_tag = as_json(handle_request(&Request::ListImages, now).await);
         assert_eq!(
             after_tag["images"].as_array().unwrap().len(),
-            2,
-            "tagging re-refs the cached artifact under a second name"
+            3,
+            "the cached base image and both sandbox references are listed"
         );
         // Drop the tag copy so the original layer-sweep assertions below still hold.
         as_json(
@@ -2087,10 +2124,27 @@ mod tests {
         );
         assert_eq!(removed["type"], "ImageRemoved", "got {removed}");
         assert_eq!(removed["reference"], reference);
-        assert_eq!(removed["reclaimed_bytes"], layer_bytes.len() as u64);
+        assert_eq!(removed["reclaimed_bytes"], 0);
+        assert!(
+            layer_cache.contains(&layer_digest).unwrap(),
+            "the sandbox's cached base image still owns its layer"
+        );
+
+        let base_removed = as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: base_ref.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(base_removed["type"], "ImageRemoved", "got {base_removed}");
+        assert_eq!(base_removed["reference"], base_ref);
+        assert_eq!(base_removed["reclaimed_bytes"], layer_bytes.len() as u64);
         assert!(
             !layer_cache.contains(&layer_digest).unwrap(),
-            "the last image's layer blob must be swept with it"
+            "the last base image's layer blob must be swept with it"
         );
 
         let pruned = as_json(handle_request(&Request::PruneImages, now).await);
