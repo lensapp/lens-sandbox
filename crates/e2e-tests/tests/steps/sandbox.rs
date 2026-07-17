@@ -1,7 +1,7 @@
 use crate::E2eWorld;
 use crate::specutil::arg_parser::split_args;
 use crate::specutil::{assert_contains, run_cli_in_dir};
-use cucumber::{then, when};
+use cucumber::{given, then, when};
 
 fn substitute_pushed_ref(world: &E2eWorld, cmd_line: &str) -> String {
     match &world.pushed_ref {
@@ -31,6 +31,19 @@ fn project_dir(world: &mut E2eWorld) -> std::path::PathBuf {
         .get_or_insert_with(|| tempfile::TempDir::new().expect("project tempdir"))
         .path()
         .to_path_buf()
+}
+
+#[given(regex = r#"^a project definition at "([^"]*)" missing its image$"#)]
+fn imageless_definition_at(world: &mut E2eWorld, rel: String) {
+    let path = project_dir(world).join(&rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create definition directory");
+    }
+    std::fs::write(
+        path,
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: imageless\nspec: {}\n",
+    )
+    .expect("write imageless definition");
 }
 
 #[when(regex = r#"^I run "([^"]*)" in the project directory$"#)]

@@ -277,8 +277,7 @@ fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
 }
 
-#[when(regex = r#"^the user runs a microVM command "([^"]*)" from a declarative sandbox$"#)]
-fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) {
+fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
     let project = microvm_project(world);
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
@@ -287,10 +286,30 @@ fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) 
     std::fs::write(project.join("lns.yaml"), definition)
         .expect("write declarative project lns.yaml");
     track_volume(world, "e2e-declarative");
+    project
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" from a declarative sandbox$"#)]
+fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) {
+    let project = write_declarative_definition(world);
     let mut args = vec!["run".to_string(), "--".to_string()];
     args.extend(split_args(&cmd_line));
     let result =
         run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" on the declarative sandbox by path from a nested directory$"#
+)]
+fn run_command_by_path_from_nested_dir(world: &mut E2eWorld, cmd_line: String) {
+    let project = write_declarative_definition(world);
+    let nested = project.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested directory");
+    let mut args = vec!["run".to_string(), "..".to_string(), "--".to_string()];
+    args.extend(split_args(&cmd_line));
+    let result = run_cli_with_timeout_in_dir(&nested, args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
 }

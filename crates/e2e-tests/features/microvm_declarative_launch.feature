@@ -12,6 +12,13 @@ Feature: declarative workdir and mounts reach a real guest
     And the output contains "bind=readonly"
     And the output contains "volume=mounted"
 
+  Scenario: a path reference launches the definition rooted at its own directory
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo wd=$(/.lens/guest-tools/bin/busybox pwd); if [ -f lns.yaml ]; then echo project=visible; fi'" on the declarative sandbox by path from a nested directory
+    Then the exit code is 0
+    And the output contains "wd=/workspace"
+    And the output contains "project=visible"
+
   Scenario: a declared path fileset is snapshotted into the guest
     Given the Lens Sandbox service is running
     And the project declares a fileset directory "skills" containing "prompts.md" mounted at "/opt/agent-skills"
