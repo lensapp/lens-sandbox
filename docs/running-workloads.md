@@ -168,16 +168,11 @@ entirely):
 lns run --entrypoint /bin/sh alpine:3.20 -c 'echo hi'
 ```
 
-### Imageless runs
+### A command with no reference
 
-Provide a command after `--` with no reference to boot a minimal guest and run it
-directly:
-
-```bash
-lns run -- /bin/sh
-```
-
-(This is distinct from a bare `lns run`, which runs the `./lns.yaml` definition.)
+`lns run -- <command>` (or `lns run <command>` for an unambiguous word) runs the
+`./lns.yaml` definition with its command overridden — there is no imageless mode;
+a run always boots a sandbox definition or a published reference.
 
 ### Setting the run user and hostname
 

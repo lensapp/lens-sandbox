@@ -69,11 +69,11 @@ pub(crate) fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
     }
 }
 
+// components() already normalizes interior `.` away, so only ParentDir needs lexical handling.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
-            std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
                 out.pop();
             }
@@ -192,10 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_carries_no_definition() {
+    fn a_reference_carries_no_definition_and_no_project_dir() {
         let fs = MapFs::default();
         let target = resolve(Some("alpine:3.20"), &fs, cwd()).unwrap();
         assert_eq!(target.definition_json(), None);
+        assert_eq!(target.project_dir(), None);
     }
 
     #[test]

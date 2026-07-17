@@ -56,8 +56,8 @@ A path-named definition's relative binds and filesets root at its own directory,
 compose-style; the policy still comes from where you run. A
 `COMMAND` after the reference overrides the image's default command (Docker-style
 `lns run alpine echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
-separator is still accepted, and a command after `--` with no `REF` is an imageless
-run (`lns run -- echo hi`).
+separator is still accepted. A command with no `REF` (`lns run -- echo hi`) runs
+the `./lns.yaml` definition with its command overridden.
 
 | Option                       | Default          | Meaning                                                                 |
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
@@ -79,7 +79,7 @@ run (`lns run -- echo hi`).
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
 | `-u`, `--user <USER[:GROUP]>`|                  | Run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`; a numeric segment is used as the uid. |
 | `--sandbox-user <NAME>`      | image `USER`     | Username the workload runs as inside the guest (the unprivileged `sandbox` user when the image sets none). |
-| `--sandbox-uid <UID>`        | image `USER` uid | UID the workload runs as inside the guest (`65534` for an imageless run). |
+| `--sandbox-uid <UID>`        | image `USER` uid | UID the workload runs as inside the guest. |
 | `--entrypoint <COMMAND>`     | image `ENTRYPOINT` | Override the image `ENTRYPOINT`; the `COMMAND` after the reference is kept as its arguments. Pass `--entrypoint ""` to clear the image entrypoint. |
 | `-h`, `--hostname <NAME>`    |                  | Set the guest hostname for this run.                                    |
 | `-q`, `--quiet`              | `false`          | Suppress the launch banner and `✓` status lines; warnings, errors, and the workload's own output still print. |

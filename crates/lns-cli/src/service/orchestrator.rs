@@ -31,8 +31,15 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
         let config_path = crate::config::default_config_path()?;
         let defaults = crate::config::load_run_defaults(&config_path)?;
         let args = crate::config::apply_run_defaults(args, defaults);
+        let cwd = std::env::current_dir().context("reading current directory")?;
+        // Target resolution is offline; a missing or invalid definition fails fast, before the service gate.
+        let target = crate::run::target::resolve(
+            args.image.as_deref(),
+            &crate::sandbox::real::RealFs,
+            &cwd,
+        )?;
         require_running().await;
-        run_image(args, ctx.debug).await
+        run_image(args, target, cwd, ctx.debug).await
     })
 }
 
@@ -170,10 +177,12 @@ async fn await_published_preflight(
     }
 }
 
-pub async fn run_image(mut args: RunArgs, debug: bool) -> Result<i32> {
-    let cwd = std::env::current_dir().context("reading current directory")?;
-    let target =
-        crate::run::target::resolve(args.image.as_deref(), &crate::sandbox::real::RealFs, &cwd)?;
+pub async fn run_image(
+    mut args: RunArgs,
+    target: crate::run::target::RunTarget,
+    cwd: std::path::PathBuf,
+    debug: bool,
+) -> Result<i32> {
     let client = real_client()?;
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {

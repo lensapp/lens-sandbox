@@ -148,7 +148,7 @@ fn run_service_status(world: &mut E2eWorld) {
 
 #[when("I run an `lns` command that requires the service")]
 fn run_command_requiring_service(world: &mut E2eWorld) {
-    let result = world.run_with_service_env(&["run", "--", "/bin/true"]);
+    let result = world.run_with_service_env(&["ps"]);
     world.result = Some(result);
 }
 
