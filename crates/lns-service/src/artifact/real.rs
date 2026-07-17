@@ -163,39 +163,67 @@ fn effective_machine_catalog() -> Vec<lns_policy::integrations::Integration> {
 
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
 async fn materialize_filesets(resolved: &ResolvedSandbox) -> Result<Vec<RuntimeFileSpec>> {
+    let content_store =
+        crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
     let mut specs = Vec::new();
     for fileset in &resolved.filesets {
         let Some(mount) = fileset.paths.first() else {
             continue;
         };
-        let layers = pull_fileset_layers(&fileset.reference)
+        let layers = pull_fileset_layers(&fileset.reference, &content_store)
             .await
             .with_context(|| format!("materializing fileset {}", fileset.name))?;
-        for layer in &layers {
-            specs.extend(fileset_runtime_specs(mount, layer)?);
+        for layer in layers {
+            let file = std::fs::File::open(&layer)
+                .with_context(|| format!("opening fileset layer {}", layer.display()))?;
+            specs.extend(fileset_runtime_specs(mount, file, &content_store)?);
         }
     }
     Ok(specs)
 }
 
 /// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the OCI empty/config layer is skipped and a fileset with no content layer is refused.
-async fn pull_fileset_layers(reference: &str) -> Result<Vec<Vec<u8>>> {
+async fn pull_fileset_layers(
+    reference: &str,
+    content_store: &crate::content_store::ContentStore,
+) -> Result<Vec<std::path::PathBuf>> {
     let parsed: Reference = reference
         .parse()
         .with_context(|| format!("invalid fileset reference {reference}"))?;
     let registry = RealRegistry::for_reference(&parsed, registry_auth_for(reference));
-    let (manifest, _digest, _config) = registry.pull_manifest_and_config(&parsed).await?;
+    pull_fileset_layers_with(&registry, &parsed, content_store).await
+}
+
+async fn pull_fileset_layers_with<R: Registry>(
+    registry: &R,
+    parsed: &Reference,
+    content_store: &crate::content_store::ContentStore,
+) -> Result<Vec<std::path::PathBuf>> {
+    let (manifest, _digest, _config) = registry.pull_manifest_and_config(parsed).await?;
     let content: Vec<_> = manifest
         .layers
         .iter()
         .filter(|layer| layer.media_type.contains("tar"))
         .collect();
     if content.is_empty() {
-        anyhow::bail!("fileset {reference} has no content layer");
+        anyhow::bail!("fileset {parsed} has no content layer");
     }
     let mut blobs = Vec::with_capacity(content.len());
     for layer in content {
-        blobs.push(registry.pull_blob(&parsed, layer, &|_| {}).await?);
+        let expected_size = u64::try_from(layer.size)
+            .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
+        let staged = content_store.staging_path()?;
+        if let Err(error) = registry
+            .pull_blob_to_path(parsed, layer, &staged, &|_| {})
+            .await
+        {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+        let installed = content_store
+            .commit_verified(staged, &layer.digest, expected_size)
+            .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
+        blobs.push(installed.path);
     }
     Ok(blobs)
 }
@@ -339,5 +367,120 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
                     .unwrap_or_default(),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oci_client::manifest::{OciDescriptor, OciImageManifest};
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StreamingRegistry {
+        blob: Vec<u8>,
+        fail: bool,
+        streamed: AtomicBool,
+    }
+
+    impl Registry for StreamingRegistry {
+        async fn pull_manifest_and_config(
+            &self,
+            _reference: &Reference,
+        ) -> Result<(OciImageManifest, String, String)> {
+            let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
+            Ok((
+                OciImageManifest {
+                    layers: vec![OciDescriptor {
+                        media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                        digest,
+                        size: self.blob.len() as i64,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                format!("sha256:{}", "b".repeat(64)),
+                "{}".into(),
+            ))
+        }
+
+        async fn pull_blob(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<Vec<u8>> {
+            anyhow::bail!("fileset pulls must not materialize a blob Vec")
+        }
+
+        async fn pull_blob_to_path(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            path: &std::path::Path,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            self.streamed.store(true, Ordering::Relaxed);
+            let split = self.blob.len() / 2;
+            tokio::fs::write(path, &self.blob[..split]).await?;
+            on_chunk(split as u64);
+            if self.fail {
+                anyhow::bail!("registry stream failed")
+            }
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .await?;
+            file.write_all(&self.blob[split..]).await?;
+            on_chunk((self.blob.len() - split) as u64);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fileset_layers_stream_to_verified_content_without_using_the_vec_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry {
+            blob: vec![7; 512 * 1024],
+            fail: false,
+            streamed: AtomicBool::new(false),
+        };
+        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let paths = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap();
+
+        assert!(registry.streamed.load(Ordering::Relaxed));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), registry.blob);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fileset_stream_leaves_no_partial_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry {
+            blob: vec![7; 128 * 1024],
+            fail: true,
+            streamed: AtomicBool::new(false),
+        };
+        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let err = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("registry stream failed"));
+        let entries = std::fs::read_dir(dir.path().join("sha256"))
+            .unwrap()
+            .count();
+        assert_eq!(entries, 0);
     }
 }

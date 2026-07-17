@@ -25,6 +25,14 @@ pub(crate) trait Registry: Send + Sync {
         descriptor: &OciDescriptor,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+
+    fn pull_blob_to_path(
+        &self,
+        reference: &Reference,
+        descriptor: &OciDescriptor,
+        path: &std::path::Path,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 pub(crate) struct CountingSink<'a> {
@@ -737,6 +745,18 @@ mod tests {
             on_chunk(mid as u64);
             on_chunk((blob.len() - mid) as u64);
             Ok(blob)
+        }
+
+        async fn pull_blob_to_path(
+            &self,
+            reference: &Reference,
+            descriptor: &OciDescriptor,
+            path: &std::path::Path,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            let bytes = self.pull_blob(reference, descriptor, on_chunk).await?;
+            tokio::fs::write(path, bytes).await?;
+            Ok(())
         }
     }
 

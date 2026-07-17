@@ -36,6 +36,72 @@ impl ContentStore {
         Ok(self.path_for(digest)?.is_file())
     }
 
+    pub(crate) fn staging_path(&self) -> Result<PathBuf> {
+        let parent = self.root.join("sha256");
+        std::fs::create_dir_all(&parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        Ok(unique_tmp_in(&parent))
+    }
+
+    pub(crate) fn commit_verified(
+        &self,
+        staged: PathBuf,
+        expected_digest: &str,
+        expected_size: u64,
+    ) -> Result<InstallResult> {
+        let outcome = (|| -> Result<InstallResult> {
+            let expected_hex = parse_sha256(expected_digest)?;
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&staged)
+                .with_context(|| format!("opening staged content {}", staged.display()))?;
+            let mut hasher = Sha256::new();
+            let mut size = 0u64;
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = std::io::Read::read(&mut file, &mut buf)
+                    .with_context(|| format!("reading staged content {}", staged.display()))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                size = size.saturating_add(n as u64);
+            }
+            if size != expected_size {
+                bail!("content size mismatch — expected {expected_size} bytes, received {size}");
+            }
+            let raw: [u8; 32] = hasher.finalize().into();
+            let actual_hex = hex::encode(raw);
+            if actual_hex != expected_hex {
+                bail!(
+                    "content digest mismatch — expected sha256:{expected_hex}, got sha256:{actual_hex}"
+                );
+            }
+            file.sync_all().context("fsync staged content blob")?;
+            drop(file);
+            let final_path = self.root.join("sha256").join(&expected_hex);
+            if final_path.is_file() {
+                std::fs::remove_file(&staged)
+                    .with_context(|| format!("removing staged content {}", staged.display()))?;
+            } else {
+                std::fs::rename(&staged, &final_path).with_context(|| {
+                    format!("rename {} -> {}", staged.display(), final_path.display())
+                })?;
+            }
+            Ok(InstallResult {
+                digest: format!("sha256:{expected_hex}"),
+                raw_digest: raw,
+                path: final_path,
+                size,
+            })
+        })();
+        if outcome.is_err() {
+            let _ = std::fs::remove_file(staged);
+        }
+        outcome
+    }
+
     pub fn install_from_reader<R: std::io::Read>(&self, mut reader: R) -> Result<InstallResult> {
         let parent = self.root.join("sha256");
         std::fs::create_dir_all(&parent)
@@ -326,6 +392,101 @@ mod tests {
             })
             .collect();
         assert!(stray.is_empty(), "stray tmp: {stray:?}");
+    }
+
+    #[test]
+    fn commit_verified_accepts_only_the_declared_digest_and_size() {
+        let d = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(d.path());
+        let bytes = b"streamed fileset layer";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let staged = store.staging_path().unwrap();
+        std::fs::write(&staged, bytes).unwrap();
+
+        let installed = store
+            .commit_verified(staged, &digest, bytes.len() as u64)
+            .unwrap();
+
+        assert_eq!(installed.digest, digest);
+        assert_eq!(installed.size, bytes.len() as u64);
+        assert_eq!(std::fs::read(installed.path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn commit_verified_removes_a_partial_blob_when_declared_size_is_wrong() {
+        let d = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(d.path());
+        let bytes = b"partial";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let staged = store.staging_path().unwrap();
+        std::fs::write(&staged, bytes).unwrap();
+
+        let err = store
+            .commit_verified(staged.clone(), &digest, bytes.len() as u64 + 1)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("size mismatch"), "got: {err:#}");
+        assert!(!staged.exists());
+        assert!(!store.contains(&digest).unwrap());
+    }
+
+    #[test]
+    fn commit_verified_removes_a_tampered_blob_before_it_becomes_addressable() {
+        let d = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(d.path());
+        let staged = store.staging_path().unwrap();
+        std::fs::write(&staged, b"tampered").unwrap();
+        let expected = format!("sha256:{}", "a".repeat(64));
+
+        let err = store
+            .commit_verified(staged.clone(), &expected, 8)
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("digest mismatch"),
+            "got: {err:#}"
+        );
+        assert!(!staged.exists());
+        assert!(!store.contains(&expected).unwrap());
+    }
+
+    #[test]
+    fn commit_verified_removes_staging_when_the_declared_digest_is_malformed() {
+        let d = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(d.path());
+        let staged = store.staging_path().unwrap();
+        std::fs::write(&staged, b"content").unwrap();
+
+        let err = store
+            .commit_verified(staged.clone(), "sha512:bad", 7)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("unsupported digest algorithm"));
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn commit_verified_discards_a_duplicate_after_verifying_it() {
+        let d = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(d.path());
+        let bytes = b"same";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        for _ in 0..2 {
+            let staged = store.staging_path().unwrap();
+            std::fs::write(&staged, bytes).unwrap();
+            store
+                .commit_verified(staged, &digest, bytes.len() as u64)
+                .unwrap();
+        }
+
+        assert_eq!(
+            std::fs::read(store.path_for(&digest).unwrap()).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read_dir(d.path().join("sha256")).unwrap().count(),
+            1
+        );
     }
 
     #[test]

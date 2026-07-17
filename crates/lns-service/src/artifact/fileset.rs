@@ -4,6 +4,7 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result, bail};
 
 use crate::artifact::assembly::LocalFileset;
+use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub struct SnapshotEntry {
@@ -57,7 +58,11 @@ fn snapshot_into<D: SnapshotDir + ?Sized>(
 }
 
 /// Expand a FileSet's tar layer into guest-write specs rooted at `mount_path`, so the fileset's files land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered fileset can't write outside its declared mount.
-pub fn fileset_runtime_specs(mount_path: &str, layer_tar: &[u8]) -> Result<Vec<RuntimeFileSpec>> {
+pub fn fileset_runtime_specs<R: Read>(
+    mount_path: &str,
+    layer_tar: R,
+    content_store: &ContentStore,
+) -> Result<Vec<RuntimeFileSpec>> {
     let root = mount_path.trim_end_matches('/');
     let mut specs = Vec::new();
     let mut archive = tar::Archive::new(layer_tar);
@@ -85,14 +90,17 @@ pub fn fileset_runtime_specs(mount_path: &str, layer_tar: &[u8]) -> Result<Vec<R
             );
         }
         let mode = entry.header().mode().unwrap_or(0o644);
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("reading fileset entry {}", path.display()))?;
+        let installed = content_store
+            .install_from_reader(&mut entry)
+            .with_context(|| format!("installing fileset entry {}", path.display()))?;
         specs.push(RuntimeFileSpec {
             guest_path: format!("{root}/{}", path.to_string_lossy()),
             mode,
-            source: RuntimeSource::Bytes(bytes),
+            source: RuntimeSource::Content {
+                digest: installed.digest,
+                raw_digest: installed.raw_digest,
+                size: installed.size,
+            },
         });
     }
     Ok(specs)
@@ -115,10 +123,17 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    fn expand(mount_path: &str, layer_tar: &[u8]) -> (tempfile::TempDir, Vec<RuntimeFileSpec>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(dir.path());
+        let specs = fileset_runtime_specs(mount_path, layer_tar, &store).unwrap();
+        (dir, specs)
+    }
+
     #[test]
-    fn expands_files_under_the_mount_path_as_byte_specs() {
+    fn expands_files_under_the_mount_path_as_streamed_content_specs() {
         let tar = tar_with(&[("deep.md", b"research"), ("nested/tools.md", b"tools")]);
-        let specs = fileset_runtime_specs("/root/.some-agent/skills", &tar).unwrap();
+        let (dir, specs) = expand("/root/.some-agent/skills", &tar);
         let mut paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
         paths.sort();
         assert_eq!(
@@ -132,13 +147,19 @@ mod tests {
             .iter()
             .find(|s| s.guest_path.ends_with("deep.md"))
             .unwrap();
-        assert!(matches!(&deep.source, RuntimeSource::Bytes(b) if b == b"research"));
+        let RuntimeSource::Content { digest, .. } = &deep.source else {
+            panic!("fileset entries must reference streamed content")
+        };
+        assert_eq!(
+            std::fs::read(ContentStore::new(dir.path()).path_for(digest).unwrap()).unwrap(),
+            b"research"
+        );
     }
 
     #[test]
     fn a_trailing_slash_on_the_mount_path_does_not_double_up() {
         let tar = tar_with(&[("a.txt", b"x")]);
-        let specs = fileset_runtime_specs("/mount/", &tar).unwrap();
+        let (_dir, specs) = expand("/mount/", &tar);
         assert_eq!(specs[0].guest_path, "/mount/a.txt");
     }
 
@@ -158,7 +179,7 @@ mod tests {
         file.set_cksum();
         builder.append_data(&mut file, "sub/f", &b"y"[..]).unwrap();
         let tar = builder.into_inner().unwrap();
-        let specs = fileset_runtime_specs("/m", &tar).unwrap();
+        let (_dir, specs) = expand("/m", &tar);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].guest_path, "/m/sub/f");
     }
@@ -188,7 +209,9 @@ mod tests {
     #[test]
     fn a_traversing_entry_is_refused() {
         let tar = raw_tar("../escape", b"x");
-        let err = fileset_runtime_specs("/mount", &tar).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            fileset_runtime_specs("/mount", &tar[..], &ContentStore::new(dir.path())).unwrap_err();
         assert!(
             format!("{err:#}").contains("escapes its mount"),
             "got: {err:#}"
@@ -198,7 +221,9 @@ mod tests {
     #[test]
     fn an_absolute_entry_is_refused() {
         let tar = raw_tar("/etc/evil", b"x");
-        let err = fileset_runtime_specs("/mount", &tar).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            fileset_runtime_specs("/mount", &tar[..], &ContentStore::new(dir.path())).unwrap_err();
         assert!(
             format!("{err:#}").contains("escapes its mount"),
             "got: {err:#}"
@@ -290,7 +315,9 @@ mod tests {
             .append_link(&mut header, "link", "/etc/passwd")
             .unwrap();
         let tar = builder.into_inner().unwrap();
-        let err = fileset_runtime_specs("/mount", &tar).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            fileset_runtime_specs("/mount", &tar[..], &ContentStore::new(dir.path())).unwrap_err();
         assert!(
             format!("{err:#}").contains("not a regular file"),
             "got: {err:#}"

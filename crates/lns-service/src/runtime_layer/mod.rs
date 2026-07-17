@@ -33,6 +33,11 @@ pub struct RuntimeFileSpec {
 pub enum RuntimeSource {
     HostFile(PathBuf),
     Bytes(Vec<u8>),
+    Content {
+        digest: String,
+        raw_digest: [u8; 32],
+        size: u64,
+    },
     Symlink(String),
 }
 
@@ -143,6 +148,30 @@ impl RuntimeLayerBuilder {
                         kind: ResolvedKind::Regular {
                             digest: Sha256Digest::from(r.raw_digest),
                             size: r.size,
+                        },
+                    });
+                }
+                RuntimeSource::Content {
+                    digest,
+                    raw_digest,
+                    size,
+                } => {
+                    if !content_store.contains(digest)? {
+                        bail!("runtime content {digest} is not installed");
+                    }
+                    manifest_files.push(ManifestEntry {
+                        path: path.clone(),
+                        digest: digest.clone(),
+                        size: *size,
+                        mode,
+                        kind: ManifestKind::Regular,
+                    });
+                    resolved.push(ResolvedEntry {
+                        path,
+                        mode,
+                        kind: ResolvedKind::Regular {
+                            digest: Sha256Digest::from(*raw_digest),
+                            size: *size,
                         },
                     });
                 }
@@ -370,6 +399,53 @@ mod tests {
         assert!(matches!(e.kind, ManifestKind::Regular));
         assert!(e.digest.starts_with("sha256:"));
         assert!(s.contains(&e.digest).unwrap());
+    }
+
+    #[test]
+    fn build_reuses_streamed_content_without_materializing_its_bytes() {
+        let d = tempdir();
+        let s = store(&d);
+        let installed = s.install_from_reader(&b"streamed"[..]).unwrap();
+        let layer = RuntimeLayerBuilder::new("fileset")
+            .build(
+                &s,
+                &[RuntimeFileSpec {
+                    guest_path: "/skills/a.md".into(),
+                    mode: 0o644,
+                    source: RuntimeSource::Content {
+                        digest: installed.digest.clone(),
+                        raw_digest: installed.raw_digest,
+                        size: installed.size,
+                    },
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(layer.manifest.files[0].digest, installed.digest);
+        assert_eq!(layer.manifest.files[0].size, installed.size);
+    }
+
+    #[test]
+    fn build_refuses_a_streamed_content_reference_that_is_not_installed() {
+        let d = tempdir();
+        let s = store(&d);
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let err = RuntimeLayerBuilder::new("fileset")
+            .build(
+                &s,
+                &[RuntimeFileSpec {
+                    guest_path: "/skills/a.md".into(),
+                    mode: 0o644,
+                    source: RuntimeSource::Content {
+                        digest: digest.clone(),
+                        raw_digest: [0xaa; 32],
+                        size: 1,
+                    },
+                }],
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains(&format!("runtime content {digest}")));
     }
 
     #[test]

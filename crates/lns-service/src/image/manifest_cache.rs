@@ -105,6 +105,18 @@ impl<R: Registry> Registry for CachingRegistry<R> {
     ) -> Result<Vec<u8>> {
         self.inner.pull_blob(reference, descriptor, on_chunk).await
     }
+
+    async fn pull_blob_to_path(
+        &self,
+        reference: &Reference,
+        descriptor: &oci_client::manifest::OciDescriptor,
+        path: &std::path::Path,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<()> {
+        self.inner
+            .pull_blob_to_path(reference, descriptor, path, on_chunk)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +239,18 @@ mod tests {
         ) -> Result<Vec<u8>> {
             Ok(vec![])
         }
+
+        async fn pull_blob_to_path(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            path: &std::path::Path,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            tokio::fs::write(path, b"delegated").await?;
+            on_chunk(9);
+            Ok(())
+        }
     }
 
     const PINNED: &str =
@@ -298,6 +322,31 @@ mod tests {
             .await
             .expect("an uncacheable manifest must still pull successfully");
         assert_eq!(digest, "sha256:manifest");
+    }
+
+    #[tokio::test]
+    async fn blob_path_streams_delegate_through_the_manifest_cache() {
+        let d = tempfile::tempdir().unwrap();
+        let output = d.path().join("blob");
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+            },
+            ManifestCache::new(d.path().join("manifests")),
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        let descriptor = sample_manifest().layers.remove(0);
+        let chunks = std::sync::atomic::AtomicU64::new(0);
+
+        caching
+            .pull_blob_to_path(&reference, &descriptor, &output, &|n| {
+                chunks.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(output).unwrap(), b"delegated");
+        assert_eq!(chunks.load(std::sync::atomic::Ordering::Relaxed), 9);
     }
 
     #[tokio::test]

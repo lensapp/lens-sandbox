@@ -119,6 +119,68 @@ impl Registry for RealRegistry {
             .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
         Ok(out.into_bytes())
     }
+
+    async fn pull_blob_to_path(
+        &self,
+        reference: &Reference,
+        descriptor: &OciDescriptor,
+        path: &std::path::Path,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<()> {
+        let file = tokio::fs::File::create(path)
+            .await
+            .with_context(|| format!("creating streamed blob {}", path.display()))?;
+        let mut out = CountingWriter::new(file, on_chunk);
+        self.client
+            .pull_blob(reference, descriptor, &mut out)
+            .await
+            .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
+        tokio::io::AsyncWriteExt::shutdown(&mut out)
+            .await
+            .with_context(|| format!("closing streamed blob {}", path.display()))
+    }
+}
+
+struct CountingWriter<'a, W> {
+    inner: W,
+    on_chunk: &'a (dyn Fn(u64) + Send + Sync),
+}
+
+impl<'a, W> CountingWriter<'a, W> {
+    fn new(inner: W, on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
+        Self { inner, on_chunk }
+    }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountingWriter<'_, W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, buf) {
+            std::task::Poll::Ready(Ok(written)) => {
+                (this.on_chunk)(written as u64);
+                std::task::Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
