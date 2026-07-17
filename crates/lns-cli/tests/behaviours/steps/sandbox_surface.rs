@@ -47,7 +47,7 @@ fn service_records_requests(w: &mut BehaviourWorld) {
     w.equivalence_requests.clear();
 }
 
-#[when(regex = r#"^the user runs the shortcut "lns ([a-z]+) ?([^"]*)"$"#)]
+#[when(regex = r#"^the user runs the shortcut "lns (\S+) ?([^"]*)"$"#)]
 async fn runs_shortcut(w: &mut BehaviourWorld, verb: String, rest: String) {
     let mut argv = vec!["lns".to_string(), verb];
     argv.extend(rest.split_whitespace().map(str::to_string));
@@ -55,7 +55,7 @@ async fn runs_shortcut(w: &mut BehaviourWorld, verb: String, rest: String) {
     record_invocation(w, cmd).await;
 }
 
-#[when(regex = r#"^the user runs its sandbox form "lns sandbox ([a-z]+) ?([^"]*)"$"#)]
+#[when(regex = r#"^the user runs its sandbox form "lns sandbox (\S+) ?([^"]*)"$"#)]
 async fn runs_sandbox_form(w: &mut BehaviourWorld, verb: String, rest: String) {
     let mut argv = vec!["lns".to_string(), "sandbox".to_string(), verb];
     argv.extend(rest.split_whitespace().map(str::to_string));
