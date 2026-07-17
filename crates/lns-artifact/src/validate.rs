@@ -1,122 +1,13 @@
 use crate::spec;
-use serde_json::Value;
 
-/// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the secret guard. Returns every problem found, not just the first.
+/// Validate a single artifact document: schema + cross-field guards for its declared kind.
 pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
-    let mut problems = Vec::new();
     let schema = if crate::sandbox::is_sandbox_definition(doc) {
         crate::sandbox::validate(doc)
     } else {
         spec::validate_any(doc)
     };
-    if let Err(e) = schema {
-        problems.push(format!("schema: {e:#}"));
-    }
-    problems.extend(scan_secrets(doc));
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems)
-    }
-}
-
-fn scan_secrets(doc: &[u8]) -> Vec<String> {
-    let Ok(value) = serde_json::from_slice::<Value>(doc) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    walk(&value, "", &mut found);
-    found
-}
-
-fn walk(value: &Value, path: &str, out: &mut Vec<String>) {
-    match value {
-        Value::String(s) => {
-            if let Some(kind) = secret_shape(s) {
-                out.push(format!(
-                    "secret: {path} looks like a real {kind}; artifacts must carry credential placeholders, never real secrets"
-                ));
-            }
-        }
-        Value::Array(items) => {
-            for (i, item) in items.iter().enumerate() {
-                walk(item, &format!("{path}[{i}]"), out);
-            }
-        }
-        Value::Object(map) => {
-            for (key, item) in map {
-                let child = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{path}.{key}")
-                };
-                walk(item, &child, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// A string that self-identifies as a placeholder is always exempt; otherwise flag values shaped like well-known credential formats.
-fn secret_shape(value: &str) -> Option<&'static str> {
-    if value.to_ascii_lowercase().contains("placeholder") {
-        return None;
-    }
-    if is_github_token(value) {
-        return Some("GitHub token");
-    }
-    if is_anthropic_key(value) {
-        return Some("Anthropic API key");
-    }
-    if is_openai_key(value) {
-        return Some("OpenAI-style API key");
-    }
-    if is_aws_access_key_id(value) {
-        return Some("AWS access key id");
-    }
-    None
-}
-
-fn is_github_token(value: &str) -> bool {
-    if let Some(rest) = value.strip_prefix("github_pat_") {
-        return rest.len() >= 20 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    }
-    ["ghp_", "gho_", "ghs_", "ghr_", "ghu_"]
-        .iter()
-        .filter_map(|prefix| value.strip_prefix(prefix))
-        .any(|rest| rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
-}
-
-fn is_anthropic_key(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("sk-ant-") else {
-        return false;
-    };
-    is_key_body(rest)
-}
-
-fn is_openai_key(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("sk-") else {
-        return false;
-    };
-    is_key_body(rest)
-}
-
-/// The post-prefix body of an `sk-` family key: long enough to be a real secret and drawn only from the base62 + `-`/`_` alphabet these keys use (so `sk-proj-`, `sk-svcacct-`, `sk-ant-api03-` all qualify).
-fn is_key_body(rest: &str) -> bool {
-    rest.len() >= 20
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-}
-
-fn is_aws_access_key_id(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("AKIA") else {
-        return false;
-    };
-    rest.len() == 16
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    schema.map_err(|e| vec![format!("schema: {e:#}")])
 }
 
 #[cfg(test)]
@@ -154,80 +45,7 @@ mod tests {
     }
 
     #[test]
-    fn a_self_identifying_placeholder_is_not_flagged() {
-        let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","env":{{"GH_TOKEN":"ghp_PLACEHOLDER{}"}}}}}}"#,
-            "0".repeat(27)
-        )
-        .into_bytes();
-        validate(&doc).expect("a placeholder-shaped value must pass the secret guard");
-    }
-
-    #[test]
-    fn secret_shape_recognizes_known_formats_and_ignores_benign_strings() {
-        assert_eq!(
-            secret_shape(&format!("ghp_{}", "a".repeat(36))),
-            Some("GitHub token")
-        );
-        assert_eq!(
-            secret_shape(&format!("sk-{}", "a".repeat(20))),
-            Some("OpenAI-style API key")
-        );
-        assert_eq!(
-            secret_shape(&format!("AKIA{}", "A".repeat(16))),
-            Some("AWS access key id")
-        );
-        assert_eq!(secret_shape("some-secret"), None);
-        assert_eq!(secret_shape("ghp_short"), None);
-        assert_eq!(secret_shape("sk-short"), None);
-        assert_eq!(secret_shape("AKIAtooshort"), None);
-        assert_eq!(secret_shape(&format!("ghp_{}", "!".repeat(36))), None);
-        assert_eq!(secret_shape(&format!("sk-{}", "!".repeat(20))), None);
-        assert_eq!(secret_shape(&format!("AKIA{}", "a".repeat(16))), None);
-    }
-
-    #[test]
-    fn secret_shape_catches_modern_hyphenated_key_formats() {
-        assert_eq!(
-            secret_shape(&format!("sk-ant-api03-{}", "a".repeat(20))),
-            Some("Anthropic API key"),
-            "an Anthropic key carries hyphens the old all-alphanumeric check missed"
-        );
-        assert_eq!(
-            secret_shape(&format!("sk-proj-{}", "a".repeat(20))),
-            Some("OpenAI-style API key")
-        );
-        assert_eq!(
-            secret_shape(&format!("sk-svcacct-{}", "a".repeat(20))),
-            Some("OpenAI-style API key")
-        );
-        assert_eq!(
-            secret_shape(&format!("github_pat_{}", "a".repeat(22))),
-            Some("GitHub token")
-        );
-        assert_eq!(
-            secret_shape(&format!("gho_{}", "a".repeat(36))),
-            Some("GitHub token")
-        );
-        assert_eq!(
-            secret_shape(&format!("ghs_{}", "a".repeat(36))),
-            Some("GitHub token")
-        );
-    }
-
-    #[test]
-    fn the_secret_scan_walks_nested_arrays_and_ignores_non_strings() {
-        let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","ports":[{{"container":8080}}],"env":{{"K":"sk-{}"}}}}}}"#,
-            "b".repeat(24)
-        )
-        .into_bytes();
-        let problems = validate(&doc).unwrap_err();
-        assert!(problems.iter().any(|p| p.contains("OpenAI-style API key")));
-    }
-
-    #[test]
-    fn a_non_json_document_surfaces_only_the_schema_error() {
+    fn a_non_json_document_surfaces_the_schema_error() {
         let problems = validate(b"not json at all").unwrap_err();
         assert_eq!(problems.len(), 1);
         assert!(problems[0].starts_with("schema:"));
@@ -246,22 +64,6 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.contains("must carry an image")),
             "a flat sandbox missing its image must be reported: {problems:?}"
-        );
-    }
-
-    #[test]
-    fn a_real_looking_token_in_a_flat_sandbox_env_is_flagged() {
-        let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","env":{{"GH_TOKEN":"ghp_{}"}}}}}}"#,
-            "a".repeat(36)
-        )
-        .into_bytes();
-        let problems = validate(&doc).unwrap_err();
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("GitHub token") && p.contains("spec.env.GH_TOKEN")),
-            "the secret guard must run on a flat sandbox too: {problems:?}"
         );
     }
 }

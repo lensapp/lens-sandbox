@@ -1,7 +1,7 @@
 use crate::E2eWorld;
 use crate::specutil::arg_parser::split_args;
 use crate::specutil::{assert_contains, run_cli_in_dir};
-use cucumber::{given, then, when};
+use cucumber::{then, when};
 
 fn substitute_pushed_ref(world: &E2eWorld, cmd_line: &str) -> String {
     match &world.pushed_ref {
@@ -45,16 +45,6 @@ fn run_in_project_dir(world: &mut E2eWorld, cmd_line: String) {
         envs.push(("LNS_SOCKET_PATH".into(), socket.clone().into()));
     }
     world.result = Some(run_cli_in_dir(&project, split_args(&cmd_line), envs));
-}
-
-#[given("a project lns.yaml that embeds a secret-shaped value")]
-fn project_lns_yaml_with_secret(world: &mut E2eWorld) {
-    let project = project_dir(world);
-    let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: leaky\nspec:\n  image: docker.io/library/alpine:3.20\n  env:\n    TOKEN: ghp_{}\n",
-        "a".repeat(36)
-    );
-    std::fs::write(project.join("lns.yaml"), definition).expect("write invalid lns.yaml fixture");
 }
 
 #[then(regex = r#"^the project file "([^"]*)" contains "([^"]*)"$"#)]

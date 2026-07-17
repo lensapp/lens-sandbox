@@ -266,7 +266,7 @@ fn validate_volume_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Schema + cross-field guards for a sandbox definition (the secret guard runs separately in `validate`).
+/// Schema + cross-field guards for a sandbox definition.
 pub fn validate(config_json: &[u8]) -> Result<()> {
     parse(config_json).map(|_| ())
 }

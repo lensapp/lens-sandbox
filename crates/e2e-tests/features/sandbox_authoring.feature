@@ -25,13 +25,6 @@ Feature: authoring a sandbox definition offline
     Then the exit code is 0
     And the output contains "lns.yaml is valid."
 
-  Scenario: validate rejects a definition carrying a secret-shaped value
-    Given a project lns.yaml that embeds a secret-shaped value
-    When I run "lns sandbox validate" in the project directory
-    Then the exit code is 1
-    And the output contains "lns.yaml is not valid:"
-    And the output contains "looks like a real"
-
   Scenario: validate without a definition points at lns init
     When I run "lns sandbox validate" in the project directory
     Then the exit code is non-zero

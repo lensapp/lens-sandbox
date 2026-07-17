@@ -251,23 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_reports_a_real_secret_and_exits_nonzero() {
-        let yaml = format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  env:\n    GH_TOKEN: ghp_{}\n",
-            "a".repeat(36)
-        );
-        let fs = fake("/work/lns.yaml", &yaml);
-        let mut out = Vec::new();
-        let code = validate(&fs, cwd(), &mut out).unwrap();
-        assert_eq!(code, 1);
-        let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.contains("not valid") && text.contains("GitHub token"),
-            "got: {text}"
-        );
-    }
-
-    #[test]
     fn validate_surfaces_a_missing_file() {
         let fs = MapFs::default();
         let mut out = Vec::new();

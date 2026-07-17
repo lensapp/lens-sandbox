@@ -267,19 +267,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_artifact_refuses_a_manifest_carrying_a_real_secret() {
-        let sandbox = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"a"}},"spec":{{"image":"reg/base:1","env":{{"GH_TOKEN":"ghp_{}"}}}}}}"#,
-            "a".repeat(36)
-        );
-        let err = build_artifact(sandbox.as_bytes()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("secret"),
-            "a real secret must be refused before the artifact is assembled: {err:#}"
-        );
-    }
-
     fn entry(path: &str, data: &str) -> FileEntry {
         FileEntry {
             path: path.into(),
