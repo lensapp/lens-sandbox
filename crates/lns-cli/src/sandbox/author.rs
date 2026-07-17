@@ -97,7 +97,7 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
         .with_context(|| format!("writing {}", path.display()))?;
     writeln!(
         out,
-        "✓ created {LNS_YAML} — your sandbox definition, every field ready to edit\n\n  1. set spec.image (scaffolded to alpine:3.20)\n  2. boot it with `lns run`\n  3. share it with `lns push <ref>`"
+        "✓ created {LNS_YAML} — your sandbox definition, every field ready to edit\n\n  1. set spec.image (scaffolded to alpine:3.20)\n  2. boot it with `lns run`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-sandbox:1.0.0`"
     )?;
     Ok(0)
 }
