@@ -259,6 +259,16 @@ jobs:
           # the Makefile.
           COVERAGE_CRATES: ${{ steps.affected.outputs.crates }}
 
+      # The floor output names the failing file but not the uncovered
+      # lines; when the failure doesn't reproduce on a macOS dev host the
+      # Linux lcov is the only way to see which DA lines went to zero.
+      - name: Upload lcov on coverage failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov
+          path: target/llvm-cov-target/llvm-cov/lcov.info
+
   # Fails the build on any RUSTSEC advisory against the locked graph so
   # future transitive vulns surface in CI rather than at release time.
   audit:
