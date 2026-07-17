@@ -91,6 +91,12 @@ Feature: authoring a sandbox
     Then the command fails with an exit code other than 0
     And the output contains "absolute"
 
+  Scenario: validate refuses a fileset mounted into the sandbox runtime namespace
+    Given an lns.yaml declaring fileset "./skills" mounted at "/.lens/bin"
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "/.lens runtime namespace"
+
   Scenario: validate refuses a duplicate fileset mountPath or one colliding with a volume target
     Given an lns.yaml declaring two filesets mounted at "/root/.agent/skills"
     When the user runs sandbox command "validate"

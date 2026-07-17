@@ -46,7 +46,7 @@ pub(crate) async fn peek_and_plan(
             if !problems.is_empty() {
                 anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
             }
-            let fileset_specs = materialize_filesets(&resolved).await?;
+            let fileset_specs = materialize_filesets(&resolved).await?.into_specs();
             Ok(Some(SandboxPlan {
                 workload: assembly::assemble(&resolved),
                 fileset_specs,
@@ -59,14 +59,15 @@ pub(crate) async fn peek_and_plan(
 pub(crate) async fn plan_local(definition_json: &str) -> Result<SandboxPlan> {
     let resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
     disclose_effective_policy(resolved.policy.as_ref());
-    let mut fileset_specs = materialize_filesets(&resolved).await?;
-    fileset_specs.extend(crate::artifact::fileset::local_fileset_specs(
+    let mut materialized = materialize_filesets(&resolved).await?;
+    crate::artifact::fileset::local_fileset_specs(
         &RealSnapshotDir,
         &resolved.local_filesets,
-    )?);
+        &mut materialized,
+    )?;
     Ok(SandboxPlan {
         workload: assembly::assemble(&resolved),
-        fileset_specs,
+        fileset_specs: materialized.into_specs(),
     })
 }
 
@@ -162,10 +163,12 @@ fn effective_machine_catalog() -> Vec<lns_policy::integrations::Integration> {
 }
 
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
-async fn materialize_filesets(resolved: &ResolvedSandbox) -> Result<Vec<RuntimeFileSpec>> {
+async fn materialize_filesets(
+    resolved: &ResolvedSandbox,
+) -> Result<crate::artifact::fileset::MaterializedFilesets> {
     let content_store =
         crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
-    let mut specs = Vec::new();
+    let mut out = crate::artifact::fileset::MaterializedFilesets::default();
     for fileset in &resolved.filesets {
         let Some(mount) = fileset.paths.first() else {
             continue;
@@ -173,13 +176,15 @@ async fn materialize_filesets(resolved: &ResolvedSandbox) -> Result<Vec<RuntimeF
         let layers = pull_fileset_layers(&fileset.reference, &content_store)
             .await
             .with_context(|| format!("materializing fileset {}", fileset.name))?;
+        let mut specs = Vec::new();
         for layer in layers {
             let file = std::fs::File::open(&layer)
                 .with_context(|| format!("opening fileset layer {}", layer.display()))?;
             specs.extend(fileset_runtime_specs(mount, file, &content_store)?);
         }
+        out.absorb(fileset.owner, mount, specs);
     }
-    Ok(specs)
+    Ok(out)
 }
 
 /// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the OCI empty/config layer is skipped and a fileset with no content layer is refused.

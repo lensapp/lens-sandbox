@@ -1,11 +1,63 @@
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
+use lns_artifact::sandbox::FilesetOwner;
 
 use crate::artifact::assembly::LocalFileset;
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
+
+pub const OWNED_MANIFEST_PATH: &str = "/.lens/fileset-owned";
+
+/// The fileset specs for a run plus the guest paths lns-init must chown to the workload user.
+#[derive(Default)]
+pub struct MaterializedFilesets {
+    pub specs: Vec<RuntimeFileSpec>,
+    pub owned_paths: BTreeSet<String>,
+}
+
+impl MaterializedFilesets {
+    pub fn absorb(&mut self, owner: FilesetOwner, mount_path: &str, specs: Vec<RuntimeFileSpec>) {
+        if owner == FilesetOwner::Workload {
+            self.owned_paths.extend(owned_paths_for(mount_path, &specs));
+        }
+        self.specs.extend(specs);
+    }
+
+    /// One layer entry naming every workload-owned path, so the guest can chown them after it resolves the run-as ids; no workload-owned filesets, no entry.
+    pub fn into_specs(mut self) -> Vec<RuntimeFileSpec> {
+        if !self.owned_paths.is_empty() {
+            let body: String = self.owned_paths.iter().map(|p| format!("{p}\n")).collect();
+            self.specs.push(RuntimeFileSpec {
+                guest_path: OWNED_MANIFEST_PATH.into(),
+                mode: 0o444,
+                source: RuntimeSource::Bytes(body.into_bytes()),
+            });
+        }
+        self.specs
+    }
+}
+
+/// The mount path, every directory the fileset introduces beneath it, and each shipped file.
+fn owned_paths_for(mount_path: &str, specs: &[RuntimeFileSpec]) -> BTreeSet<String> {
+    let root = mount_path.trim_end_matches('/');
+    let mut owned = BTreeSet::new();
+    owned.insert(root.to_string());
+    for spec in specs {
+        let mut path = spec.guest_path.as_str();
+        owned.insert(path.to_string());
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            if parent.len() <= root.len() {
+                break;
+            }
+            owned.insert(parent.to_string());
+            path = parent;
+        }
+    }
+    owned
+}
 
 pub struct SnapshotEntry {
     pub name: String,
@@ -22,14 +74,16 @@ pub trait SnapshotDir {
 pub fn local_fileset_specs<D: SnapshotDir + ?Sized>(
     dir: &D,
     locals: &[LocalFileset],
-) -> Result<Vec<RuntimeFileSpec>> {
-    let mut specs = Vec::new();
+    out: &mut MaterializedFilesets,
+) -> Result<()> {
     for local in locals {
         let root = local.mount_path.trim_end_matches('/');
+        let mut specs = Vec::new();
         snapshot_into(dir, Path::new(&local.source), root, &mut specs)
             .with_context(|| format!("snapshotting fileset {}", local.source))?;
+        out.absorb(local.owner, &local.mount_path, specs);
     }
-    Ok(specs)
+    Ok(())
 }
 
 fn snapshot_into<D: SnapshotDir + ?Sized>(
@@ -265,17 +319,29 @@ mod tests {
         }
     }
 
+    fn local(source: &str, mount_path: &str, owner: FilesetOwner) -> LocalFileset {
+        LocalFileset {
+            source: source.into(),
+            mount_path: mount_path.into(),
+            owner,
+        }
+    }
+
     #[test]
     fn local_specs_snapshot_nested_directories_as_host_file_specs() {
-        let specs = local_fileset_specs(
+        let mut out = MaterializedFilesets::default();
+        local_fileset_specs(
             &TwoLevel,
-            &[LocalFileset {
-                source: "/work/skills".into(),
-                mount_path: "/root/.agent/skills/".into(),
-            }],
+            &[local(
+                "/work/skills",
+                "/root/.agent/skills/",
+                FilesetOwner::Root,
+            )],
+            &mut out,
         )
         .unwrap();
-        let rendered: Vec<(String, u32)> = specs
+        let rendered: Vec<(String, u32)> = out
+            .specs
             .iter()
             .map(|spec| (spec.guest_path.clone(), spec.mode))
             .collect();
@@ -286,7 +352,7 @@ mod tests {
                 ("/root/.agent/skills/prompts.md".to_string(), 0o644),
             ]
         );
-        assert!(specs.iter().all(|spec| matches!(
+        assert!(out.specs.iter().all(|spec| matches!(
             &spec.source,
             RuntimeSource::HostFile(path) if path.starts_with("/work/skills")
         )));
@@ -296,15 +362,86 @@ mod tests {
     fn local_specs_surface_a_missing_directory_naming_the_fileset() {
         let err = local_fileset_specs(
             &TwoLevel,
-            &[LocalFileset {
-                source: "/work/missing".into(),
-                mount_path: "/s".into(),
-            }],
+            &[local("/work/missing", "/s", FilesetOwner::Workload)],
+            &mut MaterializedFilesets::default(),
         )
         .unwrap_err();
         assert!(
             format!("{err:#}").contains("snapshotting fileset /work/missing"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_workload_owned_fileset_lists_its_mount_dirs_and_files_for_the_guest_chown() {
+        let mut out = MaterializedFilesets::default();
+        local_fileset_specs(
+            &TwoLevel,
+            &[local(
+                "/work/skills",
+                "/root/.agent/skills/",
+                FilesetOwner::Workload,
+            )],
+            &mut out,
+        )
+        .unwrap();
+        let owned: Vec<&str> = out.owned_paths.iter().map(String::as_str).collect();
+        assert_eq!(
+            owned,
+            [
+                "/root/.agent/skills",
+                "/root/.agent/skills/deep",
+                "/root/.agent/skills/deep/run.sh",
+                "/root/.agent/skills/prompts.md",
+            ],
+            "the mount path, introduced dirs, and files must all transfer to the workload"
+        );
+        let manifest = out
+            .into_specs()
+            .into_iter()
+            .find(|s| s.guest_path == OWNED_MANIFEST_PATH)
+            .expect("owned manifest spec");
+        assert_eq!(manifest.mode, 0o444);
+        assert!(matches!(
+            &manifest.source,
+            RuntimeSource::Bytes(body) if body == b"/root/.agent/skills\n/root/.agent/skills/deep\n/root/.agent/skills/deep/run.sh\n/root/.agent/skills/prompts.md\n"
+        ));
+    }
+
+    #[test]
+    fn a_root_owned_fileset_ships_no_chown_manifest() {
+        let mut out = MaterializedFilesets::default();
+        local_fileset_specs(
+            &TwoLevel,
+            &[local("/work/skills", "/opt/skills", FilesetOwner::Root)],
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.owned_paths.is_empty());
+        assert!(
+            !out.into_specs()
+                .iter()
+                .any(|s| s.guest_path == OWNED_MANIFEST_PATH),
+            "pinned inputs must not be transferred to the workload"
+        );
+    }
+
+    #[test]
+    fn owned_paths_never_climb_above_the_mount_path() {
+        let specs = [RuntimeFileSpec {
+            guest_path: "/home/sandbox/.claude/settings.json".into(),
+            mode: 0o644,
+            source: RuntimeSource::Bytes(b"{}".to_vec()),
+        }];
+        let owned = owned_paths_for("/home/sandbox", &specs);
+        assert_eq!(
+            owned.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "/home/sandbox",
+                "/home/sandbox/.claude",
+                "/home/sandbox/.claude/settings.json",
+            ],
+            "/home must stay untouched"
         );
     }
 

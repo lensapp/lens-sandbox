@@ -123,12 +123,15 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     }
     if !world.project_filesets.is_empty() {
         spec_tail.push_str("\n  filesets:");
-        for (dir, file, mount) in &world.project_filesets {
+        for (dir, file, mount, owner) in &world.project_filesets {
             let fileset_dir = root.join(dir);
             std::fs::create_dir_all(&fileset_dir).expect("create fileset dir");
             std::fs::write(fileset_dir.join(file), "fileset payload\n")
                 .expect("write fileset file");
             spec_tail.push_str(&format!("\n    - path: ./{dir}\n      mountPath: {mount}"));
+            if let Some(owner) = owner {
+                spec_tail.push_str(&format!("\n      owner: {owner}"));
+            }
         }
     }
     let definition = format!(
@@ -827,7 +830,16 @@ fn project_declares_port(world: &mut E2eWorld, port: u16) {
     regex = r#"^the project declares a fileset directory "([^"]+)" containing "([^"]+)" mounted at "([^"]+)"$"#
 )]
 fn project_declares_fileset(world: &mut E2eWorld, dir: String, file: String, mount: String) {
-    world.project_filesets.push((dir, file, mount));
+    world.project_filesets.push((dir, file, mount, None));
+}
+
+#[given(
+    regex = r#"^the project declares a fileset directory "([^"]+)" containing "([^"]+)" mounted at "([^"]+)" owned by root$"#
+)]
+fn project_declares_root_fileset(world: &mut E2eWorld, dir: String, file: String, mount: String) {
+    world
+        .project_filesets
+        .push((dir, file, mount, Some("root".into())));
 }
 
 #[then("the run output carries no signature warning")]

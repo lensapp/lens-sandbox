@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use cucumber::{given, then, when};
-use lns_service::artifact::fileset::{SnapshotDir, SnapshotEntry, local_fileset_specs};
+use lns_service::artifact::fileset::{
+    MaterializedFilesets, OWNED_MANIFEST_PATH, SnapshotDir, SnapshotEntry, local_fileset_specs,
+};
 use lns_service::artifact::{published_fileset_problems, resolved_from_sandbox};
 
 use crate::world::BehaviourWorld;
@@ -125,6 +127,16 @@ fn local_definition_with_path_fileset(world: &mut BehaviourWorld, file: String, 
     world.fileset_snapshot_file = Some(file);
 }
 
+#[given(
+    regex = r#"^a local definition declaring a root-owned path fileset containing "([^"]+)" at "([^"]+)"$"#
+)]
+fn local_definition_with_root_fileset(world: &mut BehaviourWorld, file: String, mount: String) {
+    world.fileset_definition = Some(sandbox_json(&format!(
+        r#"{{"path":"/consumer/project/skills","mountPath":"{mount}","owner":"root"}}"#
+    )));
+    world.fileset_snapshot_file = Some(file);
+}
+
 #[when("the local definition is planned")]
 fn plan_local_definition(world: &mut BehaviourWorld) {
     let json = world
@@ -137,9 +149,47 @@ fn plan_local_definition(world: &mut BehaviourWorld) {
         .fileset_snapshot_file
         .take()
         .expect("the scenario must stage a file");
-    let specs = local_fileset_specs(&OneFileDir(file), &resolved.local_filesets)
-        .expect("the snapshot must plan");
+    let mut materialized = MaterializedFilesets::default();
+    local_fileset_specs(
+        &OneFileDir(file),
+        &resolved.local_filesets,
+        &mut materialized,
+    )
+    .expect("the snapshot must plan");
+    let specs = materialized.into_specs();
+    world.fileset_manifest = specs
+        .iter()
+        .find(|spec| spec.guest_path == OWNED_MANIFEST_PATH)
+        .map(|spec| match &spec.source {
+            lns_service::runtime_layer::RuntimeSource::Bytes(body) => {
+                String::from_utf8(body.clone()).expect("utf8 manifest")
+            }
+            other => panic!("the chown manifest must be inline bytes, got {other:?}"),
+        });
     world.fileset_specs = Some(specs.into_iter().map(|spec| spec.guest_path).collect());
+}
+
+#[then(regex = r#"^the plan ships a chown manifest listing "([^"]+)"$"#)]
+fn plan_ships_manifest(world: &mut BehaviourWorld, path: String) -> Result<(), String> {
+    let manifest = world
+        .fileset_manifest
+        .as_ref()
+        .ok_or("the plan shipped no chown manifest")?;
+    if manifest.lines().any(|line| line == path) {
+        Ok(())
+    } else {
+        Err(format!("expected {path:?} in the manifest:\n{manifest}"))
+    }
+}
+
+#[then("the plan ships no chown manifest")]
+fn plan_ships_no_manifest(world: &mut BehaviourWorld) -> Result<(), String> {
+    match &world.fileset_manifest {
+        None => Ok(()),
+        Some(manifest) => Err(format!(
+            "a root-owned fileset must not transfer to the workload, got:\n{manifest}"
+        )),
+    }
 }
 
 #[then(regex = r#"^the plan carries a guest-write spec for "([^"]+)"$"#)]

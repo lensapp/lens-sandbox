@@ -27,6 +27,22 @@ Feature: declarative workdir and mounts reach a real guest
     And the output contains "fileset payload"
     And the run output carries no signature warning
 
+  Scenario: a declared fileset transfers to the workload user by default
+    Given the Lens Sandbox service is running
+    And the project declares a fileset directory "seed" containing "state.json" mounted at "/home/sandbox"
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox stat -c owner=%u /home/sandbox/state.json && echo overwrite > /home/sandbox/state.json && echo writable=yes'"
+    Then the exit code is 0
+    And the output contains "owner=65534"
+    And the output contains "writable=yes"
+
+  Scenario: an owner root fileset stays pinned beyond the workload's reach
+    Given the Lens Sandbox service is running
+    And the project declares a fileset directory "skills" containing "prompts.md" mounted at "/opt/agent-skills" owned by root
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox stat -c owner=%u /opt/agent-skills/prompts.md; echo tamper > /opt/agent-skills/prompts.md 2>/dev/null || echo denied=yes'"
+    Then the exit code is 0
+    And the output contains "owner=0"
+    And the output contains "denied=yes"
+
   Scenario: a pulled published sandbox launches offline from the consumer project
     Given a local registry
     And the Lens Sandbox service is running

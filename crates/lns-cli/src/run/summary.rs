@@ -322,6 +322,7 @@ mod tests {
             path: path.map(str::to_string),
             reference: reference.map(str::to_string),
             mount_path: "/s".into(),
+            owner: lns_artifact::sandbox::FilesetOwner::default(),
         }
     }
 

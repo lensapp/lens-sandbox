@@ -74,6 +74,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                 fileset.path.as_ref().map(|path| assembly::LocalFileset {
                     source: path.clone(),
                     mount_path: fileset.mount_path.clone(),
+                    owner: fileset.owner,
                 })
             })
             .collect(),
@@ -89,6 +90,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                         name: fileset.mount_path.clone(),
                         paths: vec![fileset.mount_path.clone()],
                         reference: reference.clone(),
+                        owner: fileset.owner,
                     })
             })
             .collect(),
@@ -144,7 +146,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_splits_path_and_ref_filesets() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b","owner":"root"}]}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
@@ -153,11 +155,17 @@ mod tests {
             [assembly::LocalFileset {
                 source: "/work/skills".into(),
                 mount_path: "/a".into(),
+                owner: lns_artifact::sandbox::FilesetOwner::Workload,
             }]
         );
         assert_eq!(resolved.filesets.len(), 1);
         assert_eq!(resolved.filesets[0].reference, "reg/skills@sha256:abc");
         assert_eq!(resolved.filesets[0].paths, ["/b"]);
+        assert_eq!(
+            resolved.filesets[0].owner,
+            lns_artifact::sandbox::FilesetOwner::Root,
+            "a declared owner must survive resolution"
+        );
     }
 
     #[test]

@@ -29,3 +29,14 @@ Feature: a sandbox's declared filesets are planned into the launch
     Given a local definition declaring a path fileset containing "prompts.md" at "/root/.agent/skills"
     When the local definition is planned
     Then the plan carries a guest-write spec for "/root/.agent/skills/prompts.md"
+
+  Scenario: a fileset's files transfer to the workload user by default
+    Given a local definition declaring a path fileset containing "state.json" at "/home/sandbox"
+    When the local definition is planned
+    Then the plan ships a chown manifest listing "/home/sandbox/state.json"
+    And the plan ships a chown manifest listing "/home/sandbox"
+
+  Scenario: an owner root fileset ships no chown manifest
+    Given a local definition declaring a root-owned path fileset containing "prompts.md" at "/opt/skills"
+    When the local definition is planned
+    Then the plan ships no chown manifest

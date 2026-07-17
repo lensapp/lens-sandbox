@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub struct LocalFileset {
     pub source: String,
     pub mount_path: String,
+    pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -25,6 +26,7 @@ pub struct ResolvedFileset {
     pub paths: Vec<String>,
     /// The digest-pinned OCI reference the fileset's content layer is pulled from at materialization.
     pub reference: String,
+    pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
 #[derive(Debug, Clone)]
