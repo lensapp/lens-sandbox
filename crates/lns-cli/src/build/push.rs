@@ -27,17 +27,35 @@ fn auth_refused(
     auth: &RegistryAuth,
     err: impl std::fmt::Display,
 ) -> anyhow::Error {
+    crate::log::debug!(registry = %reference.registry(), error = %err, "registry refused the push auth");
+    auth_refused_message(reference, auth)
+}
+
+fn auth_refused_message(reference: &Reference, auth: &RegistryAuth) -> anyhow::Error {
     let registry = reference.registry();
-    let hint = match auth {
-        RegistryAuth::Anonymous => format!(
-            "no login is stored for {registry} — sign in with a token that has push access, then push again:\n  lns login {registry} --username <USER> --password-stdin"
+    let recipe = login_recipe(registry);
+    match auth {
+        RegistryAuth::Anonymous => anyhow::anyhow!(
+            "{registry} denied the push — no login is stored for it\n\n\
+             Sign in with a token that has push access, then push again:\n\n{recipe}"
         ),
-        _ => format!(
-            "the stored login for {registry} was refused — the token may be expired, missing push scope, or not allowed to write {}; refresh it:\n  lns login {registry} --username <USER> --password-stdin",
+        _ => anyhow::anyhow!(
+            "{registry} denied the push — it refused the stored login\n\n\
+             The token may be expired, missing push scope, or not allowed to\n\
+             write {}. Refresh the login, then push again:\n\n{recipe}",
             reference.repository()
         ),
-    };
-    anyhow::anyhow!("authenticating to {registry}: {err}\n{hint}")
+    }
+}
+
+fn login_recipe(registry: &str) -> String {
+    if registry == "ghcr.io" {
+        return "\x20   gh auth refresh --scopes write:packages\n\
+                \x20   gh auth token | lns login ghcr.io --username <YOUR-GITHUB-USER> --password-stdin\n\n\
+                (or paste any GitHub token with the write:packages scope via --password-stdin)"
+            .into();
+    }
+    format!("\x20   echo <TOKEN> | lns login {registry} --username <USER> --password-stdin")
 }
 
 /// Upload a built artifact's blobs and then its exact manifest bytes to `target`, reusing the stored `lns login` credential (which must carry push scope).
@@ -83,15 +101,44 @@ mod tests {
     }
 
     #[test]
-    fn an_anonymous_refusal_points_at_lns_login() {
-        let err = auth_refused(&reference(), &RegistryAuth::Anonymous, "DENIED");
+    fn an_anonymous_refusal_points_at_lns_login_without_the_raw_registry_error() {
+        let err = auth_refused(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            r#"{"code":"DENIED"}"#,
+        );
         let text = format!("{err:#}");
-        assert!(text.contains("authenticating to ghcr.io: DENIED"), "{text}");
-        assert!(text.contains("no login is stored for ghcr.io"), "{text}");
+        assert!(text.contains("ghcr.io denied the push"), "{text}");
+        assert!(text.contains("no login is stored"), "{text}");
         assert!(
-            text.contains("lns login ghcr.io --username <USER> --password-stdin"),
+            !text.contains("DENIED"),
+            "the raw registry error belongs on the debug stream only: {text}"
+        );
+    }
+
+    #[test]
+    fn a_ghcr_refusal_teaches_the_gh_cli_token_recipe() {
+        let err = auth_refused(&reference(), &RegistryAuth::Anonymous, "denied");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("gh auth refresh --scopes write:packages"),
             "{text}"
         );
+        assert!(text.contains("gh auth token | lns login ghcr.io"), "{text}");
+    }
+
+    #[test]
+    fn a_generic_registry_refusal_gets_the_plain_login_recipe() {
+        let reference: Reference = "registry.example.test/team/thing:1".parse().unwrap();
+        let err = auth_refused(&reference, &RegistryAuth::Anonymous, "denied");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(
+                "echo <TOKEN> | lns login registry.example.test --username <USER> --password-stdin"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("gh auth"), "{text}");
     }
 
     #[test]
@@ -99,10 +146,7 @@ mod tests {
         let auth = RegistryAuth::Basic("user".into(), "secret".into());
         let err = auth_refused(&reference(), &auth, "DENIED");
         let text = format!("{err:#}");
-        assert!(
-            text.contains("the stored login for ghcr.io was refused"),
-            "{text}"
-        );
+        assert!(text.contains("it refused the stored login"), "{text}");
         assert!(text.contains("acme/my-sandbox"), "{text}");
         assert!(
             !text.contains("secret"),

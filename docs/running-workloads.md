@@ -521,16 +521,23 @@ that would publish (`npm publish --dry-run`-style), so you can preview a
 release offline.
 
 Pushing needs a stored login with **push access** for the registry — sign in once
-with `lns login` (for `ghcr.io` that's a GitHub token with the `write:packages`
-scope, pushed to a repository path you own):
+with `lns login`. For `ghcr.io` that's a GitHub token with the `write:packages`
+scope, pushed to a repository path you own; the GitHub CLI mints one directly:
 
 ```bash
-echo "$TOKEN" | lns login ghcr.io --username <USER> --password-stdin
+gh auth refresh --scopes write:packages
+gh auth token | lns login ghcr.io --username <YOUR-GITHUB-USER> --password-stdin
+```
+
+For any other registry, pipe a push-scoped token the same way:
+
+```bash
+echo "$TOKEN" | lns login registry.example.com --username <USER> --password-stdin
 ```
 
 A refused push says which of the two it is — no stored login, or a stored login
 the registry rejected (expired, missing push scope, or the wrong repository
-path) — and names the `lns login` command to fix it.
+path) — and prints the sign-in recipe to fix it.
 
 On the other side, `lns pull` fetches a published sandbox and its base image into
 the local cache, and `lns run` can boot it straight from the reference:
