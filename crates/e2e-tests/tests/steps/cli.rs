@@ -10,8 +10,8 @@ fn fresh_home(world: &mut E2eWorld) {
     world.home = Some(tempfile::TempDir::new().expect("tempdir"));
 }
 
-#[given(regex = r#"^the home config file declares a malformed run\.env entry "([^"]+)"$"#)]
-fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
+#[given("the home config file declares an invalid run.cpus default")]
+fn home_config_with_invalid_cpus(world: &mut E2eWorld) {
     let home = world
         .home
         .as_ref()
@@ -23,11 +23,7 @@ fn home_config_with_malformed_env(world: &mut E2eWorld, entry: String) {
     };
     let dir = config_dir.join("lns");
     std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(
-        dir.join("config.yaml"),
-        format!("run:\n  env:\n    - {entry}\n"),
-    )
-    .expect("write config");
+    std::fs::write(dir.join("config.yaml"), "run:\n  cpus: 0\n").expect("write config");
 }
 
 #[when(regex = r#"^I run "([^"]*)"$"#)]
@@ -68,7 +64,13 @@ fn i_run_with_stdout_closed(world: &mut E2eWorld, cmd_line: String) {
 #[then(regex = r#"^the exit code is (\d+)$"#)]
 fn exit_code_is(world: &mut E2eWorld, code: i32) -> Result<(), String> {
     let res = world.result.as_ref().ok_or("no CLI run captured")?;
-    assert_eq_int(code, res.exit_code, "exit code")
+    assert_eq_int(code, res.exit_code, "exit code").map_err(|e| {
+        format!(
+            "{e}\nstdout: {}\nstderr: {}",
+            res.stdout.trim_end(),
+            res.stderr.trim_end()
+        )
+    })
 }
 
 #[then("the exit code is non-zero")]

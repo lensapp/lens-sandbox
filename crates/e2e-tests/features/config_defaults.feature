@@ -20,7 +20,7 @@ Feature: lns config persists defaults across invocations
 
   Scenario: lns run rejects a malformed hand-edited default before any service round-trip
     Given a clean lns cache home
-    And the home config file declares a malformed run.env entry "BARE"
+    And the home config file declares an invalid run.cpus default
     When I run "lns run alpine"
     Then the exit code is non-zero
-    And the output contains "run.env"
+    And the output contains "run.cpus"

@@ -91,6 +91,28 @@ where
     }
 }
 
+pub fn run_cli_in_dir<I, S, E, K, V>(dir: &Path, args: I, envs: E) -> CliResult
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut cmd = Command::new(lns_binary());
+    cmd.current_dir(dir).args(&args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to spawn lns binary");
+    CliResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
 pub fn run_cli_with_closed_stdout<I, S, E, K, V>(args: I, envs: E) -> CliResult
 where
     I: IntoIterator<Item = S>,
@@ -129,6 +151,28 @@ where
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
     let mut cmd = Command::new(lns_binary());
     cmd.args(&args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    capture_with_timeout(cmd, timeout)
+}
+
+pub fn run_cli_with_timeout_in_dir<I, S, E, K, V>(
+    dir: &Path,
+    args: I,
+    envs: E,
+    timeout: Duration,
+) -> CliResult
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut cmd = Command::new(lns_binary());
+    cmd.current_dir(dir).args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
     }

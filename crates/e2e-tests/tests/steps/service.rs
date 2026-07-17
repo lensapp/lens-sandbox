@@ -5,6 +5,10 @@ use crate::specutil::{
 use cucumber::{given, then, when};
 
 pub(crate) fn start_service(world: &mut E2eWorld) {
+    start_service_with(world, &[]);
+}
+
+pub(crate) fn start_service_with(world: &mut E2eWorld, extra: &[(&str, &str)]) {
     world.ensure_service_dir();
     let mut envs: Vec<(&str, std::ffi::OsString)> = vec![
         (
@@ -17,6 +21,7 @@ pub(crate) fn start_service(world: &mut E2eWorld) {
         envs.push(("HOME", home.path().into()));
         envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
     }
+    envs.extend(extra.iter().map(|(k, v)| (*k, std::ffi::OsString::from(v))));
     let result = run_cli_with_env(["service", "start"], envs);
     assert!(
         result.exit_code == 0,
@@ -79,6 +84,36 @@ fn service_is_running_in_home(world: &mut E2eWorld) {
     start_service(world);
 }
 
+#[given("the Lens Sandbox service is running headless in that home")]
+fn service_is_running_headless_in_home(world: &mut E2eWorld) {
+    assert!(
+        world.home.is_some(),
+        "Given a clean lns cache home before starting the service in it"
+    );
+    start_service_with(world, &[("LNS_HEADLESS", "1")]);
+}
+
+#[when(regex = r#"^the user connects integration "([^"]+)"$"#)]
+fn connect_integration(world: &mut E2eWorld, id: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("a home holds the integration catalog")
+        .path()
+        .to_path_buf();
+    let mut envs: Vec<(&str, std::ffi::OsString)> = vec![("HOME", home.clone().into())];
+    if let Some(sock) = &world.service_socket {
+        envs.push(("LNS_SOCKET_PATH", sock.clone().into()));
+    }
+    let result = crate::specutil::run_cli_with_timeout_in_dir(
+        &home,
+        vec!["integration".to_string(), "connect".to_string(), id],
+        envs,
+        std::time::Duration::from_secs(30),
+    );
+    world.result = Some(result);
+}
+
 #[when("I run `lns service start`")]
 fn run_service_start(world: &mut E2eWorld) {
     world.ensure_service_dir();
@@ -113,7 +148,7 @@ fn run_service_status(world: &mut E2eWorld) {
 
 #[when("I run an `lns` command that requires the service")]
 fn run_command_requiring_service(world: &mut E2eWorld) {
-    let result = world.run_with_service_env(&["run", "--", "/bin/true"]);
+    let result = world.run_with_service_env(&["ps"]);
     world.result = Some(result);
 }
 

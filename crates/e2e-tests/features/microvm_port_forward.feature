@@ -16,3 +16,10 @@ Feature: only published ports are reachable from the host through a real microVM
     Then the exit code is 0
     And the host can fetch "published" from port 47821
     And the host cannot connect to port 47822
+
+  Scenario: a locally declared port publishes automatically like compose up
+    Given the Lens Sandbox service is running
+    And the project definition declares port 47823
+    When the user starts a detached microVM command "/bin/sh -c 'while true; do printf declared | /.lens/guest-tools/bin/busybox nc -l -p 47823; done'" with no port flags
+    Then the exit code is 0
+    And the host can fetch "declared" from port 47823

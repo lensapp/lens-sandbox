@@ -1,9 +1,148 @@
 use crate::E2eWorld;
-use crate::specutil::{arg_parser::split_args, run_cli_with_timeout};
+use crate::specutil::{arg_parser::split_args, run_cli_with_timeout, run_cli_with_timeout_in_dir};
 use cucumber::{given, then, when};
 use std::time::{Duration, Instant};
 
 const MICROVM_RUN_TIMEOUT: Duration = Duration::from_secs(120);
+// Streaming verbs are the deadlock-prone surface: a terminal-ownership regression hangs them forever, so they always run under a kill deadline.
+const STREAM_VERB_TIMEOUT: Duration = Duration::from_secs(30);
+const LOG_REPLAY_DEADLINE: Duration = Duration::from_secs(90);
+
+// `lns run` takes a published sandbox or ./lns.yaml (imageless mode and plain-image REFs are retired), so every microVM scenario boots a sandbox over this base.
+// The ECR mirror of Docker Hub: anonymous pulls there hit hard rate limits when the suite boots ~45 guests.
+const MICROVM_IMAGE: &str = "public.ecr.aws/docker/library/alpine:3.20";
+
+static PINNED_MICROVM_IMAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn linux_host_arch_resolver(entries: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    entries
+        .iter()
+        .find(|e| {
+            !e.media_type.contains("attestation")
+                && e.platform.as_ref().is_some_and(|p| {
+                    p.os.to_string() == "linux" && p.architecture.to_string() == arch
+                })
+        })
+        .map(|e| e.digest.clone())
+}
+
+fn image_pin_cache_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-microvm-image-pin")
+}
+
+fn cached_image_pin() -> Option<String> {
+    let contents = std::fs::read_to_string(image_pin_cache_path()).ok()?;
+    let (tag, pinned) = contents.trim().split_once(' ')?;
+    (tag == MICROVM_IMAGE && pinned.contains("@sha256:")).then(|| pinned.to_string())
+}
+
+// Resolve the base tag to a digest-pinned reference once per checkout (a digest is immutable, and the pin file keeps repeated suite invocations from tripping ECR's rate limit): pinned refs hit the daemon's manifest cache, so ~45 booted guests cost one registry round-trip.
+fn pinned_microvm_image() -> String {
+    PINNED_MICROVM_IMAGE
+        .get_or_init(|| {
+            if let Some(pin) = cached_image_pin() {
+                return pin;
+            }
+            let pinned = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let reference: oci_client::Reference =
+                        MICROVM_IMAGE.parse().expect("base ref parses");
+                    // Mirror the daemon's linux/host-arch index resolution so the pin lands on the platform manifest digest the daemon verifies against.
+                    let client = oci_client::Client::new(oci_client::client::ClientConfig {
+                        platform_resolver: Some(Box::new(linux_host_arch_resolver)),
+                        ..Default::default()
+                    });
+                    let (_, digest) = client
+                        .pull_image_manifest(
+                            &reference,
+                            &oci_client::secrets::RegistryAuth::Anonymous,
+                        )
+                        .await
+                        .expect("resolve the base image digest");
+                    format!(
+                        "{}/{}@{digest}",
+                        reference.registry(),
+                        reference.repository()
+                    )
+                })
+            });
+            let _ = std::fs::write(
+                image_pin_cache_path(),
+                format!("{MICROVM_IMAGE} {pinned}\n"),
+            );
+            pinned
+        })
+        .clone()
+}
+
+fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
+    let dir = world
+        .project
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("project tempdir"));
+    let root = dir.path().to_path_buf();
+    let mut spec_tail = String::new();
+    if let Some(command) = &world.project_command {
+        spec_tail.push_str(&format!("\n  command: {command}"));
+    }
+    if !world.project_env.is_empty() {
+        spec_tail.push_str("\n  env:");
+        for (key, value) in &world.project_env {
+            spec_tail.push_str(&format!("\n    {key}: {value}"));
+        }
+    }
+    if !world.project_integrations.is_empty() {
+        spec_tail.push_str("\n  integrations:");
+        for id in &world.project_integrations {
+            spec_tail.push_str(&format!("\n    - {id}"));
+        }
+    }
+    if !world.project_credentials.is_empty() {
+        spec_tail.push_str("\n  credentials:");
+        for (name, env, required) in &world.project_credentials {
+            spec_tail.push_str(&format!(
+                "\n    - name: {name}\n      env: {env}\n      required: {required}"
+            ));
+        }
+    }
+    if !world.project_ports.is_empty() {
+        spec_tail.push_str("\n  ports:");
+        for (host, container) in &world.project_ports {
+            if let Some(host) = host {
+                spec_tail.push_str(&format!(
+                    "\n    - host: {host}\n      container: {container}"
+                ));
+            } else {
+                spec_tail.push_str(&format!("\n    - container: {container}"));
+            }
+        }
+    }
+    if !world.project_filesets.is_empty() {
+        spec_tail.push_str("\n  filesets:");
+        for (dir, file, mount) in &world.project_filesets {
+            let fileset_dir = root.join(dir);
+            std::fs::create_dir_all(&fileset_dir).expect("create fileset dir");
+            std::fs::write(fileset_dir.join(file), "fileset payload\n")
+                .expect("write fileset file");
+            spec_tail.push_str(&format!("\n    - path: ./{dir}\n      mountPath: {mount}"));
+        }
+    }
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
+        pinned_microvm_image()
+    );
+    std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
+    std::fs::write(
+        root.join("lns-policy.yaml"),
+        "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+    )
+    .expect("write the project policy");
+    root
+}
 
 fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
     world
@@ -13,29 +152,36 @@ fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
         .unwrap_or_default()
 }
 
+// Anchored to the CLI's "✓ started run <id>" status line: the workload transcript precedes it and legitimately contains phrases like "run as root".
 fn parse_run_id(text: &str) -> Option<String> {
-    let marker = text.find("run ")?;
-    let id: String = text[marker + "run ".len()..]
+    let marker = text.find("started run ")?;
+    let id: String = text[marker + "started run ".len()..]
         .chars()
         .take_while(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         .collect();
     (!id.is_empty()).then_some(id)
 }
 
-fn run_microvm(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
+fn run_microvm(world: &mut E2eWorld, run_args: Vec<String>, cmd_line: &str) {
+    run_microvm_of(world, run_args, cmd_line);
+}
+
+fn run_microvm_of(world: &mut E2eWorld, mut run_args: Vec<String>, cmd_line: &str) {
     run_args.push("--".to_string());
     run_args.extend(split_args(cmd_line));
     run_lns_microvm(world, run_args);
 }
 
 fn run_lns_microvm(world: &mut E2eWorld, tail: Vec<String>) {
+    let project = microvm_project(world);
     let mut args = vec!["run".to_string()];
     if let Some(policy) = &world.policy_path {
         args.push("--policy".to_string());
         args.push(policy.to_string_lossy().into_owned());
     }
     args.extend(tail);
-    let result = run_cli_with_timeout(args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    let result =
+        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
 }
@@ -71,9 +217,104 @@ fn host_bind_source(world: &E2eWorld) -> String {
         .into_owned()
 }
 
+#[given(regex = r#"^the home's integration catalog declares "([^"]+)" managing "([^"]+)"$"#)]
+fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home before writing a catalog");
+    let catalog = format!(
+        "integrations:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
+    );
+    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
+        .expect("write the user integration catalog");
+}
+
+#[given(regex = r#"^the project definition declares integration "([^"]+)"$"#)]
+fn project_declares_integration(world: &mut E2eWorld, id: String) {
+    world.project_integrations.push(id);
+}
+
+#[given(regex = r#"^the project definition requires credential "([^"]+)" injected as "([^"]+)"$"#)]
+fn project_requires_credential(world: &mut E2eWorld, id: String, env: String) {
+    world.project_credentials.push((id, env, true));
+}
+
+#[given(regex = r#"^the project definition declares credential "([^"]+)" injected as "([^"]+)"$"#)]
+fn project_declares_credential(world: &mut E2eWorld, id: String, env: String) {
+    world.project_credentials.push((id, env, false));
+}
+
+#[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]
+fn project_sets_command(world: &mut E2eWorld, command: String) {
+    world.project_command = Some(command);
+}
+
+#[given(regex = r#"^the project definition sets env "([^"]+)=([^"]*)"$"#)]
+fn project_sets_env(world: &mut E2eWorld, key: String, value: String) {
+    world.project_env.push((key, value));
+}
+
+#[given(
+    regex = r#"^the home's integration catalog declares an oauth integration "([^"]+)" signing in at "([^"]+)"$"#
+)]
+fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: String) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home before writing a catalog");
+    let catalog = format!(
+        "integrations:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
+    );
+    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
+        .expect("write the user integration catalog");
+}
+
+#[when("the user runs the sandbox definition")]
+fn run_definition_only(world: &mut E2eWorld) {
+    run_lns_microvm(world, vec![]);
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)"$"#)]
 fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
+}
+
+fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
+    let project = microvm_project(world);
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
+        pinned_microvm_image()
+    );
+    std::fs::write(project.join("lns.yaml"), definition)
+        .expect("write declarative project lns.yaml");
+    track_volume(world, "e2e-declarative");
+    project
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" from a declarative sandbox$"#)]
+fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) {
+    let project = write_declarative_definition(world);
+    let mut args = vec!["run".to_string(), "--".to_string()];
+    args.extend(split_args(&cmd_line));
+    let result =
+        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" on the declarative sandbox by path from a nested directory$"#
+)]
+fn run_command_by_path_from_nested_dir(world: &mut E2eWorld, cmd_line: String) {
+    let project = write_declarative_definition(world);
+    let nested = project.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested directory");
+    let mut args = vec!["run".to_string(), "..".to_string(), "--".to_string()];
+    args.extend(split_args(&cmd_line));
+    let result = run_cli_with_timeout_in_dir(&nested, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with hostname "([^"]+)"$"#)]
@@ -358,14 +599,171 @@ fn run_command_with_env(world: &mut E2eWorld, cmd_line: String, env: String) {
     run_microvm(world, vec!["-e".into(), env], &cmd_line);
 }
 
+static RUN_SANDBOX_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PUBLISHED_DECLARATIVE_SEQ: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn mirror_microvm_image(host: &str, seq: usize) -> String {
+    let source: oci_client::Reference = pinned_microvm_image()
+        .parse()
+        .expect("pinned image ref parses");
+    let remote = oci_client::Client::new(oci_client::client::ClientConfig::default());
+    let oci_client::client::ImageData {
+        layers,
+        digest: _,
+        config,
+        manifest,
+    } = remote
+        .pull(
+            &source,
+            &oci_client::secrets::RegistryAuth::Anonymous,
+            vec![
+                oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
+                oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+            ],
+        )
+        .await
+        .expect("pull the microVM image for the offline registry");
+    let destination: oci_client::Reference = format!("{host}/e2e-offline-base:{seq}")
+        .parse()
+        .expect("offline base ref parses");
+    let local = oci_client::Client::new(oci_client::client::ClientConfig {
+        protocol: oci_client::client::ClientProtocol::Http,
+        ..Default::default()
+    });
+    local
+        .push(
+            &destination,
+            &layers,
+            config,
+            &oci_client::secrets::RegistryAuth::Anonymous,
+            manifest,
+        )
+        .await
+        .expect("push the microVM image into the offline registry");
+    let (_, digest, _) = local
+        .pull_manifest_and_config(&destination, &oci_client::secrets::RegistryAuth::Anonymous)
+        .await
+        .expect("resolve the mirrored image digest");
+    destination.clone_with_digest(digest).whole()
+}
+
+#[when(
+    "the user pulls a published declarative sandbox and runs it with the registry offline from a consumer project"
+)]
+async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .get_or_insert_with(crate::registry::LocalRegistry::start)
+        .host();
+    let seq = PUBLISHED_DECLARATIVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = mirror_microvm_image(&host, seq).await;
+    let reference = format!("{host}/e2e-declarative-sandbox:{seq}");
+    let volume = format!("e2e-declarative-published-{seq}");
+    let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
+    );
+    std::fs::write(publisher.path().join("lns.yaml"), definition)
+        .expect("write published declarative lns.yaml");
+    let pushed = run_cli_with_timeout_in_dir(
+        publisher.path(),
+        vec!["push".to_string(), reference.clone()],
+        std::iter::empty::<(&str, &str)>(),
+        MICROVM_RUN_TIMEOUT,
+    );
+    assert_eq!(
+        pushed.exit_code, 0,
+        "push published declarative sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    let pulled = world.run_with_service_env(&["pull", &reference]);
+    assert_eq!(
+        pulled.exit_code, 0,
+        "pull published declarative sandbox:\n{}\n{}",
+        pulled.stdout, pulled.stderr
+    );
+
+    let consumer = world
+        .project
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("consumer project tempdir"))
+        .path()
+        .to_path_buf();
+    std::fs::write(consumer.join("consumer-marker"), "consumer project\n")
+        .expect("write consumer marker");
+    std::fs::write(
+        consumer.join("lns-policy.yaml"),
+        "network:\n  defaultVerdict: deny\n",
+    )
+    .expect("write consumer policy");
+    track_volume(world, &volume);
+    world
+        .registry
+        .as_ref()
+        .expect("the local registry exists")
+        .set_online(false);
+
+    let command = "/bin/sh -c 'echo wd=$(/.lens/guest-tools/bin/busybox pwd); if [ -f consumer-marker ]; then echo consumer=visible; fi; if echo blocked > consumer-marker 2>/dev/null; then echo bind=writable; else echo bind=readonly; fi; echo volume=mounted > /data/marker; read v < /data/marker; echo $v'";
+    let mut args = vec!["run".to_string(), reference, "--".to_string()];
+    args.extend(split_args(command));
+    let result =
+        run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
+// `lns run` refuses a plain OCI image, so image-driven scenarios publish a minimal sandbox over it to the in-process registry and run that reference.
+async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String {
+    let image = if image == MICROVM_IMAGE {
+        pinned_microvm_image()
+    } else {
+        image.to_string()
+    };
+    let host = world
+        .registry
+        .get_or_insert_with(crate::registry::LocalRegistry::start)
+        .host();
+    let seq = RUN_SANDBOX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let reference: oci_client::Reference = format!("{host}/e2e-run-sandbox:{seq}")
+        .parse()
+        .expect("run-sandbox ref parses");
+    let doc = format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"e2e-run-sandbox"}},"spec":{{"image":"{image}"}}}}"#
+    );
+    let built = lns_artifact::build::build_artifact(doc.as_bytes()).expect("build run sandbox");
+    let client = oci_client::Client::new(oci_client::client::ClientConfig {
+        protocol: oci_client::client::ClientProtocol::Http,
+        ..Default::default()
+    });
+    for blob in &built.blobs {
+        client
+            .push_blob(&reference, blob.data.clone(), &blob.digest)
+            .await
+            .expect("push run-sandbox blob");
+    }
+    client
+        .push_manifest_raw(
+            &reference,
+            built.manifest.clone(),
+            http::HeaderValue::from_str(&built.manifest_media_type).expect("media type header"),
+        )
+        .await
+        .expect("push run-sandbox manifest");
+    reference.whole()
+}
+
 #[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)"$"#)]
-fn run_image_command(world: &mut E2eWorld, image: String, cmd_line: String) {
-    run_microvm(world, vec![image], &cmd_line);
+async fn run_image_command(world: &mut E2eWorld, image: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(world, vec![reference], &cmd_line);
 }
 
 #[when(regex = r#"^the user runs image "([^"]+)" with command "([^"]*)" and no separator$"#)]
-fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line: String) {
-    let mut tail = vec![image];
+async fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    let mut tail = vec![reference];
     tail.extend(split_args(&cmd_line));
     run_lns_microvm(world, tail);
 }
@@ -373,22 +771,24 @@ fn run_image_command_no_separator(world: &mut E2eWorld, image: String, cmd_line:
 #[when(
     regex = r#"^the user runs image "([^"]+)" with entrypoint "([^"]+)" and command "([^"]*)"$"#
 )]
-fn run_image_with_entrypoint(
+async fn run_image_with_entrypoint(
     world: &mut E2eWorld,
     image: String,
     entrypoint: String,
     cmd_line: String,
 ) {
-    run_microvm(
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(
         world,
-        vec!["--entrypoint".into(), entrypoint, image],
+        vec!["--entrypoint".into(), entrypoint, reference],
         &cmd_line,
     );
 }
 
 #[when(regex = r#"^the user runs image "([^"]+)" as user "([^"]+)" with command "([^"]*)"$"#)]
-fn run_image_as_user(world: &mut E2eWorld, image: String, user: String, cmd_line: String) {
-    run_microvm(world, vec!["-u".into(), user, image], &cmd_line);
+async fn run_image_as_user(world: &mut E2eWorld, image: String, user: String, cmd_line: String) {
+    let reference = published_sandbox_wrapping(world, &image).await;
+    run_microvm_of(world, vec!["-u".into(), user, reference], &cmd_line);
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with (\d+) vCPUs$"#)]
@@ -412,6 +812,39 @@ fn start_detached(world: &mut E2eWorld, cmd_line: String) {
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with auto-remove$"#)]
 fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["-d".into(), "--rm".into()], &cmd_line);
+}
+
+#[given(regex = r"^the project definition declares port (\d+)$")]
+fn project_declares_port(world: &mut E2eWorld, port: u16) {
+    world.project_ports.push((None, port));
+}
+
+#[given(
+    regex = r#"^the project declares a fileset directory "([^"]+)" containing "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn project_declares_fileset(world: &mut E2eWorld, dir: String, file: String, mount: String) {
+    world.project_filesets.push((dir, file, mount));
+}
+
+#[then("the run output carries no signature warning")]
+fn no_signature_warning(world: &mut E2eWorld) -> Result<(), String> {
+    let result = world.result.as_ref().ok_or("no run captured")?;
+    let combined = format!("{}\n{}", result.stdout, result.stderr);
+    if combined.to_lowercase().contains("signature") {
+        Err(format!(
+            "a sandbox run must not consult the signature gate, got:\n{combined}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with no port flags$"#)]
+fn start_detached_no_port_flags(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec!["-d".into()], &cmd_line);
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
 }
 
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" publishing port (\d+)$"#)]
@@ -476,6 +909,58 @@ fn host_cannot_connect(_world: &mut E2eWorld, port: u16) -> Result<(), String> {
     }
 }
 
+fn exec_in_that_run(world: &mut E2eWorld, tier: &[&str], cmd_line: &str) -> Result<(), String> {
+    let id = last_run(world)?;
+    let mut args: Vec<String> = tier.iter().map(|s| s.to_string()).collect();
+    args.extend(["-i=false".into(), "-t=false".into(), id, "--".into()]);
+    args.extend(split_args(cmd_line));
+    world.result = Some(run_cli_with_timeout(
+        args,
+        socket_env(world),
+        STREAM_VERB_TIMEOUT,
+    ));
+    Ok(())
+}
+
+#[when(regex = r#"^the user execs "([^"]*)" in that run$"#)]
+fn exec_top_level(world: &mut E2eWorld, cmd_line: String) -> Result<(), String> {
+    exec_in_that_run(world, &["exec"], &cmd_line)
+}
+
+#[when(regex = r#"^the user execs "([^"]*)" in that run via the sandbox namespace$"#)]
+fn exec_sandbox_namespace(world: &mut E2eWorld, cmd_line: String) -> Result<(), String> {
+    exec_in_that_run(world, &["sandbox", "exec"], &cmd_line)
+}
+
+// The workload's first output lands moments after the run starts; retry the replay until it shows (or surface the last attempt for the Then assertions).
+fn logs_until(world: &mut E2eWorld, tier: &[&str], needle: &str) -> Result<(), String> {
+    let id = last_run(world)?;
+    let mut args: Vec<String> = tier.iter().map(|s| s.to_string()).collect();
+    args.push(id);
+    let deadline = Instant::now() + LOG_REPLAY_DEADLINE;
+    loop {
+        let result = run_cli_with_timeout(args.clone(), socket_env(world), STREAM_VERB_TIMEOUT);
+        let settled = result.exit_code == 0 && result.stdout.contains(needle);
+        world.result = Some(result);
+        if settled || Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[when(regex = r#"^the user prints that run's logs until they contain "([^"]+)"$"#)]
+fn logs_top_level(world: &mut E2eWorld, needle: String) -> Result<(), String> {
+    logs_until(world, &["logs"], &needle)
+}
+
+#[when(
+    regex = r#"^the user prints that run's logs via the sandbox namespace until they contain "([^"]+)"$"#
+)]
+fn logs_sandbox_namespace(world: &mut E2eWorld, needle: String) -> Result<(), String> {
+    logs_until(world, &["sandbox", "logs"], &needle)
+}
+
 #[when("the user stops that run")]
 fn stop_that_run(world: &mut E2eWorld) -> Result<(), String> {
     let id = last_run(world)?;
@@ -495,6 +980,34 @@ fn inspect_that_run(world: &mut E2eWorld) -> Result<(), String> {
     let id = last_run(world)?;
     world.result = Some(world.run_with_service_env(&["sandbox", "inspect", &id]));
     Ok(())
+}
+
+#[when("the user lists running sandboxes")]
+fn list_running_sandboxes(world: &mut E2eWorld) {
+    world.result = Some(world.run_with_service_env(&["ps"]));
+}
+
+#[then("the output lists that run")]
+fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    let short = lns_ipc::short_run_id(&id);
+    let res = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}{}", res.stdout, res.stderr);
+    if combined.contains(short) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the listing to show run {short}, got:\n{combined}"
+        ))
+    }
+}
+
+#[given("a network policy holding an ask default and a direct-transport allow route")]
+fn policy_ask_with_direct_route(world: &mut E2eWorld) {
+    write_policy(
+        world,
+        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  allowedRoutes:\n    - match: api.example.test\n      verdict: allow\n      transport: direct\n",
+    );
 }
 
 #[given("a network policy that denies all egress")]
