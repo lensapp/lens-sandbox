@@ -93,6 +93,19 @@ integrations:
           header: x-api-key
         - kind: bearer_header
           domain: api.anthropic.com
+  - id: claude-code-subscription
+    name: Claude Code (subscription)
+    authKind: credential
+    routes:
+      - match: api.anthropic.com
+    credential:
+      envVar: CLAUDE_CODE_OAUTH_TOKEN
+      placeholder: sk-ant-oat01-LNSPLACEHOLDER0000000000000000000000000000000000000000000000000000000000AA
+      injections:
+        - kind: bearer_header
+          domain: api.anthropic.com
+    tokenFallback:
+      help: https://docs.claude.com/en/docs/claude-code/setup#long-lived-authentication-token
   - id: bedrock
     name: Amazon Bedrock
     authKind: credential

@@ -784,6 +784,33 @@ mod tests {
     }
 
     #[test]
+    fn bundled_claude_code_subscription_bearer_injects_an_oat01_token_on_the_anthropic_api() {
+        let integ = bundled_integrations()
+            .iter()
+            .find(|i| i.id == "claude-code-subscription")
+            .expect("claude-code-subscription is bundled");
+        assert_eq!(integ.auth_kind, AuthKind::Credential);
+        let cred = integ.credential.as_ref().unwrap();
+        assert_eq!(cred.env_var, "CLAUDE_CODE_OAUTH_TOKEN");
+        assert!(
+            cred.placeholder.starts_with("sk-ant-oat01-"),
+            "the placeholder must mimic a real `claude setup-token` so Claude Code emits it, got: {}",
+            cred.placeholder
+        );
+        assert!(
+            cred.injections
+                .iter()
+                .all(|i| i.kind == InjectionKind::BearerHeader && i.domain == "api.anthropic.com"),
+            "a subscription OAuth token rides only as Authorization: Bearer, got: {:?}",
+            cred.injections
+        );
+        assert!(
+            integ.token_fallback.is_some(),
+            "the card must point the user at `claude setup-token`"
+        );
+    }
+
+    #[test]
     fn bundled_bedrock_injects_a_bearer_header_on_the_regional_runtime_and_control_planes() {
         let bedrock = bundled_integrations()
             .iter()
