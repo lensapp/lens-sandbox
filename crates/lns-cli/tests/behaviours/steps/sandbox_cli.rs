@@ -320,6 +320,13 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
         };
         let mut out: Vec<u8> = Vec::new();
         let result = match author::load_definition_json(&fs, Path::new("/work")) {
+            Ok(doc) if push_args.dry_run => distribute::push_dry_run(
+                &fs,
+                Path::new("/work"),
+                &doc,
+                &push_args.reference,
+                &mut out,
+            ),
             Ok(doc) => {
                 distribute::push(
                     &fs,

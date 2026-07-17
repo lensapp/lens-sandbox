@@ -17,6 +17,31 @@ Feature: distributing a sandbox
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
 
+  Scenario: push --dry-run builds everything and uploads nothing
+    Given a valid lns.yaml in the current directory
+    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "would push ghcr.io/team/hermes:1.4.0@sha256:"
+    And the output contains "nothing uploaded"
+    And nothing is pushed
+
+  Scenario: push --dry-run packs path filesets and reports their pinned refs
+    Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
+    And the project directory "./skills" contains "prompts.md"
+    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "would push fileset"
+    And the output contains "@sha256:"
+    And nothing is pushed
+
+  Scenario: push --dry-run refuses an invalid definition like a real push
+    Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
+    And the project directory "./skills" contains ".env"
+    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the command fails with an exit code other than 0
+    And the output contains ".env"
+    And nothing is pushed
+
   Scenario: push fails clearly when the credential lacks write scope
     Given a valid lns.yaml in the current directory
     And the stored credential for the registry lacks push scope

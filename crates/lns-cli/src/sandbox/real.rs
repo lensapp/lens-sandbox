@@ -19,7 +19,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         }
         if let super::SandboxCommand::Push(push_args) = &args.command {
             let reference = push_args.reference.clone();
-            return push_local(&reference, ctx.cwd()?).await;
+            return push_local(&reference, push_args.dry_run, ctx.cwd()?).await;
         }
         crate::service::require_running().await;
         dispatch(args).await
@@ -84,7 +84,7 @@ pub fn run_attach<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFut
 pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxPushArgs::from_arg_matches(matches)?;
-        push_local(&args.reference, ctx.cwd()?).await
+        push_local(&args.reference, args.dry_run, ctx.cwd()?).await
     })
 }
 
@@ -102,9 +102,12 @@ pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture
     })
 }
 
-async fn push_local(reference: &str, cwd: PathBuf) -> Result<i32> {
+async fn push_local(reference: &str, dry_run: bool, cwd: PathBuf) -> Result<i32> {
     let doc = super::author::load_definition_json(&RealFs, &cwd)?;
     let mut out = std::io::stdout();
+    if dry_run {
+        return super::distribute::push_dry_run(&RealFs, &cwd, &doc, reference, &mut out);
+    }
     super::distribute::push(&RealFs, &cwd, &RealProducer, &doc, reference, &mut out).await
 }
 

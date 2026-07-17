@@ -130,7 +130,7 @@ interchangeable everywhere a run is addressed.
 | `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
 | `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. |
 | `show`     | —              | Render `./lns.yaml`'s effective definition (merged config, resolved values). |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. |
+| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing. |
 | `pull`     | `lns pull`     | Fetch a published sandbox and its base image into the local cache. |
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |

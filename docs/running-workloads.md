@@ -515,6 +515,11 @@ Publishing is one step. `lns push` (a shortcut for `lns sandbox push`) builds
 lns push ghcr.io/acme/reviewer:1.0.0
 ```
 
+`lns push --dry-run` does everything short of uploading — validates the
+definition, packs the filesets, builds the artifact — and prints the digests
+that would publish (`npm publish --dry-run`-style), so you can preview a
+release offline.
+
 Pushing needs a stored login with **push access** for the registry — sign in once
 with `lns login` (for `ghcr.io` that's a GitHub token with the `write:packages`
 scope, pushed to a repository path you own):

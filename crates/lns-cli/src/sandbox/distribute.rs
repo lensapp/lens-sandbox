@@ -129,6 +129,43 @@ where
     Ok(0)
 }
 
+/// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — offline, printing the digests that would publish; nothing is uploaded.
+pub fn push_dry_run<F, W>(
+    fs: &F,
+    cwd: &Path,
+    doc: &[u8],
+    reference: &str,
+    out: &mut W,
+) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    W: Write,
+{
+    let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
+    for fileset in &packed {
+        writeln!(
+            out,
+            "would push fileset {} ({})",
+            fileset.reference,
+            blob_bytes(&fileset.built)
+        )?;
+    }
+    let built = lns_artifact::build::build_artifact(&doc)?;
+    writeln!(
+        out,
+        "would push {reference}@{} ({})",
+        built.manifest_digest,
+        blob_bytes(&built)
+    )?;
+    writeln!(out, "dry run — built and validated; nothing uploaded")?;
+    Ok(0)
+}
+
+fn blob_bytes(built: &BuiltArtifact) -> String {
+    let bytes: usize = built.blobs.iter().map(|blob| blob.data.len()).sum();
+    format!("{bytes} bytes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

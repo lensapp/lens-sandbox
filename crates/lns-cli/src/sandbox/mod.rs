@@ -76,6 +76,11 @@ pub struct SandboxPushArgs {
         help = "Registry reference to publish the sandbox at, e.g. ghcr.io/team/hermes:1.4.0."
     )]
     pub reference: String,
+    #[arg(
+        long = "dry-run",
+        help = "Validate, pack, and build everything push would upload, print the digests, and upload nothing."
+    )]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -1115,6 +1120,7 @@ mod tests {
         let svc = CannedService::new(Response::Pong);
         let cmd = SandboxCommand::Push(SandboxPushArgs {
             reference: "ghcr.io/team/hermes:1.4.0".into(),
+            dry_run: false,
         });
         let mut out = Vec::new();
         let mut stdout = Vec::new();
