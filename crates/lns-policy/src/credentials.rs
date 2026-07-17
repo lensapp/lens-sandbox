@@ -50,6 +50,15 @@ pub trait CredentialStore: Send + Sync {
     fn save(&self, state: &CredentialStateFile) -> io::Result<()>;
 }
 
+/// True when the id's entry arms injection without a prompt: a non-empty stored value or oauth access token; absent, host-detect, and deny all read as unbound.
+pub fn has_armed_entry(state: &CredentialStateFile, id: &str) -> bool {
+    match state.get(id) {
+        Some(CredentialEntry::Oauth { access_token, .. }) => !access_token.is_empty(),
+        Some(CredentialEntry::Stored { value }) => !value.is_empty(),
+        _ => false,
+    }
+}
+
 /// Falls back to `./.lns-credentials.json` when `HOME` is unset rather than panicking.
 pub fn default_credentials_path() -> PathBuf {
     if let Some(p) = std::env::var_os("LNS_CREDENTIALS_PATH") {
@@ -310,5 +319,55 @@ mod tests {
             default_credentials_path(),
             PathBuf::from(".lns-credentials.json")
         );
+    }
+
+    #[test]
+    fn has_armed_entry_arms_only_a_nonempty_stored_value_or_oauth_token() {
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "stored".into(),
+            CredentialEntry::Stored {
+                value: "some-secret".into(),
+            },
+        );
+        state.insert(
+            "oauth".into(),
+            CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: 9999,
+                scopes: vec![],
+                account: None,
+            },
+        );
+        state.insert(
+            "empty-stored".into(),
+            CredentialEntry::Stored {
+                value: String::new(),
+            },
+        );
+        state.insert(
+            "expired-grant".into(),
+            CredentialEntry::Oauth {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at: 0,
+                scopes: vec![],
+                account: None,
+            },
+        );
+        state.insert("host".into(), CredentialEntry::HostDetect);
+        state.insert("denied".into(), CredentialEntry::Deny);
+
+        assert!(has_armed_entry(&state, "stored"));
+        assert!(has_armed_entry(&state, "oauth"));
+        assert!(!has_armed_entry(&state, "empty-stored"));
+        assert!(!has_armed_entry(&state, "expired-grant"));
+        assert!(
+            !has_armed_entry(&state, "host"),
+            "host-detect binds at first use, not upfront"
+        );
+        assert!(!has_armed_entry(&state, "denied"));
+        assert!(!has_armed_entry(&state, "absent"));
     }
 }

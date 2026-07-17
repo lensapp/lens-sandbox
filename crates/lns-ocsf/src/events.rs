@@ -371,6 +371,35 @@ pub fn bind_mount(
     ev.build()
 }
 
+pub fn sandbox_run(
+    ctx: &Context,
+    reference: &str,
+    digest: &str,
+    integrations: &[String],
+    policy_hash: &str,
+) -> Value {
+    let mut ev = Event::new(
+        "sandbox_run",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set("message", format!("ran sandbox {reference}").into())
+    .set("process", json!({"uid": ctx.run, "name": "sandbox"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_sandbox", reference.into())
+    .note("lns_sandbox_digest", digest.into())
+    .note("lns_policy_hash", policy_hash.into());
+    if !integrations.is_empty() {
+        ev = ev.note("lns_integrations", json!(integrations));
+    }
+    ev.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +621,39 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_kind"], "launch");
         assert_eq!(ev["unmapped"]["lns_image"], "alpine:latest");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
+    }
+
+    #[test]
+    fn sandbox_run_records_the_reference_resolved_digest_and_integrations() {
+        let ev = sandbox_run(
+            &ctx(),
+            "some-registry.example/some-agent:research",
+            "sha256:beef",
+            &["some-integration".into()],
+            "sha256:po1icy",
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["unmapped"]["lns_kind"], "sandbox_run");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
+        assert_eq!(
+            ev["unmapped"]["lns_sandbox"],
+            "some-registry.example/some-agent:research"
+        );
+        assert_eq!(
+            ev["unmapped"]["lns_sandbox_digest"], "sha256:beef",
+            "the audit must pin which bytes actually ran, not just the mutable tag"
+        );
+        assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
+        assert_eq!(ev["unmapped"]["lns_integrations"][0], "some-integration");
+    }
+
+    #[test]
+    fn sandbox_run_omits_the_integrations_note_when_there_are_none() {
+        let ev = sandbox_run(&ctx(), "reg/some-agent:1", "sha256:beef", &[], "sha256:p");
+        assert_schema_valid(&ev);
+        assert!(ev["unmapped"].get("lns_integrations").is_none());
+        assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:p");
     }
 
     #[test]

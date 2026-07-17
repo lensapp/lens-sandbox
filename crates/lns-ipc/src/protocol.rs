@@ -65,6 +65,9 @@ pub enum Request {
     BeginIntegrationSignIn {
         id: String,
     },
+    BindIntegrationCredential {
+        id: String,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -84,11 +87,27 @@ pub enum Request {
         image: String,
     },
     PruneImages,
+    InspectImage {
+        image: String,
+    },
+    TagImage {
+        from: String,
+        to: String,
+    },
     RegistryLogin {
         registry: String,
         username: String,
         secret: String,
     },
+}
+
+/// The value decision a credential bind resolved to: a stored value, the host-detected value, or an explicit deny — all three persist per machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialBindDecision {
+    Stored,
+    HostDetect,
+    Denied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +171,12 @@ pub enum Response {
     OauthSignInFailed {
         reason: String,
     },
+    CredentialBindComplete {
+        decision: CredentialBindDecision,
+    },
+    CredentialBindFailed {
+        reason: String,
+    },
     RegistryLoginVerified,
     VolumeList {
         volumes: Vec<VolumeInfo>,
@@ -183,6 +208,13 @@ pub enum Response {
     ImagesPruned {
         removed: Vec<String>,
         reclaimed_bytes: u64,
+    },
+    ImageInspected {
+        inspection: ArtifactInspection,
+    },
+    ImageTagged {
+        from: String,
+        to: String,
     },
     RunProgress {
         verb: String,
@@ -216,6 +248,70 @@ pub struct ImageInfo {
     pub layers: u32,
     pub pulled: String,
     pub in_use_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ArtifactInspection {
+    Image(ImageView),
+    Sandbox(SandboxView),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageView {
+    pub reference: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxView {
+    pub reference: String,
+    #[serde(default)]
+    pub digest: String,
+    pub image: String,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub mounts: Vec<SandboxMount>,
+    #[serde(default)]
+    pub ports: Vec<SandboxPort>,
+    #[serde(default)]
+    pub filesets: Vec<SandboxFileset>,
+    #[serde(default)]
+    pub integrations: Vec<String>,
+    #[serde(default)]
+    pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxFileset {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(rename = "ref", default)]
+    pub reference: Option<String>,
+    pub mount_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPort {
+    #[serde(default)]
+    pub host: Option<u16>,
+    pub container: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMountKind {
+    Bind,
+    Volume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxMount {
+    pub kind: SandboxMountKind,
+    pub source: String,
+    pub target: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +356,8 @@ pub struct RunConfig {
     #[serde(default)]
     pub hostname: Option<String>,
     pub env: Vec<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
     pub published_ports: Vec<PortPublish>,
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
@@ -280,6 +378,7 @@ impl RunConfig {
             entrypoint: args.entrypoint.clone(),
             hostname: args.hostname.clone(),
             env: args.env.clone(),
+            workdir: args.workdir.clone(),
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
             binds: args.binds.clone(),
@@ -315,9 +414,16 @@ pub struct PortPublish {
 pub struct RunImageArgs {
     pub image: Option<String>,
     #[serde(default)]
+    pub resolved_image: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
+    /// True when the user set `--cpus`/`-m` explicitly, so a published sandbox's size can't silently override an explicit request that happens to equal the built-in default.
+    #[serde(default)]
+    pub cpus_explicit: bool,
+    #[serde(default)]
+    pub mem_explicit: bool,
     pub policy_path: Option<String>,
     #[serde(default)]
     pub sandbox_user: Option<String>,
@@ -349,6 +455,12 @@ pub struct RunImageArgs {
     pub binds: Vec<BindMount>,
     #[serde(default)]
     pub auto_remove: bool,
+    /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
+    #[serde(default)]
+    pub verify_sandbox: bool,
+    /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, integrations, and resources apply.
+    #[serde(default)]
+    pub definition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,7 +472,6 @@ pub struct VolumeMount {
 
 impl VolumeMount {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let read_only = spec.ends_with(":ro");
         let body = spec
             .strip_suffix(":ro")
             .or_else(|| spec.strip_suffix(":rw"))
@@ -373,7 +484,7 @@ impl VolumeMount {
         Ok(Self {
             name: name.to_string(),
             target: target.to_string(),
-            read_only,
+            read_only: spec.ends_with(":ro"),
         })
     }
 }
@@ -385,9 +496,8 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
         ));
     }
     if target.chars().any(cmdline_unsafe_char) {
-        return Err(format!(
-            "invalid volume target {target:?}: must not contain whitespace, quotes, or control characters"
-        ));
+        let reason = "must not contain whitespace, quotes, or control characters";
+        return Err(format!("invalid volume target {target:?}: {reason}"));
     }
     if target.split('/').any(|seg| seg == "." || seg == "..") {
         return Err(format!(
@@ -489,10 +599,9 @@ pub enum MountSpec {
 impl MountSpec {
     pub fn parse(spec: &str) -> Result<Self, String> {
         if Self::source_is_path(spec) {
-            BindSpec::parse(spec).map(MountSpec::Bind)
-        } else {
-            VolumeMount::parse(spec).map(MountSpec::Named)
+            return BindSpec::parse(spec).map(MountSpec::Bind);
         }
+        VolumeMount::parse(spec).map(MountSpec::Named)
     }
 
     fn source_is_path(spec: &str) -> bool {
@@ -618,6 +727,7 @@ mod tests {
         });
         let parsed: RunImageArgs = serde_json::from_value(frame).unwrap();
         assert!(parsed.volumes.is_empty());
+        assert_eq!(parsed.definition, None);
     }
 
     #[test]
@@ -630,9 +740,12 @@ mod tests {
         };
         let req = Request::RunImage(Box::new(RunImageArgs {
             image: Some("prism".into()),
+            resolved_image: None,
             name: None,
             cpus: 1,
             mem: 512,
+            cpus_explicit: false,
+            mem_explicit: false,
             policy_path: None,
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
@@ -650,6 +763,8 @@ mod tests {
             volumes: Vec::new(),
             binds: Vec::new(),
             auto_remove: false,
+            verify_sandbox: false,
+            definition: None,
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -657,12 +772,15 @@ mod tests {
     }
 
     #[test]
-    fn run_image_args_volumes_and_binds_survive_postcard_round_trip() {
+    fn run_image_args_declarative_launch_settings_survive_postcard_round_trip() {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
+            resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             name: None,
             cpus: 1,
             mem: 512,
+            cpus_explicit: false,
+            mem_explicit: false,
             policy_path: None,
             sandbox_user: None,
             sandbox_uid: None,
@@ -670,7 +788,7 @@ mod tests {
             hostname: None,
             cmd: vec![],
             env: vec![],
-            workdir: None,
+            workdir: Some("/workspace".into()),
             debug: false,
             tty: true,
             stdin: true,
@@ -690,6 +808,8 @@ mod tests {
                 kept_paths: vec![".npmrc".into()],
             }],
             auto_remove: false,
+            verify_sandbox: false,
+            definition: None,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -783,9 +903,12 @@ mod tests {
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
             image: Some("some-image:1".into()),
+            resolved_image: None,
             name: None,
             cpus: 2,
             mem: 1024,
+            cpus_explicit: true,
+            mem_explicit: true,
             policy_path: Some("/work/lns-policy.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
@@ -793,7 +916,7 @@ mod tests {
             hostname: Some("demo".into()),
             cmd: vec!["echo".into(), "hi".into()],
             env: vec!["FOO=bar".into()],
-            workdir: None,
+            workdir: Some("/workspace".into()),
             debug: false,
             tty: false,
             stdin: false,
@@ -818,6 +941,8 @@ mod tests {
                 kept_paths: vec![],
             }],
             auto_remove: true,
+            verify_sandbox: false,
+            definition: Some(r#"{"kind":"Sandbox"}"#.into()),
         }
     }
 
@@ -834,6 +959,7 @@ mod tests {
         assert!(config.auto_remove);
         assert_eq!(config.sandbox_uid, Some(65534));
         assert_eq!(config.env, vec!["FOO=bar".to_string()]);
+        assert_eq!(config.workdir.as_deref(), Some("/workspace"));
         assert_eq!(config.published_ports, args.published_ports);
         assert_eq!(config.volumes, args.volumes);
         assert_eq!(config.binds, args.binds);
@@ -1008,6 +1134,38 @@ mod tests {
     }
 
     #[test]
+    fn bind_integration_credential_survives_a_request_round_trip() {
+        let req = Request::BindIntegrationCredential {
+            id: "some-provider".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn credential_bind_responses_survive_round_trips() {
+        for resp in [
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::Stored,
+            },
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::HostDetect,
+            },
+            Response::CredentialBindComplete {
+                decision: CredentialBindDecision::Denied,
+            },
+            Response::CredentialBindFailed {
+                reason: "the value decision timed out".into(),
+            },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
+    }
+
+    #[test]
     fn run_detach_request_survives_a_round_trip() {
         let req = Request::RunDetach {
             run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
@@ -1132,6 +1290,48 @@ mod tests {
         assert_eq!(json["reference"], "registry.example.test/some/image:1.0");
         assert_eq!(json["size_bytes"], 4096);
         assert_eq!(json["layers"], 1);
+    }
+
+    #[test]
+    fn sandbox_view_round_trips_declarative_launch_settings() {
+        let view = SandboxView {
+            reference: "registry.example.test/team/sandbox:1".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: Some("/workspace".into()),
+            mounts: vec![SandboxMount {
+                kind: SandboxMountKind::Bind,
+                source: ".".into(),
+                target: "/workspace".into(),
+                read_only: true,
+            }],
+            ports: vec![
+                SandboxPort {
+                    host: None,
+                    container: 3003,
+                },
+                SandboxPort {
+                    host: Some(8080),
+                    container: 9090,
+                },
+            ],
+            filesets: vec![SandboxFileset {
+                path: None,
+                reference: Some(format!(
+                    "registry.example.test/team/skills@sha256:{}",
+                    "a".repeat(64)
+                )),
+                mount_path: "/root/.agent/skills".into(),
+            }],
+            integrations: Vec::new(),
+            policy_flags: Vec::new(),
+        };
+        let response = Response::ImageInspected {
+            inspection: ArtifactInspection::Sandbox(view),
+        };
+        let frame = crate::encode_frame(&response).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, response);
     }
 
     #[test]

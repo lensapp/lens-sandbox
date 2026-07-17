@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 
 use crate::providers::InjectionDef;
-use crate::{HttpRule, RouteRule, Scheme, Transport, Verdict, is_false};
+use crate::{HttpRule, NetworkPolicy, RouteRule, Scheme, Transport, Verdict, is_false};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +174,21 @@ impl Catalog {
         for i in &self.integrations {
             i.validate()?;
         }
+        NetworkPolicy {
+            allowed_routes: self
+                .integrations
+                .iter()
+                .flat_map(|integration| {
+                    integration
+                        .routes
+                        .iter()
+                        .map(IntegrationRoute::to_route_rule)
+                })
+                .collect(),
+            ..NetworkPolicy::default()
+        }
+        .validate_local_transport()
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -1100,6 +1115,26 @@ mod tests {
         let c = Catalog::load_or_default(&path).unwrap();
         assert_eq!(c.integrations.len(), 1);
         assert_eq!(c.integrations[0].id, "acme");
+    }
+
+    #[test]
+    fn load_or_default_rejects_an_upstream_route_transport() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".lns-integrations.yaml");
+        let mut integration = sample_integration();
+        integration.routes[0].transport = Some(Transport::Upstream);
+        Catalog {
+            integrations: vec![integration],
+        }
+        .save_atomic(&path)
+        .unwrap();
+        let err = Catalog::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("upstream transport isn't supported in the local sandbox"),
+            "got: {err}"
+        );
     }
 
     #[test]
