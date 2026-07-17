@@ -21,6 +21,10 @@ pub fn data_root() -> Result<PathBuf, CachePathError> {
         .ok_or(CachePathError::NoDataDir)
 }
 
+pub fn build_cache_root() -> Result<PathBuf, CachePathError> {
+    Ok(cache_root()?.join("builds"))
+}
+
 pub fn short_run_id(id: &str) -> &str {
     id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
 }
@@ -110,6 +114,17 @@ mod tests {
         assert!(
             root.is_absolute(),
             "cache_root must be absolute, got: {root:?}"
+        );
+    }
+
+    #[test]
+    fn build_cache_root_lives_under_cache_root_not_data_root() {
+        let cache = cache_root().expect("cache dir resolves in test env");
+        let builds = build_cache_root().expect("build_cache_root");
+        assert_eq!(builds, cache.join("builds"));
+        assert!(
+            !builds.starts_with(data_root().expect("data dir resolves in test env")),
+            "the build cache is reconstructible content, so it belongs under cache_root, not data_root"
         );
     }
 
