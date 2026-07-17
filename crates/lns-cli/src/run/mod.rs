@@ -10,7 +10,7 @@ use crate::command::{CommandSpec, subcommand};
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
         subcommand::<crate::cli::RunArgs>("run")
-            .about("Run an OCI image in a microVM.")
+            .about("Run a sandbox in a microVM.")
             .disable_help_flag(true)
             .arg(
                 clap::Arg::new("help")

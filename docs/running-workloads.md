@@ -515,6 +515,18 @@ Publishing is one step. `lns push` (a shortcut for `lns sandbox push`) builds
 lns push ghcr.io/acme/reviewer:1.0.0
 ```
 
+Pushing needs a stored login with **push access** for the registry — sign in once
+with `lns login` (for `ghcr.io` that's a GitHub token with the `write:packages`
+scope, pushed to a repository path you own):
+
+```bash
+echo "$TOKEN" | lns login ghcr.io --username <USER> --password-stdin
+```
+
+A refused push says which of the two it is — no stored login, or a stored login
+the registry rejected (expired, missing push scope, or the wrong repository
+path) — and names the `lns login` command to fix it.
+
 On the other side, `lns pull` fetches a published sandbox and its base image into
 the local cache, and `lns run` can boot it straight from the reference:
 
