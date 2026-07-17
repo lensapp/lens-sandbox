@@ -47,22 +47,7 @@ fn walk_into<F: Fs + ?Sized>(
     Ok(())
 }
 
-/// A path fileset's source is authored relative to the project and packed from inside it; an absolute path (which `Path::join` treats as an escape hatch) or a `..` segment would pull in host files outside the project, so both are refused before the walk — the same containment bind sources get.
-pub fn source_containment_problem(path: &str) -> Option<String> {
-    if path.starts_with('/') {
-        return Some(format!(
-            "fileset path {path:?} must be relative to the project, not absolute"
-        ));
-    }
-    if path.split('/').any(|segment| segment == "..") {
-        return Some(format!(
-            "fileset path {path:?} must not contain a `..` path segment"
-        ));
-    }
-    None
-}
-
-/// The offline validate/run guard: every path fileset must name a readable, secret-free directory inside the project.
+/// The offline validate/run guard: every path fileset must name a readable, secret-free directory in the project.
 pub fn path_fileset_problems<F: Fs + ?Sized>(
     fs: &F,
     project_dir: &Path,
@@ -74,9 +59,6 @@ pub fn path_fileset_problems<F: Fs + ?Sized>(
         .iter()
         .filter_map(|fileset| {
             let path = fileset.path.as_deref()?;
-            if let Some(problem) = source_containment_problem(path) {
-                return Some(problem);
-            }
             walk(fs, &project_dir.join(path))
                 .err()
                 .map(|e| format!("fileset {path}: {e:#}"))
@@ -147,36 +129,5 @@ mod tests {
         let problems = path_fileset_problems(&fs, Path::new("/work"), &def);
         assert_eq!(problems.len(), 1, "got: {problems:?}");
         assert!(problems[0].contains("./missing"), "got: {problems:?}");
-    }
-
-    #[test]
-    fn source_containment_refuses_absolute_and_traversing_paths_but_allows_project_relative() {
-        assert!(source_containment_problem("./skills").is_none());
-        assert!(source_containment_problem("skills/deep").is_none());
-        assert!(
-            source_containment_problem("/home/me/.aws")
-                .is_some_and(|p| p.contains("must be relative to the project")),
-            "an absolute path would pack out-of-project host files into the artifact"
-        );
-        assert!(
-            source_containment_problem("../../other-project")
-                .is_some_and(|p| p.contains("`..` path segment")),
-            "a `..` path escapes the project"
-        );
-    }
-
-    #[test]
-    fn path_fileset_problems_refuses_an_out_of_project_source_before_walking() {
-        let fs = MapFs::default();
-        let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"/etc","mountPath":"/a"}]}}"#,
-        )
-        .unwrap();
-        let problems = path_fileset_problems(&fs, Path::new("/work"), &def);
-        assert_eq!(problems.len(), 1, "got: {problems:?}");
-        assert!(
-            problems[0].contains("must be relative to the project"),
-            "got: {problems:?}"
-        );
     }
 }

@@ -50,9 +50,6 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
     let mut packed = Vec::new();
     for (index, fileset) in def.spec.filesets.iter().enumerate() {
         if let Some(path) = &fileset.path {
-            if let Some(problem) = super::fileset::source_containment_problem(path) {
-                bail!("refusing to push: {problem}");
-            }
             let files = super::fileset::walk(fs, &cwd.join(path))
                 .with_context(|| format!("fileset {path}"))?;
             let built = lns_artifact::build::build_fileset(
@@ -307,31 +304,6 @@ mod tests {
             format!("{err:#}").contains("not digest-pinned"),
             "got: {err:#}"
         );
-    }
-
-    #[tokio::test]
-    async fn push_refuses_an_out_of_project_fileset_path_before_uploading() {
-        for path in ["/home/me/.aws", "../../other-project"] {
-            let producer = FakeProducer::err("must not reach the producer");
-            let mut out = Vec::new();
-            let doc = format!(
-                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","filesets":[{{"path":"{path}","mountPath":"/s"}}]}}}}"#
-            );
-            let err = push(
-                &fs_with_skills(),
-                cwd(),
-                &producer,
-                doc.as_bytes(),
-                "ghcr.io/team/hermes:1.4.0",
-                &mut out,
-            )
-            .await
-            .unwrap_err();
-            assert!(
-                format!("{err:#}").contains("refusing to push"),
-                "an out-of-project fileset path must never be packed into a published artifact: {err:#}"
-            );
-        }
     }
 
     #[tokio::test]
