@@ -1,3 +1,5 @@
+#[path = "support/registry.rs"]
+mod registry;
 mod specutil;
 mod steps;
 
@@ -19,6 +21,19 @@ pub struct E2eWorld {
     pub policy_dir: Option<TempDir>,
     pub policy_path: Option<PathBuf>,
     pub host_bind_dir: Option<TempDir>,
+    pub registry: Option<registry::LocalRegistry>,
+    pub pushed_ref: Option<String>,
+    pub pushed_digest: Option<String>,
+    pub project: Option<TempDir>,
+    pub project_integrations: Vec<String>,
+    pub project_command: Option<String>,
+    pub project_env: Vec<(String, String)>,
+    /// Credential slots the project definition declares, as (integration id, env target, required).
+    pub project_credentials: Vec<(String, String, bool)>,
+    /// Ports the project definition declares, as (host, container).
+    pub project_ports: Vec<(Option<u16>, u16)>,
+    /// Path filesets the project declares, as (directory, file inside it, mountPath).
+    pub project_filesets: Vec<(String, String, String)>,
 }
 
 impl E2eWorld {
@@ -74,6 +89,10 @@ async fn main() {
     let features_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("features");
     let microvm_only = std::env::var_os("LNS_E2E_MICROVM").is_some();
 
+    // Optional dev filter: run only features whose name contains this substring.
+    let only_feature = std::env::var("LNS_E2E_FEATURE")
+        .ok()
+        .filter(|s| !s.is_empty());
     let mut runner = E2eWorld::cucumber().fail_on_skipped();
     if microvm_only {
         runner = runner.max_concurrent_scenarios(1);
@@ -83,6 +102,11 @@ async fn main() {
             let tagged =
                 |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
             if tagged("gui") {
+                return false;
+            }
+            if let Some(needle) = &only_feature
+                && !feat.name.contains(needle.as_str())
+            {
                 return false;
             }
             if microvm_only {

@@ -1,11 +1,11 @@
 # Parked under specs/microvm/ (not the globbed features/ dir): these three
 # scenarios test that a fresh volume is SEEDED from the image's contents at the
 # mount path, which an imageless run cannot exercise. They have no step glue
-# yet and stay inert until a local-image path exists. `lns image` is
-# registry-only today (pull/ls/rm/prune) and `lns run` resolves refs through a
-# registry, so there is no hermetic way to supply an image with /data seed
-# files; the clean enabler is a first-class `lns image import <oci-archive|dir>`
-# (a `docker load` equivalent). The non-seeding volume behaviour is covered
+# yet and stay inert until a local-image path exists. The image cache is
+# registry-fed today (`lns pull` / `lns run <ref>` resolve refs through a
+# registry), so there is no hermetic way to supply an image with /data seed
+# files; the clean enabler is a first-class local import (a `docker load`
+# equivalent). The non-seeding volume behaviour is covered
 # imageless in features/volumes.feature. See CLAUDE.md "Out of scope".
 @microvm
 Feature: a fresh volume is seeded from the image at the mount path

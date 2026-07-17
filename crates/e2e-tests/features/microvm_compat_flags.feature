@@ -1,6 +1,6 @@
 @microvm
 Feature: Docker-compat run/exec flags take effect against a real microVM
-  These imageless scenarios boot a real guest via `make e2e-microvm` and drive the
+  These scenarios boot a real guest via `make e2e-microvm` and drive the
   Docker-style flags this repo added end-to-end: --hostname and -u/--user are
   guest-observable (the code that applies them is platform-only, so Layer 2/3 can
   only fake it), --rm is host-observable after the workload exits, and `lns exec`

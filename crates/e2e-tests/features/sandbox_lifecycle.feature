@@ -2,7 +2,8 @@ Feature: sandbox lifecycle verbs reach the service end to end
   The lns sandbox family talks to the real lns-service over its Unix
   socket. Without a bootable microVM these scenarios confirm the wiring:
   requests arrive, are dispatched, and the daemon's answers come back.
-  Happy paths against live runs are covered by the behaviours layers.
+  Happy paths against live runs are covered by the behaviours layers, and
+  the cached-store verbs (ls, rm, prune) by sandbox_management.
 
   Scenario: the sandbox family lists its verbs in help
     When I run "lns sandbox --help"
@@ -11,19 +12,21 @@ Feature: sandbox lifecycle verbs reach the service end to end
     And the output contains "logs"
     And the output contains "attach"
     And the output contains "inspect"
-    And the output contains "stats"
 
-  Scenario: sandbox ls answers with the runs table end to end
-    Given the Lens Sandbox service is running
-    When I run sandbox command "ls" against the service
+  Scenario: the top-level surface lists the sandbox shortcuts
+    When I run "lns --help"
     Then the exit code is 0
-    And the output contains "ID"
-
-  Scenario: the flat ls alias still reaches the service
-    Given the Lens Sandbox service is running
-    When I run lns "ls" against the service
-    Then the exit code is 0
-    And the output contains "ID"
+    And the output contains "init"
+    And the output contains "ps"
+    And the output contains "push"
+    And the output contains "pull"
+    And the output contains "tag"
+    And the output contains "stop"
+    And the output contains "rm"
+    And the output contains "inspect"
+    And the output contains "logs"
+    And the output contains "attach"
+    And the output contains "kill"
 
   Scenario: sandbox kill of an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
@@ -31,15 +34,34 @@ Feature: sandbox lifecycle verbs reach the service end to end
     Then the exit code is non-zero
     And the output contains "4242"
 
+  Scenario: kill accepts a --signal override while reporting an unknown run
+    Given the Lens Sandbox service is running
+    When I run lns "kill --signal KILL 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "4242"
+
+  Scenario: kill rejects an unsupported signal name
+    Given the Lens Sandbox service is running
+    When I run lns "kill --signal USR1 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "USR1"
+
+  Scenario: ps renders only its header when nothing is running
+    Given the Lens Sandbox service is running
+    When I run lns "ps" against the service
+    Then the exit code is 0
+    And the output contains "CPU"
+    And the output contains "MEM"
+
   Scenario: stopping an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "stop 4242" against the service
     Then the exit code is non-zero
     And the output contains "no such run: 4242"
 
-  Scenario: inspecting an unknown run reports the daemon's error
+  Scenario: stop accepts a --timeout override while reporting an unknown run
     Given the Lens Sandbox service is running
-    When I run sandbox command "inspect 4242" against the service
+    When I run lns "stop --timeout 1 4242" against the service
     Then the exit code is non-zero
     And the output contains "no such run: 4242"
 
@@ -49,25 +71,25 @@ Feature: sandbox lifecycle verbs reach the service end to end
     Then the exit code is non-zero
     And the output contains "no such run: 4242"
 
+  Scenario: logs -f of an unknown run reports the daemon's error
+    Given the Lens Sandbox service is running
+    When I run lns "logs -f 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "no such run: 4242"
+
   Scenario: attaching to an unknown run reports the daemon's error
     Given the Lens Sandbox service is running
     When I run sandbox command "attach 4242" against the service
     Then the exit code is non-zero
     And the output contains "no such run: 4242"
 
-  Scenario: requesting stats of an unknown run reports the daemon's error
+  Scenario: attach accepts a custom detach chord while reporting an unknown run
     Given the Lens Sandbox service is running
-    When I run sandbox command "stats 4242" against the service
-    Then the exit code is non-zero
-    And the output contains "4242"
-
-  Scenario: removing an unknown run reports the daemon's error
-    Given the Lens Sandbox service is running
-    When I run sandbox command "rm 4242" against the service
+    When I run lns "attach --detach-keys ctrl-a,ctrl-b 4242" against the service
     Then the exit code is non-zero
     And the output contains "no such run: 4242"
 
-  Scenario: pruning with no finished runs succeeds end to end
-    Given the Lens Sandbox service is running
-    When I run sandbox command "prune" against the service
-    Then the exit code is 0
+  Scenario: attach rejects an unparseable detach chord
+    When I run lns "attach --detach-keys bogus 4242" against the service
+    Then the exit code is non-zero
+    And the output contains "bogus"

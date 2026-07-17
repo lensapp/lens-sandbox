@@ -42,3 +42,10 @@ lns-service = { path = "../lns-service" }
 dirs        = "5"
 libc        = "0.2"
 sha2        = "0.10"
+hex         = "0.4"
+http        = "1"
+lns-artifact = { path = "../lns-artifact" }
+# The registry round-trip e2e stands up an in-process OCI registry and resolves
+# the base image's platform-manifest digest to pin the sandbox image.
+oci-client  = "0.16"
+oci-spec    = "0.9"
