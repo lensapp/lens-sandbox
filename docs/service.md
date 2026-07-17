@@ -8,7 +8,7 @@ small background process that runs in your menu bar / system tray. It owns:
 - the approval window and credential prompts,
 - the per-run [audit](audit.md) writer.
 
-`lns run`, `lns exec`, `lns ls`, and `lns kill` all talk to it over a local Unix
+`lns run`, `lns ps`, `lns exec`, and `lns stop` all talk to it over a local Unix
 socket. It's a user-launched process you start yourself — not a system daemon — and
 it's meant to stay running so the sandbox is always ready.
 
@@ -35,6 +35,11 @@ Two environment variables override the defaults (mostly useful for development):
 
 - `LNS_SOCKET_PATH` — use a specific socket path.
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
+- `LNS_HEADLESS=1` — run without the tray or approval window even when a
+  display is present. Interactive prompts can't be shown headless: approvals
+  need pre-authorized rules in `lns-policy.yaml`, and `lns integration
+  connect` for a credential integration fails immediately instead of waiting
+  on a card that can never appear.
 
 ## Updating
 

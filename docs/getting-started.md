@@ -71,13 +71,14 @@ lns service status
 ```
 
 The service keeps running across sandbox runs — it owns the microVM lifecycle, the
-image cache, the approval window, and the audit log. Stop it from the tray's
-**Quit** menu or with `lns service stop`. See [the background
-service](service.md) for details.
+cache, the approval window, and the audit log. Stop it from the tray's **Quit**
+menu or with `lns service stop`. See [the background service](service.md) for
+details.
 
 ## Your first run
 
-Change into your project directory, then run an OCI image:
+Change into your project directory, then run an OCI image straight away — this is
+the quick path, no configuration required:
 
 ```bash
 cd ~/dev/my-app
@@ -103,9 +104,75 @@ lns run
 You run Lens Sandbox from a project directory — that's where it looks for
 `lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
 give the workload your actual project files, bind-mount the directory with
-`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for scratch
-space that persists across runs instead, attach a named volume. The workload's own
-working directory comes from the image.
+`-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
+portable definition use a declarative bind with `source: .`; for scratch
+space that persists across runs instead, attach a named volume. The workload's
+working directory comes from `spec.workdir` when declared, otherwise from the image.
+
+## Define a sandbox
+
+The quick path is handy, but the sandbox you'll keep is a **definition** — a
+`./lns.yaml` file that pins the base image plus its command, environment, policy,
+and integrations. One directory is one sandbox. Scaffold it with `lns init`:
+
+```bash
+lns init
+```
+
+That writes a starter `./lns.yaml`:
+
+```yaml
+apiVersion: lns.run/v1
+kind: Sandbox
+metadata:
+  name: sandbox
+spec:
+  image: docker.io/library/alpine:3.20
+  command: sh
+  workdir: /workspace
+  env: {}
+  resources:
+    cpu: 1
+    memory: 512Mi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes: []
+  integrations: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []
+```
+
+Every `spec` field is present with its default so editing is filling in a blank,
+not learning a schema. Edit `spec.image` (and the fields you need), then check it
+offline —
+`validate` runs schema, cross-field, and secret checks without touching the
+network or the service, and a target-less `lns inspect` renders the effective
+definition:
+
+```bash
+lns sandbox validate     # -> lns.yaml is valid.
+lns inspect              # -> the merged, resolved definition (offline)
+```
+
+Run it by omitting the reference — `lns run` with no argument runs the
+`./lns.yaml` in the current directory:
+
+```bash
+lns run
+```
+
+When you're ready to share the sandbox, publish it in one step. `lns push` builds
+`./lns.yaml` and uploads it to a registry as a sandbox artifact; anyone can then
+`lns pull` or `lns run` that reference:
+
+```bash
+lns push ghcr.io/acme/reviewer:1.0.0
+```
 
 ## What happens on an unknown request
 
@@ -125,7 +192,8 @@ If no one answers, the request times out and is denied.
 
 ## Where to go next
 
-- Tune resources, mount volumes, publish ports, and run commands directly:
+- Author, run, distribute, and manage a sandbox; tune resources, mount volumes,
+  publish ports, and run commands directly:
   [Running workloads](running-workloads.md).
 - Pre-author rules instead of approving them interactively:
   [Policy and approvals](policy.md).
