@@ -1391,10 +1391,15 @@ version = "0.15.0"
 dependencies = [
  "cucumber",
  "dirs 5.0.1",
+ "hex",
+ "http 1.4.1",
  "libc",
+ "lns-artifact",
  "lns-ipc",
  "lns-ocsf",
  "lns-service",
+ "oci-client",
+ "oci-spec",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -3201,6 +3206,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "lns-artifact"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "lns-policy",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tar",
+]
+
+[[package]]
 name = "lns-audit"
 version = "0.1.0"
 dependencies = [
@@ -3224,12 +3243,16 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "futures-util",
+ "hex",
+ "http 1.4.1",
  "httpmock",
  "libc",
+ "lns-artifact",
  "lns-audit",
  "lns-ipc",
  "lns-ocsf",
  "lns-policy",
+ "oci-client",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -3304,6 +3327,7 @@ dependencies = [
  "gtk",
  "hex",
  "libc",
+ "lns-artifact",
  "lns-audit",
  "lns-ipc",
  "lns-ocsf",
@@ -3327,6 +3351,7 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "sha2 0.10.9",
+ "shlex",
  "tar",
  "tempfile",
  "thiserror 2.0.18",

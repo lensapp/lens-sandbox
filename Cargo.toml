@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lns-artifact",
     "crates/lns-audit",
     "crates/lns-cli",
     "crates/lns-init",
@@ -27,6 +28,7 @@ members = [
 #                         default-members so host `cargo build` doesn't
 #                         pull the full proxy/MITM/rustls stack.
 default-members = [
+    "crates/lns-artifact",
     "crates/lns-audit",
     "crates/lns-cli",
     "crates/lns-init",
