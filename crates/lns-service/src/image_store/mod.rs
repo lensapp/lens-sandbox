@@ -201,8 +201,21 @@ pub async fn remove_with<F: Fs, C: Caches>(
 }
 
 pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -> Result<()> {
-    let from_ref = normalize_reference(from)?;
-    let to_ref = normalize_reference(to)?;
+    let from_parsed: oci_client::Reference = from
+        .parse()
+        .with_context(|| format!("invalid image reference: {from}"))?;
+    let to_parsed: oci_client::Reference = to
+        .parse()
+        .with_context(|| format!("invalid image reference: {to}"))?;
+    if from_parsed.registry() != to_parsed.registry()
+        || from_parsed.repository() != to_parsed.repository()
+    {
+        bail!(
+            "cross-repository tagging isn't supported; cross-repository publication requires `lns sandbox push`"
+        );
+    }
+    let from_ref = from_parsed.whole();
+    let to_ref = to_parsed.whole();
     let bytes = match fs.read(&record_path(images_root, &from_ref)).await {
         Ok(bytes) => bytes,
         Err(_) => bail!("no such cached sandbox: {from_ref}"),
@@ -539,7 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tag_with_re_refs_a_cached_record_under_the_new_name() {
+    async fn tag_with_allows_a_new_tag_in_the_same_registry_and_repository() {
         let from = "registry.example.test/team/hermes:1.4.0";
         let fs = FakeFs::with_records(&[rec(from, &[("sha256:layer", 10)])]);
         tag_with(
@@ -559,6 +572,42 @@ mod tests {
                 .all(|d| *d == format!("sha256:{}", "d".repeat(64))),
             "the tag points at the same cached artifact: {digests:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn tag_with_rejects_a_different_repository_without_creating_a_record() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let to = "registry.example.test/other/hermes:latest";
+        let fs = FakeFs::with_records(&[rec(from, &[])]);
+
+        let err = tag_with(&fs, Path::new(ROOT), from, to)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("cross-repository publication requires `lns sandbox push`"),
+            "got: {err}"
+        );
+        assert!(!fs.has(&record_path(Path::new(ROOT), to)));
+    }
+
+    #[tokio::test]
+    async fn tag_with_rejects_a_different_registry_without_creating_a_record() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let to = "other.example.test/team/hermes:latest";
+        let fs = FakeFs::with_records(&[rec(from, &[])]);
+
+        let err = tag_with(&fs, Path::new(ROOT), from, to)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("cross-repository publication requires `lns sandbox push`"),
+            "got: {err}"
+        );
+        assert!(!fs.has(&record_path(Path::new(ROOT), to)));
     }
 
     #[tokio::test]

@@ -38,7 +38,7 @@ pub enum SandboxCommand {
     Push(SandboxPushArgs),
     #[command(about = "Fetch a published sandbox and its base image into the local cache.")]
     Pull(SandboxPullArgs),
-    #[command(about = "Re-reference a cached sandbox under a new tag (`docker tag`-style).")]
+    #[command(about = "Add a tag to a cached sandbox within its current repository.")]
     Tag(SandboxTagArgs),
     #[command(about = "List running sandboxes with their CPU and memory (`docker ps`-style).")]
     Ps,
@@ -94,7 +94,7 @@ pub struct SandboxTagArgs {
 
     #[arg(
         value_name = "TARGET",
-        help = "New reference the cached sandbox also resolves under."
+        help = "New tag in the source sandbox's registry and repository."
     )]
     pub to: String,
 }
