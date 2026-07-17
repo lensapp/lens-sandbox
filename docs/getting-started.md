@@ -127,22 +127,29 @@ kind: Sandbox
 metadata:
   name: sandbox
 spec:
-  # The base OCI image this sandbox runs; pin it by digest before you publish.
   image: docker.io/library/alpine:3.20
-  # command: sh
-  # workdir: /workspace
-  # env:
-  #   MODE: production
-  # policy:
-  #   defaultVerdict: ask
-  # integrations: []
-  # volumes:
-  #   - type: bind
-  #     source: .
-  #     target: /workspace
+  command: sh
+  workdir: /workspace
+  env: {}
+  resources:
+    cpu: 1
+    memory: 512Mi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes: []
+  integrations: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []
 ```
 
-Edit `spec.image` (and uncomment the fields you need), then check it offline —
+Every `spec` field is present with its default so editing is filling in a blank,
+not learning a schema. Edit `spec.image` (and the fields you need), then check it
+offline —
 `validate` runs schema, cross-field, and secret checks without touching the
 network or the service, and `show` renders the effective definition:
 

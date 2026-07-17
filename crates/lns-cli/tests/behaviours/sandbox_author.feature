@@ -2,7 +2,7 @@ Feature: authoring a sandbox
   A sandbox is authored on disk as `./lns.yaml` (kind: Sandbox). The author
   verbs scaffold it, validate it offline, and render its effective definition.
 
-  Scenario: init scaffolds a default sandbox definition
+  Scenario: init scaffolds a default sandbox definition with every spec field
     Given the current directory has no lns.yaml
     When the user runs sandbox command "init"
     Then the exit code is 0
@@ -11,6 +11,21 @@ Feature: authoring a sandbox
     And the file "lns.yaml" contains "apiVersion: lns.run/v1"
     And the file "lns.yaml" contains "workdir: /workspace"
     And the file "lns.yaml" contains "volumes:"
+    And the file "lns.yaml" contains "env:"
+    And the file "lns.yaml" contains "resources:"
+    And the file "lns.yaml" contains "defaultVerdict: ask"
+    And the file "lns.yaml" contains "allowedRoutes:"
+    And the file "lns.yaml" contains "integrations:"
+    And the file "lns.yaml" contains "credentials:"
+    And the file "lns.yaml" contains "filesets:"
+    And the file "lns.yaml" contains "ports:"
+
+  Scenario: the scaffolded definition is valid as written
+    Given the current directory has no lns.yaml
+    When the user runs sandbox command "init"
+    And the user runs sandbox command "validate"
+    Then the exit code is 0
+    And the output contains "valid"
 
   Scenario: init refuses to clobber an existing definition
     Given the current directory already has an lns.yaml

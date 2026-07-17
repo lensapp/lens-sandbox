@@ -12,22 +12,24 @@ kind: Sandbox
 metadata:
   name: sandbox
 spec:
-  # The base OCI image this sandbox runs; pin it by digest before you publish.
   image: docker.io/library/alpine:3.20
-  # command: sh
-  # workdir: /workspace
-  # env:
-  #   MODE: production
-  # policy:
-  #   defaultVerdict: ask
-  # integrations: []
-  # volumes:
-  #   - type: bind
-  #     source: .
-  #     target: /workspace
-  #   - type: volume
-  #     source: sandbox-cache
-  #     target: /home/sandbox/.cache
+  command: sh
+  workdir: /workspace
+  env: {}
+  resources:
+    cpu: 1
+    memory: 512Mi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes: []
+  integrations: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []
 ";
 
 /// A minimal filesystem seam so the author verbs are host-tested with an in-memory fake; `RealFs` in `real.rs` is the std::fs leaf.
