@@ -326,10 +326,9 @@ mod tests {
             vec![],
         )
         .await;
-        let err = match result {
-            Ok(_) => panic!("a sandbox that ships a policy must not boot unsupervised"),
-            Err(e) => e,
-        };
+        let err = result
+            .err()
+            .expect("a sandbox that ships a policy must not boot unsupervised");
         assert!(
             format!("{err:#}").contains("refusing to launch it unsupervised"),
             "got: {err:#}"
@@ -449,10 +448,11 @@ mod tests {
                 "env dump must not be a bare unredacted prefix dump: {body_str}"
             );
         }
+        let ships_real = specs
+            .iter()
+            .any(|s| s.guest_path == "/.lens/bin/supervisor.real");
         assert!(
-            specs
-                .iter()
-                .any(|s| s.guest_path == "/.lens/bin/supervisor.real"),
+            ships_real,
             "LNS_DEBUG_WRAP path must also ship the real supervisor at .real"
         );
     }
