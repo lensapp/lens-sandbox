@@ -300,6 +300,37 @@ fn group_gid(newroot: &str, name: &str) -> Option<u32> {
     })
 }
 
+const FILESET_OWNED_MANIFEST: &str = "/.lens/fileset-owned";
+
+/// Transfer the fileset paths the definition marked `owner: workload` to the run-as ids; the host ships the list inside the runtime layer because only the guest can resolve a named image user.
+fn chown_fileset_owned(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, u32)>) {
+    let Some((uid, gid)) = run_ids else {
+        return;
+    };
+    let Ok(listing) = std::fs::read_to_string(format!("{newroot}{FILESET_OWNED_MANIFEST}")) else {
+        return;
+    };
+    for path in listing.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        if !path.starts_with('/') || path.split('/').any(|seg| seg == "..") {
+            eprintln!(
+                "lns-init: skipping fileset-owned entry {path:?} — not an absolute in-root path"
+            );
+            continue;
+        }
+        let full = format!("{newroot}{path}");
+        match CString::new(full.as_str()) {
+            Ok(full_c) => {
+                if let Err(err) = sys.lchown(&full_c, uid, gid) {
+                    eprintln!("lns-init: lchown({full:?}, {uid}, {gid}) failed: {err}");
+                }
+            }
+            Err(_) => {
+                eprintln!("lns-init: skipping fileset-owned entry {path:?} — interior NUL");
+            }
+        }
+    }
+}
+
 fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, gid: u32, sys: &dyn Syscalls) {
     let etc = format!("{newroot}/etc");
     let _ = std::fs::create_dir_all(&etc);
@@ -744,6 +775,8 @@ fn mount_composefs_and_exec_broker_inner(
         sys.export_env("LENS_RUN_UID", &uid.to_string());
         sys.export_env("LENS_RUN_GID", &gid.to_string());
     }
+
+    chown_fileset_owned(sys, newroot, run_ids);
 
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
@@ -1976,6 +2009,96 @@ mod tests {
         assert!(
             !sys.calls().iter().any(|c| matches!(c, Call::Chroot(_))),
             "the workload must never be pivoted into when its user can't be resolved"
+        );
+    }
+
+    fn newroot_with_manifest(dir: &tempfile::TempDir, listing: &str) -> String {
+        let newroot = dir.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{newroot}/.lens")).unwrap();
+        std::fs::write(format!("{newroot}{FILESET_OWNED_MANIFEST}"), listing).unwrap();
+        newroot
+    }
+
+    #[test]
+    fn chown_fileset_owned_transfers_each_listed_path_to_the_run_as_ids() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(
+            &dir,
+            "/home/sandbox\n/home/sandbox/.claude\n/home/sandbox/.claude.json\n",
+        );
+        let sys = FakeSyscalls::new();
+        chown_fileset_owned(&sys, &newroot, Some((65534, 65534)));
+        let expected: Vec<Call> = [
+            format!("{newroot}/home/sandbox"),
+            format!("{newroot}/home/sandbox/.claude"),
+            format!("{newroot}/home/sandbox/.claude.json"),
+        ]
+        .into_iter()
+        .map(|path| Call::Lchown {
+            path,
+            uid: 65534,
+            gid: 65534,
+        })
+        .collect();
+        assert_eq!(sys.calls(), expected);
+    }
+
+    #[test]
+    fn chown_fileset_owned_is_a_noop_without_a_manifest_or_without_run_ids() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        let sys = FakeSyscalls::new();
+        chown_fileset_owned(&sys, &newroot, Some((65534, 65534)));
+        // A root workload already owns root-owned files, so a manifest without run ids is also a no-op.
+        let with_manifest = newroot_with_manifest(&dir, "/opt/seed/file\n");
+        chown_fileset_owned(&sys, &with_manifest, None);
+        assert!(!sys.calls().iter().any(|c| matches!(c, Call::Lchown { .. })));
+    }
+
+    #[test]
+    fn chown_fileset_owned_skips_blank_relative_and_traversing_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(&dir, "\nrelative/path\n/ok/../escape\n/kept\n");
+        let sys = FakeSyscalls::new();
+        chown_fileset_owned(&sys, &newroot, Some((1000, 1000)));
+        assert_eq!(
+            sys.calls(),
+            [Call::Lchown {
+                path: format!("{newroot}/kept"),
+                uid: 1000,
+                gid: 1000,
+            }]
+        );
+    }
+
+    #[test]
+    fn chown_fileset_owned_reports_a_failed_lchown_and_keeps_going() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(&dir, "/first\n/second\n");
+        let sys = FakeSyscalls::new()
+            .fail_when(|c| matches!(c, Call::Lchown { .. }).then_some(ErrorKind::PermissionDenied));
+        chown_fileset_owned(&sys, &newroot, Some((1000, 1000)));
+        let attempts = sys
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, Call::Lchown { .. }))
+            .count();
+        assert_eq!(attempts, 2, "one denied path must not abort the rest");
+    }
+
+    #[test]
+    fn chown_fileset_owned_skips_an_entry_with_an_interior_nul() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(&dir, "/has\0nul\n/clean\n");
+        let sys = FakeSyscalls::new();
+        chown_fileset_owned(&sys, &newroot, Some((1000, 1000)));
+        assert_eq!(
+            sys.calls(),
+            [Call::Lchown {
+                path: format!("{newroot}/clean"),
+                uid: 1000,
+                gid: 1000,
+            }]
         );
     }
 

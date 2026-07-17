@@ -67,7 +67,7 @@ The `spec` fields:
 | `credentials`  | Credential slots: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms like a declared integration; a **required** slot with no value bound on the machine refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
-| `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
+| `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 
 Check the definition offline — no network, no service — with `validate` and a
@@ -339,16 +339,17 @@ from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
 `spec.volumes` attaches the *consumer's* files: live host binds and named
 volumes on the machine where the sandbox runs. `spec.filesets` is the opposite
 direction — files the *author* ships **inside** the published artifact (agent
-settings, skills, prompt libraries), materialized into the guest at launch as a
-read-only snapshot:
+settings, skills, prompt libraries, seeded tool state), materialized into the
+guest at launch as a snapshot:
 
 ```yaml
 spec:
   filesets:
-    - path: ./skills              # a directory in the author's project
-      mountPath: /root/.agent/skills
+    - path: ./seed                # a directory in the author's project
+      mountPath: /home/sandbox    # owned by the workload user (the default)
     - ref: ghcr.io/team/settings@sha256:…   # a pre-published FileSet artifact
       mountPath: /root/.agent/settings
+      owner: root                 # pinned input: the workload can't rewrite it
 ```
 
 - **`path`** names a directory in the authoring project. A local `lns run`
@@ -365,11 +366,21 @@ spec:
   discloses them as `Fileset:` lines.
 - Each entry sets exactly one of `path`/`ref`. `mountPath` is an absolute
   guest path; duplicates — including collisions with a volume `target` — are
-  rejected offline.
+  rejected offline, as is any mount into the sandbox's own `/.lens` runtime
+  namespace.
+- **`owner`** decides who owns the materialized files in the guest.
+  The default, `workload`, transfers the mount path and everything it ships
+  to the run-as user, so a seeded config the tool rewrites at runtime
+  (`~/.claude.json`-style state) just works. `owner: root` pins the content
+  beyond the workload's reach — the right choice for skills, prompts, and
+  MCP configs an agent must not rewrite mid-run. Either way the snapshot is
+  ephemeral: changes die with the microVM.
 - A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
   fileset refuses `validate`, `run`, and `push` outright: a fileset is baked
   into an artifact, so there is no keep/drop prompt to catch it later — real
-  secrets stay outside the workload.
+  secrets stay outside the workload. Ship the tool's *configuration* in a
+  fileset and bind its *credential* through `spec.credentials`, so the
+  published artifact stays secret-free on every machine that pulls it.
 
 The trust model is pinning plus disclosure: a published sandbox whose fileset
 ref is not digest-pinned is refused, and what a sandbox ships is always

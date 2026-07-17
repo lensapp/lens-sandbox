@@ -66,6 +66,7 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
             entries[index] = serde_json::json!({
                 "ref": pinned,
                 "mountPath": fileset.mount_path,
+                "owner": owner_str(fileset.owner),
             });
             packed.push(PackedFileset {
                 built,
@@ -81,6 +82,13 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
     }
     let rewritten = serde_json::to_vec(&value).context("serializing the pinned definition")?;
     Ok((rewritten, packed))
+}
+
+fn owner_str(owner: lns_artifact::sandbox::FilesetOwner) -> &'static str {
+    match owner {
+        lns_artifact::sandbox::FilesetOwner::Workload => "workload",
+        lns_artifact::sandbox::FilesetOwner::Root => "root",
+    }
 }
 
 fn fileset_name(path: &str) -> String {
@@ -321,6 +329,17 @@ mod tests {
         assert!(entry.get("path").is_none(), "got: {entry}");
         assert_eq!(entry["ref"], serde_json::Value::String(prebuilt[0].clone()));
         assert_eq!(entry["mountPath"], "/root/.agent/skills");
+        assert_eq!(entry["owner"], "workload");
+    }
+
+    #[test]
+    fn pack_preserves_an_explicit_root_owner_on_the_pinned_entry() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
+        let (rewritten, packed) =
+            pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
+        assert_eq!(packed.len(), 1);
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["spec"]["filesets"][0]["owner"], "root");
     }
 
     #[tokio::test]

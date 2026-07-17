@@ -101,6 +101,17 @@ pub struct FilesetEntry {
     pub reference: Option<String>,
     #[serde(rename = "mountPath")]
     pub mount_path: String,
+    #[serde(default)]
+    pub owner: FilesetOwner,
+}
+
+/// Who owns the materialized files in the guest: the run-as workload user (so the workload can rewrite its own seeded state), or root (pinned inputs the workload must not touch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesetOwner {
+    #[default]
+    Workload,
+    Root,
 }
 
 #[derive(Deserialize)]
@@ -212,7 +223,15 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
         }
         _ => {}
     }
-    spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")
+    spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")?;
+    let normalized = fileset.mount_path.trim_end_matches('/');
+    if normalized == "/.lens" || normalized.starts_with("/.lens/") {
+        bail!(
+            "fileset mountPath {} targets the /.lens runtime namespace, which belongs to the sandbox itself",
+            fileset.mount_path
+        );
+    }
+    Ok(())
 }
 
 fn validate_volume(volume: &Volume) -> Result<()> {
@@ -507,6 +526,50 @@ mod tests {
             def.spec.filesets[1].reference.as_deref(),
             Some("registry.example.test/team/settings@sha256:abc")
         );
+    }
+
+    #[test]
+    fn parse_defaults_fileset_owner_to_workload_so_seeded_state_is_rewritable() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/home/sandbox"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.filesets[0].owner, FilesetOwner::Workload);
+    }
+
+    #[test]
+    fn parse_reads_an_explicit_root_owner_that_pins_shipped_inputs() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.filesets[0].owner, FilesetOwner::Root);
+    }
+
+    #[test]
+    fn parse_rejects_an_unknown_fileset_owner() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/s","owner":"nobody"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unknown variant"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_fileset_mounted_into_the_lens_runtime_namespace() {
+        for mount in ["/.lens", "/.lens/", "/.lens/bin"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"path":"./seed","mountPath":"{mount}"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("/.lens runtime namespace"),
+                "mount {mount}: got: {err:#}"
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,8 @@ pub struct BehaviourWorld {
     pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedSandbox>,
     pub fileset_problems: Option<Vec<String>>,
     pub fileset_specs: Option<Vec<String>>,
+    /// The chown-manifest body the planned specs ship for lns-init, when any fileset is workload-owned.
+    pub fileset_manifest: Option<String>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
