@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use lns_ipc::{RunStatus, RunSummary, SignalKind, StatusInfo};
+use lns_ipc::{SignalKind, StatusInfo};
 
 pub mod client;
 mod login_agent;
@@ -19,7 +19,7 @@ const NOT_RUNNING_MESSAGE: &str =
 mod orchestrator;
 pub use orchestrator::{
     DetachBehaviour, PrePhaseOutcome, PrePhaseStep, dispatch, drive_attached_session_with_writers,
-    drive_pre_phase, exec_command, exec_image, kill, ls, pre_phase_step, render_started_run,
+    drive_pre_phase, exec_command, exec_image, launch_run, pre_phase_step, render_started_run,
     render_status_line, require_running, run_command, run_image,
 };
 
@@ -46,30 +46,6 @@ pub enum ServiceCommand {
     #[command(about = "Stop the service and unregister the per-user login agent.")]
     Disable,
 }
-
-pub fn augment_kill(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::cli::KillArgs>("kill").hide(true))
-}
-
-pub const KILL_SPEC: CommandSpec = CommandSpec {
-    name: "kill",
-    augment: augment_kill,
-    run: orchestrator::kill_command,
-    announces_update_check: true,
-    owns_terminal: false,
-};
-
-pub fn augment_ls(app: clap::Command) -> clap::Command {
-    app.subcommand(clap::Command::new("ls").visible_alias("list").hide(true))
-}
-
-pub const LS_SPEC: CommandSpec = CommandSpec {
-    name: "ls",
-    augment: augment_ls,
-    run: orchestrator::ls_command,
-    announces_update_check: true,
-    owns_terminal: false,
-};
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
@@ -248,71 +224,6 @@ pub(crate) fn parse_signal_name(name: &str) -> Result<SignalKind> {
         }
     })
 }
-pub(crate) fn render_ls_table<W: std::io::Write>(
-    out: &mut W,
-    rows: &[RunSummary],
-) -> std::io::Result<()> {
-    let status_str = |s: RunStatus| match s {
-        RunStatus::Running => "running".to_string(),
-        RunStatus::Exited { code } => format!("exited ({code})"),
-    };
-
-    let id_w = "ID".len().max(
-        rows.iter()
-            .map(|r| lns_ipc::short_run_id(&r.id).len())
-            .max()
-            .unwrap_or(0),
-    );
-    let name_w = "NAME"
-        .len()
-        .max(rows.iter().map(|r| r.name.len()).max().unwrap_or(0));
-    let status_w = "STATUS".len().max(
-        rows.iter()
-            .map(|r| status_str(r.status).len())
-            .max()
-            .unwrap_or(0),
-    );
-    let image_w = "IMAGE"
-        .len()
-        .max(rows.iter().map(|r| r.image.len()).max().unwrap_or(0));
-    let cmd_w = "COMMAND"
-        .len()
-        .max(rows.iter().map(|r| r.command.len()).max().unwrap_or(0));
-
-    writeln!(
-        out,
-        "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  STARTED",
-        "ID",
-        "NAME",
-        "STATUS",
-        "IMAGE",
-        "COMMAND",
-        id_w = id_w,
-        name_w = name_w,
-        status_w = status_w,
-        image_w = image_w,
-        cmd_w = cmd_w,
-    )?;
-    for r in rows {
-        writeln!(
-            out,
-            "{:<id_w$}  {:<name_w$}  {:<status_w$}  {:<image_w$}  {:<cmd_w$}  {}",
-            lns_ipc::short_run_id(&r.id),
-            r.name,
-            status_str(r.status),
-            r.image,
-            r.command,
-            friendly_started(&r.started),
-            id_w = id_w,
-            name_w = name_w,
-            status_w = status_w,
-            image_w = image_w,
-            cmd_w = cmd_w,
-        )?;
-    }
-    Ok(())
-}
-
 pub(super) fn friendly_started(rfc3339: &str) -> String {
     let trimmed = rfc3339.trim_end_matches('Z');
     trimmed.replacen('T', " ", 1)
@@ -552,7 +463,6 @@ mod tests {
 
     use crate::test_env::EnvScope;
     use lns_ipc::SignalKind as IpcSignal;
-    use lns_ipc::{RunStatus, RunSummary};
 
     #[test]
     #[serial_test::serial(env)]
@@ -652,57 +562,6 @@ exit 0
     fn friendly_started_passes_through_unparseable_input() {
         let s = friendly_started("not a date");
         assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn render_ls_table_emits_header_and_one_row_per_run() {
-        let rows = vec![RunSummary {
-            id: "1a2b3c4d0000000000000000000000aa".to_string(),
-            name: "reviewer".into(),
-            image: "alpine:3.20".into(),
-            command: "echo hi".into(),
-            started: "2024-03-15T08:30:00Z".into(),
-            status: RunStatus::Running,
-        }];
-        let mut buf: Vec<u8> = Vec::new();
-        render_ls_table(&mut buf, &rows).expect("render");
-        let out = String::from_utf8(buf).unwrap();
-        for tok in ["ID", "NAME", "STATUS", "STARTED", "IMAGE", "COMMAND"] {
-            assert!(
-                out.contains(tok),
-                "expected header token {tok:?} in {out:?}"
-            );
-        }
-        assert!(out.contains("1a2b3c4d0000"), "short id missing in {out:?}");
-        assert!(out.contains("reviewer"), "name missing in {out:?}");
-        assert!(out.contains("alpine:3.20"), "image missing in {out:?}");
-    }
-
-    #[test]
-    fn render_ls_table_handles_empty_run_list() {
-        let mut buf: Vec<u8> = Vec::new();
-        render_ls_table(&mut buf, &[]).expect("render empty");
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("ID"));
-    }
-
-    #[test]
-    fn render_ls_table_renders_exited_status_with_code() {
-        let rows = vec![RunSummary {
-            id: "5e6f7a8b0000000000000000000000bb".to_string(),
-            name: "auditor".into(),
-            image: "<imageless>".into(),
-            command: "true".into(),
-            started: "2024-03-15T08:30:00Z".into(),
-            status: RunStatus::Exited { code: 0 },
-        }];
-        let mut buf: Vec<u8> = Vec::new();
-        render_ls_table(&mut buf, &rows).expect("render");
-        let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.to_lowercase().contains("exited") || out.contains('0'),
-            "expected exited indicator in {out:?}"
-        );
     }
 
     #[tokio::test]

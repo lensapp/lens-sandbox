@@ -1,19 +1,35 @@
 Feature: connecting integrations from the CLI
-  An integration is connected to a project from the CLI with
-  `lns integration connect <id>`, which records it under `integrations:`
-  in that directory's `lns-policy.yaml`. Most integrations authenticate
-  with a credential value; an `oauth` integration authenticates by an
-  interactive device sign-in the background service drives — so connecting
-  one shows the verification URL and code and only records the integration
-  once the sign-in completes. The live token set lands in the per-machine
-  credential store, never in `lns-policy.yaml`. `lns integration list`
-  shows, per integration, whether it authenticates by sign-in or a value.
+  `lns integration connect <id>` binds an integration's per-machine value
+  decision. A credential integration binds through the approval-window
+  card — use the host-detected value, store one, or deny — and an `oauth`
+  integration by an interactive sign-in the background service drives, so
+  connecting one shows the verification URL and code. Either way the
+  decision lands in the per-machine credential store, never in
+  `lns-policy.yaml`; the id is recorded under `integrations:` in that
+  directory's policy only once the bind or sign-in completes.
+  `lns integration list` shows, per integration, whether it authenticates
+  by sign-in or a value.
 
-  These scenarios use an arbitrary user-declared "some-oauth" integration, so
-  nothing here pins a shipped service.
+  These scenarios use arbitrary user-declared integrations, so nothing
+  here pins a shipped service.
 
   Background:
     Given a user catalog declares the "some-oauth" oauth integration
+
+  Scenario: Connecting a credential integration binds the value decision through the approval window
+    Given a user catalog declares the "some-provider" credential integration
+    And the background service is available to sign in
+    When the developer runs "lns integration connect some-provider"
+    Then the output describes binding a credential value
+    And "some-provider" is recorded under integrations in lns-policy.yaml
+    And lns-policy.yaml carries no credential material
+
+  Scenario: Connecting a credential integration fails clearly when the service is unavailable
+    Given a user catalog declares the "some-provider" credential integration
+    And the background service is not available
+    When the developer runs "lns integration connect some-provider"
+    Then the command fails noting the service is needed to bind
+    And "some-provider" is not recorded in lns-policy.yaml
 
   Scenario: Connecting an oauth integration signs in and then records it
     Given the background service is available to sign in

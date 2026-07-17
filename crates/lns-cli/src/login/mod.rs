@@ -70,7 +70,7 @@ pub trait RegistryVerifier {
 
 pub fn augment_login(app: clap::Command) -> clap::Command {
     app.subcommand(subcommand::<LoginArgs>("login").about(
-        "Log in to an OCI registry so `lns run` and `lns image pull` can fetch its private images.",
+        "Log in to an OCI registry so `lns run` and `lns pull` can fetch its private images.",
     ))
 }
 

@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
 lns-ipc    = { path = "../lns-ipc" }
+lns-artifact = { path = "../lns-artifact" }
 lns-audit  = { path = "../lns-audit" }
 lns-policy = { path = "../lns-policy" }
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "time", "sync"] }
@@ -32,7 +33,10 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2       = "0.10"
+hex        = "0.4"
 libc       = "0.2"
+oci-client = "0.16"
+http       = "1"
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"

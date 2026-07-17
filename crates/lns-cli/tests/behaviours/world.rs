@@ -26,10 +26,22 @@ pub struct BehaviourWorld {
     pub signin_is_pkce: bool,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
-    pub image: ImageCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
+    pub sandbox_run: SandboxRunRig,
+    /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
+    pub push_outcome: Option<Result<String, String>>,
+    /// FileSet artifact refs the push uploaded, in order.
+    pub pushed_filesets: Vec<String>,
+    /// The definition JSON a prepared local run would send to the service.
+    pub wire_definition: Option<String>,
+    /// The preflight view a pulled-run scenario stages.
+    pub pulled_view: Option<lns_ipc::SandboxView>,
+    /// The definition doc the push handed to build_and_push, when it got that far.
+    pub pushed_doc: Option<Vec<u8>>,
     pub host_bind: HostBindRig,
+    /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
+    pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
 }
 
 use lns_policy::host_bind_decisions::SecretDisposition;
@@ -56,10 +68,9 @@ pub struct HostBindOutcome {
 #[derive(Debug, Default)]
 pub struct ResolvedRunView {
     pub summary: String,
-    pub env: Vec<String>,
+    pub workdir: Option<String>,
     pub volumes: Vec<String>,
     pub binds: Vec<String>,
-    pub publish: Vec<String>,
 }
 
 /// Scripted state for the fake volume service plus the user's prompt answer.
@@ -74,22 +85,24 @@ pub struct VolumeCliRig {
     pub prompt_answer: Option<String>,
 }
 
-/// Scripted state for the fake image service plus the user's prompt answer.
+/// Drives the in-process `lns run` target resolution: what image a run request would carry, and a service refusal to surface.
 #[derive(Debug, Default)]
-pub struct ImageCliRig {
-    pub images: Vec<lns_ipc::ImageInfo>,
-    pub pull_result: Option<lns_ipc::ImageInfo>,
-    pub remove_result: Option<(String, u64)>,
-    pub prune_plan: Option<(Vec<String>, u64)>,
-    pub refuse_message: Option<String>,
-    pub unreachable: bool,
-    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
-    pub prompt_answer: Option<String>,
+pub struct SandboxRunRig {
+    pub request_image: Option<String>,
+    pub verify_sandbox: Option<bool>,
+    pub definition: Option<String>,
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct SandboxCliRig {
     pub response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `RunStats` request specifically, so `ps` can canned-serve both a run listing and its stats.
+    pub stats_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for an `InspectImage` request, so `inspect` can fall back from a running run to the cached artifact.
+    pub inspect_image_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `RemoveImage` request, so `rm` can resolve running-vs-cached then remove.
+    pub remove_image_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,

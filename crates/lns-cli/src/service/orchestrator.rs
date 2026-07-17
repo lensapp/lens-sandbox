@@ -15,23 +15,33 @@ use tokio::time::timeout;
 use clap::FromArgMatches;
 
 use crate::chord::{DetachChordDetector, FeedAction};
-use crate::cli::{ExecArgs, KillArgs, RunArgs};
+use crate::cli::{ExecArgs, RunArgs};
 use crate::command::{RunCtx, RunFuture};
 use lns_ipc::{ExecImageArgs, RunImageArgs};
 
 use super::{client::ServiceClient, real, require_running_check};
 use crate::run::summary::print_run_summary;
 
+const PUBLISHED_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let mut args = RunArgs::from_arg_matches(matches)?;
-        args.env = crate::run::env_file::merged_run_env(&args.env_file, &args.env)?;
-        let config_path = crate::config::default_config_path()?;
-        let defaults = crate::config::load_run_defaults(&config_path)?;
-        let args = crate::config::apply_run_defaults(args, defaults);
-        require_running().await;
-        run_image(args, ctx.debug).await
+        let args = RunArgs::from_arg_matches(matches)?;
+        launch_run(args, ctx.debug).await
     })
+}
+
+pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
+    args.env = crate::run::env_file::merged_run_env(&args.env_file, &args.env)?;
+    let config_path = crate::config::default_config_path()?;
+    let defaults = crate::config::load_run_defaults(&config_path)?;
+    let args = crate::config::apply_run_defaults(args, defaults);
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    // Target resolution is offline; a missing or invalid definition fails fast, before the service gate.
+    let target =
+        crate::run::target::resolve(args.image.as_deref(), &crate::sandbox::real::RealFs, &cwd)?;
+    require_running().await;
+    run_image(args, target, cwd, debug).await
 }
 
 pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -39,23 +49,6 @@ pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
         let args = ExecArgs::from_arg_matches(matches)?;
         require_running().await;
         exec_image(args).await
-    })
-}
-
-pub fn kill_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = KillArgs::from_arg_matches(matches)?;
-        require_running().await;
-        kill(args).await?;
-        Ok(0)
-    })
-}
-
-pub fn ls_command<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        require_running().await;
-        ls().await?;
-        Ok(0)
     })
 }
 
@@ -127,8 +120,121 @@ fn resolve_host_binds(
     )
 }
 
-pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
-    let cwd = std::env::current_dir().context("reading current directory")?;
+#[derive(Debug)]
+struct PublishedTarget {
+    image: String,
+    defaults: crate::run::declarative::Defaults,
+    filesets: Vec<(String, String)>,
+}
+
+fn published_target(
+    reference: &str,
+    inspection: lns_ipc::ArtifactInspection,
+) -> Result<PublishedTarget> {
+    match inspection {
+        lns_ipc::ArtifactInspection::Sandbox(view) => {
+            if view.digest.is_empty() {
+                anyhow::bail!("published sandbox preflight returned no manifest digest");
+            }
+            let parsed: oci_client::Reference = reference
+                .parse()
+                .with_context(|| format!("invalid sandbox reference {reference}"))?;
+            Ok(PublishedTarget {
+                image: parsed.clone_with_digest(view.digest.clone()).to_string(),
+                defaults: crate::run::declarative::Defaults::from_view(&view),
+                filesets: crate::run::summary::fileset_summaries_from_view(&view),
+            })
+        }
+        lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
+            "{reference} is not a sandbox; run `lns init` to author an lns.yaml, or pass a published sandbox reference"
+        ),
+    }
+}
+
+async fn preflight_published(socket: &Path, reference: &str) -> Result<PublishedTarget> {
+    let request = Request::InspectImage {
+        image: reference.to_string(),
+    };
+    await_published_preflight(reference, real::send_request(socket, &request)).await
+}
+
+async fn await_published_preflight(
+    reference: &str,
+    response: impl std::future::Future<Output = Option<Response>>,
+) -> Result<PublishedTarget> {
+    let response = timeout(PUBLISHED_PREFLIGHT_TIMEOUT, response)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "published sandbox preflight timed out after {}s while inspecting {reference}",
+                PUBLISHED_PREFLIGHT_TIMEOUT.as_secs()
+            )
+        })?;
+    match response {
+        Some(Response::ImageInspected { inspection }) => published_target(reference, inspection),
+        Some(Response::Error { message }) => anyhow::bail!("daemon error: {message}"),
+        Some(other) => anyhow::bail!("expected sandbox preflight, got {other:?}"),
+        None => anyhow::bail!("no response from lns-service during sandbox preflight"),
+    }
+}
+
+pub async fn run_image(
+    mut args: RunArgs,
+    target: crate::run::target::RunTarget,
+    cwd: std::path::PathBuf,
+    debug: bool,
+) -> Result<i32> {
+    let client = real_client()?;
+    let published = match &target {
+        crate::run::target::RunTarget::Reference(reference) => {
+            Some(preflight_published(client.socket(), reference).await?)
+        }
+        crate::run::target::RunTarget::Local { .. } => {
+            // A path-shaped REF resolved to a definition; the summary names its image, not the path.
+            if args.image.is_some() {
+                args.image = Some(target.image());
+            }
+            None
+        }
+    };
+    let defaults = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => {
+            crate::run::declarative::Defaults::from_definition(def)
+        }
+        (_, Some(published)) => published.defaults.clone(),
+        _ => crate::run::declarative::Defaults::default(),
+    };
+    let resolved = crate::run::declarative::resolve(
+        &defaults,
+        target.project_dir().unwrap_or(&cwd),
+        args.workdir.take(),
+        std::mem::take(&mut args.mounts),
+    )?;
+    args.workdir = resolved.workdir;
+    args.mounts = resolved.mounts;
+    let local_definition = matches!(&target, crate::run::target::RunTarget::Local { .. });
+    let composed = crate::run::declarative::compose_ports(
+        &defaults.ports,
+        std::mem::take(&mut args.publish),
+        local_definition || args.publish_declared,
+    )?;
+    args.publish = composed.published;
+    args.declared_unpublished = composed.declared_unpublished;
+    args.filesets = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => def
+            .spec
+            .filesets
+            .iter()
+            .map(|fileset| {
+                (
+                    crate::run::summary::fileset_source_display(fileset),
+                    fileset.mount_path.clone(),
+                )
+            })
+            .collect(),
+        (_, Some(published)) => published.filesets.clone(),
+        _ => Vec::new(),
+    };
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
@@ -148,7 +254,6 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     }
     let binds: Vec<lns_ipc::BindMount> = resolved_binds.iter().map(|b| b.to_wire()).collect();
 
-    let client = real_client()?;
     let socket = client.socket();
     let mut stream = UnixStream::connect(socket)
         .await
@@ -169,15 +274,18 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
     let request = Request::RunImage(Box::new(RunImageArgs {
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
-        image: args.image,
+        cpus_explicit: args.cpus.is_some(),
+        mem_explicit: args.mem.is_some(),
+        cmd: args.cmd,
+        env: args.env,
+        image: Some(target.image()),
+        resolved_image: published.as_ref().map(|published| published.image.clone()),
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
         sandbox_uid,
         entrypoint: args.entrypoint,
         hostname: args.hostname,
-        cmd: args.cmd,
-        env: args.env,
         workdir: args.workdir,
         debug,
         tty,
@@ -188,6 +296,8 @@ pub async fn run_image(args: RunArgs, debug: bool) -> Result<i32> {
         volumes,
         binds,
         auto_remove: args.auto_remove,
+        verify_sandbox: target.verify_sandbox(),
+        definition: target.definition_json(),
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
@@ -285,45 +395,6 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         args.quiet,
     )
     .await
-}
-
-pub async fn kill(args: KillArgs) -> Result<()> {
-    let signal = super::parse_signal_name(&args.signal)?;
-    let socket = super::socket_path()?;
-    let response = real::send_request(
-        &socket,
-        &Request::Kill {
-            run: args.run.clone(),
-            signal,
-        },
-    )
-    .await
-    .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
-    match response {
-        Response::Acknowledged => {
-            println!("killed run {}", crate::sandbox::run_label(&args.run));
-            Ok(())
-        }
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
-        other => anyhow::bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
-pub async fn ls() -> Result<()> {
-    let socket = super::socket_path()?;
-    let response = real::send_request(&socket, &Request::ListRuns)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))?;
-    let mut rows = match response {
-        Response::RunList { runs } => runs,
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
-        other => anyhow::bail!("unexpected response from daemon: {other:?}"),
-    };
-    rows.sort_by(|a, b| b.started.cmp(&a.started));
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    super::render_ls_table(&mut out, &rows)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -859,6 +930,25 @@ where
                 Ok(PrePhaseStep::Continue)
             }
         }
+        WireFrame::Json(Response::OauthVerification {
+            verification_uri,
+            user_code,
+            expires_in_secs,
+        }) => {
+            writeln!(
+                writer,
+                "Open {verification_uri} and enter code {user_code} (expires in {}m)",
+                expires_in_secs / 60
+            )?;
+            Ok(PrePhaseStep::Continue)
+        }
+        WireFrame::Json(Response::OauthBrowserOpened { authorization_url }) => {
+            writeln!(
+                writer,
+                "Opening your browser to authorize… (if it didn't open, visit {authorization_url})"
+            )?;
+            Ok(PrePhaseStep::Continue)
+        }
         WireFrame::Json(Response::RunExit { code }) => Ok(PrePhaseStep::EarlyExit(code)),
         WireFrame::Json(Response::Error { message }) => {
             anyhow::bail!("daemon error: {message}")
@@ -948,6 +1038,101 @@ fn phrase_for_verb(verb: &str) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn published_sandbox_preflight_pins_the_artifact_and_keeps_launch_defaults() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let target = published_target(
+            "registry.example.test/team/sandbox:1",
+            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: "registry.example.test/team/sandbox:1".into(),
+                digest: digest.clone(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: Some("/workspace".into()),
+                mounts: vec![lns_ipc::SandboxMount {
+                    kind: lns_ipc::SandboxMountKind::Bind,
+                    source: ".".into(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                }],
+                ports: Vec::new(),
+                filesets: vec![lns_ipc::SandboxFileset {
+                    path: None,
+                    reference: Some(format!(
+                        "registry.example.test/team/skills@sha256:{}",
+                        "b".repeat(64)
+                    )),
+                    mount_path: "/root/.agent/skills".into(),
+                }],
+                integrations: Vec::new(),
+                policy_flags: Vec::new(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            target.image,
+            format!("registry.example.test/team/sandbox@{digest}")
+        );
+        assert_eq!(target.defaults.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(target.defaults.mounts[0].source, ".");
+        assert_eq!(
+            target.filesets,
+            [(
+                format!(
+                    "registry.example.test/team/skills@sha256:{}…",
+                    "b".repeat(12)
+                ),
+                "/root/.agent/skills".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn published_preflight_refuses_a_plain_image() {
+        let err = published_target(
+            "registry.example.test/team/image:1",
+            lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
+                reference: "registry.example.test/team/image:1".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not a sandbox"));
+    }
+
+    #[test]
+    fn published_sandbox_preflight_refuses_an_unpinned_result() {
+        let err = published_target(
+            "registry.example.test/team/sandbox:1",
+            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                reference: "registry.example.test/team/sandbox:1".into(),
+                digest: String::new(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: Some("/workspace".into()),
+                mounts: Vec::new(),
+                ports: Vec::new(),
+                filesets: Vec::new(),
+                integrations: Vec::new(),
+                policy_flags: Vec::new(),
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no manifest digest"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn published_preflight_times_out_when_the_service_never_responds() {
+        let err = await_published_preflight(
+            "registry.example.test/team/sandbox:1",
+            std::future::pending::<Option<Response>>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "published sandbox preflight timed out after 30s while inspecting registry.example.test/team/sandbox:1"
+        );
+    }
 
     #[tokio::test]
     async fn drive_attached_session_returns_exit_code_from_run_exit_frame() {
@@ -1143,6 +1328,58 @@ mod tests {
             .await
             .expect_err("stdout before SessionReady is a protocol violation");
         assert!(format!("{err:#}").contains("unexpected frame"));
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_renders_a_device_sign_in_prompt_and_continues() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(
+                &mut server,
+                Response::OauthVerification {
+                    verification_uri: "https://api.some-oauth.example/device".into(),
+                    user_code: "SOME-CODE".into(),
+                    expires_in_secs: 900,
+                },
+            )
+            .await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("Open https://api.some-oauth.example/device and enter code SOME-CODE (expires in 15m)"),
+            "got: {s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_pre_phase_renders_a_browser_sign_in_line_and_continues() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            write_response(
+                &mut server,
+                Response::OauthBrowserOpened {
+                    authorization_url: "https://api.some-oauth.example/authorize".into(),
+                },
+            )
+            .await;
+            write_response(&mut server, run_log("SessionReady", "")).await;
+        });
+        let mut buf = Vec::<u8>::new();
+        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("visit https://api.some-oauth.example/authorize"),
+            "got: {s}"
+        );
     }
 
     #[tokio::test]

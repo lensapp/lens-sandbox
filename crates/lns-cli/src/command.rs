@@ -48,11 +48,19 @@ pub fn registry() -> Vec<CommandSpec> {
     vec![
         crate::run::RUN_SPEC,
         crate::run::EXEC_SPEC,
-        crate::service::KILL_SPEC,
-        crate::service::LS_SPEC,
         crate::volume::SPEC,
-        crate::image::SPEC,
         crate::sandbox::SPEC,
+        crate::sandbox::INIT_SPEC,
+        crate::sandbox::PS_SPEC,
+        crate::sandbox::KILL_SPEC,
+        crate::sandbox::PUSH_SPEC,
+        crate::sandbox::PULL_SPEC,
+        crate::sandbox::TAG_SPEC,
+        crate::sandbox::STOP_SPEC,
+        crate::sandbox::RM_SPEC,
+        crate::sandbox::INSPECT_SPEC,
+        crate::sandbox::LOGS_SPEC,
+        crate::sandbox::ATTACH_SPEC,
         crate::audit::SPEC,
         crate::service::SPEC,
         crate::update::SPEC,
@@ -108,10 +116,37 @@ where
     T: Into<OsString>,
 {
     let raw: Vec<OsString> = argv.into_iter().map(Into::into).collect();
-    match first_subcommand(app, &raw) {
-        Some((idx, sub @ ("run" | "exec"))) => normalize_workload_argv(app, &raw, idx, sub),
-        _ => raw,
+    match workload_position(app, &raw) {
+        Some((idx, cmd)) => normalize_workload_argv(app, cmd, &raw, idx),
+        None => raw,
     }
+}
+
+fn workload_position<'a>(
+    app: &'a clap::Command,
+    raw: &[OsString],
+) -> Option<(usize, &'a clap::Command)> {
+    let (idx, name) = first_subcommand(app, raw)?;
+    if name != "sandbox" {
+        return app.find_subcommand(name).map(|cmd| (idx, cmd));
+    }
+    let sandbox = app.find_subcommand("sandbox")?;
+    let (nested_idx, nested) = nested_workload(raw, idx + 1)?;
+    sandbox.find_subcommand(nested).map(|cmd| (nested_idx, cmd))
+}
+
+fn nested_workload(raw: &[OsString], from: usize) -> Option<(usize, &'static str)> {
+    for (idx, arg) in raw.iter().enumerate().skip(from) {
+        let Some(arg) = arg.to_str() else { continue };
+        if arg == "--" {
+            return None;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return workload_subcommand(arg).map(|name| (idx, name));
+    }
+    None
 }
 
 fn first_subcommand(app: &clap::Command, raw: &[OsString]) -> Option<(usize, &'static str)> {
@@ -138,6 +173,13 @@ fn first_subcommand(app: &clap::Command, raw: &[OsString]) -> Option<(usize, &'s
 
 fn normalized_subcommand(arg: &str) -> Option<&'static str> {
     match arg {
+        "sandbox" => Some("sandbox"),
+        _ => workload_subcommand(arg),
+    }
+}
+
+fn workload_subcommand(arg: &str) -> Option<&'static str> {
+    match arg {
         "run" => Some("run"),
         "exec" => Some("exec"),
         _ => None,
@@ -146,11 +188,12 @@ fn normalized_subcommand(arg: &str) -> Option<&'static str> {
 
 fn normalize_workload_argv(
     app: &clap::Command,
+    cmd: &clap::Command,
     raw: &[OsString],
     idx: usize,
-    sub: &str,
 ) -> Vec<OsString> {
-    let consumes = options_consuming_next_value(app, sub);
+    let mut consumes = value_consuming_options(app);
+    consumes.extend(value_consuming_options(cmd));
     let mut out = raw[..=idx].to_vec();
     let rest = &raw[idx + 1..];
     let mut positional_seen = false;
@@ -195,14 +238,6 @@ fn expand_it(arg: &OsString) -> Option<Vec<OsString>> {
         Some("-ti") => Some(vec![OsString::from("-t"), OsString::from("-i")]),
         _ => None,
     }
-}
-
-fn options_consuming_next_value(app: &clap::Command, sub: &str) -> HashSet<String> {
-    let mut set = value_consuming_options(app);
-    if let Some(cmd) = app.get_subcommands().find(|c| c.get_name() == sub) {
-        set.extend(value_consuming_options(cmd));
-    }
-    set
 }
 
 fn value_consuming_options(cmd: &clap::Command) -> HashSet<String> {
@@ -305,12 +340,12 @@ mod tests {
     }
 
     #[test]
-    fn only_run_and_exec_own_the_terminal() {
+    fn every_spec_that_can_stream_over_tokio_stdio_owns_the_terminal() {
         for spec in registry() {
-            if matches!(spec.name, "run" | "exec") {
+            if matches!(spec.name, "run" | "exec" | "sandbox" | "logs" | "attach") {
                 assert!(
                     spec.owns_terminal,
-                    "{} drives the tty over tokio stdin/stdout; the dispatcher must not hold the std locks for it",
+                    "{} can drive the tty over tokio stdin/stdout; the dispatcher must not hold the std locks for it",
                     spec.name
                 );
             } else {
@@ -347,6 +382,117 @@ mod tests {
     #[test]
     fn normalization_ignores_run_and_exec_after_another_subcommand() {
         let raw = ["lns", "sandbox", "logs", "exec", "-it"];
+        let normalized = normalize_argv(&build_cli(), raw);
+        assert_eq!(
+            normalized,
+            raw.into_iter().map(OsString::from).collect::<Vec<_>>()
+        );
+    }
+
+    fn sandbox_run_args(argv: &[&str]) -> crate::cli::RunArgs {
+        use crate::sandbox::SandboxCommand;
+        let args: crate::sandbox::SandboxArgs = parse_args(argv.iter().copied()).unwrap();
+        let SandboxCommand::Run(run) = args.command else {
+            panic!("expected the run variant")
+        };
+        *run
+    }
+
+    #[test]
+    #[should_panic(expected = "expected the run variant")]
+    fn sandbox_run_args_guards_against_decoding_another_verb() {
+        sandbox_run_args(&["lns", "sandbox", "ps"]);
+    }
+
+    #[test]
+    fn sandbox_run_expands_it_and_inserts_the_command_separator() {
+        let args = sandbox_run_args(&["lns", "sandbox", "run", "--rm", "-it", "alpine", "sh"]);
+        assert!(args.auto_remove);
+        assert!(args.interactive);
+        assert!(args.tty);
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn sandbox_run_treats_a_value_options_argument_as_its_value_not_the_image() {
+        let args = sandbox_run_args(&["lns", "sandbox", "run", "--workdir", "/w", "alpine", "sh"]);
+        assert_eq!(args.workdir.as_deref(), Some("/w"));
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn sandbox_run_uses_short_h_for_hostname_while_long_help_still_works() {
+        let args = sandbox_run_args(&["lns", "sandbox", "run", "-h", "demo", "alpine"]);
+        assert_eq!(args.hostname.as_deref(), Some("demo"));
+        let err = try_get_matches_from(["lns", "sandbox", "run", "--help"])
+            .expect_err("--help exits through clap");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    fn sandbox_exec_args(argv: &[&str]) -> crate::cli::ExecArgs {
+        use crate::sandbox::SandboxCommand;
+        let args: crate::sandbox::SandboxArgs = parse_args(argv.iter().copied()).unwrap();
+        let SandboxCommand::Exec(exec) = args.command else {
+            panic!("expected the exec variant")
+        };
+        exec
+    }
+
+    #[test]
+    #[should_panic(expected = "expected the exec variant")]
+    fn sandbox_exec_args_guards_against_decoding_another_verb() {
+        sandbox_exec_args(&["lns", "sandbox", "ps"]);
+    }
+
+    #[test]
+    fn sandbox_exec_expands_a_leading_it_cluster_into_session_flags() {
+        let exec = sandbox_exec_args(&["lns", "sandbox", "exec", "-it", "demo", "sh"]);
+        assert!(exec.interactive);
+        assert!(exec.tty);
+        assert_eq!(exec.run, "demo");
+        assert_eq!(exec.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn normalization_stops_at_a_sandbox_level_separator() {
+        let raw = ["lns", "sandbox", "--", "run", "-it"];
+        let normalized = normalize_argv(&build_cli(), raw);
+        assert_eq!(
+            normalized,
+            raw.into_iter().map(OsString::from).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalization_skips_non_utf8_arguments_between_sandbox_and_run() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = vec![
+            OsString::from("lns"),
+            OsString::from("sandbox"),
+            OsString::from_vec(vec![0xff]),
+            OsString::from("run"),
+            OsString::from("alpine"),
+            OsString::from("sh"),
+        ];
+        let normalized = normalize_argv(&build_cli(), raw);
+        let expected = vec![
+            OsString::from("lns"),
+            OsString::from("sandbox"),
+            OsString::from_vec(vec![0xff]),
+            OsString::from("run"),
+            OsString::from("alpine"),
+            OsString::from("--"),
+            OsString::from("sh"),
+        ];
+        assert_eq!(normalized, expected);
+    }
+
+    #[test]
+    fn normalization_ignores_a_sandbox_namespace_with_no_nested_workload() {
+        let raw = ["lns", "sandbox", "--help"];
         let normalized = normalize_argv(&build_cli(), raw);
         assert_eq!(
             normalized,
