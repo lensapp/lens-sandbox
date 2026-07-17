@@ -4,10 +4,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
+use crate::artifact_rig::ArtifactRig;
 use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
+use crate::declared_rig::DeclaredRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
+use crate::policy_rig::PolicyRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -48,6 +51,20 @@ pub struct BehaviourWorld {
     pub bind: Option<BindRig>,
 
     pub image: Option<ImageRig>,
+
+    pub artifact: Option<ArtifactRig>,
+
+    pub policy: Option<PolicyRig>,
+
+    pub declared: Option<DeclaredRig>,
+
+    /// The sandbox definition JSON a fileset-planning scenario stages.
+    pub fileset_definition: Option<Vec<u8>>,
+    /// The staged file name inside the scenario's path fileset directory.
+    pub fileset_snapshot_file: Option<String>,
+    pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedSandbox>,
+    pub fileset_problems: Option<Vec<String>>,
+    pub fileset_specs: Option<Vec<String>>,
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
@@ -106,5 +123,13 @@ impl BehaviourWorld {
             self.image = Some(ImageRig::new());
         }
         self.image.as_mut().expect("image rig must exist")
+    }
+
+    pub fn artifact(&mut self) -> &mut ArtifactRig {
+        self.artifact.get_or_insert_with(ArtifactRig::default)
+    }
+
+    pub fn policy(&mut self) -> &mut PolicyRig {
+        self.policy.get_or_insert_with(PolicyRig::default)
     }
 }

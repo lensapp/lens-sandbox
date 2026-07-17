@@ -75,6 +75,45 @@ async fn orchestrate(
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
+    // A local definition plans directly; a published sandbox reference boots its base image; a plain image passes through unchanged.
+    let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
+    let sandbox_plan = match (args.definition.as_deref(), resolved_image) {
+        (Some(definition), _) => Some(crate::artifact::real::plan_local(definition).await?),
+        (None, Some(image_ref)) => {
+            crate::artifact::real::peek_and_plan(image_ref, args.verify_sandbox, &run_id, &microvm)
+                .await?
+        }
+        (None, None) => None,
+    };
+    if let Some(plan) = &sandbox_plan {
+        crate::artifact::real::refuse_unknown_integrations(
+            plan.workload.policy.as_ref(),
+            &plan.workload.credentials,
+        )?;
+        crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
+        gate_declared_sign_ins(
+            plan.workload.policy.as_ref(),
+            &plan.workload.credentials,
+            &frame_tx,
+        )
+        .await?;
+    }
+    let launch = sandbox_plan
+        .as_ref()
+        .map(|plan| super::sandbox_launch(&plan.workload, &args.cmd, &args.env));
+    let image_ref: Option<String> = match &launch {
+        Some(l) => Some(l.image.clone()),
+        None => resolved_image.map(str::to_string),
+    };
+    let cmd: Vec<String> = launch
+        .as_ref()
+        .map(|l| l.cmd.clone())
+        .unwrap_or_else(|| args.cmd.clone());
+    let env: Vec<String> = launch
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_else(|| args.env.clone());
+
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
@@ -83,6 +122,13 @@ async fn orchestrate(
                 run_id.clone(),
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
+                sandbox_plan
+                    .as_ref()
+                    .and_then(|p| p.workload.policy.as_ref()),
+                sandbox_plan
+                    .as_ref()
+                    .map(|p| p.workload.credentials.as_slice())
+                    .unwrap_or_default(),
                 guest_tools.root.clone(),
                 args.env.clone(),
             ),
@@ -96,8 +142,8 @@ async fn orchestrate(
     };
     let image_fut = async {
         let image = ingest::run(
-            args.image.as_deref(),
-            &args.cmd,
+            image_ref.as_deref(),
+            &cmd,
             &image::want_arch(),
             &layer_cache,
             image::pull,
@@ -175,11 +221,16 @@ async fn orchestrate(
     }
 
     let imageless = args.image.is_none();
+    let fileset_specs: &[runtime_layer::RuntimeFileSpec] = sandbox_plan
+        .as_ref()
+        .map(|p| p.fileset_specs.as_slice())
+        .unwrap_or_default();
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
+        fileset_specs,
     )?;
 
     let layers = std::mem::take(&mut image.bytes);
@@ -228,12 +279,11 @@ async fn orchestrate(
             .as_ref()
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
-        imageless,
     );
     let exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
-        &args.cmd,
+        &cmd,
         image.config.as_ref(),
         session.as_ref(),
     );
@@ -250,10 +300,21 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
+    let (cpus, memory_mib) = super::sandbox_vm_size(
+        sandbox_plan
+            .as_ref()
+            .and_then(|p| p.workload.resources.as_ref()),
+        args.cpus,
+        args.cpus_explicit,
+        args.mem,
+        args.mem_explicit,
+    );
+    crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
+
     let spec = vm::VmSpec {
         run_id: run_id.clone(),
-        cpus: args.cpus,
-        memory_mib: args.mem,
+        cpus,
+        memory_mib,
         kernel: kernel_path,
         initrd,
         composefs_descriptor: descriptor.path.clone(),
@@ -282,7 +343,7 @@ async fn orchestrate(
     let argv = build_workload_argv(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
-        &args.cmd,
+        &cmd,
         session.is_some(),
     );
     let workdir = crate::workload_cwd::resolve(
@@ -292,8 +353,8 @@ async fn orchestrate(
     let composed = exec_env_strings(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
-        &args.cmd,
-        &args.env,
+        &cmd,
+        &env,
         session.is_some(),
         session
             .as_ref()
@@ -378,4 +439,88 @@ async fn orchestrate(
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
+}
+
+/// Block the boot on any definition-declared oauth integration — under `spec.integrations` or a required credential slot — with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete.
+async fn gate_declared_sign_ins(
+    policy: Option<&lns_policy::Policy>,
+    credentials: &[lns_artifact::spec::CredentialSlot],
+    frame_tx: &Sender<WireFrame>,
+) -> Result<()> {
+    use crate::artifact::credential_boot::{
+        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+        sign_in_gate_ids,
+    };
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+    use lns_ipc::Response;
+
+    let declared = sign_in_gate_ids(policy, credentials);
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let state = JsonFileCredentialStore::new(default_credentials_path())
+        .load()
+        .unwrap_or_default();
+    let plans = plan_declared_integrations(&declared, &catalog, &state);
+    if boot_gate(&plans) == BootGate::StartWorkload {
+        return Ok(());
+    }
+    for plan in plans {
+        let SlotPlan::Connect(prompt) = plan else {
+            continue;
+        };
+        let id = prompt.integration.clone();
+        let _ = frame_tx
+            .send(WireFrame::Json(Response::RunLog {
+                level: lns_ipc::LogLevel::Info,
+                verb: None,
+                message: format!("integration {id} needs a sign-in before the workload starts"),
+            }))
+            .await;
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
+        let sign_in = crate::ipc::adapter::run_integration_sign_in(&id, progress_tx);
+        tokio::pin!(sign_in);
+        let terminal = loop {
+            tokio::select! {
+                biased;
+                Some(resp) = progress_rx.recv() => {
+                    let _ = frame_tx.send(WireFrame::Json(resp)).await;
+                }
+                res = &mut sign_in => break res,
+            }
+        };
+        while let Ok(resp) = progress_rx.try_recv() {
+            let _ = frame_tx.send(WireFrame::Json(resp)).await;
+        }
+        match terminal {
+            Response::OauthSignInComplete => {
+                let _ = frame_tx
+                    .send(WireFrame::Json(Response::RunLog {
+                        level: lns_ipc::LogLevel::Info,
+                        verb: None,
+                        message: format!("signed in to {id}"),
+                    }))
+                    .await;
+            }
+            Response::OauthSignInFailed { reason } => {
+                if resolve_connect(&prompt, ConnectChoice::Decline).starts_workload() {
+                    continue;
+                }
+                anyhow::bail!(
+                    "sign-in for integration {id} did not complete ({reason}); launch aborted"
+                );
+            }
+            other => {
+                anyhow::bail!("unexpected sign-in response for integration {id}: {other:?}");
+            }
+        }
+    }
+    Ok(())
 }

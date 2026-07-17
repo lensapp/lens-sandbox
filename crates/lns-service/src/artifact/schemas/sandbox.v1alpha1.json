@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "apiVersion": {
+      "const": "lens.dev/v1alpha1"
+    },
+    "kind": {
+      "const": "Sandbox"
+    },
+    "metadata": {
+      "properties": {
+        "labels": {
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "mount": {
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)"
+          },
+          "pattern": "^/",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "properties": {
+        "baseImage": {
+          "pattern": "@sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "isolation": {
+          "enum": [
+            "microvm",
+            "container"
+          ]
+        },
+        "resources": {
+          "properties": {
+            "cpu": {
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "memory": {
+              "type": [
+                "string",
+                "integer"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "supervisorVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "isolation"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "type": "object",
+  "$id": "https://lens.dev/schemas/sandbox.v1alpha1.json",
+  "title": "Lens sandbox artifact (v1alpha1)",
+  "x-lens-class": "runtime",
+  "x-lens-config-media-type": "application/vnd.lens.sandbox.config.v1+json",
+  "x-lens-artifact-type": "application/vnd.lens.sandbox.v1+json"
+}

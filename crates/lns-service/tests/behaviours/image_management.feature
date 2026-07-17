@@ -26,6 +26,24 @@ Feature: image cache lifecycle — list, remove, prune
     When the images are listed
     Then the image listing names "registry.example.test/some/image:1.0" as idle
 
+  Scenario: Tagging within one repository creates another reference to the cached sandbox
+    Given image "registry.example.test/team/sandbox:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When image "registry.example.test/team/sandbox:1.0" is tagged as "registry.example.test/team/sandbox:stable"
+    Then the image tag succeeds
+    And image "registry.example.test/team/sandbox:stable" has the same digest as "registry.example.test/team/sandbox:1.0"
+
+  Scenario: Tagging into another repository is refused
+    Given image "registry.example.test/team/sandbox:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When image "registry.example.test/team/sandbox:1.0" is tagged as "registry.example.test/other/sandbox:stable"
+    Then the image tag is refused because cross-repository publication requires a push
+    And the image record for "registry.example.test/other/sandbox:stable" is gone from the cache
+
+  Scenario: Tagging into another registry is refused
+    Given image "registry.example.test/team/sandbox:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When image "registry.example.test/team/sandbox:1.0" is tagged as "other.example.test/team/sandbox:stable"
+    Then the image tag is refused because cross-repository publication requires a push
+    And the image record for "other.example.test/team/sandbox:stable" is gone from the cache
+
   Scenario: Removing an idle image drops its record and its unshared layers
     Given image "registry.example.test/some/image:1.0" is cached with layer "sha256:aaa" of 3000 bytes
     When image "registry.example.test/some/image:1.0" is removed

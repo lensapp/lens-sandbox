@@ -153,6 +153,7 @@ async fn handle_connection(
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
         Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
+        Request::BindIntegrationCredential { id } => handle_credential_bind(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
 }
@@ -217,8 +218,124 @@ async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()
     crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
-/// Drives an integration's interactive sign-in host-side, dispatching on its oauth `flow` and persisting the obtained credential for the next run to arm.
+/// Drives an integration's interactive sign-in host-side, streaming its progress frames to the client and closing with the terminal response.
 async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
+    let sign_in = run_integration_sign_in(&id, progress_tx);
+    tokio::pin!(sign_in);
+    let terminal = loop {
+        tokio::select! {
+            biased;
+            Some(resp) = progress_rx.recv() => {
+                stream.write_all(&encode_frame(&resp)?).await?;
+            }
+            res = &mut sign_in => break res,
+        }
+    };
+    while let Ok(resp) = progress_rx.try_recv() {
+        stream.write_all(&encode_frame(&resp)?).await?;
+    }
+    stream.write_all(&encode_frame(&terminal)?).await?;
+    Ok(())
+}
+
+/// Presents a connect-time value-decision card on the approval window and closes the stream with the terminal response.
+async fn handle_credential_bind(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+    let terminal = run_credential_bind(&id).await;
+    stream.write_all(&encode_frame(&terminal)?).await?;
+    Ok(())
+}
+
+const CREDENTIAL_BIND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Drive a credential integration's value decision through the approval window card and persist the outcome — a value, host-detect, or an explicit deny — to the per-machine store.
+async fn run_credential_bind(id: &str) -> Response {
+    use crate::credential_flow::bind::{
+        BindResolution, bind_prompt, bind_provider, resolve_bind_decision,
+    };
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+
+    let user = lns_policy::integrations::Catalog::load_or_default(
+        &lns_policy::integrations::default_integrations_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let Some(integ) = catalog.iter().find(|i| i.id == id) else {
+        return Response::CredentialBindFailed {
+            reason: format!("{id:?} is not in this machine's integration catalog"),
+        };
+    };
+    let Some(prompt) = bind_prompt(integ) else {
+        return Response::CredentialBindFailed {
+            reason: format!("{id:?} is not a credential integration"),
+        };
+    };
+    // Fail fast instead of holding the CLI on a card a headless service can never show.
+    if !crate::tray::display_present() {
+        return Response::CredentialBindFailed {
+            reason: "no display is available for the approval-window value decision; \
+                     bind on a machine where the Lens Sandbox window can appear"
+                .into(),
+        };
+    }
+    let Some(window_state) = crate::approval_flow::window::get() else {
+        return Response::CredentialBindFailed {
+            reason: "the approval window is not available to make the value decision".into(),
+        };
+    };
+    let prompt_id = prompt.id.clone();
+    let providers: Vec<_> = bind_provider(integ).into_iter().collect();
+    let host_value_available =
+        crate::credential_flow::registry::detect_for_with(id, &providers).is_some();
+    let (decision_tx, mut decision_rx) = mpsc::unbounded_channel();
+    // Check-and-insert atomically: a second concurrent bind for the same id would otherwise coalesce into the first card and, on its own timeout, tear the first client's pending card down.
+    if !window_state.try_insert_credential_pending(prompt, host_value_available, decision_tx) {
+        return Response::CredentialBindFailed {
+            reason: format!("a bind for {id:?} is already pending in the approval window"),
+        };
+    }
+    if let Some(ctx) = crate::approval_flow::window::ctx() {
+        ctx.request_repaint();
+    }
+    let delivery = match timeout(CREDENTIAL_BIND_TIMEOUT, decision_rx.recv()).await {
+        Ok(Some(delivery)) => delivery,
+        Ok(None) | Err(_) => {
+            window_state.remove_credential_pending(&prompt_id);
+            return Response::CredentialBindFailed {
+                reason: "the value decision timed out before it was made".into(),
+            };
+        }
+    };
+    match resolve_bind_decision(delivery.request) {
+        BindResolution::Persist(entry, decision) => {
+            let store = JsonFileCredentialStore::new(default_credentials_path());
+            let mut state = match store.load() {
+                Ok(state) => state,
+                Err(e) => {
+                    return Response::CredentialBindFailed {
+                        reason: format!("reading the credential store failed: {e}"),
+                    };
+                }
+            };
+            state.insert(id.to_string(), entry);
+            match store.save(&state) {
+                Ok(()) => Response::CredentialBindComplete { decision },
+                Err(e) => Response::CredentialBindFailed {
+                    reason: format!("storing the decision failed: {e}"),
+                },
+            }
+        }
+        BindResolution::Failed(reason) => Response::CredentialBindFailed { reason },
+    }
+}
+
+/// Drive an integration's oauth sign-in host-side — dispatching on its `flow`, emitting progress via `progress`, persisting the obtained credential — and return the terminal response. Shared by the connect verb and the run launch gate.
+pub(crate) async fn run_integration_sign_in(
+    id: &str,
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use lns_policy::integrations::OauthFlow;
 
     let user = lns_policy::integrations::Catalog::load_or_default(
@@ -231,58 +348,43 @@ async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyho
         .find(|i| i.id == id)
         .and_then(|i| i.oauth.as_ref())
     else {
-        let frame = encode_frame(&Response::OauthSignInFailed {
+        return Response::OauthSignInFailed {
             reason: format!("{id:?} is not an oauth integration"),
-        })?;
-        stream.write_all(&frame).await?;
-        return Ok(());
+        };
     };
     match oauth.flow {
         OauthFlow::Device => {
-            handle_device_sign_in(stream, &id, crate::oauth::OauthConfig::from(oauth)).await
+            device_sign_in(id, crate::oauth::OauthConfig::from(oauth), progress).await
         }
-        OauthFlow::Pkce => {
-            handle_pkce_sign_in(stream, &id, crate::oauth::PkceConfig::from(oauth)).await
-        }
+        OauthFlow::Pkce => pkce_sign_in(id, crate::oauth::PkceConfig::from(oauth), progress).await,
     }
 }
 
-/// Streams the device-flow verification prompt to the client and persists the obtained token set.
-async fn handle_device_sign_in(
-    mut stream: UnixStream,
+/// Emits the device-flow verification prompt and persists the obtained token set.
+async fn device_sign_in(
     id: &str,
     cfg: crate::oauth::OauthConfig,
-) -> anyhow::Result<()> {
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use crate::oauth::{
         DeviceCode, RealClock, RealDeviceFlow, SignIn, SignInPivot, run_device_flow,
     };
 
-    let (code_tx, mut code_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCode>();
-    let flow = run_device_flow(
+    let outcome = run_device_flow(
         &RealDeviceFlow,
         &cfg,
         move |code: &DeviceCode| {
-            let _ = code_tx.send(code.clone());
+            let _ = progress.send(Response::OauthVerification {
+                verification_uri: code.verification_uri.clone(),
+                user_code: code.user_code.clone(),
+                expires_in_secs: code.expires_in.as_secs(),
+            });
         },
         std::future::pending::<SignInPivot>(),
-    );
-    tokio::pin!(flow);
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            Some(code) = code_rx.recv() => {
-                let frame = encode_frame(&Response::OauthVerification {
-                    verification_uri: code.verification_uri,
-                    user_code: code.user_code,
-                    expires_in_secs: code.expires_in.as_secs(),
-                })?;
-                stream.write_all(&frame).await?;
-            }
-            res = &mut flow => break res,
-        }
-    };
+    )
+    .await;
 
-    let response = match outcome {
+    match outcome {
         Ok(SignIn::Completed(token)) => match persist_oauth_token(id, &token, &RealClock) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
@@ -298,56 +400,44 @@ async fn handle_device_sign_in(
         Ok(SignIn::Cancelled) => Response::OauthSignInFailed {
             reason: "the sign-in was cancelled".into(),
         },
-        // This CLI-driven path streams only the browser dance; it offers no token-paste surface, so a pivot can't arise here.
+        // This streamed path offers no token-paste surface, so a pivot can't arise here.
         Ok(SignIn::Token(_)) => Response::OauthSignInFailed {
             reason: "token fallback is not available over this sign-in path".into(),
         },
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),
         },
-    };
-    let frame = encode_frame(&response)?;
-    stream.write_all(&frame).await?;
-    Ok(())
+    }
 }
 
-/// Opens the browser to the PKCE authorization URL (sending it to the client too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
-async fn handle_pkce_sign_in(
-    mut stream: UnixStream,
+/// Opens the browser to the PKCE authorization URL (emitting it too), then exchanges the redirect's code for the provider's key and persists it as a durable credential.
+async fn pkce_sign_in(
     id: &str,
     cfg: crate::oauth::PkceConfig,
-) -> anyhow::Result<()> {
+    progress: tokio::sync::mpsc::UnboundedSender<Response>,
+) -> Response {
     use crate::oauth::{
         PkceChallenge, PkceSignIn, RealAuthCodeFlow, RealCallbackListener, run_pkce_flow,
     };
 
     let challenge = PkceChallenge::generate();
-    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let flow = run_pkce_flow(
+    let outcome = run_pkce_flow(
         &RealAuthCodeFlow,
         &RealCallbackListener,
         &cfg,
         &challenge,
         move |url: &str| {
-            let _ = url_tx.send(url.to_string());
+            let _ = progress.send(Response::OauthBrowserOpened {
+                authorization_url: url.to_string(),
+            });
             crate::browser::open(url);
         },
         std::future::pending::<()>(),
         crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
-    );
-    tokio::pin!(flow);
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            Some(url) = url_rx.recv() => {
-                let frame = encode_frame(&Response::OauthBrowserOpened { authorization_url: url })?;
-                stream.write_all(&frame).await?;
-            }
-            res = &mut flow => break res,
-        }
-    };
+    )
+    .await;
 
-    let response = match outcome {
+    match outcome {
         Ok(PkceSignIn::Completed(key)) => match persist_pkce_key(id, key) {
             Ok(()) => Response::OauthSignInComplete,
             Err(e) => Response::OauthSignInFailed {
@@ -363,10 +453,7 @@ async fn handle_pkce_sign_in(
         Err(e) => Response::OauthSignInFailed {
             reason: format!("{e:#}"),
         },
-    };
-    let frame = encode_frame(&response)?;
-    stream.write_all(&frame).await?;
-    Ok(())
+    }
 }
 
 fn persist_oauth_token(

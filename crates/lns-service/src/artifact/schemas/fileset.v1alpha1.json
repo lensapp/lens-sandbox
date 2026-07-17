@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "apiVersion": {
+      "const": "lens.dev/v1alpha1"
+    },
+    "kind": {
+      "const": "FileSet"
+    },
+    "metadata": {
+      "properties": {
+        "labels": {
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "mount": {
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)"
+          },
+          "pattern": "^/",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec",
+    "mount"
+  ],
+  "type": "object",
+  "$id": "https://lens.dev/schemas/fileset.v1alpha1.json",
+  "title": "Lens fileset artifact (v1alpha1)",
+  "x-lens-class": "application",
+  "x-lens-config-media-type": "application/vnd.lens.fileset.config.v1+json",
+  "x-lens-artifact-type": "application/vnd.lens.fileset.v1+json"
+}

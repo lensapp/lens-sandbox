@@ -250,6 +250,39 @@ pub fn record_run_launched(
     )
 }
 
+pub fn record_sandbox_run_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    reference: &str,
+    digest: &str,
+    integrations: &[String],
+    policy_hash: &str,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::sandbox_run_event(cx, reference, digest, integrations, policy_hash),
+    )
+}
+
+pub fn record_sandbox_run(
+    run_id: &str,
+    microvm: &str,
+    reference: &str,
+    digest: &str,
+    integrations: &[String],
+    policy_hash: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_sandbox_run_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        reference,
+        digest,
+        integrations,
+        policy_hash,
+    )
+}
+
 pub fn record_volume_attached_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
@@ -356,6 +389,75 @@ mod tests {
         assert!(
             content.contains(&format!("\"prev_hash\":\"{}\"", lns_ipc::GENESIS_PREV_HASH)),
             "the launch line is the run's genesis: {content}"
+        );
+    }
+
+    #[test]
+    fn record_sandbox_run_writes_the_reference_digest_integrations_and_policy_hash() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_sandbox_run_at(
+            &path,
+            &cx(),
+            "some-registry.example/some-agent:research",
+            "sha256:beef",
+            &["some-integration".to_string()],
+            "sha256:po1icy",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("\"lns_kind\":\"sandbox_run\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_sandbox\":\"some-registry.example/some-agent:research\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_sandbox_digest\":\"sha256:beef\""),
+            "the audit must pin the resolved digest, not just the tag: {content}"
+        );
+        assert!(
+            content.contains("\"lns_policy_hash\":\"sha256:po1icy\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_integrations\":[\"some-integration\"]"),
+            "{content}"
+        );
+        assert!(content.contains("\"lns_origin\":\"host\""), "{content}");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn record_sandbox_run_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_sandbox_run(
+            "aa125",
+            "calm-finch",
+            "reg/some-agent:1",
+            "sha256:beef",
+            &[],
+            "sha256:po1icy",
+            &CLOCK,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(audit_path("aa125").unwrap()).unwrap();
+        assert!(
+            content.contains("\"lns_sandbox\":\"reg/some-agent:1\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_sandbox_digest\":\"sha256:beef\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_policy_hash\":\"sha256:po1icy\""),
+            "{content}"
         );
     }
 

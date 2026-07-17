@@ -38,6 +38,11 @@ async fn remove_image(w: &mut BehaviourWorld, reference: String) {
     w.image().remove(&reference).await;
 }
 
+#[when(expr = "image {string} is tagged as {string}")]
+async fn tag_image(w: &mut BehaviourWorld, from: String, to: String) {
+    w.image().tag(&from, &to).await;
+}
+
 #[when(expr = "the images are pruned")]
 async fn prune_images(w: &mut BehaviourWorld) {
     w.image().prune().await;
@@ -84,6 +89,40 @@ fn listing_in_use(w: &mut BehaviourWorld, reference: String) {
 fn listing_idle(w: &mut BehaviourWorld, reference: String) {
     let rig = w.image();
     assert_eq!(listed(rig, &reference).in_use_by, None);
+}
+
+#[then(expr = "the image tag succeeds")]
+fn tag_succeeds(w: &mut BehaviourWorld) {
+    let rig = w.image();
+    assert!(
+        rig.last_error.is_none(),
+        "unexpected tag error: {:?}",
+        rig.last_error
+    );
+}
+
+#[then(expr = "image {string} has the same digest as {string}")]
+async fn tag_has_same_digest(w: &mut BehaviourWorld, tagged: String, source: String) {
+    let tagged_digest = w
+        .image()
+        .recorded_digest(&tagged)
+        .await
+        .expect("the tagged record");
+    let source_digest = w
+        .image()
+        .recorded_digest(&source)
+        .await
+        .expect("the source record");
+    assert_eq!(tagged_digest, source_digest);
+}
+
+#[then(expr = "the image tag is refused because cross-repository publication requires a push")]
+fn tag_refused_cross_repository(w: &mut BehaviourWorld) {
+    let err = w.image().last_error.clone().expect("a tag error");
+    assert!(
+        err.contains("cross-repository publication requires `lns sandbox push`"),
+        "got: {err}"
+    );
 }
 
 #[then(expr = "the pull succeeds reporting {string} at {int} bytes")]

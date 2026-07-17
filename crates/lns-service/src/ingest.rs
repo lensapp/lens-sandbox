@@ -9,6 +9,8 @@ pub struct IngestedImage {
     pub digests: Vec<String>,
     pub bytes: Vec<Vec<u8>>,
     pub config: Option<oci_client::config::ConfigFile>,
+    pub artifact_type: Option<String>,
+    pub config_media_type: Option<String>,
 }
 
 pub async fn run(
@@ -31,6 +33,8 @@ pub async fn run(
                 digests: pulled.layer_digests,
                 bytes,
                 config: Some(pulled.config),
+                artifact_type: pulled.artifact_type,
+                config_media_type: Some(pulled.config_media_type),
             })
         }
         None => {
@@ -43,6 +47,8 @@ pub async fn run(
                 digests: Vec::new(),
                 bytes: Vec::new(),
                 config: None,
+                artifact_type: None,
+                config_media_type: None,
             })
         }
     }
@@ -101,6 +107,8 @@ mod tests {
             ],
             config,
             layer_digests: vec!["sha256:aaaa".to_string(), "sha256:bbbb".to_string()],
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".to_string(),
         }
     }
 
@@ -133,6 +141,37 @@ mod tests {
         assert!(
             ingested.config.is_none(),
             "imageless config is None — runtime layer carries everything"
+        );
+        assert!(
+            ingested.artifact_type.is_none() && ingested.config_media_type.is_none(),
+            "imageless has no pulled manifest, so no artifact type to dispatch on"
+        );
+    }
+
+    #[tokio::test]
+    async fn oci_branch_threads_the_artifact_type_for_dispatch() {
+        let (_dir, cache) = empty_cache();
+        let mut pulled = sample_pulled();
+        pulled.artifact_type = Some("application/vnd.lens.sandbox.v1+json".into());
+        pulled.config_media_type = "application/vnd.lens.sandbox.config.v1+json".into();
+        let cell: Mutex<Option<PulledImage>> = Mutex::new(Some(pulled));
+        let ingested = run(
+            Some("reg/sandbox:1"),
+            &[],
+            &Arch::ARM64,
+            &cache,
+            async |_img: &str, _c: &LayerCache| Ok(cell.lock().unwrap().take().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ingested.artifact_type.as_deref(),
+            Some("application/vnd.lens.sandbox.v1+json"),
+            "the pulled manifest's artifactType must reach the ingest result so run can dispatch",
+        );
+        assert_eq!(
+            ingested.config_media_type.as_deref(),
+            Some("application/vnd.lens.sandbox.config.v1+json"),
         );
     }
 

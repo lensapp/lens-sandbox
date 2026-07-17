@@ -198,6 +198,13 @@ impl ImageRig {
         }
     }
 
+    pub async fn tag(&mut self, from: &str, to: &str) {
+        match image_store::tag_with(&self.fs, &self.images_root, from, to).await {
+            Ok(()) => self.last_error = None,
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
     pub async fn prune(&mut self) {
         match image_store::prune_with(&self.fs, &self.caches, &self.images_root, &self.active).await
         {
@@ -214,5 +221,15 @@ impl ImageRig {
             .await
             .expect("listing the index");
         listed.iter().any(|i| i.reference == reference)
+    }
+
+    pub async fn recorded_digest(&self, reference: &str) -> Option<String> {
+        let listed = image_store::list_with(&self.fs, &self.images_root, &self.active)
+            .await
+            .expect("listing the index");
+        listed
+            .iter()
+            .find(|image| image.reference == reference)
+            .map(|image| image.digest.clone())
     }
 }

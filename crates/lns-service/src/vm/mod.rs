@@ -208,7 +208,6 @@ pub fn resolve_run_as(
     explicit_user: Option<&str>,
     explicit_uid: Option<u32>,
     image_user: Option<&str>,
-    imageless: bool,
 ) -> RunAs {
     if explicit_user.is_some() || explicit_uid.is_some() {
         let (user, group) = explicit_user
@@ -224,17 +223,10 @@ pub fn resolve_run_as(
             group: group.map(str::to_string),
         };
     }
-    if imageless {
-        return RunAs {
-            user: DEFAULT_SANDBOX_USER.to_string(),
-            uid: Some(DEFAULT_SANDBOX_UID),
-            group: None,
-        };
-    }
     match image_user.map(str::trim).filter(|u| !u.is_empty()) {
         None => RunAs {
-            user: String::new(),
-            uid: Some(0),
+            user: DEFAULT_SANDBOX_USER.to_string(),
+            uid: Some(DEFAULT_SANDBOX_UID),
             group: None,
         },
         Some(spec) => {
@@ -1035,15 +1027,16 @@ mod tests {
     }
 
     #[test]
-    fn run_as_image_without_a_user_directive_runs_as_root() {
+    fn run_as_image_without_a_user_directive_drops_to_the_sandbox_user() {
         for image_user in [None, Some(""), Some("  ")] {
             assert_eq!(
-                resolve_run_as(None, None, image_user, false),
+                resolve_run_as(None, None, image_user),
                 RunAs {
-                    user: String::new(),
-                    uid: Some(0),
+                    user: "sandbox".to_string(),
+                    uid: Some(65534),
                     group: None,
-                }
+                },
+                "a sandbox run must stay unprivileged unless the image or the user asks for a specific identity"
             );
         }
     }
@@ -1051,7 +1044,7 @@ mod tests {
     #[test]
     fn run_as_leaves_a_named_image_users_uid_for_the_guest_to_resolve_by_name() {
         assert_eq!(
-            resolve_run_as(None, None, Some("www-data"), false),
+            resolve_run_as(None, None, Some("www-data")),
             RunAs {
                 user: "www-data".to_string(),
                 uid: None,
@@ -1063,7 +1056,7 @@ mod tests {
     #[test]
     fn run_as_parses_a_numeric_image_user_into_its_uid() {
         assert_eq!(
-            resolve_run_as(None, None, Some("1000"), false),
+            resolve_run_as(None, None, Some("1000")),
             RunAs {
                 user: "1000".to_string(),
                 uid: Some(1000),
@@ -1075,7 +1068,7 @@ mod tests {
     #[test]
     fn run_as_keeps_the_group_component_of_the_image_user() {
         assert_eq!(
-            resolve_run_as(None, None, Some("www-data:www-data"), false),
+            resolve_run_as(None, None, Some("www-data:www-data")),
             RunAs {
                 user: "www-data".to_string(),
                 uid: None,
@@ -1084,7 +1077,7 @@ mod tests {
             "a named user:group must carry its group on so the guest can resolve it"
         );
         assert_eq!(
-            resolve_run_as(None, None, Some("app:root"), false),
+            resolve_run_as(None, None, Some("app:root")),
             RunAs {
                 user: "app".to_string(),
                 uid: None,
@@ -1093,7 +1086,7 @@ mod tests {
             "an explicitly requested group must not be replaced by the user's primary group"
         );
         assert_eq!(
-            resolve_run_as(None, None, Some("1001:0"), false),
+            resolve_run_as(None, None, Some("1001:0")),
             RunAs {
                 user: "1001".to_string(),
                 uid: Some(1001),
@@ -1106,7 +1099,7 @@ mod tests {
     #[test]
     fn run_as_treats_an_empty_group_component_as_no_group() {
         assert_eq!(
-            resolve_run_as(None, None, Some("app:"), false),
+            resolve_run_as(None, None, Some("app:")),
             RunAs {
                 user: "app".to_string(),
                 uid: None,
@@ -1118,7 +1111,7 @@ mod tests {
     #[test]
     fn run_as_explicit_cli_override_wins_over_the_image_user_and_carries_no_group() {
         assert_eq!(
-            resolve_run_as(Some("alice"), Some(1234), Some("www-data:www-data"), false),
+            resolve_run_as(Some("alice"), Some(1234), Some("www-data:www-data")),
             RunAs {
                 user: "alice".to_string(),
                 uid: Some(1234),
@@ -1126,7 +1119,7 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_run_as(None, Some(1234), Some("www-data"), false),
+            resolve_run_as(None, Some(1234), Some("www-data")),
             RunAs {
                 user: "sandbox".to_string(),
                 uid: Some(1234),
@@ -1134,7 +1127,7 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_run_as(Some("alice"), None, None, true),
+            resolve_run_as(Some("alice"), None, None),
             RunAs {
                 user: "alice".to_string(),
                 uid: Some(65534),
@@ -1146,7 +1139,7 @@ mod tests {
     #[test]
     fn run_as_explicit_user_parses_numeric_uid_and_group() {
         assert_eq!(
-            resolve_run_as(Some("1000:1001"), Some(1000), None, false),
+            resolve_run_as(Some("1000:1001"), Some(1000), None),
             RunAs {
                 user: "1000".to_string(),
                 uid: Some(1000),
@@ -1154,7 +1147,7 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_run_as(Some("node:staff"), None, None, false),
+            resolve_run_as(Some("node:staff"), None, None),
             RunAs {
                 user: "node".to_string(),
                 uid: Some(65534),
@@ -1166,7 +1159,7 @@ mod tests {
     #[test]
     fn run_as_empty_user_segment_falls_back_to_the_sandbox_user() {
         assert_eq!(
-            resolve_run_as(Some(":1000"), None, None, false),
+            resolve_run_as(Some(":1000"), None, None),
             RunAs {
                 user: "sandbox".to_string(),
                 uid: Some(65534),
@@ -1174,27 +1167,13 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_run_as(Some(""), Some(1000), None, false),
+            resolve_run_as(Some(""), Some(1000), None),
             RunAs {
                 user: "sandbox".to_string(),
                 uid: Some(1000),
                 group: None,
             }
         );
-    }
-
-    #[test]
-    fn run_as_imageless_runs_unprivileged_as_the_sandbox_user() {
-        for image_user in [None, Some("ignored:when-imageless")] {
-            assert_eq!(
-                resolve_run_as(None, None, image_user, true),
-                RunAs {
-                    user: "sandbox".to_string(),
-                    uid: Some(65534),
-                    group: None,
-                }
-            );
-        }
     }
 
     #[test]

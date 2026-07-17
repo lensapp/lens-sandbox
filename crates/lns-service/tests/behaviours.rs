@@ -1,13 +1,19 @@
 #[path = "behaviours/approval_rig.rs"]
 mod approval_rig;
+#[path = "behaviours/artifact_rig.rs"]
+mod artifact_rig;
 #[path = "behaviours/bind_rig.rs"]
 mod bind_rig;
 #[path = "behaviours/credential_rig.rs"]
 mod credential_rig;
+#[path = "behaviours/declared_rig.rs"]
+mod declared_rig;
 #[path = "behaviours/forward_rig.rs"]
 mod forward_rig;
 #[path = "behaviours/image_rig.rs"]
 mod image_rig;
+#[path = "behaviours/policy_rig.rs"]
+mod policy_rig;
 #[path = "behaviours/runner.rs"]
 mod runner;
 #[path = "behaviours/steps/mod.rs"]
