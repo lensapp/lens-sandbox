@@ -49,6 +49,23 @@ impl Default for NetworkPolicy {
     }
 }
 
+impl NetworkPolicy {
+    pub fn validate_local_transport(&self) -> io::Result<()> {
+        let uses_upstream = self.default_transport == Transport::Upstream
+            || self
+                .allowed_routes
+                .iter()
+                .any(|route| route.transport == Transport::Upstream);
+        if uses_upstream {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "upstream transport isn't supported in the local sandbox",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -110,7 +127,7 @@ impl Policy {
             Ok(text) => {
                 let policy: Self = serde_yaml::from_str(&text)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                policy.validate_local_transport()?;
+                policy.network.validate_local_transport()?;
                 Ok(policy)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -149,22 +166,6 @@ impl Policy {
         let before = self.integrations.len();
         self.integrations.retain(|i| i != id);
         self.integrations.len() != before
-    }
-
-    fn validate_local_transport(&self) -> io::Result<()> {
-        let uses_upstream = self.network.default_transport == Transport::Upstream
-            || self
-                .network
-                .allowed_routes
-                .iter()
-                .any(|route| route.transport == Transport::Upstream);
-        if uses_upstream {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "upstream transport isn't supported in the local sandbox",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -385,7 +386,26 @@ network:
     }
 
     #[test]
-    fn load_or_default_rejects_upstream_transport_for_local_sandbox() {
+    fn load_or_default_rejects_an_upstream_default_transport() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
+  defaultVerdict: ask
+  defaultTransport: upstream
+";
+        fs::write(&path, yaml).unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("upstream transport isn't supported in the local sandbox"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_an_upstream_route_transport() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("lns-policy.yaml");
         let yaml = "\

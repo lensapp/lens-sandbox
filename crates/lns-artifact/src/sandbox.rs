@@ -135,6 +135,10 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     if doc.spec.image.trim().is_empty() {
         bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
     }
+    doc.spec
+        .policy
+        .validate_local_transport()
+        .context("sandbox policy")?;
     if let Some(workdir) = &doc.spec.workdir {
         spec::validate_mount_path(workdir).context("workdir")?;
     }
@@ -314,6 +318,30 @@ mod tests {
         assert_eq!(def.spec.policy.default_verdict, Verdict::Ask);
         assert_eq!(def.spec.policy.default_transport, Transport::Direct);
         assert!(def.spec.integrations.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_an_upstream_default_transport() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","policy":{"defaultTransport":"upstream"}}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("upstream transport isn't supported in the local sandbox"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_upstream_route_transport() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","transport":"upstream"}]}}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("upstream transport isn't supported in the local sandbox"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
