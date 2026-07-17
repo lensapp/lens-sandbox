@@ -65,6 +65,9 @@ fn secret_shape(value: &str) -> Option<&'static str> {
     if is_github_token(value) {
         return Some("GitHub token");
     }
+    if is_anthropic_key(value) {
+        return Some("Anthropic API key");
+    }
     if is_openai_key(value) {
         return Some("OpenAI-style API key");
     }
@@ -75,17 +78,35 @@ fn secret_shape(value: &str) -> Option<&'static str> {
 }
 
 fn is_github_token(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("ghp_") else {
+    if let Some(rest) = value.strip_prefix("github_pat_") {
+        return rest.len() >= 20 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    }
+    ["ghp_", "gho_", "ghs_", "ghr_", "ghu_"]
+        .iter()
+        .filter_map(|prefix| value.strip_prefix(prefix))
+        .any(|rest| rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+fn is_anthropic_key(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("sk-ant-") else {
         return false;
     };
-    rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+    is_key_body(rest)
 }
 
 fn is_openai_key(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("sk-") else {
         return false;
     };
-    rest.len() >= 20 && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+    is_key_body(rest)
+}
+
+/// The post-prefix body of an `sk-` family key: long enough to be a real secret and drawn only from the base62 + `-`/`_` alphabet these keys use (so `sk-proj-`, `sk-svcacct-`, `sk-ant-api03-` all qualify).
+fn is_key_body(rest: &str) -> bool {
+    rest.len() >= 20
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn is_aws_access_key_id(value: &str) -> bool {
@@ -163,6 +184,35 @@ mod tests {
         assert_eq!(secret_shape(&format!("ghp_{}", "!".repeat(36))), None);
         assert_eq!(secret_shape(&format!("sk-{}", "!".repeat(20))), None);
         assert_eq!(secret_shape(&format!("AKIA{}", "a".repeat(16))), None);
+    }
+
+    #[test]
+    fn secret_shape_catches_modern_hyphenated_key_formats() {
+        assert_eq!(
+            secret_shape(&format!("sk-ant-api03-{}", "a".repeat(20))),
+            Some("Anthropic API key"),
+            "an Anthropic key carries hyphens the old all-alphanumeric check missed"
+        );
+        assert_eq!(
+            secret_shape(&format!("sk-proj-{}", "a".repeat(20))),
+            Some("OpenAI-style API key")
+        );
+        assert_eq!(
+            secret_shape(&format!("sk-svcacct-{}", "a".repeat(20))),
+            Some("OpenAI-style API key")
+        );
+        assert_eq!(
+            secret_shape(&format!("github_pat_{}", "a".repeat(22))),
+            Some("GitHub token")
+        );
+        assert_eq!(
+            secret_shape(&format!("gho_{}", "a".repeat(36))),
+            Some("GitHub token")
+        );
+        assert_eq!(
+            secret_shape(&format!("ghs_{}", "a".repeat(36))),
+            Some("GitHub token")
+        );
     }
 
     #[test]
