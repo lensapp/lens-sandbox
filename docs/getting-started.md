@@ -125,44 +125,30 @@ That writes a starter `./lns.yaml`:
 apiVersion: lns.run/v1
 kind: Sandbox
 metadata:
-  name: hermes
+  name: sandbox
 spec:
-  image: docker.io/nousresearch/hermes-agent:latest
-  command: gateway run
-  workdir: /opt/data
-  env:
-    HERMES_DASHBOARD: "1"
+  image: docker.io/library/alpine:3.20
+  command: sh
+  workdir: /workspace
+  env: {}
   resources:
-    cpu: 2
-    memory: 4Gi
+    cpu: 1
+    memory: 512Mi
   policy:
     defaultVerdict: ask
     allowedRoutes: []
-  integrations:
-    - anthropic
+  integrations: []
   credentials: []
   volumes:
-    - type: volume
-      source: hermes-data
-      target: /opt/data
-  filesets:
-    - path: ./skills
-      mountPath: /opt/data/skills
-  ports:
-    - container: 8642
-      host: 8642
-    - container: 9119
-      host: 9119
+    - type: bind
+      source: .
+      target: /workspace
+  filesets: []
+  ports: []
 ```
 
-The scaffold is a working example — the open-source
-[Hermes agent](https://hermes-agent.nousresearch.com/) — with every `spec` field
-present, so editing is filling in a blank, not learning a schema. Its agent state
-persists in a named volume, the scaffolded `./skills` directory (an example
-`SKILL.md` is created next to `lns.yaml`) is mounted into the agent, the
-`anthropic` integration injects `ANTHROPIC_API_KEY` without the real key ever
-entering the workload, and the gateway (8642) and dashboard (9119) ports publish
-on loopback. Swap the image and fields for your own workload, then check it
+Every `spec` field is present with its default so editing is filling in a blank,
+not learning a schema. Edit `spec.image` (and the fields you need), then check it
 offline —
 `validate` runs schema, cross-field, and secret checks without touching the
 network or the service, and `show` renders the effective definition:

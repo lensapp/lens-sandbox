@@ -150,9 +150,6 @@ impl super::author::Fs for RealFs {
         std::fs::read_to_string(path)
     }
     fn write(&self, path: &Path, contents: &str) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         std::fs::write(path, contents)
     }
     fn exists(&self, path: &Path) -> bool {

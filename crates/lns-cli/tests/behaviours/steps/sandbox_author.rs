@@ -85,28 +85,26 @@ fn project_directory_contains(w: &mut BehaviourWorld, dir: String, file: String)
     w.author_files.insert(path, "fixture contents".to_string());
 }
 
-#[then(regex = r#"^a file "([^"]+)" is created$"#)]
-fn file_created(w: &mut BehaviourWorld, file: String) -> Result<(), String> {
-    if w.author_files
-        .contains_key(&PathBuf::from("/work").join(&file))
-    {
+#[then(regex = r#"^a file "lns\.yaml" is created$"#)]
+fn file_created(w: &mut BehaviourWorld) -> Result<(), String> {
+    if w.author_files.contains_key(&yaml_key()) {
         Ok(())
     } else {
-        Err(format!("{file} was not created"))
+        Err("lns.yaml was not created".to_string())
     }
 }
 
-#[then(regex = r#"^the file "([^"]+)" contains "([^"]+)"$"#)]
-fn file_contains(w: &mut BehaviourWorld, file: String, needle: String) -> Result<(), String> {
+#[then(regex = r#"^the file "lns\.yaml" contains "([^"]+)"$"#)]
+fn file_contains(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
     let contents = w
         .author_files
-        .get(&PathBuf::from("/work").join(&file))
-        .ok_or(format!("{file} does not exist"))?;
+        .get(&yaml_key())
+        .ok_or("lns.yaml does not exist")?;
     if contents.contains(&needle) {
         Ok(())
     } else {
         Err(format!(
-            "expected {file} to contain {needle:?}, got:\n{contents}"
+            "expected lns.yaml to contain {needle:?}, got:\n{contents}"
         ))
     }
 }
