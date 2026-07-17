@@ -185,12 +185,22 @@ impl WindowState {
         host_value_available: bool,
         decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
     ) {
+        self.try_insert_credential_pending(prompt, host_value_available, decision_tx);
+    }
+
+    /// Insert a credential card only if no card with the same id is already pending, atomically under one lock; returns `false` (inserting nothing) on a duplicate so a concurrent bind can be refused rather than coalescing into — and later tearing down — the first card.
+    pub fn try_insert_credential_pending(
+        &self,
+        prompt: CredentialPendingPrompt,
+        host_value_available: bool,
+        decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
+    ) -> bool {
         let mut g = self.lock();
         if g.pending_credentials
             .iter()
             .any(|e| e.prompt.id == prompt.id)
         {
-            return;
+            return false;
         }
         let seq = g.alloc_seq();
         g.pending_credentials.push(CredentialPendingEntry {
@@ -208,6 +218,7 @@ impl WindowState {
             decision_tx,
             seq,
         });
+        true
     }
 
     pub fn remove_credential_pending(&self, id: &str) {
@@ -942,6 +953,25 @@ mod tests {
         s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
         s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
         assert_eq!(s.snapshot().pending_credentials.len(), 2);
+    }
+
+    #[test]
+    fn try_insert_credential_pending_reports_the_first_insert_and_refuses_a_duplicate() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        assert!(
+            s.try_insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone()),
+            "the first insert of an id succeeds"
+        );
+        assert!(
+            !s.try_insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx),
+            "a concurrent duplicate is refused, not coalesced"
+        );
+        assert_eq!(
+            s.snapshot().pending_credentials.len(),
+            1,
+            "the refused duplicate left the first card intact"
+        );
     }
 
     #[test]

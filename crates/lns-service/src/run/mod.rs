@@ -83,6 +83,73 @@ pub(super) fn exec_env_strings(
     )
 }
 
+/// The image ref, command, and env a sandbox run boots with, once its definition is resolved.
+pub(super) struct SandboxLaunch {
+    pub image: String,
+    pub cmd: Vec<String>,
+    pub env: Vec<String>,
+}
+
+/// Size a sandbox run's VM: the sandbox's resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
+pub(super) fn sandbox_vm_size(
+    resources: Option<&lns_artifact::spec::Resources>,
+    requested_cpus: u8,
+    cpus_explicit: bool,
+    requested_mem_mib: usize,
+    mem_explicit: bool,
+) -> (u8, usize) {
+    use crate::artifact::resources::{ResourceOverrides, VmSize, resolve_size};
+    const DEFAULT_CPUS: u8 = 1;
+    const DEFAULT_MEM_MIB: usize = 512;
+    let overrides = ResourceOverrides {
+        cpus: cpus_explicit.then_some(requested_cpus),
+        mem_mib: mem_explicit.then_some(requested_mem_mib),
+    };
+    let size = resolve_size(
+        resources,
+        &overrides,
+        VmSize {
+            cpus: DEFAULT_CPUS,
+            mem_mib: DEFAULT_MEM_MIB,
+        },
+    );
+    (size.cpus, size.mem_mib)
+}
+
+/// Merge a resolved sandbox's workload with the user's run args: boot the sandbox base image, take the sandbox command unless the user gave one after `--`, and layer env base-image < sandbox < user `-e`.
+pub(super) fn sandbox_launch(
+    workload: &crate::artifact::assembly::AssembledWorkload,
+    user_cmd: &[String],
+    user_env: &[String],
+) -> SandboxLaunch {
+    let cmd = if user_cmd.is_empty() {
+        workload
+            .command
+            .as_deref()
+            .map(shell_split)
+            .unwrap_or_default()
+    } else {
+        user_cmd.to_vec()
+    };
+    let mut env: Vec<String> = workload
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    env.extend(user_env.iter().cloned());
+    SandboxLaunch {
+        image: workload.base_image.clone(),
+        cmd,
+        env,
+    }
+}
+
+/// Split an agent command string into argv with shell quoting honored, so `agent --prompt "hello world"` stays one argument; an unbalanced-quote string falls back to whitespace splitting rather than dropping the command.
+fn shell_split(command: &str) -> Vec<String> {
+    shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect())
+}
+
 pub(super) fn vm_ended_before_connector(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> anyhow::Error {
@@ -102,6 +169,41 @@ mod tests {
     use super::*;
     use lns_ipc::LogLevel;
     use tokio::sync::mpsc;
+
+    fn resources(cpu: i64, mem_mib: i64) -> lns_artifact::spec::Resources {
+        lns_artifact::spec::Resources {
+            cpu: Some(lns_artifact::spec::Quantity::Int(cpu)),
+            memory: Some(lns_artifact::spec::Quantity::Int(mem_mib)),
+        }
+    }
+
+    #[test]
+    fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
+        let res = resources(4, 2048);
+        assert_eq!(sandbox_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
+    }
+
+    #[test]
+    fn sandbox_vm_size_lets_an_explicit_request_override_the_sandbox() {
+        let res = resources(4, 2048);
+        assert_eq!(sandbox_vm_size(Some(&res), 2, true, 1024, true), (2, 1024));
+    }
+
+    #[test]
+    fn sandbox_vm_size_honors_an_explicit_request_that_equals_the_builtin_default() {
+        let res = resources(4, 2048);
+        assert_eq!(
+            sandbox_vm_size(Some(&res), 1, true, 512, true),
+            (1, 512),
+            "a user who explicitly asks for the default size must be able to constrain a greedy sandbox"
+        );
+    }
+
+    #[test]
+    fn sandbox_vm_size_falls_back_to_the_request_when_the_sandbox_is_silent() {
+        assert_eq!(sandbox_vm_size(None, 1, false, 512, false), (1, 512));
+        assert_eq!(sandbox_vm_size(None, 8, true, 4096, true), (8, 4096));
+    }
 
     #[tokio::test]
     async fn emit_completion_ok_zero_sends_only_run_exit_zero() {
@@ -360,6 +462,88 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "VM backend never produced a VsockConnector"
+        );
+    }
+
+    fn workload(
+        command: Option<&str>,
+        env: &[(&str, &str)],
+    ) -> crate::artifact::assembly::AssembledWorkload {
+        let resolved = crate::artifact::assembly::ResolvedSandbox {
+            base_image: "registry.example.test/base@sha256:abc".into(),
+            command: command.map(str::to_string),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        crate::artifact::assembly::assemble(&resolved)
+    }
+
+    #[test]
+    fn sandbox_launch_boots_the_base_image_with_the_agent_command() {
+        let w = workload(Some("agent --serve"), &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
+        assert_eq!(launch.image, "registry.example.test/base@sha256:abc");
+        assert_eq!(launch.cmd, vec!["agent".to_string(), "--serve".to_string()]);
+    }
+
+    #[test]
+    fn sandbox_launch_keeps_a_quoted_agent_argument_as_one_token() {
+        let w = workload(Some(r#"agent --prompt "hello world" --flag"#), &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
+        assert_eq!(
+            launch.cmd,
+            vec![
+                "agent".to_string(),
+                "--prompt".to_string(),
+                "hello world".to_string(),
+                "--flag".to_string()
+            ],
+            "a quoted argument must survive as a single argv entry, not be split on the space"
+        );
+    }
+
+    #[test]
+    fn sandbox_launch_falls_back_to_whitespace_on_an_unbalanced_quote() {
+        let w = workload(Some(r#"agent "unclosed"#), &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
+        assert_eq!(
+            launch.cmd,
+            vec!["agent".to_string(), "\"unclosed".to_string()]
+        );
+    }
+
+    #[test]
+    fn sandbox_launch_lets_a_user_command_after_dashdash_override_the_agent() {
+        let w = workload(Some("agent --serve"), &[]);
+        let launch = sandbox_launch(&w, &["bash".to_string()], &[]);
+        assert_eq!(launch.cmd, vec!["bash".to_string()]);
+    }
+
+    #[test]
+    fn sandbox_launch_leaves_the_command_empty_when_the_agent_declares_none() {
+        let w = workload(None, &[]);
+        let launch = sandbox_launch(&w, &[], &[]);
+        assert!(
+            launch.cmd.is_empty(),
+            "no agent command → fall back to image"
+        );
+    }
+
+    #[test]
+    fn sandbox_launch_layers_user_env_after_the_agent_env_so_the_user_wins() {
+        let w = workload(Some("agent"), &[("MODE", "research"), ("PORT", "3003")]);
+        let launch = sandbox_launch(&w, &[], &["PORT=4000".to_string()]);
+        assert_eq!(
+            launch.env,
+            vec![
+                "MODE=research".to_string(),
+                "PORT=3003".to_string(),
+                "PORT=4000".to_string(),
+            ],
+            "agent env first, user -e appended so last-wins env resolution prefers the user",
         );
     }
 }

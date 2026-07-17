@@ -4,7 +4,7 @@ use lns_ipc::{Request, Response, StatusInfo, WireFrame, encode_wire_frame};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-mod adapter;
+pub(crate) mod adapter;
 pub use adapter::run_server;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -114,6 +114,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::BeginIntegrationSignIn must be dispatched via handle_integration_sign_in, not handle_request"
             )
         }
+        Request::BindIntegrationCredential { .. } => {
+            unreachable!(
+                "Request::BindIntegrationCredential must be dispatched via handle_credential_bind, not handle_request"
+            )
+        }
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(run_id) {
                 Response::CancelAccepted
@@ -202,6 +207,19 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                         reclaimed_bytes: report.reclaimed_bytes,
                     }),
             )
+        }
+        Request::InspectImage { image } => image_response(
+            crate::artifact::real::inspect(image)
+                .await
+                .map(|inspection| Response::ImageInspected { inspection }),
+        ),
+        Request::TagImage { from, to } => {
+            image_response(crate::image_store::tag(from, to).await.map(|()| {
+                Response::ImageTagged {
+                    from: from.clone(),
+                    to: to.clone(),
+                }
+            }))
         }
         Request::RegistryLogin {
             registry,
@@ -518,9 +536,12 @@ mod tests {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
                 image: None,
+                resolved_image: None,
                 name: None,
                 cpus: 1,
                 mem: 0,
+                cpus_explicit: false,
+                mem_explicit: false,
                 policy_path: None,
                 sandbox_user: None,
                 sandbox_uid: None,
@@ -538,6 +559,8 @@ mod tests {
                 volumes: vec![],
                 binds: vec![],
                 auto_remove: false,
+                verify_sandbox: false,
+                definition: None,
             })),
             Instant::now(),
         )
@@ -552,6 +575,20 @@ mod tests {
         let _ = handle_request(
             &Request::BeginIntegrationSignIn {
                 id: "some-oauth".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "BindIntegrationCredential must be dispatched via handle_credential_bind"
+    )]
+    async fn bind_integration_credential_via_handle_request_panics() {
+        let _ = handle_request(
+            &Request::BindIntegrationCredential {
+                id: "some-provider".into(),
             },
             Instant::now(),
         )
@@ -1871,6 +1908,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn handle_request_inspect_of_an_invalid_reference_surfaces_the_parse_error() {
+        let resp = as_json(
+            handle_request(
+                &Request::InspectImage {
+                    image: "###".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(
+            message.contains("invalid image reference"),
+            "got: {message}"
+        );
+    }
+
     #[test]
     fn login_response_maps_ok_to_verified() {
         assert_eq!(login_response(Ok(())), Response::RegistryLoginVerified);
@@ -1939,7 +1995,7 @@ mod tests {
         let layer_bytes = b"offline layer".to_vec();
         let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer_bytes));
 
-        let manifest = oci_client::manifest::OciImageManifest {
+        let base_manifest = oci_client::manifest::OciImageManifest {
             layers: vec![oci_client::manifest::OciDescriptor {
                 digest: layer_digest.clone(),
                 size: layer_bytes.len() as i64,
@@ -1948,11 +2004,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let manifest_digest = format!(
+        let base_digest = format!(
             "sha256:{:x}",
-            sha2::Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+            sha2::Sha256::digest(serde_json::to_vec(&base_manifest).unwrap())
         );
-        let reference = format!("registry.example.test/cov/pinned@{manifest_digest}");
+        let base_ref = format!("registry.example.test/cov/base@{base_digest}");
 
         let cache_root = crate::cache::root().unwrap();
         let layer_cache = crate::oci_layer_cache::LayerCache::new(cache_root.join("layers"));
@@ -1962,13 +2018,43 @@ mod tests {
         let config = format!(
             r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
         );
-        crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"))
+        let manifest_cache =
+            crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"));
+        manifest_cache
+            .put(
+                &base_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: base_manifest,
+                    manifest_digest: base_digest.clone(),
+                    config,
+                },
+            )
+            .unwrap();
+        let definition = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"cached-lifecycle"}},"spec":{{"image":"{base_ref}"}}}}"#
+        );
+        let artifact_manifest = oci_client::manifest::OciImageManifest {
+            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            config: oci_client::manifest::OciDescriptor {
+                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
+                size: definition.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let manifest_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&artifact_manifest).unwrap())
+        );
+        let reference = format!("registry.example.test/cov/pinned@{manifest_digest}");
+        manifest_cache
             .put(
                 &reference,
                 &crate::image::manifest_cache::CachedManifest {
-                    manifest,
+                    manifest: artifact_manifest,
                     manifest_digest: manifest_digest.clone(),
-                    config,
+                    config: definition,
                 },
             )
             .unwrap();
@@ -1985,12 +2071,47 @@ mod tests {
         assert_eq!(pulled["type"], "ImagePulled", "got {pulled}");
         assert_eq!(pulled["image"]["reference"], reference);
         assert_eq!(pulled["image"]["digest"], manifest_digest);
-        assert_eq!(pulled["image"]["layers"], 1);
-        assert_eq!(pulled["image"]["size_bytes"], layer_bytes.len() as u64);
+        assert_eq!(pulled["image"]["layers"], 0);
+        assert_eq!(pulled["image"]["size_bytes"], 0);
 
         let listed = as_json(handle_request(&Request::ListImages, now).await);
         assert_eq!(listed["type"], "ImageList", "got {listed}");
-        assert_eq!(listed["images"][0]["reference"], reference);
+        assert!(
+            listed["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|image| image["reference"] == reference),
+            "got {listed}"
+        );
+
+        let tagged = as_json(
+            handle_request(
+                &Request::TagImage {
+                    from: reference.clone(),
+                    to: "registry.example.test/cov/pinned:latest".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(tagged["type"], "ImageTagged", "got {tagged}");
+        let after_tag = as_json(handle_request(&Request::ListImages, now).await);
+        assert_eq!(
+            after_tag["images"].as_array().unwrap().len(),
+            3,
+            "the cached base image and both sandbox references are listed"
+        );
+        // Drop the tag copy so the original layer-sweep assertions below still hold.
+        as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: "registry.example.test/cov/pinned:latest".into(),
+                },
+                now,
+            )
+            .await,
+        );
 
         let removed = as_json(
             handle_request(
@@ -2003,15 +2124,137 @@ mod tests {
         );
         assert_eq!(removed["type"], "ImageRemoved", "got {removed}");
         assert_eq!(removed["reference"], reference);
-        assert_eq!(removed["reclaimed_bytes"], layer_bytes.len() as u64);
+        assert_eq!(removed["reclaimed_bytes"], 0);
+        assert!(
+            layer_cache.contains(&layer_digest).unwrap(),
+            "the sandbox's cached base image still owns its layer"
+        );
+
+        let base_removed = as_json(
+            handle_request(
+                &Request::RemoveImage {
+                    image: base_ref.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(base_removed["type"], "ImageRemoved", "got {base_removed}");
+        assert_eq!(base_removed["reference"], base_ref);
+        assert_eq!(base_removed["reclaimed_bytes"], layer_bytes.len() as u64);
         assert!(
             !layer_cache.contains(&layer_digest).unwrap(),
-            "the last image's layer blob must be swept with it"
+            "the last base image's layer blob must be swept with it"
         );
 
         let pruned = as_json(handle_request(&Request::PruneImages, now).await);
         assert_eq!(pruned["type"], "ImagesPruned", "got {pruned}");
         assert_eq!(pruned["removed"], serde_json::json!([]));
         assert_eq!(pruned["reclaimed_bytes"], 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_pull_of_a_sandbox_artifact_caches_it_with_its_base_image() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+
+        use sha2::Digest;
+        let cache_root = crate::cache::root().unwrap();
+        let manifest_cache =
+            crate::image::manifest_cache::ManifestCache::new(cache_root.join("manifests"));
+        let layer_cache = crate::oci_layer_cache::LayerCache::new(cache_root.join("layers"));
+
+        let layer_bytes = b"offline base layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer_bytes));
+        layer_cache
+            .install_from_bytes(&layer_digest, &layer_bytes)
+            .unwrap();
+        let base_manifest = oci_client::manifest::OciImageManifest {
+            layers: vec![oci_client::manifest::OciDescriptor {
+                digest: layer_digest.clone(),
+                size: layer_bytes.len() as i64,
+                media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let base_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&base_manifest).unwrap())
+        );
+        let base_ref = format!("registry.example.test/cov/base@{base_digest}");
+        manifest_cache
+            .put(
+                &base_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: base_manifest,
+                    manifest_digest: base_digest.clone(),
+                    config: format!(
+                        r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
+                    ),
+                },
+            )
+            .unwrap();
+
+        let definition = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"{base_ref}"}}}}"#
+        );
+        let artifact_manifest = oci_client::manifest::OciImageManifest {
+            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            config: oci_client::manifest::OciDescriptor {
+                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
+                size: definition.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let artifact_digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&artifact_manifest).unwrap())
+        );
+        let artifact_ref = format!("registry.example.test/cov/sandbox@{artifact_digest}");
+        manifest_cache
+            .put(
+                &artifact_ref,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest: artifact_manifest,
+                    manifest_digest: artifact_digest.clone(),
+                    config: definition,
+                },
+            )
+            .unwrap();
+
+        let pulled = as_json(
+            handle_request(
+                &Request::PullImage {
+                    image: artifact_ref.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(pulled["type"], "ImagePulled", "got {pulled}");
+        assert_eq!(pulled["image"]["reference"], artifact_ref);
+        assert_eq!(pulled["image"]["digest"], artifact_digest);
+        assert_eq!(
+            pulled["image"]["layers"], 0,
+            "a config-only artifact records no layers"
+        );
+
+        let listed = as_json(handle_request(&Request::ListImages, now).await);
+        let refs: Vec<String> = listed["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["reference"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            refs.contains(&artifact_ref) && refs.contains(&base_ref),
+            "pull must cache the sandbox and prefetch its base image, got {refs:?}"
+        );
     }
 }

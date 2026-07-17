@@ -15,7 +15,7 @@ use lns_policy::{Policy, PolicyStore, RouteRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
-/// Supplies the registry credentials bundled into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
+/// Supplies the registry credentials packed into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
 pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 
 /// Maps a reloaded policy's `integrations:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
@@ -90,6 +90,7 @@ pub struct ApprovalSession {
     connector: OnceLock<Arc<dyn IntegrationConnector>>,
     connecting: Mutex<HashSet<String>>,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
+    policy_floor: OnceLock<Policy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +120,7 @@ impl ApprovalSession {
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
             ledger: OnceLock::new(),
+            policy_floor: OnceLock::new(),
         }
     }
 
@@ -136,6 +138,11 @@ impl ApprovalSession {
     /// Installs the integration-route deriver once at boot so a watcher reload re-applies a connected integration's routes instead of dropping them; idempotent, the first wins.
     pub fn set_integration_route_deriver(&self, deriver: IntegrationRouteDeriver) {
         let _ = self.integration_routes.set(deriver);
+    }
+
+    /// Installs a sandbox's shipped policy as an always-merged floor, so a watcher reload of the local overlay can never drop the sandbox's rules; idempotent, the first wins.
+    pub fn set_policy_floor(&self, floor: Policy) {
+        let _ = self.policy_floor.set(floor);
     }
 
     /// Installs the integration connector once the credential subsystem exists; idempotent, the first wins.
@@ -426,6 +433,9 @@ impl ApprovalSession {
     }
 
     pub fn apply_external_policy(&self, mut new_policy: Policy) {
+        if let Some(floor) = self.policy_floor.get() {
+            new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
+        }
         if let Some(derive) = self.integration_routes.get() {
             new_policy
                 .network
@@ -1101,6 +1111,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_policy_floor_survives_a_reload_keeping_its_deny_deny_dominant() {
+        let (s, _n, _store, mut rx) = fixture();
+        let mut floor = Policy::default();
+        floor.add_rule(RouteRule::deny_host("api.example.test"));
+        s.set_policy_floor(floor);
+
+        // A watcher reload of the local overlay that *allows* the host must not drop the floor's deny.
+        let mut reloaded = Policy::default();
+        reloaded.add_rule(RouteRule::allow_host("api.example.test"));
+        s.apply_external_policy(reloaded);
+
+        let routes = s.current_policy().network.allowed_routes;
+        let deny_idx = routes
+            .iter()
+            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Deny);
+        let allow_idx = routes
+            .iter()
+            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Allow);
+        assert!(
+            deny_idx.is_some(),
+            "the floor's deny must survive the reload"
+        );
+        assert!(
+            deny_idx < allow_idx,
+            "the floor's deny must stay ordered before the reloaded allow: {routes:?}"
+        );
+        let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
     fn apply_external_policy_emits_no_decision_frames() {
         let (s, _n, _store, mut rx) = fixture();
         s.apply_external_policy(Policy::default());
@@ -1138,7 +1178,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn allow_always_policy_frame_bundles_registry_credentials_when_provider_set() {
+    fn allow_always_policy_frame_packs_registry_credentials_when_provider_set() {
         let (s, _n, _store, mut rx) = fixture();
         s.set_credentials_provider(Box::new(|| {
             vec![Credential {
@@ -1162,7 +1202,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn apply_external_policy_bundles_registry_credentials_when_provider_set() {
+    fn apply_external_policy_packs_registry_credentials_when_provider_set() {
         let (s, _n, _store, mut rx) = fixture();
         s.set_credentials_provider(Box::new(|| {
             vec![Credential {

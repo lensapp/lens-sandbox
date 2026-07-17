@@ -373,16 +373,10 @@ impl CredentialSession {
     }
 
     fn has_armed_value(&self, credential_id: &str) -> bool {
-        match self
-            .state
-            .lock()
-            .expect("state mutex poisoned")
-            .get(credential_id)
-        {
-            Some(CredentialEntry::Oauth { access_token, .. }) => !access_token.is_empty(),
-            Some(CredentialEntry::Stored { value }) => !value.is_empty(),
-            _ => false,
-        }
+        lns_policy::credentials::has_armed_entry(
+            &self.state.lock().expect("state mutex poisoned"),
+            credential_id,
+        )
     }
 
     fn injects_for_host(&self, credential_id: &str, host: &str) -> bool {

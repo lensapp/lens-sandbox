@@ -133,8 +133,26 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(v["type"], "policy");
         assert_eq!(v["network"]["defaultVerdict"], "ask");
-        assert!(v["network"].get("defaultTransport").is_none());
+        assert_eq!(
+            v["network"]["defaultTransport"], "direct",
+            "lens-sandbox-core fail-closes a non-deny verdict to deny when defaultTransport is missing"
+        );
         assert_eq!(v["network"]["allowedRoutes"], json!([]));
+    }
+
+    #[test]
+    fn every_route_in_the_frame_carries_its_transport_even_when_direct() {
+        let mut net = NetworkPolicy::default();
+        net.allowed_routes.push(RouteRule::allow_host("10.0.0.0/8"));
+        let frame = HostFrame::Policy(PolicyMessage {
+            network: Some(net),
+            credentials: None,
+        });
+        let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            v["network"]["allowedRoutes"][0]["transport"], "direct",
+            "core's route schema has no transport default — one missing transport fails the whole route parse and clears every route"
+        );
     }
 
     #[test]

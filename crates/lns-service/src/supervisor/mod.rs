@@ -74,16 +74,27 @@ impl SupervisorSession {
         run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
+        sandbox_policy: Option<&lns_policy::Policy>,
+        sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
     ) -> Result<Option<Self>> {
         let Some(policy_path) = policy else {
+            if sandbox_policy.is_some() {
+                bail!(
+                    "this sandbox ships a network policy but no local policy path was resolved to \
+                     layer it under; refusing to launch it unsupervised (its policy would go \
+                     unenforced)"
+                );
+            }
             return Ok(None);
         };
         adapter::start(
             run_id,
             microvm_name,
             policy_path,
+            sandbox_policy,
+            sandbox_credentials,
             guest_tools_root,
             user_env,
         )
@@ -288,6 +299,8 @@ mod tests {
             "aa42".to_string(),
             "vm-42".into(),
             None,
+            None,
+            &[],
             PathBuf::from("/tmp"),
             vec![],
         )
@@ -296,6 +309,29 @@ mod tests {
         assert!(
             result.is_none(),
             "no policy → unsupervised, no relay spun up"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_policy_refuses_a_shipped_policy_with_no_local_path() {
+        let mut sandbox_policy = lns_policy::Policy::default();
+        sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
+        let result = SupervisorSession::start_if_policy(
+            "aa42".to_string(),
+            "vm-42".into(),
+            None,
+            Some(&sandbox_policy),
+            &[],
+            PathBuf::from("/tmp"),
+            vec![],
+        )
+        .await;
+        let err = result
+            .err()
+            .expect("a sandbox that ships a policy must not boot unsupervised");
+        assert!(
+            format!("{err:#}").contains("refusing to launch it unsupervised"),
+            "got: {err:#}"
         );
     }
 
@@ -412,10 +448,11 @@ mod tests {
                 "env dump must not be a bare unredacted prefix dump: {body_str}"
             );
         }
+        let ships_real = specs
+            .iter()
+            .any(|s| s.guest_path == "/.lens/bin/supervisor.real");
         assert!(
-            specs
-                .iter()
-                .any(|s| s.guest_path == "/.lens/bin/supervisor.real"),
+            ships_real,
             "LNS_DEBUG_WRAP path must also ship the real supervisor at .real"
         );
     }
@@ -538,12 +575,51 @@ mod tests {
             "deadbeef00000000000000000000aa99".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
+            None,
+            &[],
             d.path().to_path_buf(),
             vec![],
         )
         .await
         .expect("start_if_policy");
         let session = result.expect("Some(session) with policy set");
+        assert_eq!(session.assets.supervisor_bin, supervisor_bin);
+        drop(session);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn start_if_policy_merges_a_sandbox_policy_floor_under_the_local_overlay() {
+        use crate::approval_flow::window::{self, WindowState};
+        use crate::test_env::EnvVarGuard;
+        window::install(WindowState::new());
+        let d = tempfile::TempDir::new().expect("tempdir");
+        let _home = EnvVarGuard::set("HOME", d.path());
+        let supervisor_bin = d.path().join("supervisor.real");
+        std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
+        let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
+        let policy_path = d.path().join("lns-policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+        )
+        .expect("policy");
+        let mut sandbox_policy = lns_policy::Policy::default();
+        sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
+
+        let result = SupervisorSession::start_if_policy(
+            "deadbeef00000000000000000000aa98".to_string(),
+            "calm-finch".into(),
+            Some(&policy_path),
+            Some(&sandbox_policy),
+            &[],
+            d.path().to_path_buf(),
+            vec![],
+        )
+        .await
+        .expect("start_if_policy");
+        let session = result.expect("Some(session) with a sandbox policy floor");
         assert_eq!(session.assets.supervisor_bin, supervisor_bin);
         drop(session);
         tokio::task::yield_now().await;

@@ -13,8 +13,8 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    CountingSink, PulledImage, Registry, enforce_manifest_doc_size, linux_platform_resolver,
-    pull_inner, serialized_len,
+    CountingSink, PulledArtifact, PulledImage, Registry, enforce_manifest_doc_size,
+    linux_platform_resolver, pull_inner, pull_sandbox_with, serialized_len,
 };
 
 pub struct RealRegistry {
@@ -34,10 +34,25 @@ impl RealRegistry {
         });
         Self { client, auth }
     }
+
+    /// Like `with_auth`, but reaches a loopback registry over plaintext HTTP (as Docker treats `localhost:5000`) so a local test/dev registry works without TLS.
+    pub fn for_reference(reference: &Reference, auth: RegistryAuth) -> Self {
+        let protocol = if lns_artifact::is_loopback_registry(reference.registry()) {
+            oci_client::client::ClientProtocol::Http
+        } else {
+            oci_client::client::ClientProtocol::Https
+        };
+        let client = oci_client::Client::new(ClientConfig {
+            protocol,
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
+            ..Default::default()
+        });
+        Self { client, auth }
+    }
 }
 
 /// The stored login for `image`'s registry, or anonymous when none is recorded (or the reference / store is unreadable — the pull then fails with the registry's own auth error).
-fn registry_auth_for(image: &str) -> RegistryAuth {
+pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
     let Ok(reference) = image.parse::<Reference>() else {
         return RegistryAuth::Anonymous;
     };
@@ -104,17 +119,92 @@ impl Registry for RealRegistry {
             .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
         Ok(out.into_bytes())
     }
+
+    async fn pull_blob_to_path(
+        &self,
+        reference: &Reference,
+        descriptor: &OciDescriptor,
+        path: &std::path::Path,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<()> {
+        let file = tokio::fs::File::create(path)
+            .await
+            .with_context(|| format!("creating streamed blob {}", path.display()))?;
+        let mut out = CountingWriter::new(file, on_chunk);
+        self.client
+            .pull_blob(reference, descriptor, &mut out)
+            .await
+            .map_err(|e| anyhow::anyhow!("pull_blob {}: {e}", descriptor.digest))?;
+        tokio::io::AsyncWriteExt::shutdown(&mut out)
+            .await
+            .with_context(|| format!("closing streamed blob {}", path.display()))
+    }
+}
+
+struct CountingWriter<'a, W> {
+    inner: W,
+    on_chunk: &'a (dyn Fn(u64) + Send + Sync),
+}
+
+impl<'a, W> CountingWriter<'a, W> {
+    fn new(inner: W, on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
+        Self { inner, on_chunk }
+    }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountingWriter<'_, W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, buf) {
+            std::task::Poll::Ready(Ok(written)) => {
+                (this.on_chunk)(written as u64);
+                std::task::Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
     let _shared = crate::image_store::lock_shared().await;
-    let manifests = crate::cache::root()?.join("manifests");
-    let auth = registry_auth_for(image);
-    let registry =
-        CachingRegistry::new(RealRegistry::with_auth(auth), ManifestCache::new(manifests));
+    let registry = caching_registry_for(image)?;
     let pulled = pull_inner(&registry, image, layer_cache).await?;
     if let Err(e) = crate::image_store::record(&pulled).await {
         crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
     }
     Ok(pulled)
+}
+
+pub async fn pull_sandbox(image: &str) -> Result<PulledArtifact> {
+    let _shared = crate::image_store::lock_shared().await;
+    let registry = caching_registry_for(image)?;
+    pull_sandbox_with(&registry, image).await
+}
+
+pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {
+    let manifests = crate::cache::root()?.join("manifests");
+    let auth = registry_auth_for(image);
+    let inner = match image.parse::<Reference>() {
+        Ok(parsed) => RealRegistry::for_reference(&parsed, auth),
+        Err(_) => RealRegistry::with_auth(auth),
+    };
+    Ok(CachingRegistry::new(inner, ManifestCache::new(manifests)))
 }

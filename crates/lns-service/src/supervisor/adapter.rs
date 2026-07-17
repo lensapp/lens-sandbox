@@ -17,7 +17,7 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::integrations::{
-    applied_integration_routes, resolve_applied_integrations, resolve_connectable_integrations,
+    applied_integration_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -464,22 +464,33 @@ async fn start_credential_subsystem(
     Ok((credential_session, credential_watcher))
 }
 
+/// The run's initial running policy: the local overlay file, with the sandbox's shipped policy merged under it as the deny-dominant baseline. Approvals still persist to the local file only.
+fn effective_running_policy(policy_path: &Path, sandbox_policy: Option<&Policy>) -> Result<Policy> {
+    let overlay = Policy::load_or_default(policy_path)
+        .with_context(|| format!("loading policy {}", policy_path.display()))?;
+    Ok(match sandbox_policy {
+        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &overlay),
+        None => overlay,
+    })
+}
+
 pub(super) async fn start(
     run_id: String,
     microvm_name: String,
     policy_path: &Path,
+    sandbox_policy: Option<&Policy>,
+    sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
-    let mut policy = Policy::load_or_default(policy_path)
-        .with_context(|| format!("loading policy {}", policy_path.display()))?;
+    let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
     // Applied integrations resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
     let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
-    let applied = resolve_applied_integrations(&policy, &catalog);
+    let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog integrations are seeded unarmed so their use offers a live connect.
-    let connectable = resolve_connectable_integrations(&policy, &catalog);
+    let connectable = resolve_connectable_with_slots(&policy, sandbox_credentials, &catalog);
     policy.network.allowed_routes.extend(applied.routes);
     let connectable_ids: HashSet<String> = connectable
         .providers
@@ -512,6 +523,9 @@ pub(super) async fn start(
     );
 
     session.set_integration_route_deriver(make_integration_route_deriver(catalog.clone()));
+    if let Some(baseline) = sandbox_policy {
+        session.set_policy_floor(baseline.clone());
+    }
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -1170,7 +1184,10 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
             }),
         }];
-        let connectable = resolve_connectable_integrations(&Policy::default(), &catalog);
+        let connectable = crate::credential_flow::integrations::resolve_connectable_integrations(
+            &Policy::default(),
+            &catalog,
+        );
         let offerable = build_offerable(&connectable, &catalog);
         assert_eq!(offerable.len(), 1);
         assert_eq!(offerable[0].id, "some-oauth");

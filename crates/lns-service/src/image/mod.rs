@@ -10,7 +10,8 @@ use crate::oci_layer_cache::LayerCache;
 
 pub(crate) mod manifest_cache;
 mod real;
-pub use real::{pull, verify_login};
+pub(crate) use real::{RealRegistry, caching_registry_for, registry_auth_for};
+pub use real::{pull, pull_sandbox, verify_login};
 
 pub(crate) trait Registry: Send + Sync {
     fn pull_manifest_and_config(
@@ -24,6 +25,14 @@ pub(crate) trait Registry: Send + Sync {
         descriptor: &OciDescriptor,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+
+    fn pull_blob_to_path(
+        &self,
+        reference: &Reference,
+        descriptor: &OciDescriptor,
+        path: &std::path::Path,
+        on_chunk: &(dyn Fn(u64) + Send + Sync),
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 pub(crate) struct CountingSink<'a> {
@@ -185,6 +194,60 @@ pub struct PulledImage {
     pub layers: Vec<oci_client::client::ImageLayer>,
     pub config: oci_client::config::ConfigFile,
     pub layer_digests: Vec<String>,
+    pub artifact_type: Option<String>,
+    pub config_media_type: String,
+}
+
+#[derive(Debug)]
+pub struct PulledArtifact {
+    pub reference: Reference,
+    pub digest: String,
+    pub base_image: Option<String>,
+}
+
+pub(crate) async fn pull_sandbox_with<R: Registry>(
+    client: &R,
+    image: &str,
+) -> Result<PulledArtifact> {
+    let reference: Reference = image
+        .parse()
+        .with_context(|| format!("invalid image reference: {image}"))?;
+    let (manifest, manifest_digest, config_str) =
+        client.pull_manifest_and_config(&reference).await?;
+    let path = crate::artifact::dispatch(
+        manifest.artifact_type.as_deref(),
+        Some(manifest.config.media_type.as_str()),
+    )
+    .map_err(sandbox_pull_error)?;
+    if path == crate::artifact::RunPath::SingleImage {
+        anyhow::bail!(
+            "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` only accepts published Sandbox artifacts"
+        );
+    }
+    verify_digest_pin(&reference, &manifest_digest, image)?;
+    let def = lns_artifact::sandbox::parse(config_str.as_bytes())
+        .with_context(|| format!("parsing published sandbox {image}"))?;
+    Ok(PulledArtifact {
+        reference,
+        digest: manifest_digest,
+        base_image: Some(def.spec.image),
+    })
+}
+
+fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e:#}").context("this reference is not a supported Lens Sandbox artifact")
+}
+
+fn verify_digest_pin(reference: &Reference, manifest_digest: &str, image: &str) -> Result<()> {
+    if let Some(expected) = reference.digest()
+        && !ct_digest_eq(manifest_digest, expected)
+    {
+        anyhow::bail!(
+            "manifest digest mismatch for {image} — expected {expected}, \
+             received {manifest_digest}"
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
@@ -203,16 +266,8 @@ pub(crate) async fn pull_inner<R: Registry>(
     let config: oci_client::config::ConfigFile =
         serde_json::from_str(&config_str).context("parsing image config")?;
 
-    if let Some(expected) = reference.digest() {
-        let raw = manifest_bytes(&manifest)?;
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&raw)));
-        if !ct_digest_eq(&actual, expected) {
-            anyhow::bail!(
-                "manifest digest mismatch for {image} — expected {expected}, \
-                 received {actual}"
-            );
-        }
-    }
+    // Compare against the registry-reported content digest, not a re-serialization of the parsed manifest — serde's byte layout differs from the registry's, so re-hashing would false-mismatch every real digest-pinned pull.
+    verify_digest_pin(&reference, &manifest_digest, image)?;
 
     if config.rootfs.diff_ids.len() != manifest.layers.len() {
         anyhow::bail!(
@@ -359,6 +414,8 @@ pub(crate) async fn pull_inner<R: Registry>(
         layers,
         config,
         layer_digests,
+        artifact_type: manifest.artifact_type.clone(),
+        config_media_type: manifest.config.media_type.clone(),
     })
 }
 
@@ -382,10 +439,6 @@ fn short_digest(digest: &str) -> String {
     let hex_part = &digest[prefix_end..];
     let take = hex_part.len().min(10);
     format!("{}{}…", &digest[..prefix_end], &hex_part[..take])
-}
-
-fn manifest_bytes(manifest: &oci_client::manifest::OciImageManifest) -> Result<Vec<u8>> {
-    serde_json::to_vec(manifest).context("serializing manifest for digest check")
 }
 
 fn compute_diff_id(compressed: &[u8], media_type: &str) -> Result<String> {
@@ -620,7 +673,7 @@ mod tests {
         FakeImage {
             manifest,
             config_json: serde_json::to_string(&config).unwrap(),
-            manifest_digest: "sha256:not-used-unless-pull-by-digest".to_string(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
             blobs: vec![(layer_a_digest, layer_a_gz), (layer_b_digest, layer_b_gz)],
         }
     }
@@ -687,6 +740,48 @@ mod tests {
             on_chunk((blob.len() - mid) as u64);
             Ok(blob)
         }
+
+        async fn pull_blob_to_path(
+            &self,
+            reference: &Reference,
+            descriptor: &OciDescriptor,
+            path: &std::path::Path,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            let bytes = self.pull_blob(reference, descriptor, on_chunk).await?;
+            tokio::fs::write(path, bytes).await?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_path_pull_writes_the_blob_and_reports_streamed_bytes() {
+        let registry = build_two_layer_image().into_registry();
+        let descriptor = registry.manifest.layers[0].clone();
+        let expected = registry
+            .blobs
+            .iter()
+            .find(|(digest, _)| digest == &descriptor.digest)
+            .unwrap()
+            .1
+            .clone();
+        let reference: Reference = "registry.example.test/team/image:1".parse().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let received = std::sync::atomic::AtomicU64::new(0);
+
+        registry
+            .pull_blob_to_path(&reference, &descriptor, &path, &|bytes| {
+                received.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        assert_eq!(
+            received.load(std::sync::atomic::Ordering::Relaxed),
+            expected.len() as u64
+        );
     }
 
     #[test]
@@ -816,23 +911,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_bytes_round_trips_through_serde() {
-        let manifest = OciImageManifest {
-            layers: vec![OciDescriptor {
-                digest: "sha256:abcd".into(),
-                size: 7,
-                media_type: manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let bytes = manifest_bytes(&manifest).unwrap();
-        let back: OciImageManifest = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.layers.len(), 1);
-        assert_eq!(back.layers[0].digest, "sha256:abcd");
-    }
-
-    #[test]
     fn serialized_len_matches_a_full_serialization_without_allocating_it() {
         let manifest = OciImageManifest {
             layers: vec![OciDescriptor {
@@ -914,6 +992,132 @@ mod tests {
         assert_eq!(short_digest("c34f34b9359800"), "c34f34b935…");
     }
 
+    fn build_sandbox_artifact() -> FakeImage {
+        let definition = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"registry.example.test/base@sha256:{}"}}}}"#,
+            "b".repeat(64)
+        );
+        let manifest = OciImageManifest {
+            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            config: OciDescriptor {
+                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                digest: sha256_hex(definition.as_bytes()),
+                size: definition.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        FakeImage {
+            manifest,
+            config_json: definition,
+            manifest_digest: format!("sha256:{}", "c".repeat(64)),
+            blobs: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_accepts_a_published_sandbox_and_names_its_base_image() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let artifact = pull_sandbox_with(&registry, "registry.example.test/sb:1")
+            .await
+            .unwrap();
+        assert_eq!(artifact.digest, format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(
+            artifact.base_image.as_deref(),
+            Some(format!("registry.example.test/base@sha256:{}", "b".repeat(64)).as_str()),
+            "the definition's spec.image must surface so the store can prefetch it",
+        );
+        let calls: Vec<String> = registry.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["manifest"],
+            "a config-only artifact must not pull layer blobs",
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_rejects_a_plain_oci_image_before_pulling_layers() {
+        ensure_global_trace_subscriber();
+        let registry = build_two_layer_image().into_registry();
+        let err = pull_sandbox_with(&registry, "alpine:3.20")
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("OCI image, not a Lens Sandbox artifact"),
+            "got: {rendered}"
+        );
+        assert_eq!(
+            registry.calls.lock().unwrap().as_slice(),
+            ["manifest"],
+            "rejection must happen before any image layer is fetched",
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_refuses_a_digest_pinned_artifact_on_mismatch() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let pinned = format!("registry.example.test/sb@sha256:{}", "d".repeat(64));
+        let err = pull_sandbox_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_accepts_a_digest_pinned_artifact_that_matches() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let pinned = format!("registry.example.test/sb@sha256:{}", "c".repeat(64));
+        pull_sandbox_with(&registry, &pinned).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_rejects_a_corrupt_definition() {
+        ensure_global_trace_subscriber();
+        let mut artifact = build_sandbox_artifact();
+        artifact.config_json = "{}".into();
+        let registry = artifact.into_registry();
+        let err = pull_sandbox_with(&registry, "registry.example.test/sb:1")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parsing published sandbox"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_refuses_an_unpullable_artifact_kind_naming_the_type() {
+        ensure_global_trace_subscriber();
+        let mut artifact = build_sandbox_artifact();
+        artifact.manifest.artifact_type = Some("application/vnd.acme.surprise.v1+json".into());
+        let registry = artifact.into_registry();
+        let err = pull_sandbox_with(&registry, "registry.example.test/odd:1")
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("not a supported Lens Sandbox artifact")
+                && rendered.contains("vnd.acme.surprise"),
+            "got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_sandbox_refuses_an_unparseable_reference() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let err = pull_sandbox_with(&registry, "###").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid image reference"),
+            "got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn pull_inner_happy_path_returns_layers_in_manifest_order() {
         ensure_global_trace_subscriber();
@@ -927,6 +1131,40 @@ mod tests {
         assert_eq!(calls[0], "manifest", "manifest fetch happens first");
         assert!(calls[1].starts_with("blob:"));
         assert!(calls[2].starts_with("blob:"));
+    }
+
+    #[tokio::test]
+    async fn pull_inner_threads_manifest_artifact_type_and_config_media_type() {
+        ensure_global_trace_subscriber();
+        let mut img = build_two_layer_image();
+        img.manifest.artifact_type = Some("application/vnd.lens.sandbox.v1+json".into());
+        img.manifest.config.media_type = "application/vnd.lens.sandbox.config.v1+json".into();
+        let registry = img.into_registry();
+        let (_dir, cache) = cache();
+        let pulled = pull_inner(&registry, "reg/sandbox:1", &cache)
+            .await
+            .unwrap();
+        assert_eq!(
+            pulled.artifact_type.as_deref(),
+            Some("application/vnd.lens.sandbox.v1+json"),
+            "the manifest's artifactType must be carried on the pulled image so run can dispatch",
+        );
+        assert_eq!(
+            pulled.config_media_type, "application/vnd.lens.sandbox.config.v1+json",
+            "the config descriptor's mediaType must be carried for the oras empty-artifactType fallback",
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_inner_reports_no_artifact_type_for_a_plain_image() {
+        ensure_global_trace_subscriber();
+        let registry = build_two_layer_image().into_registry();
+        let (_dir, cache) = cache();
+        let pulled = pull_inner(&registry, "alpine:3.20", &cache).await.unwrap();
+        assert!(
+            pulled.artifact_type.is_none(),
+            "a plain image manifest declares no artifactType",
+        );
     }
 
     #[tokio::test]
@@ -1136,13 +1374,14 @@ mod tests {
 
     #[tokio::test]
     async fn pull_inner_verifies_manifest_digest_when_pinned_by_digest() {
+        // The pinned digest is checked against the registry-reported content digest, not a re-serialization of the parsed manifest (which would never match a real registry's byte layout).
         let image = build_two_layer_image();
-        let manifest_canonical = serde_json::to_vec(&image.manifest).unwrap();
-        let actual_digest = sha256_hex(&manifest_canonical);
+        let reported = image.manifest_digest.clone();
         let registry = image.into_registry();
         let (_dir, cache) = cache();
-        let by_digest = format!("alpine@{actual_digest}");
-        pull_inner(&registry, &by_digest, &cache).await.unwrap();
+        pull_inner(&registry, &format!("alpine@{reported}"), &cache)
+            .await
+            .unwrap();
         let wrong =
             "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let err = pull_inner(&registry, wrong, &cache).await.unwrap_err();

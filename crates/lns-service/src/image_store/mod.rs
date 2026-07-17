@@ -50,6 +50,25 @@ fn record_path(images_root: &Path, reference: &str) -> PathBuf {
     images_root.join(format!("{key}.json"))
 }
 
+fn pinned_reference(reference: &str, digest: &str) -> Result<String> {
+    let parsed: oci_client::Reference = reference
+        .parse()
+        .with_context(|| format!("invalid image reference: {reference}"))?;
+    Ok(parsed.clone_with_digest(digest.to_string()).whole())
+}
+
+pub fn artifact_record_for(
+    artifact: &crate::image::PulledArtifact,
+    pulled_unix_secs: u64,
+) -> ImageRecord {
+    ImageRecord {
+        reference: artifact.reference.whole(),
+        digest: artifact.digest.clone(),
+        layers: Vec::new(),
+        pulled_unix_secs,
+    }
+}
+
 pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
     ImageRecord {
         reference: pulled.reference.whole(),
@@ -94,6 +113,19 @@ async fn load_records<F: Fs>(fs: &F, images_root: &Path) -> Result<Vec<ImageReco
     }
     records.sort_by(|a, b| a.reference.cmp(&b.reference));
     Ok(records)
+}
+
+async fn cached_digest_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    image: &str,
+) -> Result<Option<String>> {
+    let reference = normalize_reference(image)?;
+    Ok(load_records(fs, images_root)
+        .await?
+        .into_iter()
+        .find(|record| record.reference == reference)
+        .map(|record| record.digest))
 }
 
 fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
@@ -142,9 +174,10 @@ pub async fn remove_with<F: Fs, C: Caches>(
 ) -> Result<RemovedImage> {
     let reference = normalize_reference(image)?;
     let records = load_records(fs, images_root).await?;
-    if !records.iter().any(|r| r.reference == reference) {
-        bail!("no such image: {reference}");
-    }
+    let record = records
+        .iter()
+        .find(|record| record.reference == reference)
+        .ok_or_else(|| anyhow::anyhow!("no such image: {reference}"))?;
     if let Some(run_id) = holder(active, &reference) {
         bail!(
             "image {reference:?} in use by run {}",
@@ -155,12 +188,42 @@ pub async fn remove_with<F: Fs, C: Caches>(
         .await
         .with_context(|| format!("removing image record for {reference}"))?;
     caches.remove_manifest(&reference)?;
+    let pinned = pinned_reference(&reference, &record.digest)?;
+    if pinned != reference {
+        caches.remove_manifest(&pinned)?;
+    }
     let keep = layer_keep_set(records.iter().filter(|r| r.reference != reference));
     let reclaimed_bytes = caches.sweep_layers(&keep)?;
     Ok(RemovedImage {
         reference,
         reclaimed_bytes,
     })
+}
+
+pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -> Result<()> {
+    let from_parsed: oci_client::Reference = from
+        .parse()
+        .with_context(|| format!("invalid image reference: {from}"))?;
+    let to_parsed: oci_client::Reference = to
+        .parse()
+        .with_context(|| format!("invalid image reference: {to}"))?;
+    if from_parsed.registry() != to_parsed.registry()
+        || from_parsed.repository() != to_parsed.repository()
+    {
+        bail!(
+            "cross-repository tagging isn't supported; cross-repository publication requires `lns sandbox push`"
+        );
+    }
+    let from_ref = from_parsed.whole();
+    let to_ref = to_parsed.whole();
+    let bytes = match fs.read(&record_path(images_root, &from_ref)).await {
+        Ok(bytes) => bytes,
+        Err(_) => bail!("no such cached sandbox: {from_ref}"),
+    };
+    let mut record: ImageRecord =
+        serde_json::from_slice(&bytes).context("parsing cached sandbox record")?;
+    record.reference = to_ref;
+    record_with(fs, images_root, &record).await
 }
 
 pub async fn prune_with<F: Fs, C: Caches>(
@@ -179,6 +242,10 @@ pub async fn prune_with<F: Fs, C: Caches>(
             .await
             .with_context(|| format!("removing image record for {}", record.reference))?;
         caches.remove_manifest(&record.reference)?;
+        let pinned = pinned_reference(&record.reference, &record.digest)?;
+        if pinned != record.reference {
+            caches.remove_manifest(&pinned)?;
+        }
         removed.push(record.reference.clone());
     }
     let reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
@@ -230,11 +297,17 @@ pub async fn pull_with<F: Fs>(
 
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let pulled = crate::image::pull(image, &layer_cache).await?;
+    let artifact = crate::image::pull_sandbox(image).await?;
+    if let Some(base) = &artifact.base_image {
+        crate::image::pull(base, &layer_cache)
+            .await
+            .with_context(|| format!("fetching the sandbox's base image {base}"))?;
+    }
+    let record = artifact_record_for(&artifact, now_unix_secs());
     pull_with(
         &real::RealFs,
         &images_root()?,
-        &record_for(&pulled, now_unix_secs()),
+        &record,
         &crate::run_registry::snapshot(),
     )
     .await
@@ -249,6 +322,10 @@ pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
     .await
 }
 
+pub(crate) async fn cached_digest(image: &str) -> Result<Option<String>> {
+    cached_digest_with(&real::RealFs, &images_root()?, image).await
+}
+
 pub async fn remove(image: &str) -> Result<RemovedImage> {
     let _exclusive = cache_lock().write().await;
     remove_with(
@@ -261,15 +338,23 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
     .await
 }
 
+pub async fn tag(from: &str, to: &str) -> Result<()> {
+    let _exclusive = cache_lock().write().await;
+    tag_with(&real::RealFs, &images_root()?, from, to).await
+}
+
 pub async fn prune() -> Result<PruneReport> {
     let _exclusive = cache_lock().write().await;
-    prune_with(
+    let mut report = prune_with(
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
         &images_root()?,
         &crate::run_registry::snapshot(),
     )
-    .await
+    .await?;
+    report.reclaimed_bytes +=
+        crate::build_cache::sweep_with(&real::RealFs, &lns_ipc::build_cache_root()?).await?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -439,6 +524,120 @@ mod tests {
         assert!(err.contains("invalid image reference"), "got: {err}");
     }
 
+    #[tokio::test]
+    async fn cached_digest_finds_the_digest_recorded_for_a_tag() {
+        let fs = FakeFs::with_records(&[rec("registry.example.test/team/sandbox:1", &[])]);
+        let digest =
+            cached_digest_with(&fs, Path::new(ROOT), "registry.example.test/team/sandbox:1")
+                .await
+                .unwrap();
+        assert_eq!(
+            digest.as_deref(),
+            Some(format!("sha256:{}", "d".repeat(64)).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_digest_is_none_for_an_uncached_reference() {
+        assert_eq!(
+            cached_digest_with(
+                &FakeFs::default(),
+                Path::new(ROOT),
+                "registry.example.test/team/missing:1",
+            )
+            .await
+            .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_with_allows_a_new_tag_in_the_same_registry_and_repository() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let fs = FakeFs::with_records(&[rec(from, &[("sha256:layer", 10)])]);
+        tag_with(
+            &fs,
+            Path::new(ROOT),
+            from,
+            "registry.example.test/team/hermes:latest",
+        )
+        .await
+        .unwrap();
+        let listed = list_with(&fs, Path::new(ROOT), &[]).await.unwrap();
+        let digests: Vec<&str> = listed.iter().map(|i| i.digest.as_str()).collect();
+        assert_eq!(listed.len(), 2, "both the original and the tag are listed");
+        assert!(
+            digests
+                .iter()
+                .all(|d| *d == format!("sha256:{}", "d".repeat(64))),
+            "the tag points at the same cached artifact: {digests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_with_rejects_a_different_repository_without_creating_a_record() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let to = "registry.example.test/other/hermes:latest";
+        let fs = FakeFs::with_records(&[rec(from, &[])]);
+
+        let err = tag_with(&fs, Path::new(ROOT), from, to)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("cross-repository publication requires `lns sandbox push`"),
+            "got: {err}"
+        );
+        assert!(!fs.has(&record_path(Path::new(ROOT), to)));
+    }
+
+    #[tokio::test]
+    async fn tag_with_rejects_a_different_registry_without_creating_a_record() {
+        let from = "registry.example.test/team/hermes:1.4.0";
+        let to = "other.example.test/team/hermes:latest";
+        let fs = FakeFs::with_records(&[rec(from, &[])]);
+
+        let err = tag_with(&fs, Path::new(ROOT), from, to)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("cross-repository publication requires `lns sandbox push`"),
+            "got: {err}"
+        );
+        assert!(!fs.has(&record_path(Path::new(ROOT), to)));
+    }
+
+    #[tokio::test]
+    async fn tag_with_refuses_an_uncached_source() {
+        let fs = FakeFs::default();
+        let err = tag_with(&fs, Path::new(ROOT), "absent:1", "absent:2")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such cached sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn artifact_record_for_normalizes_the_reference_and_carries_no_layers() {
+        let artifact = crate::image::PulledArtifact {
+            reference: "some-sandbox:1.0".parse().unwrap(),
+            digest: "sha256:manifest".into(),
+            base_image: Some("registry.example.test/base@sha256:abc".into()),
+        };
+        let record = artifact_record_for(&artifact, 42);
+        assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
+        assert_eq!(record.digest, "sha256:manifest");
+        assert_eq!(record.pulled_unix_secs, 42);
+        assert_eq!(
+            record.layers,
+            vec![],
+            "a config-only artifact holds no reclaimable layers",
+        );
+    }
+
     #[test]
     fn record_for_normalizes_the_reference_and_measures_layers() {
         let reference: oci_client::Reference = "some-image:1.0".parse().unwrap();
@@ -456,6 +655,8 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "a".repeat(64))],
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         let record = record_for(&pulled, 42);
         assert_eq!(record.reference, "docker.io/library/some-image:1.0");
@@ -682,7 +883,10 @@ mod tests {
         )));
         assert_eq!(
             *caches.removed_manifests.lock().unwrap(),
-            vec!["registry.example.test/gone:1".to_string()]
+            vec![
+                "registry.example.test/gone:1".to_string(),
+                format!("registry.example.test/gone@sha256:{}", "d".repeat(64))
+            ]
         );
         let swept = caches.swept_with.lock().unwrap();
         assert_eq!(swept.len(), 1);
@@ -904,8 +1108,18 @@ mod tests {
                 ..Default::default()
             },
             layer_digests: vec![format!("sha256:{}", "e".repeat(64))],
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         record(&pulled).await.unwrap();
+
+        assert_eq!(
+            cached_digest("registry.example.test/cov/lifecycle:1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(format!("sha256:{}", "c".repeat(64)).as_str())
+        );
 
         let listed = list().await.unwrap();
         assert_eq!(listed.len(), 1);

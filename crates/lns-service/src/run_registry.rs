@@ -203,6 +203,15 @@ pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>
     }
 }
 
+/// Record the VM size a sandbox run resolved to (from its resources) so `lns inspect` reports what actually booted, not the pre-resolution request.
+pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+        h.config.cpus = cpus;
+        h.config.mem_mib = mem_mib;
+    }
+}
+
 pub fn set_exit_code(run_id: &str, code: i32) {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_ref().and_then(|m| m.get(run_id))
@@ -902,6 +911,24 @@ mod tests {
     async fn inspect_returns_none_for_unknown_run() {
         let id = "deadbeef00000000000000000000000f".to_string();
         assert!(inspect(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn set_resolved_size_updates_the_inspected_config() {
+        let id = allocate_run_id();
+        let (mut handle, _rx) = make_handle();
+        handle.config.cpus = 1;
+        handle.config.mem_mib = 512;
+        register(id.clone(), handle);
+
+        set_resolved_size(&id, 4, 2048);
+        let details = inspect(&id).expect("registered run must be inspectable");
+        assert_eq!(details.config.cpus, 4);
+        assert_eq!(details.config.mem_mib, 2048);
+
+        set_resolved_size("deadbeef00000000000000000000000f", 8, 8);
+
+        deregister(&id);
     }
 
     #[tokio::test]
