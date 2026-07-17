@@ -304,8 +304,8 @@ fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, gid: u32, sys: &dyn Sy
     let etc = format!("{newroot}/etc");
     let _ = std::fs::create_dir_all(&etc);
 
-    append_user_line(&format!("{etc}/passwd"), name, uid, gid);
-    append_group_line(&format!("{etc}/group"), name, gid);
+    prepend_user_line(&format!("{etc}/passwd"), name, uid, gid);
+    prepend_group_line(&format!("{etc}/group"), name, gid);
 
     let home = format!("{newroot}/home/{name}");
     match CString::new(home.as_str()) {
@@ -325,33 +325,25 @@ fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, gid: u32, sys: &dyn Sy
     }
 }
 
-fn append_user_line(passwd_path: &str, user: &str, uid: u32, gid: u32) {
+// Prepended, not appended: first-match uid→name resolution (whoami, id) must surface this identity over an image alias for the same uid (alpine's nobody:65534).
+fn prepend_user_line(passwd_path: &str, user: &str, uid: u32, gid: u32) {
     let existing = std::fs::read_to_string(passwd_path).unwrap_or_default();
     let prefix = format!("{user}:");
     if existing.lines().any(|l| l.starts_with(&prefix)) {
         return;
     }
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(&format!(
-        "{user}:x:{uid}:{gid}:lens sandbox user:/home/{user}:/bin/sh\n"
-    ));
+    let updated =
+        format!("{user}:x:{uid}:{gid}:lens sandbox user:/home/{user}:/bin/sh\n{existing}");
     let _ = std::fs::write(passwd_path, updated);
 }
 
-fn append_group_line(group_path: &str, group: &str, gid: u32) {
+fn prepend_group_line(group_path: &str, group: &str, gid: u32) {
     let existing = std::fs::read_to_string(group_path).unwrap_or_default();
     let prefix = format!("{group}:");
     if existing.lines().any(|l| l.starts_with(&prefix)) {
         return;
     }
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(&format!("{group}:x:{gid}:\n"));
+    let updated = format!("{group}:x:{gid}:\n{existing}");
     let _ = std::fs::write(group_path, updated);
 }
 
@@ -1126,6 +1118,36 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn workload_ids_seed_the_sandbox_user_ahead_of_an_image_alias_for_the_same_uid() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             nobody:x:65534:65534:nobody:/:/sbin/nologin\n",
+        );
+        std::fs::write(dir.path().join("etc/group"), "root:x:0:\nnobody:x:65534:\n").unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "sandbox".into(),
+            uid: Some(65534),
+            group: None,
+        };
+        assert_eq!(
+            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            (65534, 65534)
+        );
+        let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
+        assert!(
+            passwd.find("sandbox:x:65534:").unwrap() < passwd.find("nobody:x:65534:").unwrap(),
+            "first-match uid resolution (whoami, id) must surface the sandbox identity, not the image's alias: {passwd}"
+        );
+        let group = std::fs::read_to_string(format!("{newroot}/etc/group")).unwrap();
+        assert!(
+            group.find("sandbox:x:65534:").unwrap() < group.find("nobody:x:65534:").unwrap(),
+            "group name resolution must also prefer the sandbox identity: {group}"
+        );
     }
 
     #[test]
@@ -1958,11 +1980,11 @@ mod tests {
     }
 
     #[test]
-    fn write_sandbox_user_is_idempotent_and_appends_newline_to_seeded_files() {
+    fn write_sandbox_user_is_idempotent_and_keeps_the_image_entries_intact() {
         let dir = tempfile::TempDir::new().unwrap();
         let newroot = dir.path().to_str().unwrap();
         std::fs::create_dir_all(format!("{newroot}/etc")).unwrap();
-        // Seeded files lack a trailing newline → exercises the newline-insertion branch.
+        // Existing files lack a trailing newline → the seeded line must not fuse with the image's first entry.
         std::fs::write(
             format!("{newroot}/etc/passwd"),
             "root:x:0:0:root:/root:/bin/sh",
@@ -1979,13 +2001,13 @@ mod tests {
             "no duplicate user line"
         );
         assert!(
-            passwd.starts_with("root:x:0:0:root:/root:/bin/sh\nagent:"),
-            "newline inserted before appended user: {passwd:?}"
+            passwd.ends_with("\nroot:x:0:0:root:/root:/bin/sh"),
+            "the image's passwd entries must survive the seeded prepend verbatim: {passwd:?}"
         );
         let group = std::fs::read_to_string(format!("{newroot}/etc/group")).unwrap();
         assert!(
-            group.starts_with("root:x:0:\nagent:x:1000:"),
-            "newline inserted before appended group: {group:?}"
+            group.starts_with("agent:x:1000:\n") && group.ends_with("\nroot:x:0:"),
+            "the seeded group line must lead and the image's entries must survive: {group:?}"
         );
     }
 
