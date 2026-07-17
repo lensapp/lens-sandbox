@@ -170,6 +170,7 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
         }
     }
     let mut container_ports = BTreeSet::new();
+    let mut host_ports = BTreeSet::new();
     for port in &doc.spec.ports {
         if !(1..=65535).contains(&port.container) {
             bail!(
@@ -177,13 +178,16 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
                 port.container
             );
         }
-        if let Some(host) = port.host
-            && !(1..=65535).contains(&host)
-        {
-            bail!("sandbox port host {host} is out of range (1-65535)");
-        }
         if !container_ports.insert(port.container) {
             bail!("duplicate container port {}", port.container);
+        }
+        if let Some(host) = port.host {
+            if !(1..=65535).contains(&host) {
+                bail!("sandbox port host {host} is out of range (1-65535)");
+            }
+            if !host_ports.insert(host) {
+                bail!("duplicate host port {host}");
+            }
         }
     }
     Ok(Definition {
@@ -552,6 +556,18 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("out of range"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_host_ports() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","ports":[{"host":8080,"container":3000},{"host":8080,"container":3001}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate host port 8080"),
+            "two container ports mapping to one host port collide at bind time: {err:#}"
+        );
     }
 
     #[test]
