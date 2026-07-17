@@ -187,6 +187,19 @@ mod tests {
     }
 
     #[test]
+    fn a_local_run_refuses_an_out_of_project_fileset_path() {
+        let fs = fake(
+            "/work/lns.yaml",
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: /etc\n      mountPath: /root/.agent/skills\n",
+        );
+        let err = resolve(None, &fs, cwd()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must be relative to the project"),
+            "an absolute fileset path would let the service read files outside the project: {err:#}"
+        );
+    }
+
+    #[test]
     fn an_invalid_local_definition_surfaces_the_parse_error() {
         let fs = fake(
             "/work/lns.yaml",
