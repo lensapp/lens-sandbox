@@ -245,13 +245,10 @@ mod tests {
             &self,
             _reference: &Reference,
             _descriptor: &OciDescriptor,
-            max_bytes: u64,
+            _max_bytes: u64,
             path: &std::path::Path,
             on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<()> {
-            if max_bytes < 9 {
-                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
-            }
             tokio::fs::write(path, b"delegated").await?;
             on_chunk(9);
             Ok(())

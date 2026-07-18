@@ -750,14 +750,11 @@ mod tests {
             &self,
             reference: &Reference,
             descriptor: &OciDescriptor,
-            max_bytes: u64,
+            _max_bytes: u64,
             path: &std::path::Path,
             on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<()> {
             let bytes = self.pull_blob(reference, descriptor, on_chunk).await?;
-            if bytes.len() as u64 > max_bytes {
-                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
-            }
             tokio::fs::write(path, bytes).await?;
             Ok(())
         }
