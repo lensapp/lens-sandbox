@@ -33,6 +33,14 @@ fn valid_lns_yaml(w: &mut BehaviourWorld) {
     );
 }
 
+#[given("an lns.yaml with a misspelled volume readOnly field")]
+fn lns_yaml_with_unknown_nested_field(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  volumes:\n    - name: data\n      target: /data\n      readOlny: true\n",
+    );
+}
+
 fn fileset_yaml(entries: &str) -> String {
     format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n{entries}"

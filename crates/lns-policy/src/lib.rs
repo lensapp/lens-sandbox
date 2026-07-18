@@ -24,7 +24,7 @@ pub struct Policy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub allowed_routes: Vec<RouteRule>,
@@ -71,7 +71,7 @@ pub(crate) fn is_false(b: &bool) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RouteRule {
     // The schema field is named `match`; rename keeps the Rust ident legal.
     #[serde(rename = "match")]
@@ -91,6 +91,7 @@ pub struct RouteRule {
 
 /// HTTP method/path restriction within a route rule; wire-compatible with lens-sandbox-core's `HttpRule`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,

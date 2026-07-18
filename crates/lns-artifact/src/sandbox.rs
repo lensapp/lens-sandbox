@@ -34,7 +34,7 @@ pub enum VolumeType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volume {
     #[serde(rename = "type", default)]
     volume_type: Option<VolumeType>,
@@ -66,7 +66,7 @@ impl Volume {
 
 /// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the integration ids it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpec {
     #[serde(default)]
     pub image: String,
@@ -94,6 +94,7 @@ pub struct SandboxSpec {
 
 /// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilesetEntry {
     #[serde(default)]
     pub path: Option<String>,
@@ -115,6 +116,7 @@ pub enum FilesetOwner {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Doc {
     #[serde(rename = "apiVersion", default)]
     api_version: String,
@@ -732,6 +734,33 @@ mod tests {
             format!("{err:#}").contains("parsing sandbox definition"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn versioned_sandbox_definitions_reject_unknown_fields_recursively() {
+        let specs = [
+            r#"{"image":"x:1","unexpected":true}"#,
+            r#"{"image":"x:1","resources":{"cpu":1,"unexpected":true}}"#,
+            r#"{"image":"x:1","policy":{"unexpected":true}}"#,
+            r#"{"image":"x:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","unexpected":true}]}}"#,
+            r#"{"image":"x:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}"#,
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","requred":true}]}"#,
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/data","readOlny":true}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills","unexpected":true}]}"#,
+            r#"{"image":"x:1","ports":[{"container":3003,"unexpected":true}]}"#,
+        ];
+        for spec in specs {
+            let err = parse(&def_json(spec)).unwrap_err();
+            assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
+        }
+
+        let top_level = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"},"unexpected":true}"#;
+        let err = parse(top_level).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
+
+        let metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes","unexpected":true},"spec":{"image":"x:1"}}"#;
+        let err = parse(metadata).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
     }
 
     #[test]

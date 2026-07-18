@@ -66,6 +66,7 @@ impl Kind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub name: String,
     #[serde(default)]
@@ -73,6 +74,7 @@ pub struct Metadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mount {
     pub path: String,
     #[serde(rename = "readOnly", default)]
@@ -94,6 +96,7 @@ pub enum Quantity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Resources {
     #[serde(default)]
     pub cpu: Option<Quantity>,
@@ -102,6 +105,7 @@ pub struct Resources {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxSpec {
     #[serde(rename = "baseImage", default)]
     pub base_image: Option<String>,
@@ -115,6 +119,7 @@ pub struct SandboxSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialSlot {
     pub name: String,
     pub env: String,
@@ -123,6 +128,7 @@ pub struct CredentialSlot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Port {
     #[serde(default)]
     pub host: Option<i64>,
@@ -142,6 +148,7 @@ pub struct FileSet {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Doc {
     #[serde(rename = "apiVersion", default)]
     api_version: String,
@@ -364,6 +371,33 @@ mod tests {
         assert!(
             format!("{:#}", parse_sandbox(b"not json").unwrap_err()).contains("parsing artifact")
         );
+    }
+
+    #[test]
+    fn versioned_artifacts_reject_unknown_fields_recursively() {
+        let digest = format!("reg/base@sha256:{}", "a".repeat(64));
+        let sandbox_docs = [
+            format!(
+                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}"}},"unexpected":true}}"#
+            ),
+            format!(
+                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox","unexpected":true}},"spec":{{"isolation":"microvm","baseImage":"{digest}"}}}}"#
+            ),
+            format!(
+                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}","unexpected":true}}}}"#
+            ),
+            format!(
+                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}","resources":{{"cpu":1,"unexpected":true}}}}}}"#
+            ),
+        ];
+        for doc in sandbox_docs {
+            let err = parse_sandbox(doc.as_bytes()).unwrap_err();
+            assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
+        }
+
+        let fileset = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/skills","readOlny":true},"spec":{}}"#;
+        let err = parse_fileset(fileset).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
     }
 
     #[test]
