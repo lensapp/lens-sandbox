@@ -212,6 +212,14 @@ pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
     }
 }
 
+pub(crate) fn set_resolved_command_and_env(run_id: &str, command: &[String], env: &[String]) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+        h.command = command.join(" ");
+        h.config.env = env.to_vec();
+    }
+}
+
 pub fn set_exit_code(run_id: &str, code: i32) {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_ref().and_then(|m| m.get(run_id))
@@ -927,6 +935,35 @@ mod tests {
         assert_eq!(details.config.mem_mib, 2048);
 
         set_resolved_size("deadbeef00000000000000000000000f", 8, 8);
+
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    async fn set_resolved_command_and_env_updates_the_inspected_launch_config() {
+        let id = allocate_run_id();
+        let (mut handle, _rx) = make_handle();
+        handle.command = "request-command".to_string();
+        handle.config.env = vec!["REQUEST_ENV=old".to_string()];
+        register(id.clone(), handle);
+
+        set_resolved_command_and_env(
+            &id,
+            &["agent".to_string(), "serve".to_string()],
+            &["MODE=production".to_string(), "PORT=4000".to_string()],
+        );
+        let details = inspect(&id).expect("registered run must be inspectable");
+        assert_eq!(details.summary.command, "agent serve");
+        assert_eq!(
+            details.config.env,
+            vec!["MODE=production".to_string(), "PORT=4000".to_string()]
+        );
+
+        set_resolved_command_and_env(
+            "deadbeef00000000000000000000000f",
+            &["ignored".to_string()],
+            &["IGNORED=1".to_string()],
+        );
 
         deregister(&id);
     }

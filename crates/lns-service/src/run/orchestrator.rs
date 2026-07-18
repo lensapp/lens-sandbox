@@ -113,6 +113,7 @@ async fn orchestrate(
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_else(|| args.env.clone());
+    crate::run_registry::set_resolved_command_and_env(&run_id, &cmd, &env);
 
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
@@ -130,7 +131,7 @@ async fn orchestrate(
                     .map(|p| p.workload.credentials.as_slice())
                     .unwrap_or_default(),
                 guest_tools.root.clone(),
-                args.env.clone(),
+                env.clone(),
             ),
             initramfs::build(&guest_tools),
         )?;
