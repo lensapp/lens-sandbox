@@ -11,6 +11,43 @@ use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub const OWNED_MANIFEST_PATH: &str = "/.lens/fileset-owned";
 
+pub(crate) struct FilesetBudget {
+    bytes: u64,
+    entries: usize,
+    max_bytes: u64,
+    max_entries: usize,
+}
+
+impl FilesetBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limits(
+            lns_artifact::build::MAX_FILESET_BYTES,
+            lns_artifact::build::MAX_FILESET_ENTRIES,
+        )
+    }
+
+    fn with_limits(max_bytes: u64, max_entries: usize) -> Self {
+        Self {
+            bytes: 0,
+            entries: 0,
+            max_bytes,
+            max_entries,
+        }
+    }
+
+    fn charge(&mut self, size: u64) -> Result<()> {
+        if self.entries >= self.max_entries {
+            bail!("fileset contains more than {} entries", self.max_entries);
+        }
+        self.entries += 1;
+        if size > self.max_bytes.saturating_sub(self.bytes) {
+            bail!("fileset content exceeds the {}-byte limit", self.max_bytes);
+        }
+        self.bytes += size;
+        Ok(())
+    }
+}
+
 /// The fileset specs for a run plus the guest paths lns-init must chown to the workload user.
 #[derive(Default)]
 pub struct MaterializedFilesets {
@@ -117,12 +154,31 @@ pub fn fileset_runtime_specs<R: Read>(
     layer_tar: R,
     content_store: &ContentStore,
 ) -> Result<Vec<RuntimeFileSpec>> {
+    fileset_runtime_specs_with_budget(
+        mount_path,
+        layer_tar,
+        content_store,
+        &mut FilesetBudget::new(),
+    )
+}
+
+pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
+    mount_path: &str,
+    layer_tar: R,
+    content_store: &ContentStore,
+    budget: &mut FilesetBudget,
+) -> Result<Vec<RuntimeFileSpec>> {
     let root = mount_path.trim_end_matches('/');
     let mut specs = Vec::new();
     let mut archive = tar::Archive::new(layer_tar);
     for entry in archive.entries().context("reading fileset layer")? {
         let mut entry = entry.context("reading fileset entry")?;
         let entry_type = entry.header().entry_type();
+        let size = entry
+            .header()
+            .size()
+            .context("reading fileset entry size")?;
+        budget.charge(size)?;
         if entry_type.is_dir() {
             continue;
         }
@@ -240,6 +296,36 @@ mod tests {
         let (_dir, specs) = expand("/m", &tar);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].guest_path, "/m/sub/f");
+    }
+
+    #[test]
+    fn expansion_refuses_content_beyond_the_aggregate_limit() {
+        let tar = tar_with(&[("a", b"123"), ("b", b"456")]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut budget = FilesetBudget::with_limits(5, 10);
+        let err = fileset_runtime_specs_with_budget(
+            "/mount",
+            &tar[..],
+            &ContentStore::new(dir.path()),
+            &mut budget,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("5-byte limit"));
+    }
+
+    #[test]
+    fn expansion_refuses_more_than_the_entry_limit() {
+        let tar = tar_with(&[("a", b"1"), ("b", b"2")]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut budget = FilesetBudget::with_limits(10, 1);
+        let err = fileset_runtime_specs_with_budget(
+            "/mount",
+            &tar[..],
+            &ContentStore::new(dir.path()),
+            &mut budget,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("more than 1 entries"));
     }
 
     /// A raw single-file tar with an arbitrary `name` — `tar::Builder` refuses to write `..`, but an untrusted registry blob can still contain it, which is exactly what the guard defends against.
