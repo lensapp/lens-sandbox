@@ -47,6 +47,13 @@ Feature: authoring a sandbox
     And the output contains "valid"
     And the service received no request
 
+  Scenario: validate refuses an unknown nested definition field
+    Given an lns.yaml with a misspelled volume readOnly field
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "unknown field"
+    And the service received no request
+
   Scenario: inspect with no target renders the effective definition offline
     Given a valid lns.yaml in the current directory
     When the user runs sandbox command "inspect"

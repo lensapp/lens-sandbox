@@ -77,12 +77,12 @@ details.
 
 ## Your first run
 
-Change into your project directory, then run an OCI image straight away — this is
-the quick path, no configuration required:
+Change into your project directory, scaffold its sandbox definition, then run it:
 
 ```bash
 cd ~/dev/my-app
-lns run alpine:3.20
+lns init
+lns run
 ```
 
 Before the workload starts, `lns` prints a summary of what it's about to do and
@@ -111,9 +111,9 @@ working directory comes from `spec.workdir` when declared, otherwise from the im
 
 ## Define a sandbox
 
-The quick path is handy, but the sandbox you'll keep is a **definition** — a
-`./lns.yaml` file that pins the base image plus its command, environment, policy,
-and integrations. One directory is one sandbox. Scaffold it with `lns init`:
+The sandbox you keep is its **definition** — a `./lns.yaml` file that pins the base
+image plus its command, environment, policy, and integrations. One directory is
+one sandbox. Scaffold it with `lns init`:
 
 ```bash
 lns init

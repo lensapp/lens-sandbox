@@ -54,8 +54,8 @@ local definition** — `.`, `lns.yaml`, `./lns.yaml`, or a relative/absolute pat
 a directory holding one; omit it to run the `./lns.yaml` in the current directory.
 A path-named definition's relative binds and filesets root at its own directory,
 compose-style; the policy still comes from where you run. A
-`COMMAND` after the reference overrides the image's default command (Docker-style
-`lns run alpine echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
+`COMMAND` after the reference overrides the sandbox base image's default command
+(`lns run ghcr.io/acme/agent:1 echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
 separator is still accepted. A command with no `REF` (`lns run -- echo hi`) runs
 the `./lns.yaml` definition with its command overridden.
 
@@ -64,7 +64,7 @@ the `./lns.yaml` definition with its command overridden.
 | `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
-| `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare image reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
+| `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
@@ -187,9 +187,9 @@ lns logout <REGISTRY>
 | `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
 | `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
 
-The registry is matched by host: a bare `lns run alpine` uses the `run.registry`
-default (or Docker Hub), while a fully-qualified `lns run ghcr.io/org/app` always
-targets that registry and uses its stored login if present. Credentials live in
+The registry is matched by host: a bare published-sandbox reference uses the
+`run.registry` default (or Docker Hub), while a fully-qualified
+`lns run ghcr.io/org/app` always targets that registry and uses its stored login if present. Credentials live in
 a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
 `LNS_REGISTRY_AUTH_PATH`), separate from any shareable policy.
 
@@ -329,7 +329,7 @@ lns config list
 | ------------- | ------------- | ---------------------------------------------------------- |
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
-| `run.registry`| `--registry`  | Default registry host for bare image references (e.g. `ghcr.io`). |
+| `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`). |
 
 The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment
 variables, volumes, and ports are properties of a sandbox, not persistent config —

@@ -107,7 +107,7 @@ run):
 lns run                                  # run ./lns.yaml in this directory
 lns run .                                # same
 lns run ../other-project                 # run that directory's lns.yaml
-lns run ghcr.io/acme/agent:latest        # run a published sandbox / image by reference
+lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
@@ -128,20 +128,19 @@ $EDITOR lns.yaml                         # set spec.image and the fields you nee
 lns run                                  # run it
 ```
 
-The quick path skips the file and names a reference directly:
+To run a sandbox somebody else published, name its registry reference directly:
 
 ```bash
 lns run ghcr.io/acme/agent:latest
 ```
 
-The image is pulled (and cached by the service) and its entrypoint starts inside
-the microVM.
+The sandbox artifact and its base image are pulled and cached by the service, then
+its entrypoint starts inside the microVM.
 
-### Pinning an image by digest
+### Pinning a published sandbox by digest
 
 A tag like `:latest` is mutable — the registry can republish it at any time. To run
-exactly the bytes you vetted, pin the reference by digest, either in `spec.image`
-or on the command line:
+exactly the published sandbox you vetted, pin its reference by digest:
 
 ```bash
 lns run ghcr.io/acme/agent@sha256:8a2c…
@@ -152,12 +151,12 @@ registry. `lns pull` pre-warms the cache ahead of a run.
 
 ### Overriding the command
 
-A command after the reference replaces the image's default command (Docker-style)
+A command after the reference replaces the sandbox base image's default command
 while keeping its `ENTRYPOINT`; an explicit `--` separator is still accepted:
 
 ```bash
-lns run alpine:3.20 sh -c 'echo hello && uname -a'
-lns run alpine:3.20 -- sh -c 'echo hello && uname -a'
+lns run ghcr.io/acme/agent:1.0.0 sh -c 'echo hello && uname -a'
+lns run ghcr.io/acme/agent:1.0.0 -- sh -c 'echo hello && uname -a'
 ```
 
 To replace the image's `ENTRYPOINT` as well, pass `--entrypoint`; the command after
@@ -165,7 +164,7 @@ the reference becomes its arguments (`--entrypoint ""` clears the entrypoint
 entirely):
 
 ```bash
-lns run --entrypoint /bin/sh alpine:3.20 -c 'echo hi'
+lns run --entrypoint /bin/sh ghcr.io/acme/agent:1.0.0 -c 'echo hi'
 ```
 
 ### A command with no reference
@@ -180,7 +179,7 @@ a run always boots a sandbox definition or a published reference.
 segment is used as the uid), and `-h`/`--hostname` sets the guest hostname:
 
 ```bash
-lns run -u 1000:1000 -h build-box alpine:3.20
+lns run -u 1000:1000 -h build-box ghcr.io/acme/agent:1.0.0
 ```
 
 ### Resources
