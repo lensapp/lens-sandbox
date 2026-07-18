@@ -204,12 +204,9 @@ async fn pull_fileset_layers_with<R: Registry>(
     parsed: &Reference,
     content_store: &crate::content_store::ContentStore,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let (manifest, _digest, _config) = registry.pull_manifest_and_config(parsed).await?;
-    let content: Vec<_> = manifest
-        .layers
-        .iter()
-        .filter(|layer| layer.media_type.contains("tar"))
-        .collect();
+    let (manifest, _digest, config) = registry.pull_manifest_and_config(parsed).await?;
+    validate_fileset_artifact(parsed, &manifest, &config)?;
+    let content: Vec<_> = manifest.layers.iter().collect();
     if content.is_empty() {
         anyhow::bail!("fileset {parsed} has no content layer");
     }
@@ -231,6 +228,40 @@ async fn pull_fileset_layers_with<R: Registry>(
         blobs.push(installed.path);
     }
     Ok(blobs)
+}
+
+fn validate_fileset_artifact(
+    reference: &Reference,
+    manifest: &oci_client::manifest::OciImageManifest,
+    config: &str,
+) -> Result<()> {
+    let kind = lns_artifact::spec::Kind::FileSet;
+    let expected_artifact_type = kind.artifact_type();
+    if let Some(actual) = manifest.artifact_type.as_deref()
+        && actual != expected_artifact_type
+    {
+        anyhow::bail!("{reference} is not a FileSet artifact: artifact type is {actual}");
+    }
+    let expected_config_media_type = kind.config_media_type();
+    if manifest.config.media_type != expected_config_media_type {
+        anyhow::bail!(
+            "{reference} is not a FileSet artifact: config media type is {}",
+            manifest.config.media_type
+        );
+    }
+    lns_artifact::spec::parse_fileset(config.as_bytes())
+        .with_context(|| format!("validating FileSet config for {reference}"))?;
+    if let Some(layer) = manifest
+        .layers
+        .iter()
+        .find(|layer| layer.media_type != "application/vnd.oci.image.layer.v1.tar")
+    {
+        anyhow::bail!(
+            "FileSet {reference} has unsupported layer media type {}",
+            layer.media_type
+        );
+    }
+    Ok(())
 }
 
 /// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
@@ -385,7 +416,25 @@ mod tests {
     struct StreamingRegistry {
         blob: Vec<u8>,
         fail: bool,
+        artifact_type: Option<String>,
+        config_media_type: String,
+        config: String,
+        layer_media_type: String,
         streamed: AtomicBool,
+    }
+
+    impl StreamingRegistry {
+        fn fileset(blob: Vec<u8>, fail: bool) -> Self {
+            Self {
+                blob,
+                fail,
+                artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
+                config_media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
+                config: r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
+                layer_media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                streamed: AtomicBool::new(false),
+            }
+        }
     }
 
     impl Registry for StreamingRegistry {
@@ -396,8 +445,13 @@ mod tests {
             let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
             Ok((
                 OciImageManifest {
+                    artifact_type: self.artifact_type.clone(),
+                    config: OciDescriptor {
+                        media_type: self.config_media_type.clone(),
+                        ..Default::default()
+                    },
                     layers: vec![OciDescriptor {
-                        media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                        media_type: self.layer_media_type.clone(),
                         digest,
                         size: self.blob.len() as i64,
                         ..Default::default()
@@ -405,7 +459,7 @@ mod tests {
                     ..Default::default()
                 },
                 format!("sha256:{}", "b".repeat(64)),
-                "{}".into(),
+                self.config.clone(),
             ))
         }
 
@@ -447,11 +501,7 @@ mod tests {
     async fn fileset_layers_stream_to_verified_content_without_using_the_vec_api() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
-        let registry = StreamingRegistry {
-            blob: vec![7; 512 * 1024],
-            fail: false,
-            streamed: AtomicBool::new(false),
-        };
+        let registry = StreamingRegistry::fileset(vec![7; 512 * 1024], false);
         let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse()
             .unwrap();
@@ -469,11 +519,7 @@ mod tests {
     async fn a_failed_fileset_stream_leaves_no_partial_content() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
-        let registry = StreamingRegistry {
-            blob: vec![7; 128 * 1024],
-            fail: true,
-            streamed: AtomicBool::new(false),
-        };
+        let registry = StreamingRegistry::fileset(vec![7; 128 * 1024], true);
         let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse()
             .unwrap();
@@ -487,5 +533,70 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(entries, 0);
+    }
+
+    #[tokio::test]
+    async fn a_plain_image_is_refused_before_any_layer_is_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
+        registry.artifact_type = None;
+        registry.config_media_type = "application/vnd.oci.image.config.v1+json".into();
+        registry.config = "{}".into();
+        let reference: Reference = "registry.example.test/team/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let err = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("not a FileSet artifact"),
+            "got: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_fileset_with_the_wrong_config_kind_is_refused_before_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
+        registry.config = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"files"},"spec":{}}"#.into();
+        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let err = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("expected kind FileSet"),
+            "got: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_fileset_with_a_compressed_layer_is_refused_before_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
+        registry.layer_media_type = "application/vnd.oci.image.layer.v1.tar+gzip".into();
+        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let err = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("unsupported layer media type"),
+            "got: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
     }
 }
