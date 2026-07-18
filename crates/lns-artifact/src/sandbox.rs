@@ -224,14 +224,23 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
         _ => {}
     }
     spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")?;
-    let normalized = fileset.mount_path.trim_end_matches('/');
-    if normalized == "/.lens" || normalized.starts_with("/.lens/") {
+    if overlaps_runtime_namespace(&fileset.mount_path) {
         bail!(
-            "fileset mountPath {} targets the /.lens runtime namespace, which belongs to the sandbox itself",
+            "fileset mountPath {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
             fileset.mount_path
         );
     }
     Ok(())
+}
+
+fn overlaps_runtime_namespace(path: &str) -> bool {
+    match path
+        .split('/')
+        .find(|segment| !segment.is_empty() && *segment != ".")
+    {
+        None => true,
+        Some(first) => first == ".lens",
+    }
 }
 
 fn validate_volume(volume: &Volume) -> Result<()> {
@@ -560,7 +569,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_fileset_mounted_into_the_lens_runtime_namespace() {
-        for mount in ["/.lens", "/.lens/", "/.lens/bin"] {
+        for mount in ["/", "/./", "/.lens", "/.lens/", "/.lens/bin"] {
             let spec = format!(
                 r#"{{"image":"x:1","filesets":[{{"path":"./seed","mountPath":"{mount}"}}]}}"#
             );
