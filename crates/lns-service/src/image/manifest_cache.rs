@@ -110,11 +110,12 @@ impl<R: Registry> Registry for CachingRegistry<R> {
         &self,
         reference: &Reference,
         descriptor: &oci_client::manifest::OciDescriptor,
+        max_bytes: u64,
         path: &std::path::Path,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()> {
         self.inner
-            .pull_blob_to_path(reference, descriptor, path, on_chunk)
+            .pull_blob_to_path(reference, descriptor, max_bytes, path, on_chunk)
             .await
     }
 }
@@ -244,9 +245,13 @@ mod tests {
             &self,
             _reference: &Reference,
             _descriptor: &OciDescriptor,
+            max_bytes: u64,
             path: &std::path::Path,
             on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<()> {
+            if max_bytes < 9 {
+                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
+            }
             tokio::fs::write(path, b"delegated").await?;
             on_chunk(9);
             Ok(())
@@ -339,7 +344,7 @@ mod tests {
         let chunks = std::sync::atomic::AtomicU64::new(0);
 
         caching
-            .pull_blob_to_path(&reference, &descriptor, &output, &|n| {
+            .pull_blob_to_path(&reference, &descriptor, 9, &output, &|n| {
                 chunks.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             })
             .await

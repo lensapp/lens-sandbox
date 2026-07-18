@@ -1,5 +1,5 @@
 use crate::artifact::assembly::{self, AssembledWorkload, ResolvedSandbox};
-use crate::artifact::fileset::fileset_runtime_specs;
+use crate::artifact::fileset::{FilesetBudget, fileset_runtime_specs_with_budget};
 use crate::artifact::{RunPath, dispatch, dispatch_run, resolved_from_sandbox};
 use crate::image::{RealRegistry, Registry, registry_auth_for};
 use crate::runtime_layer::RuntimeFileSpec;
@@ -29,6 +29,7 @@ pub(crate) async fn peek_and_plan(
         .pull_manifest_and_config(&reference)
         .await
         .with_context(|| format!("peeking manifest for {image_ref}"))?;
+    crate::image::verify_digest_pin(&reference, &digest, image_ref)?;
     match dispatch_run(
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
@@ -177,10 +178,16 @@ async fn materialize_filesets(
             .await
             .with_context(|| format!("materializing fileset {}", fileset.name))?;
         let mut specs = Vec::new();
+        let mut budget = FilesetBudget::new();
         for layer in layers {
             let file = std::fs::File::open(&layer)
                 .with_context(|| format!("opening fileset layer {}", layer.display()))?;
-            specs.extend(fileset_runtime_specs(mount, file, &content_store)?);
+            specs.extend(fileset_runtime_specs_with_budget(
+                mount,
+                file,
+                &content_store,
+                &mut budget,
+            )?);
         }
         out.absorb(fileset.owner, mount, specs);
     }
@@ -204,8 +211,10 @@ async fn pull_fileset_layers_with<R: Registry>(
     parsed: &Reference,
     content_store: &crate::content_store::ContentStore,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let (manifest, _digest, config) = registry.pull_manifest_and_config(parsed).await?;
+    let (manifest, digest, config) = registry.pull_manifest_and_config(parsed).await?;
+    crate::image::verify_digest_pin(parsed, &digest, &parsed.to_string())?;
     validate_fileset_artifact(parsed, &manifest, &config)?;
+    validate_fileset_layer_sizes(&manifest, lns_artifact::build::MAX_FILESET_BYTES)?;
     let content: Vec<_> = manifest.layers.iter().collect();
     if content.is_empty() {
         anyhow::bail!("fileset {parsed} has no content layer");
@@ -216,7 +225,7 @@ async fn pull_fileset_layers_with<R: Registry>(
             .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
         let staged = content_store.staging_path()?;
         if let Err(error) = registry
-            .pull_blob_to_path(parsed, layer, &staged, &|_| {})
+            .pull_blob_to_path(parsed, layer, expected_size, &staged, &|_| {})
             .await
         {
             let _ = std::fs::remove_file(&staged);
@@ -228,6 +237,22 @@ async fn pull_fileset_layers_with<R: Registry>(
         blobs.push(installed.path);
     }
     Ok(blobs)
+}
+
+fn validate_fileset_layer_sizes(
+    manifest: &oci_client::manifest::OciImageManifest,
+    max_bytes: u64,
+) -> Result<u64> {
+    let mut total = 0_u64;
+    for layer in &manifest.layers {
+        let size = u64::try_from(layer.size)
+            .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
+        if size > max_bytes.saturating_sub(total) {
+            anyhow::bail!("fileset layers exceed the {max_bytes}-byte limit");
+        }
+        total += size;
+    }
+    Ok(total)
 }
 
 fn validate_fileset_artifact(
@@ -347,6 +372,7 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
         .pull_manifest_and_config(&reference)
         .await
         .with_context(|| format!("inspecting {image_ref}"))?;
+    crate::image::verify_digest_pin(&reference, &digest, image_ref)?;
     match dispatch(
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
@@ -420,6 +446,7 @@ mod tests {
         config_media_type: String,
         config: String,
         layer_media_type: String,
+        manifest_digest: Option<String>,
         streamed: AtomicBool,
     }
 
@@ -432,6 +459,7 @@ mod tests {
                 config_media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
                 config: r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
                 layer_media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                manifest_digest: None,
                 streamed: AtomicBool::new(false),
             }
         }
@@ -440,7 +468,7 @@ mod tests {
     impl Registry for StreamingRegistry {
         async fn pull_manifest_and_config(
             &self,
-            _reference: &Reference,
+            reference: &Reference,
         ) -> Result<(OciImageManifest, String, String)> {
             let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
             Ok((
@@ -458,7 +486,10 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                format!("sha256:{}", "b".repeat(64)),
+                self.manifest_digest
+                    .clone()
+                    .or_else(|| reference.digest().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
                 self.config.clone(),
             ))
         }
@@ -476,10 +507,14 @@ mod tests {
             &self,
             _reference: &Reference,
             _descriptor: &OciDescriptor,
+            max_bytes: u64,
             path: &std::path::Path,
             on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<()> {
             self.streamed.store(true, Ordering::Relaxed);
+            if self.blob.len() as u64 > max_bytes {
+                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
+            }
             let split = self.blob.len() / 2;
             tokio::fs::write(path, &self.blob[..split]).await?;
             on_chunk(split as u64);
@@ -513,6 +548,48 @@ mod tests {
         assert!(registry.streamed.load(Ordering::Relaxed));
         assert_eq!(paths.len(), 1);
         assert_eq!(std::fs::read(&paths[0]).unwrap(), registry.blob);
+    }
+
+    #[tokio::test]
+    async fn a_digest_mismatch_is_refused_before_any_fileset_layer_is_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
+        registry.manifest_digest = Some(format!("sha256:{}", "b".repeat(64)));
+        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap();
+
+        let err = pull_fileset_layers_with(&registry, &reference, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "got: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn declared_fileset_layers_are_rejected_before_their_aggregate_exceeds_the_limit() {
+        let manifest = OciImageManifest {
+            layers: vec![
+                OciDescriptor {
+                    digest: "sha256:a".into(),
+                    size: 3,
+                    ..Default::default()
+                },
+                OciDescriptor {
+                    digest: "sha256:b".into(),
+                    size: 3,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let err = validate_fileset_layer_sizes(&manifest, 5).unwrap_err();
+        assert!(format!("{err:#}").contains("5-byte limit"));
     }
 
     #[tokio::test]

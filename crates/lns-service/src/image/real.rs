@@ -124,13 +124,14 @@ impl Registry for RealRegistry {
         &self,
         reference: &Reference,
         descriptor: &OciDescriptor,
+        max_bytes: u64,
         path: &std::path::Path,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()> {
         let file = tokio::fs::File::create(path)
             .await
             .with_context(|| format!("creating streamed blob {}", path.display()))?;
-        let mut out = CountingWriter::new(file, on_chunk);
+        let mut out = CountingWriter::new(file, max_bytes, on_chunk);
         self.client
             .pull_blob(reference, descriptor, &mut out)
             .await
@@ -143,12 +144,19 @@ impl Registry for RealRegistry {
 
 struct CountingWriter<'a, W> {
     inner: W,
+    written: u64,
+    max_bytes: u64,
     on_chunk: &'a (dyn Fn(u64) + Send + Sync),
 }
 
 impl<'a, W> CountingWriter<'a, W> {
-    fn new(inner: W, on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
-        Self { inner, on_chunk }
+    fn new(inner: W, max_bytes: u64, on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+            on_chunk,
+        }
     }
 }
 
@@ -159,8 +167,19 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountingWriter<
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        match std::pin::Pin::new(&mut this.inner).poll_write(cx, buf) {
+        if !buf.is_empty() && this.written >= this.max_bytes {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("blob exceeds the {}-byte limit", this.max_bytes),
+            )));
+        }
+        let remaining = this.max_bytes.saturating_sub(this.written);
+        let allowed = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, &buf[..allowed]) {
             std::task::Poll::Ready(Ok(written)) => {
+                this.written += written as u64;
                 (this.on_chunk)(written as u64);
                 std::task::Poll::Ready(Ok(written))
             }
@@ -207,4 +226,18 @@ pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRe
         Err(_) => RealRegistry::with_auth(auth),
     };
     Ok(CachingRegistry::new(inner, ManifestCache::new(manifests)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn counting_writer_stops_before_writing_beyond_its_limit() {
+        let mut writer = CountingWriter::new(Vec::new(), 3, &|_| {});
+        let err = writer.write_all(b"four").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(writer.inner, b"fou");
+    }
 }

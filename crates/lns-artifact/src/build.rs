@@ -7,6 +7,12 @@ const EMPTY_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 
+/// Maximum aggregate size of a FileSet artifact's tar content layer.
+pub const MAX_FILESET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Maximum number of regular files in a FileSet artifact.
+pub const MAX_FILESET_ENTRIES: usize = 100_000;
+
 /// One file to pack into a FileSet layer: a path relative to the mount root and its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -95,7 +101,9 @@ pub fn build_artifact(doc: &[u8]) -> Result<BuiltArtifact> {
 /// Pack a directory's files into a FileSet artifact mounting at `mount_path`; the tar layer is deterministic (entries sorted, metadata zeroed) so identical inputs yield identical digests.
 pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Result<BuiltArtifact> {
     spec::validate_mount_path(mount_path).context("fileset mount path")?;
+    validate_fileset_entries(entries, MAX_FILESET_BYTES, MAX_FILESET_ENTRIES)?;
     let layer = tar_layer(entries).context("packing fileset layer")?;
+    validate_fileset_layer_size(layer.len() as u64, MAX_FILESET_BYTES)?;
     let layer_digest = sha256_digest(&layer);
 
     let config_doc = json!({
@@ -146,6 +154,32 @@ pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Res
             },
         ],
     })
+}
+
+fn validate_fileset_entries(
+    entries: &[FileEntry],
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<()> {
+    if entries.len() > max_entries {
+        bail!("fileset contains more than {max_entries} files");
+    }
+    let mut total = 0_u64;
+    for entry in entries {
+        let size = entry.data.len() as u64;
+        if size > max_bytes.saturating_sub(total) {
+            bail!("fileset content exceeds the {max_bytes}-byte limit");
+        }
+        total += size;
+    }
+    Ok(())
+}
+
+fn validate_fileset_layer_size(size: u64, max_bytes: u64) -> Result<()> {
+    if size > max_bytes {
+        bail!("fileset content layer exceeds the {max_bytes}-byte limit");
+    }
+    Ok(())
 }
 
 fn tar_layer(entries: &[FileEntry]) -> Result<Vec<u8>> {
@@ -333,5 +367,25 @@ mod tests {
     fn build_fileset_rejects_a_traversing_mount_path() {
         let err = build_fileset("s", "/root/../etc", &[entry("a", "1")]).unwrap_err();
         assert!(format!("{err:#}").contains("`..` segment"), "got: {err:#}");
+    }
+
+    #[test]
+    fn fileset_limits_reject_too_many_entries() {
+        let entries = [entry("a", "1"), entry("b", "2")];
+        let err = validate_fileset_entries(&entries, 10, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("more than 1 files"));
+    }
+
+    #[test]
+    fn fileset_limits_reject_aggregate_content_size() {
+        let entries = [entry("a", "123"), entry("b", "456")];
+        let err = validate_fileset_entries(&entries, 5, 2).unwrap_err();
+        assert!(format!("{err:#}").contains("5-byte limit"));
+    }
+
+    #[test]
+    fn fileset_limits_include_tar_framing_in_the_layer_cap() {
+        let err = validate_fileset_layer_size(6, 5).unwrap_err();
+        assert!(format!("{err:#}").contains("5-byte limit"));
     }
 }

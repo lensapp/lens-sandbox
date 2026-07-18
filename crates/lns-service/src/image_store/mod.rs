@@ -153,6 +153,14 @@ fn layer_keep_set<'a>(records: impl Iterator<Item = &'a ImageRecord>) -> HashSet
         .collect()
 }
 
+fn manifest_keep_set<'a>(
+    records: impl Iterator<Item = &'a ImageRecord>,
+) -> Result<HashSet<String>> {
+    records
+        .map(|record| pinned_reference(&record.reference, &record.digest))
+        .collect()
+}
+
 pub async fn list_with<F: Fs>(
     fs: &F,
     images_root: &Path,
@@ -187,9 +195,16 @@ pub async fn remove_with<F: Fs, C: Caches>(
     fs.remove_file(&record_path(images_root, &reference))
         .await
         .with_context(|| format!("removing image record for {reference}"))?;
-    caches.remove_manifest(&reference)?;
     let pinned = pinned_reference(&reference, &record.digest)?;
     if pinned != reference {
+        caches.remove_manifest(&reference)?;
+    }
+    let surviving_manifests = manifest_keep_set(
+        records
+            .iter()
+            .filter(|record| record.reference != reference),
+    )?;
+    if !surviving_manifests.contains(&pinned) {
         caches.remove_manifest(&pinned)?;
     }
     let keep = layer_keep_set(records.iter().filter(|r| r.reference != reference));
@@ -236,17 +251,22 @@ pub async fn prune_with<F: Fs, C: Caches>(
     let (kept, removable): (Vec<_>, Vec<_>) = records
         .into_iter()
         .partition(|r| holder(active, &r.reference).is_some());
+    let kept_manifests = manifest_keep_set(kept.iter())?;
+    let mut removable_manifests = HashSet::new();
     let mut removed = Vec::with_capacity(removable.len());
     for record in &removable {
         fs.remove_file(&record_path(images_root, &record.reference))
             .await
             .with_context(|| format!("removing image record for {}", record.reference))?;
-        caches.remove_manifest(&record.reference)?;
         let pinned = pinned_reference(&record.reference, &record.digest)?;
         if pinned != record.reference {
-            caches.remove_manifest(&pinned)?;
+            caches.remove_manifest(&record.reference)?;
         }
+        removable_manifests.insert(pinned);
         removed.push(record.reference.clone());
+    }
+    for pinned in removable_manifests.difference(&kept_manifests) {
+        caches.remove_manifest(pinned)?;
     }
     let reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
     Ok(PruneReport {
@@ -898,6 +918,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_keeps_a_digest_manifest_used_by_another_tag() {
+        let fs = FakeFs::with_records(&[
+            rec("registry.example.test/team/image:old", &[]),
+            rec("registry.example.test/team/image:current", &[]),
+        ]);
+        let caches = FakeCaches::default();
+
+        remove_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &[],
+            "registry.example.test/team/image:old",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *caches.removed_manifests.lock().unwrap(),
+            vec!["registry.example.test/team/image:old".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn remove_propagates_a_record_delete_failure() {
         let fs = FakeFs::with_records(&[rec("registry.example.test/gone:1", &[])]);
         fs.put(&Path::new(ROOT).join("sentinel.json"), b"x");
@@ -981,6 +1025,33 @@ mod tests {
         assert!(fs.has(&record_path(Path::new(ROOT), "docker.io/library/held:1.0")));
         let swept = caches.swept_with.lock().unwrap();
         assert_eq!(swept[0], HashSet::from(["sha256:held-layer".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_a_digest_manifest_used_by_a_held_alias() {
+        let fs = FakeFs::with_records(&[
+            rec("registry.example.test/team/image:held", &[]),
+            rec("registry.example.test/team/image:idle", &[]),
+        ]);
+        let caches = FakeCaches::default();
+
+        let report = prune_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &[running("aa03", "registry.example.test/team/image:held")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.removed,
+            vec!["registry.example.test/team/image:idle"]
+        );
+        assert_eq!(
+            *caches.removed_manifests.lock().unwrap(),
+            vec!["registry.example.test/team/image:idle".to_string()]
+        );
     }
 
     #[tokio::test]

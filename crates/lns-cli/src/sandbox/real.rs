@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -167,8 +167,12 @@ impl super::author::Fs for RealFs {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }
-    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        std::fs::read(path)
+    fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<super::author::DirEntry>> {
         let mut entries = Vec::new();

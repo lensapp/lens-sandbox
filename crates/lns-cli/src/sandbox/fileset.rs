@@ -7,8 +7,31 @@ use super::author::Fs;
 
 /// Snapshot a fileset directory into pack-ready entries, refusing secret-shaped files anywhere in the tree — a fileset is baked into the artifact, so there is no keep/drop prompt to catch one later.
 pub fn walk<F: Fs + ?Sized>(fs: &F, root: &Path) -> Result<Vec<FileEntry>> {
+    walk_with_limits(
+        fs,
+        root,
+        lns_artifact::build::MAX_FILESET_BYTES,
+        lns_artifact::build::MAX_FILESET_ENTRIES,
+    )
+}
+
+fn walk_with_limits<F: Fs + ?Sized>(
+    fs: &F,
+    root: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
-    walk_into(fs, root, Path::new(""), &mut entries)?;
+    let mut total_bytes = 0;
+    walk_into(
+        fs,
+        root,
+        Path::new(""),
+        &mut entries,
+        &mut total_bytes,
+        max_bytes,
+        max_entries,
+    )?;
     Ok(entries)
 }
 
@@ -17,6 +40,9 @@ fn walk_into<F: Fs + ?Sized>(
     dir: &Path,
     rel: &Path,
     out: &mut Vec<FileEntry>,
+    total_bytes: &mut u64,
+    max_bytes: u64,
+    max_entries: usize,
 ) -> Result<()> {
     let listed = fs
         .dir_entries(dir)
@@ -31,16 +57,33 @@ fn walk_into<F: Fs + ?Sized>(
         }
         let entry_abs = dir.join(&entry.name);
         if entry.dir {
-            walk_into(fs, &entry_abs, &entry_rel, out)?;
+            walk_into(
+                fs,
+                &entry_abs,
+                &entry_rel,
+                out,
+                total_bytes,
+                max_bytes,
+                max_entries,
+            )?;
         } else {
+            if out.len() >= max_entries {
+                bail!("fileset contains more than {max_entries} files");
+            }
+            let remaining = max_bytes.saturating_sub(*total_bytes);
+            let data = fs
+                .read_limited(&entry_abs, remaining)
+                .with_context(|| format!("reading fileset file {}", entry_abs.display()))?;
+            if data.len() as u64 > remaining {
+                bail!("fileset content exceeds the {max_bytes}-byte limit");
+            }
+            *total_bytes += data.len() as u64;
             out.push(FileEntry {
                 path: entry_rel
                     .to_str()
                     .with_context(|| format!("non-utf8 fileset path {}", entry_rel.display()))?
                     .to_string(),
-                data: fs
-                    .read(&entry_abs)
-                    .with_context(|| format!("reading fileset file {}", entry_abs.display()))?,
+                data,
             });
         }
     }
@@ -129,5 +172,19 @@ mod tests {
         let problems = path_fileset_problems(&fs, Path::new("/work"), &def);
         assert_eq!(problems.len(), 1, "got: {problems:?}");
         assert!(problems[0].contains("./missing"), "got: {problems:?}");
+    }
+
+    #[test]
+    fn walk_refuses_content_beyond_the_aggregate_limit() {
+        let fs = MapFs::with(&[("/work/skills/a", "123"), ("/work/skills/b", "456")]);
+        let err = walk_with_limits(&fs, Path::new("/work/skills"), 5, 10).unwrap_err();
+        assert!(format!("{err:#}").contains("5-byte limit"));
+    }
+
+    #[test]
+    fn walk_refuses_more_than_the_entry_limit() {
+        let fs = MapFs::with(&[("/work/skills/a", "1"), ("/work/skills/b", "2")]);
+        let err = walk_with_limits(&fs, Path::new("/work/skills"), 10, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("more than 1 files"));
     }
 }

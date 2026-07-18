@@ -47,11 +47,13 @@ impl Fs for MapFs {
     fn exists(&self, path: &Path) -> bool {
         self.files.borrow().contains_key(path)
     }
-    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+    fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
         if self.unreadable {
             return Err(io::Error::other("permission denied"));
         }
-        self.read_to_string(path).map(String::into_bytes)
+        let mut bytes = self.read_to_string(path)?.into_bytes();
+        bytes.truncate(max_bytes.saturating_add(1) as usize);
+        Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
         map_dir_entries(self.files.borrow().keys(), dir)

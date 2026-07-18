@@ -30,6 +30,7 @@ pub(crate) trait Registry: Send + Sync {
         &self,
         reference: &Reference,
         descriptor: &OciDescriptor,
+        max_bytes: u64,
         path: &std::path::Path,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> impl std::future::Future<Output = Result<()>> + Send;
@@ -238,7 +239,11 @@ fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!("{e:#}").context("this reference is not a supported Lens Sandbox artifact")
 }
 
-fn verify_digest_pin(reference: &Reference, manifest_digest: &str, image: &str) -> Result<()> {
+pub(crate) fn verify_digest_pin(
+    reference: &Reference,
+    manifest_digest: &str,
+    image: &str,
+) -> Result<()> {
     if let Some(expected) = reference.digest()
         && !ct_digest_eq(manifest_digest, expected)
     {
@@ -745,10 +750,14 @@ mod tests {
             &self,
             reference: &Reference,
             descriptor: &OciDescriptor,
+            max_bytes: u64,
             path: &std::path::Path,
             on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<()> {
             let bytes = self.pull_blob(reference, descriptor, on_chunk).await?;
+            if bytes.len() as u64 > max_bytes {
+                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
+            }
             tokio::fs::write(path, bytes).await?;
             Ok(())
         }
@@ -771,9 +780,15 @@ mod tests {
         let received = std::sync::atomic::AtomicU64::new(0);
 
         registry
-            .pull_blob_to_path(&reference, &descriptor, &path, &|bytes| {
-                received.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-            })
+            .pull_blob_to_path(
+                &reference,
+                &descriptor,
+                expected.len() as u64,
+                &path,
+                &|bytes| {
+                    received.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                },
+            )
             .await
             .unwrap();
 
