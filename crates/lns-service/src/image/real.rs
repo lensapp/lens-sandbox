@@ -212,6 +212,13 @@ pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> 
     Ok(pulled)
 }
 
+pub(crate) async fn pull_dependency(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> {
+    let registry = caching_registry_for(image)?;
+    let pulled = pull_inner(&registry, image, layer_cache).await?;
+    crate::image_store::record(&pulled).await?;
+    Ok(pulled)
+}
+
 pub async fn pull_sandbox(image: &str) -> Result<PulledArtifact> {
     let _shared = crate::image_store::lock_shared().await;
     let registry = caching_registry_for(image)?;

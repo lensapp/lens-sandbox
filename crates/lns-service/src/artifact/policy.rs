@@ -62,6 +62,8 @@ pub fn run_summary(flags: &[GuardrailFlag]) -> String {
 // Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
+    let baseline_denies_by_default =
+        baseline.is_some_and(|policy| policy.network.default_verdict == Verdict::Deny);
     let mut routes: Vec<RouteRule> = Vec::new();
     let mut push_unique = |rule: &RouteRule| {
         if !routes.contains(rule) {
@@ -75,7 +77,10 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
             }
         }
     }
-    for layer in &layers {
+    for (index, layer) in layers.iter().enumerate() {
+        if baseline_denies_by_default && index == 0 {
+            continue;
+        }
         for rule in &layer.network.allowed_routes {
             if rule.verdict != Verdict::Deny {
                 push_unique(rule);
@@ -188,6 +193,26 @@ mod tests {
                 .integrations
                 .contains(&"some-baseline-integration".to_string())
         );
+    }
+
+    #[test]
+    fn merge_does_not_let_an_overlay_allow_widen_a_deny_by_default_baseline() {
+        let mut baseline = allow("api.allowed.example");
+        baseline.network.default_verdict = Verdict::Deny;
+        let overlay = allow("api.overlay-only.example");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged.network.allowed_routes.iter().any(|rule| {
+                rule.match_pattern == "api.overlay-only.example" && rule.verdict == Verdict::Allow
+            }),
+            "a local overlay must not widen a sandbox's deny-by-default baseline: {merged:?}"
+        );
+        assert!(merged.network.allowed_routes.iter().any(|rule| {
+            rule.match_pattern == "api.allowed.example" && rule.verdict == Verdict::Allow
+        }));
+        assert_eq!(merged.network.default_verdict, Verdict::Deny);
     }
 
     #[test]

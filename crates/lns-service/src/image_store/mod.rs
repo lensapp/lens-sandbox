@@ -16,6 +16,8 @@ use crate::image::PulledImage;
 pub struct ImageRecord {
     pub reference: String,
     pub digest: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     pub layers: Vec<LayerRef>,
     pub pulled_unix_secs: u64,
 }
@@ -59,11 +61,16 @@ fn pinned_reference(reference: &str, digest: &str) -> Result<String> {
 
 pub fn artifact_record_for(
     artifact: &crate::image::PulledArtifact,
+    base_image: Option<&PulledImage>,
     pulled_unix_secs: u64,
 ) -> ImageRecord {
     ImageRecord {
         reference: artifact.reference.whole(),
         digest: artifact.digest.clone(),
+        dependencies: base_image
+            .into_iter()
+            .map(|image| image.reference.whole())
+            .collect(),
         layers: Vec::new(),
         pulled_unix_secs,
     }
@@ -73,6 +80,7 @@ pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
     ImageRecord {
         reference: pulled.reference.whole(),
         digest: pulled.digest.clone(),
+        dependencies: Vec::new(),
         layers: pulled
             .layer_digests
             .iter()
@@ -153,6 +161,52 @@ fn layer_keep_set<'a>(records: impl Iterator<Item = &'a ImageRecord>) -> HashSet
         .collect()
 }
 
+fn dependency_closure(records: &[ImageRecord], roots: &HashSet<String>) -> HashSet<String> {
+    let mut keep = roots.clone();
+    let mut pending: Vec<String> = roots.iter().cloned().collect();
+    while let Some(reference) = pending.pop() {
+        let Some(record) = records.iter().find(|record| record.reference == reference) else {
+            continue;
+        };
+        for dependency in &record.dependencies {
+            if keep.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    keep
+}
+
+fn removal_closure(
+    records: &[ImageRecord],
+    root: &str,
+    retained: &HashSet<String>,
+) -> HashSet<String> {
+    let mut remove = HashSet::from([root.to_string()]);
+    loop {
+        let candidates: Vec<String> = records
+            .iter()
+            .filter(|record| remove.contains(&record.reference))
+            .flat_map(|record| record.dependencies.iter().cloned())
+            .collect();
+        let mut changed = false;
+        for dependency in candidates {
+            if retained.contains(&dependency) {
+                continue;
+            }
+            let retained_owner = records.iter().any(|record| {
+                !remove.contains(&record.reference) && record.dependencies.contains(&dependency)
+            });
+            if !retained_owner && records.iter().any(|record| record.reference == dependency) {
+                changed |= remove.insert(dependency);
+            }
+        }
+        if !changed {
+            return remove;
+        }
+    }
+}
+
 fn manifest_keep_set<'a>(
     records: impl Iterator<Item = &'a ImageRecord>,
 ) -> Result<HashSet<String>> {
@@ -182,32 +236,55 @@ pub async fn remove_with<F: Fs, C: Caches>(
 ) -> Result<RemovedImage> {
     let reference = normalize_reference(image)?;
     let records = load_records(fs, images_root).await?;
-    let record = records
-        .iter()
-        .find(|record| record.reference == reference)
-        .ok_or_else(|| anyhow::anyhow!("no such image: {reference}"))?;
+    if !records.iter().any(|record| record.reference == reference) {
+        bail!("no such image: {reference}");
+    }
     if let Some(run_id) = holder(active, &reference) {
         bail!(
             "image {reference:?} in use by run {}",
             lns_ipc::short_run_id(&run_id)
         );
     }
-    fs.remove_file(&record_path(images_root, &reference))
-        .await
-        .with_context(|| format!("removing image record for {reference}"))?;
-    let pinned = pinned_reference(&reference, &record.digest)?;
-    if pinned != reference {
-        caches.remove_manifest(&reference)?;
+    if let Some(owner) = records.iter().find(|candidate| {
+        candidate.reference != reference && candidate.dependencies.contains(&reference)
+    }) {
+        bail!(
+            "image {reference:?} is required by cached sandbox {:?}",
+            owner.reference
+        );
     }
-    let surviving_manifests = manifest_keep_set(
-        records
-            .iter()
-            .filter(|record| record.reference != reference),
-    )?;
-    if !surviving_manifests.contains(&pinned) {
-        caches.remove_manifest(&pinned)?;
+    let active_references: HashSet<String> = records
+        .iter()
+        .filter(|record| holder(active, &record.reference).is_some())
+        .map(|record| record.reference.clone())
+        .collect();
+    let removed_references = removal_closure(&records, &reference, &active_references);
+    for removed in records
+        .iter()
+        .filter(|candidate| removed_references.contains(&candidate.reference))
+    {
+        fs.remove_file(&record_path(images_root, &removed.reference))
+            .await
+            .with_context(|| format!("removing image record for {}", removed.reference))?;
     }
-    let keep = layer_keep_set(records.iter().filter(|r| r.reference != reference));
+    let surviving: Vec<&ImageRecord> = records
+        .iter()
+        .filter(|candidate| !removed_references.contains(&candidate.reference))
+        .collect();
+    let surviving_manifests = manifest_keep_set(surviving.iter().copied())?;
+    for removed in records
+        .iter()
+        .filter(|candidate| removed_references.contains(&candidate.reference))
+    {
+        let pinned = pinned_reference(&removed.reference, &removed.digest)?;
+        if pinned != removed.reference {
+            caches.remove_manifest(&removed.reference)?;
+        }
+        if !surviving_manifests.contains(&pinned) {
+            caches.remove_manifest(&pinned)?;
+        }
+    }
+    let keep = layer_keep_set(surviving.into_iter());
     let reclaimed_bytes = caches.sweep_layers(&keep)?;
     Ok(RemovedImage {
         reference,
@@ -248,9 +325,15 @@ pub async fn prune_with<F: Fs, C: Caches>(
     active: &[lns_ipc::RunSummary],
 ) -> Result<PruneReport> {
     let records = load_records(fs, images_root).await?;
+    let active_roots: HashSet<String> = records
+        .iter()
+        .filter(|record| holder(active, &record.reference).is_some())
+        .map(|record| record.reference.clone())
+        .collect();
+    let kept_references = dependency_closure(&records, &active_roots);
     let (kept, removable): (Vec<_>, Vec<_>) = records
         .into_iter()
-        .partition(|r| holder(active, &r.reference).is_some());
+        .partition(|record| kept_references.contains(&record.reference));
     let kept_manifests = manifest_keep_set(kept.iter())?;
     let mut removable_manifests = HashSet::new();
     let mut removed = Vec::with_capacity(removable.len());
@@ -318,12 +401,16 @@ pub async fn pull_with<F: Fs>(
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
-    if let Some(base) = &artifact.base_image {
-        crate::image::pull(base, &layer_cache)
-            .await
-            .with_context(|| format!("fetching the sandbox's base image {base}"))?;
-    }
-    let record = artifact_record_for(&artifact, now_unix_secs());
+    let _shared = lock_shared().await;
+    let base_image = match &artifact.base_image {
+        Some(base) => Some(
+            crate::image::pull_dependency(base, &layer_cache)
+                .await
+                .with_context(|| format!("fetching the sandbox's base image {base}"))?,
+        ),
+        None => None,
+    };
+    let record = artifact_record_for(&artifact, base_image.as_ref(), now_unix_secs());
     pull_with(
         &real::RealFs,
         &images_root()?,
@@ -498,6 +585,7 @@ mod tests {
         ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "d".repeat(64)),
+            dependencies: Vec::new(),
             layers: layers
                 .iter()
                 .map(|(digest, size)| LayerRef {
@@ -641,16 +729,31 @@ mod tests {
     }
 
     #[test]
-    fn artifact_record_for_normalizes_the_reference_and_carries_no_layers() {
+    fn artifact_record_for_normalizes_the_reference_and_links_its_base_image() {
+        let base_reference = format!("registry.example.test/base@sha256:{}", "a".repeat(64));
         let artifact = crate::image::PulledArtifact {
             reference: "some-sandbox:1.0".parse().unwrap(),
             digest: "sha256:manifest".into(),
-            base_image: Some("registry.example.test/base@sha256:abc".into()),
+            base_image: Some(base_reference.clone()),
         };
-        let record = artifact_record_for(&artifact, 42);
+        let base_image = PulledImage {
+            reference: base_reference.parse().unwrap(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            layers: Vec::new(),
+            config: oci_client::config::ConfigFile {
+                architecture: "arm64".into(),
+                os: "linux".into(),
+                ..Default::default()
+            },
+            layer_digests: Vec::new(),
+            artifact_type: None,
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+        };
+        let record = artifact_record_for(&artifact, Some(&base_image), 42);
         assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
         assert_eq!(record.digest, "sha256:manifest");
         assert_eq!(record.pulled_unix_secs, 42);
+        assert_eq!(record.dependencies, vec![base_reference]);
         assert_eq!(
             record.layers,
             vec![],
@@ -1025,6 +1128,123 @@ mod tests {
         assert!(fs.has(&record_path(Path::new(ROOT), "docker.io/library/held:1.0")));
         let swept = caches.swept_with.lock().unwrap();
         assert_eq!(swept[0], HashSet::from(["sha256:held-layer".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_the_base_image_record_and_layers_of_an_active_sandbox() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let caches = FakeCaches {
+            freed: 4,
+            ..Default::default()
+        };
+
+        let report = prune_with(&fs, &caches, Path::new(ROOT), &[running("aa03", sandbox)])
+            .await
+            .unwrap();
+
+        assert!(report.removed.is_empty());
+        assert!(fs.has(&record_path(Path::new(ROOT), base)));
+        assert_eq!(
+            caches.swept_with.lock().unwrap()[0],
+            HashSet::from(["sha256:base-layer".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_of_a_sandbox_removes_its_unshared_base_image_and_layers() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let caches = FakeCaches {
+            freed: 9,
+            ..Default::default()
+        };
+
+        let removed = remove_with(&fs, &caches, Path::new(ROOT), &[], sandbox)
+            .await
+            .unwrap();
+
+        assert_eq!(removed.reclaimed_bytes, 9);
+        assert!(!fs.has(&record_path(Path::new(ROOT), sandbox)));
+        assert!(!fs.has(&record_path(Path::new(ROOT), base)));
+        assert_eq!(caches.swept_with.lock().unwrap()[0], HashSet::new());
+    }
+
+    #[tokio::test]
+    async fn remove_of_a_sandbox_keeps_a_base_image_shared_by_another_sandbox() {
+        let first = "registry.example.test/team/first:1";
+        let second = "registry.example.test/team/second:1";
+        let base = "registry.example.test/team/base:1";
+        let mut first_record = rec(first, &[]);
+        first_record.dependencies.push(base.to_string());
+        let mut second_record = rec(second, &[]);
+        second_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[
+            first_record,
+            second_record,
+            rec(base, &[("sha256:base-layer", 9)]),
+        ]);
+
+        remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], first)
+            .await
+            .unwrap();
+
+        assert!(fs.has(&record_path(Path::new(ROOT), second)));
+        assert!(fs.has(&record_path(Path::new(ROOT), base)));
+    }
+
+    #[tokio::test]
+    async fn remove_of_a_sandbox_keeps_a_base_image_held_by_a_running_workload() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+
+        remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &[running("aa04", base)],
+            sandbox,
+        )
+        .await
+        .unwrap();
+
+        assert!(fs.has(&record_path(Path::new(ROOT), base)));
+    }
+
+    #[tokio::test]
+    async fn remove_refuses_a_base_image_required_by_a_cached_sandbox() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
+
+        let err = remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], base)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("required by cached sandbox"), "got: {err}");
+        assert!(fs.has(&record_path(Path::new(ROOT), base)));
+    }
+
+    #[test]
+    fn records_written_before_dependency_tracking_deserialize_with_no_dependencies() {
+        let record: ImageRecord = serde_json::from_str(
+            r#"{"reference":"registry.example.test/team/old:1","digest":"sha256:old","layers":[],"pulled_unix_secs":1}"#,
+        )
+        .unwrap();
+
+        assert!(record.dependencies.is_empty());
     }
 
     #[tokio::test]

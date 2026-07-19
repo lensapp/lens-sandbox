@@ -120,6 +120,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
+            dependencies: Vec::new(),
             layers: vec![LayerRef {
                 digest: digest.to_string(),
                 size_bytes: size,
@@ -141,6 +142,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
+            dependencies: Vec::new(),
             layers: layers
                 .iter()
                 .map(|(digest, size)| LayerRef {
