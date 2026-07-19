@@ -122,6 +122,7 @@ fn resolve_published(world: &mut BehaviourWorld, project: String) {
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: Vec::new(),
     };
     resolve_defaults(world, &Defaults::from_view(&view), Path::new(&project), "");

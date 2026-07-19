@@ -120,19 +120,6 @@ async fn load_records<F: Fs>(fs: &F, images_root: &Path) -> Result<Vec<ImageReco
     Ok(records)
 }
 
-async fn cached_digest_with<F: Fs>(
-    fs: &F,
-    images_root: &Path,
-    image: &str,
-) -> Result<Option<String>> {
-    let reference = normalize_reference(image)?;
-    Ok(load_records(fs, images_root)
-        .await?
-        .into_iter()
-        .find(|record| record.reference == reference)
-        .map(|record| record.digest))
-}
-
 fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
     active
         .iter()
@@ -421,10 +408,6 @@ pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
     .await
 }
 
-pub(crate) async fn cached_digest(image: &str) -> Result<Option<String>> {
-    cached_digest_with(&real::RealFs, &images_root()?, image).await
-}
-
 pub async fn remove(image: &str) -> Result<RemovedImage> {
     let _exclusive = cache_lock().write().await;
     remove_with(
@@ -622,33 +605,6 @@ mod tests {
     fn normalize_reference_rejects_garbage() {
         let err = normalize_reference("###").unwrap_err().to_string();
         assert!(err.contains("invalid image reference"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn cached_digest_finds_the_digest_recorded_for_a_tag() {
-        let fs = FakeFs::with_records(&[rec("registry.example.test/team/sandbox:1", &[])]);
-        let digest =
-            cached_digest_with(&fs, Path::new(ROOT), "registry.example.test/team/sandbox:1")
-                .await
-                .unwrap();
-        assert_eq!(
-            digest.as_deref(),
-            Some(format!("sha256:{}", "d".repeat(64)).as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn cached_digest_is_none_for_an_uncached_reference() {
-        assert_eq!(
-            cached_digest_with(
-                &FakeFs::default(),
-                Path::new(ROOT),
-                "registry.example.test/team/missing:1",
-            )
-            .await
-            .unwrap(),
-            None
-        );
     }
 
     #[tokio::test]
@@ -1410,14 +1366,6 @@ mod tests {
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
         record(&pulled).await.unwrap();
-
-        assert_eq!(
-            cached_digest("registry.example.test/cov/lifecycle:1")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(format!("sha256:{}", "c".repeat(64)).as_str())
-        );
 
         let listed = list().await.unwrap();
         assert_eq!(listed.len(), 1);

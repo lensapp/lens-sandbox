@@ -755,6 +755,18 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "fileset: {source} -> {}", fileset.mount_path)?;
             }
             render_integrations(out, &view.integrations)?;
+            for credential in &view.credentials {
+                let required = if credential.required {
+                    " (required)"
+                } else {
+                    ""
+                };
+                writeln!(
+                    out,
+                    "credential: {} -> {}{required}",
+                    credential.name, credential.env
+                )?;
+            }
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Image(view) => {
@@ -1467,7 +1479,7 @@ mod tests {
                 message: "no active run with id hermes:1.4.0".into(),
             },
             Response::ImageInspected {
-                inspection: lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+                inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
@@ -1476,8 +1488,9 @@ mod tests {
                     ports: Vec::new(),
                     filesets: Vec::new(),
                     integrations: vec!["some-provider".into()],
+                    credentials: Vec::new(),
                     policy_flags: Vec::new(),
-                }),
+                })),
             },
         );
         let mut out = Vec::new();

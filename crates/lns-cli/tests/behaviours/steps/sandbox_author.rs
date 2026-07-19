@@ -33,6 +33,16 @@ fn valid_lns_yaml(w: &mut BehaviourWorld) {
     );
 }
 
+#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" credential as "([^"]+)"$"#)]
+fn lns_yaml_with_credential(w: &mut BehaviourWorld, name: String, env: String) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - name: {name}\n      env: {env}\n      required: true\n"
+        ),
+    );
+}
+
 #[given("an lns.yaml with a misspelled volume readOnly field")]
 fn lns_yaml_with_unknown_nested_field(w: &mut BehaviourWorld) {
     seed(

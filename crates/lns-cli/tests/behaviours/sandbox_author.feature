@@ -62,6 +62,13 @@ Feature: authoring a sandbox
     And the output contains "policy"
     And the service received no request
 
+  Scenario: inspect discloses every declared credential slot
+    Given an lns.yaml declaring the "some-provider" credential as "SOME_TOKEN"
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
+    And the output contains "credential: some-provider -> SOME_TOKEN (required)"
+    And the service received no request
+
   Scenario: inspect of a path-shaped target renders the definition offline
     Given a valid lns.yaml in the current directory
     When the user runs sandbox command "inspect ."
