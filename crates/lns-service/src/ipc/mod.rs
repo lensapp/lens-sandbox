@@ -2124,10 +2124,10 @@ mod tests {
         );
         assert_eq!(removed["type"], "ImageRemoved", "got {removed}");
         assert_eq!(removed["reference"], reference);
-        assert_eq!(removed["reclaimed_bytes"], 0);
+        assert_eq!(removed["reclaimed_bytes"], layer_bytes.len() as u64);
         assert!(
-            layer_cache.contains(&layer_digest).unwrap(),
-            "the sandbox's cached base image still owns its layer"
+            !layer_cache.contains(&layer_digest).unwrap(),
+            "removing the last sandbox owner must sweep its base-image layer"
         );
 
         let base_removed = as_json(
@@ -2139,12 +2139,12 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(base_removed["type"], "ImageRemoved", "got {base_removed}");
-        assert_eq!(base_removed["reference"], base_ref);
-        assert_eq!(base_removed["reclaimed_bytes"], layer_bytes.len() as u64);
+        assert_eq!(base_removed["type"], "Error", "got {base_removed}");
         assert!(
-            !layer_cache.contains(&layer_digest).unwrap(),
-            "the last base image's layer blob must be swept with it"
+            base_removed["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no such image")),
+            "the orphaned base-image record must leave with its sandbox: {base_removed}"
         );
 
         let pruned = as_json(handle_request(&Request::PruneImages, now).await);
