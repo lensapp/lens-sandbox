@@ -203,7 +203,7 @@ pub struct PulledImage {
 pub struct PulledArtifact {
     pub reference: Reference,
     pub digest: String,
-    pub base_image: Option<String>,
+    pub base_image: String,
 }
 
 pub(crate) async fn pull_sandbox_with<R: Registry>(
@@ -231,7 +231,7 @@ pub(crate) async fn pull_sandbox_with<R: Registry>(
     Ok(PulledArtifact {
         reference,
         digest: manifest_digest,
-        base_image: Some(def.spec.image),
+        base_image: def.spec.image,
     })
 }
 
@@ -1036,8 +1036,8 @@ mod tests {
             .unwrap();
         assert_eq!(artifact.digest, format!("sha256:{}", "c".repeat(64)));
         assert_eq!(
-            artifact.base_image.as_deref(),
-            Some(format!("registry.example.test/base@sha256:{}", "b".repeat(64)).as_str()),
+            artifact.base_image,
+            format!("registry.example.test/base@sha256:{}", "b".repeat(64)),
             "the definition's spec.image must surface so the store can prefetch it",
         );
         let calls: Vec<String> = registry.calls.lock().unwrap().clone();

@@ -61,16 +61,13 @@ fn pinned_reference(reference: &str, digest: &str) -> Result<String> {
 
 pub fn artifact_record_for(
     artifact: &crate::image::PulledArtifact,
-    base_image: Option<&PulledImage>,
+    base_image: &PulledImage,
     pulled_unix_secs: u64,
 ) -> ImageRecord {
     ImageRecord {
         reference: artifact.reference.whole(),
         digest: artifact.digest.clone(),
-        dependencies: base_image
-            .into_iter()
-            .map(|image| image.reference.whole())
-            .collect(),
+        dependencies: vec![base_image.reference.whole()],
         layers: Vec::new(),
         pulled_unix_secs,
     }
@@ -402,15 +399,10 @@ pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
     let _shared = lock_shared().await;
-    let base_image = match &artifact.base_image {
-        Some(base) => Some(
-            crate::image::pull_dependency(base, &layer_cache)
-                .await
-                .with_context(|| format!("fetching the sandbox's base image {base}"))?,
-        ),
-        None => None,
-    };
-    let record = artifact_record_for(&artifact, base_image.as_ref(), now_unix_secs());
+    let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
+        .await
+        .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
+    let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
     pull_with(
         &real::RealFs,
         &images_root()?,
@@ -734,7 +726,7 @@ mod tests {
         let artifact = crate::image::PulledArtifact {
             reference: "some-sandbox:1.0".parse().unwrap(),
             digest: "sha256:manifest".into(),
-            base_image: Some(base_reference.clone()),
+            base_image: base_reference.clone(),
         };
         let base_image = PulledImage {
             reference: base_reference.parse().unwrap(),
@@ -749,7 +741,7 @@ mod tests {
             artifact_type: None,
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
-        let record = artifact_record_for(&artifact, Some(&base_image), 42);
+        let record = artifact_record_for(&artifact, &base_image, 42);
         assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
         assert_eq!(record.digest, "sha256:manifest");
         assert_eq!(record.pulled_unix_secs, 42);
@@ -1245,6 +1237,21 @@ mod tests {
         .unwrap();
 
         assert!(record.dependencies.is_empty());
+    }
+
+    #[test]
+    fn dependency_closure_tolerates_a_dependency_whose_record_is_missing() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let missing_base = "registry.example.test/team/missing-base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(missing_base.to_string());
+
+        let kept = dependency_closure(&[sandbox_record], &HashSet::from([sandbox.to_string()]));
+
+        assert_eq!(
+            kept,
+            HashSet::from([sandbox.to_string(), missing_base.to_string()])
+        );
     }
 
     #[tokio::test]
