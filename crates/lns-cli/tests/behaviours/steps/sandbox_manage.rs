@@ -33,7 +33,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
         message: format!("no active run with id {reference}"),
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
-        inspection: ArtifactInspection::Sandbox(SandboxView {
+        inspection: ArtifactInspection::Sandbox(Box::new(SandboxView {
             reference,
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "docker.io/library/alpine@sha256:abc".into(),
@@ -42,8 +42,9 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
             ports: Vec::new(),
             filesets: Vec::new(),
             integrations: Vec::new(),
+            credentials: Vec::new(),
             policy_flags: Vec::new(),
-        }),
+        })),
     });
 }
 

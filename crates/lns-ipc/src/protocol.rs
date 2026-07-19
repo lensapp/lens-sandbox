@@ -254,7 +254,7 @@ pub struct ImageInfo {
 #[serde(tag = "kind")]
 pub enum ArtifactInspection {
     Image(ImageView),
-    Sandbox(SandboxView),
+    Sandbox(Box<SandboxView>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,7 +280,17 @@ pub struct SandboxView {
     #[serde(default)]
     pub integrations: Vec<String>,
     #[serde(default)]
+    pub credentials: Vec<SandboxCredential>,
+    #[serde(default)]
     pub policy_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxCredential {
+    pub name: String,
+    pub env: String,
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1324,10 +1334,15 @@ mod tests {
                 mount_path: "/root/.agent/skills".into(),
             }],
             integrations: Vec::new(),
+            credentials: vec![SandboxCredential {
+                name: "some-provider".into(),
+                env: "SOME_TOKEN".into(),
+                required: true,
+            }],
             policy_flags: Vec::new(),
         };
         let response = Response::ImageInspected {
-            inspection: ArtifactInspection::Sandbox(view),
+            inspection: ArtifactInspection::Sandbox(Box::new(view)),
         };
         let frame = crate::encode_frame(&response).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();

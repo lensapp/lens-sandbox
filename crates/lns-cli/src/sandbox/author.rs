@@ -203,6 +203,18 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     if !def.spec.integrations.is_empty() {
         writeln!(out, "  integrations: {}", def.spec.integrations.join(", "))?;
     }
+    for credential in &def.spec.credentials {
+        let required = if credential.required {
+            " (required)"
+        } else {
+            ""
+        };
+        writeln!(
+            out,
+            "  credential: {} -> {}{required}",
+            credential.name, credential.env
+        )?;
+    }
     Ok(())
 }
 

@@ -31,7 +31,7 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
 fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
-    let inspection = ArtifactInspection::Sandbox(SandboxView {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -53,8 +53,9 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: Vec::new(),
-    });
+    }));
     cached_artifact(world, &reference, inspection);
 }
 
@@ -62,7 +63,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     regex = r#"^the service inspects "([^"]+)" as a sandbox declaring ports 3003 and 8080:9090$"#
 )]
 fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
-    let inspection = ArtifactInspection::Sandbox(SandboxView {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -80,8 +81,9 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         ],
         filesets: Vec::new(),
         integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: Vec::new(),
-    });
+    }));
     cached_artifact(world, &reference, inspection);
 }
 
@@ -89,7 +91,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     regex = r#"^the service inspects "([^"]+)" as a sandbox declaring a fileset at "([^"]+)"$"#
 )]
 fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, mount: String) {
-    let inspection = ArtifactInspection::Sandbox(SandboxView {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -105,14 +107,22 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
             mount_path: mount,
         }],
         integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: Vec::new(),
-    });
+    }));
     cached_artifact(world, &reference, inspection);
 }
 
-#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox whose policy defaults to allow$"#)]
-fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
-    let inspection = ArtifactInspection::Sandbox(SandboxView {
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the "([^"]+)" credential as "([^"]+)"$"#
+)]
+fn inspects_sandbox_credential(
+    world: &mut BehaviourWorld,
+    reference: String,
+    name: String,
+    env: String,
+) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -121,10 +131,32 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        credentials: vec![lns_ipc::SandboxCredential {
+            name,
+            env,
+            required: false,
+        }],
+        policy_flags: Vec::new(),
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox whose policy defaults to allow$"#)]
+fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: vec![
             "permissive defaultVerdict: allow — the sandbox is open by default".into(),
         ],
-    });
+    }));
     cached_artifact(world, &reference, inspection);
 }
 

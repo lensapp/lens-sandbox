@@ -89,6 +89,7 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
             mount_path: mount,
         }],
         integrations: Vec::new(),
+        credentials: Vec::new(),
         policy_flags: Vec::new(),
     });
 }

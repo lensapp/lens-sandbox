@@ -1044,7 +1044,7 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         let target = published_target(
             "registry.example.test/team/sandbox:1",
-            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+            lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1065,8 +1065,9 @@ mod tests {
                     mount_path: "/root/.agent/skills".into(),
                 }],
                 integrations: Vec::new(),
+                credentials: Vec::new(),
                 policy_flags: Vec::new(),
-            }),
+            })),
         )
         .unwrap();
         assert_eq!(
@@ -1104,7 +1105,7 @@ mod tests {
     fn published_sandbox_preflight_refuses_an_unpinned_result() {
         let err = published_target(
             "registry.example.test/team/sandbox:1",
-            lns_ipc::ArtifactInspection::Sandbox(lns_ipc::SandboxView {
+            lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1113,8 +1114,9 @@ mod tests {
                 ports: Vec::new(),
                 filesets: Vec::new(),
                 integrations: Vec::new(),
+                credentials: Vec::new(),
                 policy_flags: Vec::new(),
-            }),
+            })),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("no manifest digest"));

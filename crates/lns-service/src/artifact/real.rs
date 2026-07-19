@@ -356,23 +356,23 @@ fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc
 
 /// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared integrations, and any over-broad-policy flags.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
-    let requested: Reference = image_ref
+    let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
-    let reference = if requested.digest().is_none() {
-        match crate::image_store::cached_digest(image_ref).await? {
-            Some(digest) => requested.clone_with_digest(digest),
-            None => requested,
-        }
-    } else {
-        requested
-    };
-    let registry = crate::image::caching_registry_for(&reference.to_string())?;
+    let registry = crate::image::caching_registry_for(image_ref)?;
+    inspect_with(image_ref, &reference, &registry).await
+}
+
+async fn inspect_with<R: Registry>(
+    image_ref: &str,
+    reference: &Reference,
+    registry: &R,
+) -> Result<ArtifactInspection> {
     let (manifest, digest, config_json) = registry
-        .pull_manifest_and_config(&reference)
+        .pull_manifest_and_config(reference)
         .await
         .with_context(|| format!("inspecting {image_ref}"))?;
-    crate::image::verify_digest_pin(&reference, &digest, image_ref)?;
+    crate::image::verify_digest_pin(reference, &digest, image_ref)?;
     match dispatch(
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
@@ -385,49 +385,61 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
             let def = lns_artifact::sandbox::parse(config_json.as_bytes())
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
-            Ok(ArtifactInspection::Sandbox(lns_ipc::SandboxView {
-                reference: image_ref.to_string(),
-                digest,
-                image: resolved.base_image,
-                workdir: def.spec.workdir.clone(),
-                mounts: def
-                    .spec
-                    .volumes
-                    .iter()
-                    .map(|volume| SandboxMount {
-                        kind: if volume.is_bind() {
-                            SandboxMountKind::Bind
-                        } else {
-                            SandboxMountKind::Volume
-                        },
-                        source: volume.source().to_string(),
-                        target: volume.target.clone(),
-                        read_only: volume.read_only(),
-                    })
-                    .collect(),
-                ports: declared_view_ports(&def.spec.ports)?,
-                filesets: def
-                    .spec
-                    .filesets
-                    .iter()
-                    .map(|fileset| lns_ipc::SandboxFileset {
-                        path: fileset.path.clone(),
-                        reference: fileset.reference.clone(),
-                        mount_path: fileset.mount_path.clone(),
-                    })
-                    .collect(),
-                integrations: def.spec.integrations,
-                policy_flags: resolved
-                    .policy
-                    .as_ref()
-                    .map(|p| {
-                        crate::artifact::policy::guardrail_flags(p)
-                            .iter()
-                            .map(|f| f.message().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            }))
+            Ok(ArtifactInspection::Sandbox(Box::new(
+                lns_ipc::SandboxView {
+                    reference: image_ref.to_string(),
+                    digest,
+                    image: resolved.base_image,
+                    workdir: def.spec.workdir.clone(),
+                    mounts: def
+                        .spec
+                        .volumes
+                        .iter()
+                        .map(|volume| SandboxMount {
+                            kind: if volume.is_bind() {
+                                SandboxMountKind::Bind
+                            } else {
+                                SandboxMountKind::Volume
+                            },
+                            source: volume.source().to_string(),
+                            target: volume.target.clone(),
+                            read_only: volume.read_only(),
+                        })
+                        .collect(),
+                    ports: declared_view_ports(&def.spec.ports)?,
+                    filesets: def
+                        .spec
+                        .filesets
+                        .iter()
+                        .map(|fileset| lns_ipc::SandboxFileset {
+                            path: fileset.path.clone(),
+                            reference: fileset.reference.clone(),
+                            mount_path: fileset.mount_path.clone(),
+                        })
+                        .collect(),
+                    integrations: def.spec.integrations,
+                    credentials: def
+                        .spec
+                        .credentials
+                        .into_iter()
+                        .map(|credential| lns_ipc::SandboxCredential {
+                            name: credential.name,
+                            env: credential.env,
+                            required: credential.required,
+                        })
+                        .collect(),
+                    policy_flags: resolved
+                        .policy
+                        .as_ref()
+                        .map(|p| {
+                            crate::artifact::policy::guardrail_flags(p)
+                                .iter()
+                                .map(|f| f.message().to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            )))
         }
     }
 }
@@ -437,7 +449,69 @@ mod tests {
     use super::*;
     use oci_client::manifest::{OciDescriptor, OciImageManifest};
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct InspectRegistry {
+        requested: Mutex<Option<String>>,
+    }
+
+    impl Registry for InspectRegistry {
+        async fn pull_manifest_and_config(
+            &self,
+            reference: &Reference,
+        ) -> Result<(OciImageManifest, String, String)> {
+            *self.requested.lock().unwrap() = Some(reference.to_string());
+            Ok((
+                OciImageManifest {
+                    config: OciDescriptor {
+                        media_type: "application/vnd.oci.image.config.v1+json".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                format!("sha256:{}", "a".repeat(64)),
+                "{}".into(),
+            ))
+        }
+
+        async fn pull_blob(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<Vec<u8>> {
+            anyhow::bail!("inspection does not pull layers")
+        }
+
+        async fn pull_blob_to_path(
+            &self,
+            _reference: &Reference,
+            _descriptor: &OciDescriptor,
+            _max_bytes: u64,
+            _path: &std::path::Path,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            anyhow::bail!("inspection does not pull layers")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mutable_tag_stays_unpinned_for_registry_inspection() {
+        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
+        let registry = InspectRegistry {
+            requested: Mutex::new(None),
+        };
+
+        inspect_with(&reference.to_string(), &reference, &registry)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            registry.requested.lock().unwrap().as_deref(),
+            Some("registry.example.test/team/sandbox:latest")
+        );
+    }
 
     struct StreamingRegistry {
         blob: Vec<u8>,
@@ -530,6 +604,31 @@ mod tests {
             on_chunk((self.blob.len() - split) as u64);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn sandbox_inspection_discloses_declared_credential_slots() {
+        let mut registry = StreamingRegistry::fileset(Vec::new(), false);
+        registry.artifact_type = Some(lns_artifact::spec::Kind::Sandbox.artifact_type());
+        registry.config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
+        registry.config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}}"#.into();
+        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
+
+        let inspection = inspect_with(&reference.to_string(), &reference, &registry)
+            .await
+            .unwrap();
+
+        let ArtifactInspection::Sandbox(view) = inspection else {
+            panic!("expected a sandbox inspection")
+        };
+        assert_eq!(
+            view.credentials,
+            [lns_ipc::SandboxCredential {
+                name: "some-provider".into(),
+                env: "SOME_TOKEN".into(),
+                required: true,
+            }]
+        );
     }
 
     #[tokio::test]
