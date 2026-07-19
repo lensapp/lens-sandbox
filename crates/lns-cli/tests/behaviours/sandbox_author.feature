@@ -66,6 +66,13 @@ Feature: authoring a sandbox
     Given an lns.yaml declaring the "some-provider" credential as "SOME_TOKEN"
     When the user runs sandbox command "inspect"
     Then the exit code is 0
+    And the output contains "credential: some-provider -> SOME_TOKEN"
+    And the service received no request
+
+  Scenario: inspect identifies a required credential slot
+    Given an lns.yaml declaring the required "some-provider" credential as "SOME_TOKEN"
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
     And the output contains "credential: some-provider -> SOME_TOKEN (required)"
     And the service received no request
 
