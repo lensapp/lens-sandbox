@@ -122,6 +122,28 @@ fn inspects_sandbox_credential(
     name: String,
     env: String,
 ) {
+    inspects_sandbox_credential_with_requirement(world, reference, name, env, false);
+}
+
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the required "([^"]+)" credential as "([^"]+)"$"#
+)]
+fn inspects_sandbox_required_credential(
+    world: &mut BehaviourWorld,
+    reference: String,
+    name: String,
+    env: String,
+) {
+    inspects_sandbox_credential_with_requirement(world, reference, name, env, true);
+}
+
+fn inspects_sandbox_credential_with_requirement(
+    world: &mut BehaviourWorld,
+    reference: String,
+    name: String,
+    env: String,
+    required: bool,
+) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
         digest: full_digest(),
@@ -134,7 +156,7 @@ fn inspects_sandbox_credential(
         credentials: vec![lns_ipc::SandboxCredential {
             name,
             env,
-            required: false,
+            required,
         }],
         policy_flags: Vec::new(),
     }));
