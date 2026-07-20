@@ -23,9 +23,7 @@ use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
 use crate::credential_flow::session::CredentialSession;
-use crate::credential_flow::store::{
-    CredentialStateFile, CredentialStore, JsonFileCredentialStore, default_credentials_path,
-};
+use crate::credential_flow::store::{CredentialStateFile, CredentialStore};
 use crate::credential_flow::watcher::CredentialWatcher;
 use crate::log;
 use crate::relay;
@@ -211,13 +209,12 @@ fn sweep_once(weak: &Weak<ApprovalSession>) -> bool {
     true
 }
 
-/// Defaults to empty and warns on store error, so a malformed `~/.lns-credentials.json` doesn't silently wipe the developer's rules at startup.
-fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> CredentialStateFile {
+/// Defaults to empty and warns on store error, so a malformed credential store doesn't silently wipe the developer's rules at startup.
+fn load_credentials_or_warn(store: &dyn CredentialStore) -> CredentialStateFile {
     match store.load() {
         Ok(state) => state,
         Err(e) => {
-            let path_str = path.display();
-            log::warn!("could not load {path_str} ({e}); starting with empty credential state");
+            log::warn!("could not load stored credential state ({e}); starting empty");
             CredentialStateFile::new()
         }
     }
@@ -361,7 +358,7 @@ impl crate::approval_flow::session::IntegrationConnector for CredentialConnector
 
 type CredentialSubsystem = (
     Arc<CredentialSession>,
-    crate::credential_flow::watcher::CredentialWatcher,
+    Option<crate::credential_flow::watcher::CredentialWatcher>,
 );
 
 /// A device-flow access token within this many seconds of expiry is refreshed at run start rather than served stale.
@@ -385,12 +382,9 @@ async fn start_credential_subsystem(
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
-    // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
-    let credentials_path = default_credentials_path();
-    let credential_store: Arc<dyn CredentialStore> =
-        Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
-    let mut initial_credential_state =
-        load_credentials_or_warn(credential_store.as_ref(), &credentials_path);
+    // Per-machine state independent of `--policy`: the backend chosen at boot (keychain or file).
+    let credential_store: Arc<dyn CredentialStore> = crate::credential_flow::backend::store();
+    let mut initial_credential_state = load_credentials_or_warn(credential_store.as_ref());
     // Renew any oauth grant that expired since last use before the session arms it (the dominant case; a mid-run expiry falls back to the held-request re-prompt).
     crate::oauth::refresh_due_entries(
         &mut initial_credential_state,
@@ -460,8 +454,16 @@ async fn start_credential_subsystem(
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
 
-    let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
-        .context("watching credentials file")?;
+    crate::credential_flow::live::register(&credential_session);
+
+    // The watcher exists to pick up hand-edits to the file; the keychain backend has no file, so in-process saves (live::broadcast) are its only propagation path.
+    let credential_watcher = match crate::credential_flow::backend::file_watch_path() {
+        Some(path) => Some(
+            CredentialWatcher::spawn(path, credential_session.clone())
+                .context("watching credentials file")?,
+        ),
+        None => None,
+    };
 
     Ok((credential_session, credential_watcher))
 }
@@ -619,7 +621,7 @@ pub(super) async fn start(
         },
         relay,
         watcher: Some(watcher),
-        credential_watcher: Some(credential_watcher),
+        credential_watcher,
         managed_env_vars,
     })
 }
@@ -968,7 +970,7 @@ mod tests {
         let mut seeded = CredentialStateFile::new();
         seeded.insert("some-provider".into(), CredentialEntry::HostDetect);
         store.save(&seeded).unwrap();
-        let state = load_credentials_or_warn(store.as_ref(), Path::new("/tmp/x"));
+        let state = load_credentials_or_warn(store.as_ref());
         assert!(state.contains_key("some-provider"));
     }
 
@@ -979,7 +981,7 @@ mod tests {
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "{ this is not valid json").unwrap();
         let store = crate::credential_flow::store::JsonFileCredentialStore::new(path.clone());
-        let state = load_credentials_or_warn(&store, &path);
+        let state = load_credentials_or_warn(&store);
         assert!(
             state.is_empty(),
             "malformed credentials file must surface as empty in-memory state, got {state:?}"

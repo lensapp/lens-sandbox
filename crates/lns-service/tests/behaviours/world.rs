@@ -24,6 +24,18 @@ pub struct BehaviourWorld {
     /// Lazily-built credential-flow rig — see `BehaviourWorld::credential`.
     pub credential: Option<CredentialRig>,
 
+    /// True when a storage scenario declared no reachable OS keychain.
+    pub keychain_unreachable: bool,
+    /// Set by the backend-selection step; true once the keychain factory was invoked.
+    pub keychain_probe_invoked: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Backend the selection step chose, plus its file path when it fell back.
+    pub selected_backend: Option<lns_policy::keychain::BackendKind>,
+    pub selected_file_path: Option<std::path::PathBuf>,
+    /// Warn-level output captured while the backend was installed.
+    pub selection_warning: Option<String>,
+    /// Restores LNS_CREDENTIALS_PATH when the scenario ends.
+    pub env_guard: Option<crate::steps::credential_storage::EnvGuard>,
+
     /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
     pub oauth_id: Option<String>,
 
@@ -96,6 +108,13 @@ impl BehaviourWorld {
     pub fn credential(&mut self) -> &mut CredentialRig {
         if self.credential.is_none() {
             self.credential = Some(CredentialRig::new());
+        }
+        self.credential.as_mut().expect("credential rig must exist")
+    }
+
+    pub fn credential_keychain(&mut self) -> &mut CredentialRig {
+        if self.credential.is_none() {
+            self.credential = Some(CredentialRig::keychain());
         }
         self.credential.as_mut().expect("credential rig must exist")
     }

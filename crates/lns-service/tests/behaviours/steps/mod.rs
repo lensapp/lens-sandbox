@@ -2,6 +2,7 @@ pub mod approval_flow;
 pub mod artifact_dispatch;
 pub mod credential_at_boot;
 pub mod credential_flow;
+pub mod credential_storage;
 pub mod declared_integrations;
 pub mod env_injection;
 pub mod forward;

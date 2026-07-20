@@ -1,3 +1,4 @@
+@serial
 Feature: lns-service credential storage backends
   Credential value decisions are protected at rest. When the host offers
   an OS-native keychain — the macOS Keychain, Windows Credential
@@ -14,7 +15,6 @@ Feature: lns-service credential storage backends
   These scenarios use synthetic "some-provider" / "some-oauth" fixtures;
   nothing here pins a shipped service.
 
-  @todo
   Scenario: A credential decision is persisted to the OS keychain, not to disk
     Given the OS keychain is reachable
     And a workload is running with the seeded "some-provider" placeholder
@@ -22,14 +22,12 @@ Feature: lns-service credential storage backends
     Then the credential state lands in the OS keychain as a single item
     And no plaintext credentials file is written
 
-  @todo
   Scenario: Credential storage falls back to the plaintext file when no keychain is reachable
     Given no OS keychain is reachable
     When the service selects its credential backend
     Then the plaintext JSON file backend is selected
     And a warning notes that credential values will be stored in plaintext
 
-  @todo
   Scenario: LNS_CREDENTIALS_PATH forces the file backend even when a keychain is reachable
     Given the OS keychain is reachable
     And LNS_CREDENTIALS_PATH points at a custom path
@@ -45,7 +43,6 @@ Feature: lns-service credential storage backends
     Then the running session arms the some-oauth token set without a restart
     And the token set lands in the OS keychain
 
-  @todo
   Scenario: An existing plaintext credentials file is ignored under the keychain backend
     Given the keychain backend is active with no stored state
     And a plaintext credentials file holds a "stored" entry for "some-provider"
