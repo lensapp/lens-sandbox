@@ -58,12 +58,22 @@ pub fn run_summary(flags: &[GuardrailFlag]) -> String {
     summary
 }
 
-/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: every layer's denies are ordered first so a first-match gate stays deny-dominant, `defaultVerdict` never exceeds `ask` (a permissive baseline default is backstopped, a `deny` default is honored), and connected integrations union.
+/// A deny-by-default layer permits only the routes it names, so an allow survives the merge only if every such ceiling layer carries it.
+fn allowed_by_every_ceiling(rule: &RouteRule, ceilings: &[&Policy]) -> bool {
+    ceilings
+        .iter()
+        .all(|ceiling| ceiling.network.allowed_routes.contains(rule))
+}
+
+/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and connected integrations union.
 // Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
-    let baseline_denies_by_default =
-        baseline.is_some_and(|policy| policy.network.default_verdict == Verdict::Deny);
+    let ceilings: Vec<&Policy> = layers
+        .iter()
+        .copied()
+        .filter(|policy| policy.network.default_verdict == Verdict::Deny)
+        .collect();
     let mut routes: Vec<RouteRule> = Vec::new();
     let mut push_unique = |rule: &RouteRule| {
         if !routes.contains(rule) {
@@ -77,12 +87,9 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
             }
         }
     }
-    for (index, layer) in layers.iter().enumerate() {
-        if baseline_denies_by_default && index == 0 {
-            continue;
-        }
+    for layer in &layers {
         for rule in &layer.network.allowed_routes {
-            if rule.verdict != Verdict::Deny {
+            if rule.verdict != Verdict::Deny && allowed_by_every_ceiling(rule, &ceilings) {
                 push_unique(rule);
             }
         }
@@ -212,6 +219,65 @@ mod tests {
         assert!(merged.network.allowed_routes.iter().any(|rule| {
             rule.match_pattern == "api.allowed.example" && rule.verdict == Verdict::Allow
         }));
+        assert_eq!(merged.network.default_verdict, Verdict::Deny);
+    }
+
+    fn deny_default_allowing(host: &str) -> Policy {
+        let mut p = allow(host);
+        p.network.default_verdict = Verdict::Deny;
+        p
+    }
+
+    #[test]
+    fn merge_clamps_an_untrusted_baseline_allow_against_a_user_deny_by_default() {
+        let overlay = deny_default_allowing("api.trusted.example");
+        let baseline = allow("attacker.example");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged.network.allowed_routes.iter().any(|rule| {
+                rule.match_pattern == "attacker.example" && rule.verdict == Verdict::Allow
+            }),
+            "a pulled artifact's allow must not punch through the user's deny-by-default lockdown: {merged:?}"
+        );
+        assert!(merged.network.allowed_routes.iter().any(|rule| {
+            rule.match_pattern == "api.trusted.example" && rule.verdict == Verdict::Allow
+        }));
+        assert_eq!(merged.network.default_verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn merge_keeps_an_allow_both_layers_carry_when_both_deny_by_default() {
+        let overlay = deny_default_allowing("api.shared.example");
+        let baseline = deny_default_allowing("api.shared.example");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            merged.network.allowed_routes.iter().any(|rule| {
+                rule.match_pattern == "api.shared.example" && rule.verdict == Verdict::Allow
+            }),
+            "a host both the user and the artifact allow under deny-by-default is in the intersection and must survive: {merged:?}"
+        );
+        assert_eq!(merged.network.default_verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn merge_drops_disjoint_allows_when_both_layers_deny_by_default() {
+        let overlay = deny_default_allowing("api.user-only.example");
+        let baseline = deny_default_allowing("api.artifact-only.example");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged
+                .network
+                .allowed_routes
+                .iter()
+                .any(|rule| rule.verdict == Verdict::Allow),
+            "two deny-by-default layers with disjoint allowlists intersect to nothing: {merged:?}"
+        );
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
     }
 
