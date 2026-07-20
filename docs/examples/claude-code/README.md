@@ -31,20 +31,8 @@ The first boot runs `npm install -g @anthropic-ai/claude-code`; the microVM is
 ephemeral, so each cold start reinstalls it (the `allowedRoutes` keep
 `registry.npmjs.org` open for that reason).
 
-## Authentication
-
-The `claude-code-subscription` integration injects a placeholder
-`CLAUDE_CODE_OAUTH_TOKEN` into the guest and swaps the real long-lived token into
-requests to `api.anthropic.com` — the token never enters the microVM. Mint one on
-your host and bind it once:
-
-```bash
-claude setup-token                              # prints an sk-ant-oat01-… token
-lns integration connect claude-code-subscription
-```
-
-If you skip this, the first run's approval card prompts for the token and shows
-the same `claude setup-token` command.
+On first run, an approval card asks for your Claude subscription token and shows
+how to mint it.
 
 ## Notes
 
