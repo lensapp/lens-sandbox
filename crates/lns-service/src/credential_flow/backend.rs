@@ -19,6 +19,9 @@ struct ActiveBackend {
 
 static ACTIVE: RwLock<Option<ActiveBackend>> = RwLock::new(None);
 
+// Serializes whole load-modify-save transactions so concurrent writers can't drop each other's entries (lost update).
+static RMW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     *ACTIVE.write().expect("credential backend lock poisoned") = None;
@@ -90,6 +93,7 @@ pub fn persist_entry(
     id: &str,
     entry: crate::credential_flow::store::CredentialEntry,
 ) -> std::io::Result<()> {
+    let _rmw = RMW.lock().expect("rmw mutex poisoned");
     let store = store();
     let mut state = store.load()?;
     state.insert(id.to_string(), entry);
@@ -98,6 +102,7 @@ pub fn persist_entry(
 
 /// Removes one value decision and fans the change out live; saving only on removal keeps a miss free of writes and broadcasts.
 pub fn revoke_entry(id: &str) -> std::io::Result<bool> {
+    let _rmw = RMW.lock().expect("rmw mutex poisoned");
     let store = store();
     let mut state = store.load()?;
     let existed = state.remove(id).is_some();
@@ -109,6 +114,7 @@ pub fn revoke_entry(id: &str) -> std::io::Result<bool> {
 
 /// Overwrites the store with empty state without loading first, so it doubles as the repair for a corrupt blob; the save fans out and disarms every live session.
 pub fn reset_entries() -> std::io::Result<()> {
+    let _rmw = RMW.lock().expect("rmw mutex poisoned");
     store().save(&CredentialStateFile::new())
 }
 
@@ -272,6 +278,36 @@ mod tests {
             state.get("some-oauth"),
             Some(CredentialEntry::Stored { .. })
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(credential_backend)]
+    fn concurrent_persists_never_drop_each_others_entries() {
+        use crate::credential_flow::store::CredentialEntry;
+        install(keychain_selection());
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    for i in 0..50 {
+                        persist_entry(
+                            &format!("some-provider-{w}-{i}"),
+                            CredentialEntry::HostDetect,
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let state = store().load().unwrap();
+        assert_eq!(
+            state.len(),
+            4 * 50,
+            "a lost update dropped {} entries",
+            4 * 50 - state.len()
+        );
     }
 
     #[test]
