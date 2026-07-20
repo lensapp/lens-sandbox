@@ -1853,15 +1853,9 @@ pub(crate) mod tests {
 
     #[test]
     fn host_matches_pattern_is_case_insensitive_like_dns() {
-        assert!(host_matches_pattern(
-            "api.example.test",
-            "API.Example.Test"
-        ));
+        assert!(host_matches_pattern("api.example.test", "API.Example.Test"));
         assert!(host_matches_pattern("*.example.test", "CDN.Example.Test"));
-        assert!(host_matches_pattern(
-            "API.EXAMPLE.TEST",
-            "api.example.test"
-        ));
+        assert!(host_matches_pattern("API.EXAMPLE.TEST", "api.example.test"));
     }
 
     #[test]

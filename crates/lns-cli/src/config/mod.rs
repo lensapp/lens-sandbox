@@ -880,7 +880,14 @@ mod tests {
 
     #[test]
     fn apply_run_defaults_never_registry_qualifies_a_path_shaped_target() {
-        for path in [".", "..", "lns.yaml", "./project", "../project", "/abs/project"] {
+        for path in [
+            ".",
+            "..",
+            "lns.yaml",
+            "./project",
+            "../project",
+            "/abs/project",
+        ] {
             let mut args = bare_run_args();
             args.image = Some(path.into());
             let resolved = apply_run_defaults(
