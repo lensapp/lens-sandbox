@@ -68,6 +68,9 @@ pub enum Request {
     BindIntegrationCredential {
         id: String,
     },
+    RevokeIntegration {
+        id: String,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -176,6 +179,9 @@ pub enum Response {
     },
     CredentialBindFailed {
         reason: String,
+    },
+    IntegrationRevoked {
+        existed: bool,
     },
     RegistryLoginVerified,
     VolumeList {
@@ -1223,6 +1229,24 @@ mod tests {
             Response::OauthSignInFailed {
                 reason: "access_denied".into(),
             },
+        ] {
+            let frame = crate::encode_frame(&resp).unwrap();
+            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(decoded, resp);
+        }
+    }
+
+    #[test]
+    fn revoke_integration_round_trips_with_its_response() {
+        let req = Request::RevokeIntegration {
+            id: "some-oauth".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+        for resp in [
+            Response::IntegrationRevoked { existed: true },
+            Response::IntegrationRevoked { existed: false },
         ] {
             let frame = crate::encode_frame(&resp).unwrap();
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();

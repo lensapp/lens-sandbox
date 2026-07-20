@@ -49,7 +49,6 @@ Feature: lns-service credential storage backends
     Then a credential card appears for "some-provider"
     And the plaintext credentials file is left untouched
 
-  @todo
   Scenario: Revoking a value decision removes it and re-arms the prompt without a restart
     Given the keychain backend is active
     And a workload is running with a "stored" credential rule for "some-provider"
@@ -57,7 +56,6 @@ Feature: lns-service credential storage backends
     Then the "some-provider" entry is removed from the credential state
     And a subsequent request carrying the some-provider placeholder fires a fresh credential card
 
-  @todo
   Scenario: Revoking under the file backend behaves the same
     Given the file backend is active
     And a workload is running with a "stored" credential rule for "some-provider"

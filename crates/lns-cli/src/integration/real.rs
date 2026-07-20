@@ -7,7 +7,9 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_as
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use super::service::{
+    BindOutcome, IntegrationService, LocalBoxFuture, RevokeOutcome, SignInOutcome,
+};
 use crate::command::{RunCtx, RunFuture};
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -15,23 +17,23 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         let args = super::IntegrationArgs::from_arg_matches(matches)?;
         let cwd = ctx.cwd()?;
         let catalog_path = lns_policy::integrations::default_integrations_path();
-        let signin = RealIntegrationSignIn::new(crate::service::socket_path()?);
+        let service = RealIntegrationService::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        crate::integration::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
+        crate::integration::run(&args.command, &cwd, &catalog_path, &service, &mut out).await
     })
 }
 
-pub struct RealIntegrationSignIn {
+pub struct RealIntegrationService {
     socket: PathBuf,
 }
 
-impl RealIntegrationSignIn {
+impl RealIntegrationService {
     pub fn new(socket: PathBuf) -> Self {
         Self { socket }
     }
 }
 
-impl IntegrationSignIn for RealIntegrationSignIn {
+impl IntegrationService for RealIntegrationService {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
@@ -111,6 +113,24 @@ impl IntegrationSignIn for RealIntegrationSignIn {
                 Response::CredentialBindFailed { reason } => Ok(BindOutcome::Failed(reason)),
                 Response::Error { message } => Ok(BindOutcome::Failed(message)),
                 other => bail!("unexpected response during bind: {other:?}"),
+            }
+        })
+    }
+
+    fn revoke<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, Result<RevokeOutcome>> {
+        Box::pin(async move {
+            match crate::service::real::send_request(
+                &self.socket,
+                &Request::RevokeIntegration { id: id.to_string() },
+            )
+            .await
+            {
+                Some(Response::IntegrationRevoked { existed }) => {
+                    Ok(RevokeOutcome::Cleared { existed })
+                }
+                Some(Response::Error { message }) => bail!("revoking {id:?} failed: {message}"),
+                Some(other) => bail!("unexpected response during revoke: {other:?}"),
+                None => Ok(RevokeOutcome::ServiceUnavailable),
             }
         })
     }

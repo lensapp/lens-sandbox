@@ -326,3 +326,90 @@ fn then_plaintext_file_untouched(world: &mut BehaviourWorld) -> Result<(), Strin
         )),
     }
 }
+
+#[given("the file backend is active")]
+fn given_file_backend_active(world: &mut BehaviourWorld) {
+    let rig = world.credential();
+    let path = rig.credentials_path.clone();
+    let session = rig.session.clone();
+    lns_service::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+        store: Arc::new(JsonFileCredentialStore::new(path.clone())),
+        kind: BackendKind::File,
+        file_path: Some(path),
+        fallback_reason: None,
+    });
+    lns_service::credential_flow::live::register(&session);
+}
+
+#[given(regex = r#"^a workload is running with a "stored" credential rule for "([^"]+)"$"#)]
+fn given_stored_rule_via_backend(world: &mut BehaviourWorld, credential_id: String) {
+    let _ = world.credential();
+    lns_service::credential_flow::backend::persist_entry(
+        &credential_id,
+        CredentialEntry::Stored {
+            value: "real-stored-value".into(),
+        },
+    )
+    .expect("persist the stored rule through the active backend");
+    let rig = world.credential();
+    assert!(
+        rig.session.current_state().contains_key(&credential_id),
+        "the stored rule must reach the running session via broadcast"
+    );
+}
+
+#[when(regex = r#"^the developer revokes the "([^"]+)" credential$"#)]
+async fn when_developer_revokes(world: &mut BehaviourWorld, credential_id: String) {
+    let response = crate::runner::run_one_shot(
+        &lns_ipc::Request::RevokeIntegration {
+            id: credential_id.clone(),
+        },
+        world.started_at(),
+    )
+    .await;
+    assert_eq!(
+        response,
+        lns_ipc::Response::IntegrationRevoked { existed: true },
+        "expected the revoke to clear an existing decision"
+    );
+}
+
+#[then(regex = r#"^the "([^"]+)" entry is removed from the credential state$"#)]
+fn then_entry_removed(world: &mut BehaviourWorld, credential_id: String) -> Result<(), String> {
+    let stored = lns_service::credential_flow::backend::store()
+        .load()
+        .map_err(|e| e.to_string())?;
+    if stored.contains_key(&credential_id) {
+        return Err(format!("{credential_id} still present in the stored state"));
+    }
+    let rig = world.credential();
+    if rig.session.current_state().contains_key(&credential_id) {
+        return Err(format!(
+            "{credential_id} still armed in the running session"
+        ));
+    }
+    Ok(())
+}
+
+#[then("a subsequent request carrying the some-provider placeholder fires a fresh credential card")]
+fn then_subsequent_request_fresh_card(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    rig.session.submit_pending(
+        lns_service::approval_flow::protocol::CredentialPending {
+            id: "cred-after-revoke".into(),
+            credential_id: FIXTURE_ID.into(),
+            action: format!("use of {FIXTURE_ID} placeholder"),
+            reason: "placeholder-unauthorized".into(),
+        },
+        Instant::now(),
+    );
+    let snap = rig.window_state.snapshot();
+    if snap
+        .pending_credentials
+        .iter()
+        .all(|c| c.credential_id != FIXTURE_ID)
+    {
+        return Err(format!("no fresh credential card for {FIXTURE_ID}"));
+    }
+    Ok(())
+}

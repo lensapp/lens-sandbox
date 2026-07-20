@@ -86,6 +86,17 @@ pub fn persist_entry(
     store.save(&state)
 }
 
+/// Removes one value decision and fans the change out live; saving only on removal keeps a miss free of writes and broadcasts.
+pub fn revoke_entry(id: &str) -> std::io::Result<bool> {
+    let store = store();
+    let mut state = store.load()?;
+    let existed = state.remove(id).is_some();
+    if existed {
+        store.save(&state)?;
+    }
+    Ok(existed)
+}
+
 pub fn kind() -> Option<BackendKind> {
     ACTIVE
         .read()

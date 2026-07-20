@@ -70,14 +70,12 @@ Feature: connecting integrations from the CLI
     When the developer runs "lns integration list"
     Then "some-pkce" is listed as authenticating by oauth
 
-  @todo
   Scenario: Revoking an integration clears its per-machine value decision
     Given the background service is available
     When the developer runs "lns integration revoke some-oauth"
     Then the command confirms the "some-oauth" value decision is cleared
     And lns-policy.yaml is unchanged
 
-  @todo
   Scenario: Revoking an integration fails clearly when the service is unavailable
     Given the background service is not available
     When the developer runs "lns integration revoke some-oauth"

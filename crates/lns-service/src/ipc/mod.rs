@@ -119,6 +119,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::BindIntegrationCredential must be dispatched via handle_credential_bind, not handle_request"
             )
         }
+        Request::RevokeIntegration { id } => {
+            match crate::credential_flow::backend::revoke_entry(id) {
+                Ok(existed) => Response::IntegrationRevoked { existed },
+                Err(e) => Response::Error {
+                    message: format!("could not revoke {id}: {e}"),
+                },
+            }
+        }
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(run_id) {
                 Response::CancelAccepted
