@@ -509,8 +509,11 @@ impl ApprovalSession {
     }
 }
 
-/// Matches a request host against an integration route pattern: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
-fn host_matches_pattern(pattern: &str, host: &str) -> bool {
+/// Matches a request host against an integration route pattern, case-insensitively as DNS names are: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
+pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    let (pattern, host) = (pattern.as_str(), host.as_str());
     if let Some(suffix) = pattern.strip_prefix("*.") {
         host == suffix || host.ends_with(&format!(".{suffix}"))
     } else if let Some((prefix, suffix)) = pattern.split_once('*') {
@@ -1845,6 +1848,19 @@ pub(crate) mod tests {
         assert!(!host_matches_pattern(
             "*.huggingface.co",
             "huggingface.co.evil.com"
+        ));
+    }
+
+    #[test]
+    fn host_matches_pattern_is_case_insensitive_like_dns() {
+        assert!(host_matches_pattern(
+            "api.example.test",
+            "API.Example.Test"
+        ));
+        assert!(host_matches_pattern("*.example.test", "CDN.Example.Test"));
+        assert!(host_matches_pattern(
+            "API.EXAMPLE.TEST",
+            "api.example.test"
         ));
     }
 

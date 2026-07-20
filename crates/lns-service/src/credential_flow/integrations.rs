@@ -168,14 +168,20 @@ pub fn resolve_connectable_with_slots(
     resolve_connectable_integrations(&owned, catalog)
 }
 
+/// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
+fn domains_overlap(a: &str, b: &str) -> bool {
+    use crate::approval_flow::session::host_matches_pattern;
+    host_matches_pattern(a, b) || host_matches_pattern(b, a)
+}
+
 /// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied integration's domain.
 pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
     let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
-    // An applied integration owns its route domains; a connectable that shares one must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com).
-    let owned_domains: HashSet<&str> = catalog
+    // An applied integration owns its route domains; a connectable that overlaps one must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com).
+    let owned_domains: Vec<&str> = catalog
         .iter()
         .filter(|integ| owned.contains(integ.id.as_str()))
         .flat_map(|integ| integ.routes.iter().map(|r| r.match_pattern.as_str()))
@@ -186,11 +192,12 @@ pub fn resolve_connectable_integrations(
         if owned.contains(integ.id.as_str()) {
             continue;
         }
-        if integ
-            .routes
-            .iter()
-            .any(|r| owned_domains.contains(r.match_pattern.as_str()))
-        {
+        if integ.routes.iter().any(|r| {
+            owned_domains
+                .iter()
+                .copied()
+                .any(|owned_domain| domains_overlap(owned_domain, r.match_pattern.as_str()))
+        }) {
             continue;
         }
         if let Some(p) = wire_provider(integ) {
@@ -450,6 +457,47 @@ mod tests {
             "a connectable that shares the applied integration's domain must be suppressed so its machine-global stored value can't inject over the declared credential"
         );
         assert!(c.routes.is_empty());
+    }
+
+    #[test]
+    fn connectable_excludes_an_entry_whose_wildcard_covers_an_applied_domain() {
+        let catalog = vec![
+            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_integration("some-wild", "WILD_TOKEN", "*.example.test"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert!(
+            c.providers.is_empty(),
+            "a connectable whose wildcard covers the applied integration's host must be suppressed, not just a byte-identical pattern"
+        );
+    }
+
+    #[test]
+    fn connectable_excludes_a_case_variant_of_an_applied_domain() {
+        let catalog = vec![
+            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_integration("some-upper", "UPPER_TOKEN", "API.Example.Test"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert!(
+            c.providers.is_empty(),
+            "host matching is case-insensitive, so a case-variant of the applied domain must be suppressed"
+        );
+    }
+
+    #[test]
+    fn connectable_on_a_distinct_wildcard_domain_survives_an_applied_integration() {
+        let catalog = vec![
+            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_integration("some-wild", "WILD_TOKEN", "*.other.test"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert_eq!(
+            c.providers.len(),
+            1,
+            "a wildcard on an unrelated domain must not be over-suppressed"
+        );
+        assert_eq!(c.providers[0].id(), "some-wild");
     }
 
     #[test]
