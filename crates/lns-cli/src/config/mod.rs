@@ -357,7 +357,11 @@ pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.mem = args.mem.or(defaults.mem);
     args.registry = args.registry.or(defaults.registry);
     if let Some(image) = args.image.take() {
-        args.image = Some(resolve_default_registry(&image, args.registry.as_deref()));
+        args.image = Some(if crate::run::target::is_definition_path(&image) {
+            image
+        } else {
+            resolve_default_registry(&image, args.registry.as_deref())
+        });
     }
     args
 }
@@ -872,6 +876,26 @@ mod tests {
             },
         );
         assert_eq!(resolved.image.as_deref(), Some("docker.io/library/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_never_registry_qualifies_a_path_shaped_target() {
+        for path in [".", "..", "lns.yaml", "./project", "../project", "/abs/project"] {
+            let mut args = bare_run_args();
+            args.image = Some(path.into());
+            let resolved = apply_run_defaults(
+                args,
+                RunDefaults {
+                    registry: Some("ghcr.io".into()),
+                    ..RunDefaults::default()
+                },
+            );
+            assert_eq!(
+                resolved.image.as_deref(),
+                Some(path),
+                "a path-shaped run target must reach run::target::resolve unqualified, not become ghcr.io/{path}"
+            );
+        }
     }
 
     #[test]
