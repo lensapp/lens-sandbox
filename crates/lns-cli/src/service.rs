@@ -124,10 +124,7 @@ pub async fn cmd_status(client: &impl ServiceClient, out: &mut dyn std::io::Writ
             writeln!(out, "  Credentials: stored in the OS keychain")?;
         }
         Some(lns_ipc::CredentialBackendKind::PlaintextFile) => {
-            writeln!(
-                out,
-                "  Credentials: stored in a plaintext file (no OS keychain reachable)"
-            )?;
+            writeln!(out, "  Credentials: stored in a plaintext file")?;
         }
         None => {}
     }

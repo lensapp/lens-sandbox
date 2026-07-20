@@ -26,6 +26,17 @@ pub(crate) fn reset_for_tests() {
 
 struct NotifyingStore {
     inner: Arc<dyn CredentialStore>,
+    // Serializes save+broadcast pairs so live sessions always converge to the last-saved state, matching the reload-from-store guarantee the file watcher gave.
+    fanout: std::sync::Mutex<()>,
+}
+
+impl NotifyingStore {
+    fn wrapping(inner: Arc<dyn CredentialStore>) -> Self {
+        Self {
+            inner,
+            fanout: std::sync::Mutex::new(()),
+        }
+    }
 }
 
 impl CredentialStore for NotifyingStore {
@@ -34,6 +45,7 @@ impl CredentialStore for NotifyingStore {
     }
 
     fn save(&self, state: &CredentialStateFile) -> std::io::Result<()> {
+        let _ordered = self.fanout.lock().expect("fanout mutex poisoned");
         self.inner.save(state)?;
         live::broadcast(state);
         Ok(())
@@ -53,9 +65,7 @@ pub fn install(selection: StoreSelection) {
         );
     }
     *ACTIVE.write().expect("credential backend lock poisoned") = Some(ActiveBackend {
-        store: Arc::new(NotifyingStore {
-            inner: selection.store,
-        }),
+        store: Arc::new(NotifyingStore::wrapping(selection.store)),
         kind: selection.kind,
         file_path: selection.file_path,
     });
@@ -69,9 +79,9 @@ pub fn store() -> Arc<dyn CredentialStore> {
         .as_ref()
     {
         Some(active) => active.store.clone(),
-        None => Arc::new(NotifyingStore {
-            inner: Arc::new(JsonFileCredentialStore::new(default_credentials_path())),
-        }),
+        None => Arc::new(NotifyingStore::wrapping(Arc::new(
+            JsonFileCredentialStore::new(default_credentials_path()),
+        ))),
     }
 }
 
