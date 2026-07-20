@@ -273,7 +273,9 @@ fn quantity_is_positive(quantity: &spec::Quantity) -> bool {
     match quantity {
         spec::Quantity::Int(n) => *n >= 1,
         spec::Quantity::Text(text) => {
-            let digits = text.trim().trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            let digits = text
+                .trim()
+                .trim_end_matches(|c: char| c.is_ascii_alphabetic());
             !digits.is_empty()
                 && digits.bytes().all(|b| b.is_ascii_digit())
                 && digits.bytes().any(|b| b != b'0')
@@ -480,7 +482,8 @@ mod tests {
     #[test]
     fn parse_rejects_a_volume_mounted_into_the_lens_runtime_namespace() {
         for mount in ["/", "/.lens", "/.lens/guest-tools/bin"] {
-            let spec = format!(r#"{{"image":"x:1","volumes":[{{"name":"home","target":"{mount}"}}]}}"#);
+            let spec =
+                format!(r#"{{"image":"x:1","volumes":[{{"name":"home","target":"{mount}"}}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
                 format!("{err:#}").contains("/.lens runtime namespace"),
@@ -610,7 +613,10 @@ mod tests {
 
     #[test]
     fn parse_accepts_documented_resource_shapes() {
-        parse(&def_json(r#"{"image":"x:1","resources":{"cpu":2,"memory":"1Gi"}}"#)).unwrap();
+        parse(&def_json(
+            r#"{"image":"x:1","resources":{"cpu":2,"memory":"1Gi"}}"#,
+        ))
+        .unwrap();
         parse(&def_json(
             r#"{"image":"x:1","resources":{"cpu":"1500m","memory":"768Mi"}}"#,
         ))
