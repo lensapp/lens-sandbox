@@ -413,3 +413,20 @@ fn then_subsequent_request_fresh_card(world: &mut BehaviourWorld) -> Result<(), 
     }
     Ok(())
 }
+
+#[when("a status request is served")]
+async fn when_status_request_served(world: &mut BehaviourWorld) {
+    let response = crate::runner::run_one_shot(&lns_ipc::Request::Status, world.started_at()).await;
+    world.response = Some(response);
+}
+
+#[then("the response names the OS keychain as the credential backend")]
+fn then_response_names_keychain(world: &mut BehaviourWorld) -> Result<(), String> {
+    match world.response.as_ref() {
+        Some(lns_ipc::Response::Status(info)) => match info.credential_backend {
+            Some(lns_ipc::CredentialBackendKind::OsKeychain) => Ok(()),
+            other => Err(format!("expected the OS keychain backend, got {other:?}")),
+        },
+        other => Err(format!("expected a Status response, got {other:?}")),
+    }
+}

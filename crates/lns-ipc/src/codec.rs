@@ -199,6 +199,7 @@ mod tests {
             pid: 12345,
             uptime_secs: 3600,
             version: "0.0.0".into(),
+            credential_backend: Some(crate::CredentialBackendKind::OsKeychain),
         });
         let frame = encode_frame(&resp).unwrap();
         let decoded: Response = decode_frame(&mut &frame[..]).unwrap();

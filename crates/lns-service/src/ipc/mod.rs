@@ -99,6 +99,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             pid: std::process::id(),
             uptime_secs: started_at.elapsed().as_secs(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            credential_backend: crate::credential_flow::backend::kind().map(|k| match k {
+                lns_policy::keychain::BackendKind::Keychain => {
+                    lns_ipc::CredentialBackendKind::OsKeychain
+                }
+                lns_policy::keychain::BackendKind::File => {
+                    lns_ipc::CredentialBackendKind::PlaintextFile
+                }
+            }),
         }),
         Request::Shutdown => Response::ShuttingDown,
         Request::RunImage(_) => {

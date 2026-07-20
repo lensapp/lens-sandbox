@@ -411,6 +411,16 @@ pub struct StatusInfo {
     pub pid: u32,
     pub uptime_secs: u64,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_backend: Option<CredentialBackendKind>,
+}
+
+/// Where the service keeps credential value decisions at rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialBackendKind {
+    OsKeychain,
+    PlaintextFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,6 +913,29 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    #[test]
+    fn status_info_wire_compat_defaults_a_missing_backend_to_none() {
+        let old: StatusInfo =
+            serde_json::from_str(r#"{"pid":1,"uptime_secs":2,"version":"x"}"#).unwrap();
+        assert_eq!(old.credential_backend, None);
+        let with_backend = serde_json::to_value(StatusInfo {
+            pid: 1,
+            uptime_secs: 2,
+            version: "x".into(),
+            credential_backend: Some(CredentialBackendKind::PlaintextFile),
+        })
+        .unwrap();
+        assert_eq!(with_backend["credential_backend"], "plaintext-file");
+        let without = serde_json::to_value(StatusInfo {
+            pid: 1,
+            uptime_secs: 2,
+            version: "x".into(),
+            credential_backend: None,
+        })
+        .unwrap();
+        assert!(without.get("credential_backend").is_none());
     }
 
     #[test]

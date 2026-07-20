@@ -63,7 +63,6 @@ Feature: lns-service credential storage backends
     Then the "some-provider" entry is removed from the credential state
     And a subsequent request carrying the some-provider placeholder fires a fresh credential card
 
-  @todo
   Scenario: Service status reports the active credential backend
     Given the keychain backend is active
     When a status request is served
