@@ -285,10 +285,10 @@ fn quantity_is_positive(quantity: &spec::Quantity) -> bool {
 
 fn validate_resources(resources: &Resources) -> Result<()> {
     for (field, quantity) in [("cpu", &resources.cpu), ("memory", &resources.memory)] {
-        if let Some(quantity) = quantity {
-            if !quantity_is_positive(quantity) {
-                bail!("resources.{field} {quantity:?} must be a positive count or size");
-            }
+        if let Some(quantity) = quantity
+            && !quantity_is_positive(quantity)
+        {
+            bail!("resources.{field} {quantity:?} must be a positive count or size");
         }
     }
     Ok(())
