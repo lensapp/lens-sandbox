@@ -159,6 +159,7 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .finish();
         tracing::subscriber::with_default(subscriber, f);
+        io::Write::flush(&mut buf.clone()).expect("Buf::flush is infallible");
         let bytes = buf.0.lock().unwrap().clone();
         String::from_utf8_lossy(&bytes).into_owned()
     }

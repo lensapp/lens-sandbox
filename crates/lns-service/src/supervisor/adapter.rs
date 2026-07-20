@@ -456,14 +456,7 @@ async fn start_credential_subsystem(
 
     crate::credential_flow::live::register(&credential_session);
 
-    // The watcher exists to pick up hand-edits to the file; the keychain backend has no file, so in-process saves (live::broadcast) are its only propagation path.
-    let credential_watcher = match crate::credential_flow::backend::file_watch_path() {
-        Some(path) => Some(
-            CredentialWatcher::spawn(path, credential_session.clone())
-                .context("watching credentials file")?,
-        ),
-        None => None,
-    };
+    let credential_watcher = spawn_watcher_if_file_backend(&credential_session)?;
 
     Ok((credential_session, credential_watcher))
 }
@@ -476,6 +469,18 @@ fn effective_running_policy(policy_path: &Path, sandbox_policy: Option<&Policy>)
         Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &overlay),
         None => overlay,
     })
+}
+
+/// The watcher exists to pick up hand-edits to the file; the keychain backend has no file, so in-process saves (live::broadcast) are its only propagation path.
+fn spawn_watcher_if_file_backend(
+    session: &Arc<CredentialSession>,
+) -> Result<Option<CredentialWatcher>> {
+    match crate::credential_flow::backend::file_watch_path() {
+        Some(path) => Ok(Some(
+            CredentialWatcher::spawn(path, session.clone()).context("watching credentials file")?,
+        )),
+        None => Ok(None),
+    }
 }
 
 pub(super) async fn start(
@@ -961,6 +966,54 @@ mod tests {
             )),
             dir,
         )
+    }
+
+    fn keychain_backend_selection() -> lns_policy::keychain::StoreSelection {
+        use lns_policy::keychain::{KeychainBlob, KeychainCredentialStore};
+        struct EmptyBlob;
+        impl KeychainBlob for EmptyBlob {
+            fn read(&self) -> std::io::Result<Option<String>> {
+                Ok(None)
+            }
+            fn write(&self, _blob: &str) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        lns_policy::keychain::StoreSelection {
+            store: Arc::new(KeychainCredentialStore::new(Arc::new(EmptyBlob))),
+            kind: lns_policy::keychain::BackendKind::Keychain,
+            file_path: None,
+            fallback_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(credential_backend)]
+    async fn keychain_backend_spawns_no_file_watcher() {
+        crate::credential_flow::backend::install(keychain_backend_selection());
+        let (session, _rx) = fixture_credential_session_seeding(Arc::new(Vec::new()));
+        let watcher = spawn_watcher_if_file_backend(&session).unwrap();
+        crate::credential_flow::backend::reset_for_tests();
+        assert!(watcher.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(credential_backend)]
+    async fn file_backend_spawns_the_credentials_watcher() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("lns-credentials.json");
+        crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+            store: Arc::new(crate::credential_flow::store::JsonFileCredentialStore::new(
+                path.clone(),
+            )),
+            kind: lns_policy::keychain::BackendKind::File,
+            file_path: Some(path),
+            fallback_reason: None,
+        });
+        let (session, _rx) = fixture_credential_session_seeding(Arc::new(Vec::new()));
+        let watcher = spawn_watcher_if_file_backend(&session).unwrap();
+        crate::credential_flow::backend::reset_for_tests();
+        assert!(watcher.is_some());
     }
 
     #[test]
