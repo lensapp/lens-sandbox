@@ -41,6 +41,28 @@ fn cached_image_pin() -> Option<String> {
     (tag == MICROVM_IMAGE && pinned.contains("@sha256:")).then(|| pinned.to_string())
 }
 
+// ECR throttles anonymous bursts, so the one-time pin resolution retries with backoff before giving up — otherwise a single transient 429 flakes the suite before the pin file is written.
+async fn resolve_base_image_digest(
+    client: &oci_client::Client,
+    reference: &oci_client::Reference,
+) -> String {
+    const ATTEMPTS: usize = 6;
+    let mut last_err = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match client
+            .pull_image_manifest(reference, &oci_client::secrets::RegistryAuth::Anonymous)
+            .await
+        {
+            Ok((_, digest)) => return digest,
+            Err(e) => last_err = format!("{e}"),
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs((attempt * 3) as u64)).await;
+        }
+    }
+    panic!("resolve the base image digest after {ATTEMPTS} attempts: {last_err}");
+}
+
 // Resolve the base tag to a digest-pinned reference once per checkout (a digest is immutable, and the pin file keeps repeated suite invocations from tripping ECR's rate limit): pinned refs hit the daemon's manifest cache, so ~45 booted guests cost one registry round-trip.
 fn pinned_microvm_image() -> String {
     PINNED_MICROVM_IMAGE
@@ -57,13 +79,7 @@ fn pinned_microvm_image() -> String {
                         platform_resolver: Some(Box::new(linux_host_arch_resolver)),
                         ..Default::default()
                     });
-                    let (_, digest) = client
-                        .pull_image_manifest(
-                            &reference,
-                            &oci_client::secrets::RegistryAuth::Anonymous,
-                        )
-                        .await
-                        .expect("resolve the base image digest");
+                    let digest = resolve_base_image_digest(&client, &reference).await;
                     format!(
                         "{}/{}@{digest}",
                         reference.registry(),
