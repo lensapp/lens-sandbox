@@ -40,20 +40,22 @@ This recipe is a normal sandbox artifact, so instead of copying the files around
 you can publish it once and run it by reference from any directory. The example
 below uses GitHub Container Registry (GHCR); see
 [Distributing a sandbox](../../running-workloads.md#distributing-a-sandbox) for
-the full mechanics.
+the full mechanics. Each command derives your namespace from
+`gh api user --jq .login`, so you can paste them as-is — the `tr A-Z a-z` on the
+image paths keeps a capitalized username valid (GHCR paths must be lowercase).
 
 Log in once — a GitHub token with `write:packages` (the `gh` CLI mints one):
 
 ```bash
 gh auth refresh --scopes write:packages,read:packages
-gh auth token | lns login ghcr.io --username <your-github-username> --password-stdin
+gh auth token | lns login ghcr.io --username "$(gh api user --jq .login)" --password-stdin
 ```
 
 Publish this directory's `lns.yaml`:
 
 ```bash
-lns push --dry-run ghcr.io/<your-github-username>/claude-code:0.1.0   # preview digests, upload nothing
-lns push ghcr.io/<your-github-username>/claude-code:0.1.0             # for real
+lns push --dry-run "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"   # preview digests, upload nothing
+lns push "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"             # for real
 ```
 
 Two artifacts upload: the sandbox definition and the packed `./config` fileset
@@ -65,30 +67,32 @@ config and policy baseline arrive inside the artifact:
 
 ```bash
 cd ~/some-project
-lns inspect ghcr.io/<your-github-username>/claude-code:0.1.0   # review what shipped before running
-lns run     ghcr.io/<your-github-username>/claude-code:0.1.0   # `.` -> /workspace is ~/some-project
+lns inspect "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"   # review what shipped before running
+lns run     "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"   # `.` -> /workspace is ~/some-project
 ```
 
 Edit and re-publish under a new tag so the update is unambiguous:
 
 ```bash
-lns push ghcr.io/<your-github-username>/claude-code:0.2.0
+lns push "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.2.0"
 ```
 
-Reusing the same tag instead? Run `lns pull …:0.1.0` first — a tag is mutable, so
-pull re-consults the registry. For a byte-exact hand-off, run a digest:
-`lns run ghcr.io/<your-github-username>/claude-code@sha256:…`.
+Reusing the same tag instead? Run `lns pull` on it first — a tag is mutable, so
+pull re-consults the registry. For a byte-exact hand-off, run the digest the push
+printed (`lns run ghcr.io/…@sha256:…`).
 
 ### View it on GitHub
 
-After a real push the package appears on your profile:
+After a real push, print the package links (paste-and-open):
 
-- All packages: `https://github.com/<your-github-username>?tab=packages`
-- This package: `https://github.com/users/<your-github-username>/packages/container/package/claude-code`
-- Visibility / access: `https://github.com/users/<your-github-username>/packages/container/claude-code/settings`
+```bash
+echo "https://github.com/$(gh api user --jq .login)?tab=packages"                                    # all packages
+echo "https://github.com/users/$(gh api user --jq .login)/packages/container/package/claude-code"    # this package
+echo "https://github.com/users/$(gh api user --jq .login)/packages/container/claude-code/settings"   # visibility / access
+```
 
-It lists your tags plus an untagged digest — that untagged one is the `./config`
-fileset. The package starts **private**; make it public or grant access on the
+The package lists your tags plus an untagged digest — that untagged one is the
+`./config` fileset. It starts **private**; make it public or grant access on the
 settings page for someone else to pull, and they will also need `docker.io` reach
 for the base image.
 
