@@ -1,0 +1,39 @@
+apiVersion: lns.run/v1
+kind: Sandbox
+metadata:
+  name: claude-code
+spec:
+  image: docker.io/library/node:lts-alpine
+  command: sh -lc "export PATH=$HOME/.npm-global/bin:$PATH; command -v claude >/dev/null || npm install --silent --prefix $HOME/.npm-global -g @anthropic-ai/claude-code; exec claude"
+  workdir: /workspace
+  env:
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    DISABLE_AUTOUPDATER: "1"
+    DISABLE_TELEMETRY: "1"
+    DO_NOT_TRACK: "1"
+    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1"
+    DISABLE_ERROR_REPORTING: "1"
+    NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  resources:
+    cpu: 4
+    memory: 6Gi
+  policy:
+    defaultVerdict: ask
+    allowedRoutes:
+      - match: registry.npmjs.org
+        verdict: allow
+      - match: api.anthropic.com
+        verdict: allow
+      - match: platform.claude.com
+        verdict: allow
+      - match: downloads.claude.ai
+        verdict: allow
+  integrations:
+    - claude-code-subscription
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+  filesets:
+    - path: ./config
+      mountPath: /home/sandbox
