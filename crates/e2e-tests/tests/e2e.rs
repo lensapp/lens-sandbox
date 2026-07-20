@@ -39,12 +39,27 @@ pub struct E2eWorld {
 impl E2eWorld {
     pub fn run_with_service_env(&self, args: &[&str]) -> CliResult {
         if let Some(sock) = &self.service_socket {
-            let sock_str = sock.to_string_lossy();
-            let envs = [("LNS_SOCKET_PATH", sock_str.as_ref())];
+            let mut envs: Vec<(&str, std::ffi::OsString)> =
+                vec![("LNS_SOCKET_PATH", sock.clone().into())];
+            if let Some(creds) = self.credentials_path() {
+                envs.push(("LNS_CREDENTIALS_PATH", creds.into()));
+            }
             specutil::run_cli_with_env(args.iter().copied(), envs)
         } else {
             specutil::run_cli(args.iter().copied())
         }
+    }
+
+    /// Every spawned lns / lns-service gets a scenario-scoped credentials path, forcing the file backend so e2e never touches the host's real keychain.
+    pub fn credentials_path(&self) -> Option<PathBuf> {
+        self.service_dir
+            .as_ref()
+            .map(|d| d.path().join("lns-credentials.json"))
+            .or_else(|| {
+                self.home
+                    .as_ref()
+                    .map(|h| h.path().join(".lns-credentials.json"))
+            })
     }
 
     pub fn ensure_service_dir(&mut self) {
