@@ -280,6 +280,8 @@ pub struct SandboxView {
     #[serde(default)]
     pub integrations: Vec<String>,
     #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
     pub credentials: Vec<SandboxCredential>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
@@ -1334,6 +1336,7 @@ mod tests {
                 mount_path: "/root/.agent/skills".into(),
             }],
             integrations: Vec::new(),
+            env: vec!["SHELL=/bin/sh".into()],
             credentials: vec![SandboxCredential {
                 name: "some-provider".into(),
                 env: "SOME_TOKEN".into(),

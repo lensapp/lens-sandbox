@@ -24,6 +24,12 @@ Feature: inspecting a typed artifact before running it
     And the output contains "bind . -> /workspace"
     And the output contains "volume some-cache -> /home/node/.cache"
 
+  Scenario: inspecting a sandbox shows its declared env
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox setting env "SHELL=/bin/sh"
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "env: SHELL=/bin/sh"
+
   Scenario: inspecting a sandbox shows its declared ports
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring ports 3003 and 8080:9090
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"

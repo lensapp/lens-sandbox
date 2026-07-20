@@ -418,6 +418,12 @@ async fn inspect_with<R: Registry>(
                         })
                         .collect(),
                     integrations: def.spec.integrations,
+                    env: def
+                        .spec
+                        .env
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect(),
                     credentials: def
                         .spec
                         .credentials
@@ -629,6 +635,24 @@ mod tests {
                 required: true,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_inspection_discloses_declared_env_sorted_by_key() {
+        let mut registry = StreamingRegistry::fileset(Vec::new(), false);
+        registry.artifact_type = Some(lns_artifact::spec::Kind::Sandbox.artifact_type());
+        registry.config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
+        registry.config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","env":{"SHELL":"/bin/sh","FOO":"bar"}}}"#.into();
+        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
+
+        let inspection = inspect_with(&reference.to_string(), &reference, &registry)
+            .await
+            .unwrap();
+
+        let ArtifactInspection::Sandbox(view) = inspection else {
+            panic!("expected a sandbox inspection")
+        };
+        assert_eq!(view.env, ["FOO=bar", "SHELL=/bin/sh"]);
     }
 
     #[tokio::test]
