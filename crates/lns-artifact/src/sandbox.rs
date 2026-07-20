@@ -159,6 +159,12 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     for volume in &doc.spec.volumes {
         spec::validate_mount_path(&volume.target)
             .with_context(|| format!("volume targeting {}", volume.target))?;
+        if overlaps_runtime_namespace(&volume.target) {
+            bail!(
+                "volume target {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
+                volume.target
+            );
+        }
         validate_volume(volume)?;
         if !targets.insert(&volume.target) {
             bail!("duplicate volume target {}", volume.target);
@@ -428,6 +434,18 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("`..` segment"), "got: {err:#}");
+    }
+
+    #[test]
+    fn parse_rejects_a_volume_mounted_into_the_lens_runtime_namespace() {
+        for mount in ["/", "/.lens", "/.lens/guest-tools/bin"] {
+            let spec = format!(r#"{{"image":"x:1","volumes":[{{"name":"home","target":"{mount}"}}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("/.lens runtime namespace"),
+                "volume {mount}: got: {err:#}"
+            );
+        }
     }
 
     #[test]
