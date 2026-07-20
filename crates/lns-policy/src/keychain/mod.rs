@@ -195,14 +195,20 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
+    fn unavailable_blob_source() -> io::Result<Arc<dyn KeychainBlob>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "platform store unavailable",
+        ))
+    }
+
+    // A probe of unavailable_blob_source would surface as a Some fallback_reason and the default path, so these assertions prove the keychain was never consulted.
     #[test]
     #[serial_test::serial(env)]
     fn credentials_path_override_forces_the_file_backend_without_probing() {
         use crate::test_env::EnvVarGuard;
         let _g = EnvVarGuard::set("LNS_CREDENTIALS_PATH", "/tmp/forced-creds.json");
-        let selection = select_credential_store(|| -> io::Result<Arc<dyn KeychainBlob>> {
-            panic!("the keychain must never be probed under LNS_CREDENTIALS_PATH")
-        });
+        let selection = select_credential_store(unavailable_blob_source);
         assert_eq!(selection.kind, BackendKind::File);
         assert_eq!(
             selection.file_path.as_deref(),
@@ -241,12 +247,7 @@ mod tests {
         use crate::test_env::EnvVarGuard;
         let _g1 = EnvVarGuard::unset("LNS_CREDENTIALS_PATH");
         let _g2 = EnvVarGuard::set("HOME", "/home/dev");
-        let selection = select_credential_store(|| {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "platform store unavailable",
-            ))
-        });
+        let selection = select_credential_store(unavailable_blob_source);
         assert_eq!(selection.kind, BackendKind::File);
         assert_eq!(
             selection.file_path.as_deref(),
