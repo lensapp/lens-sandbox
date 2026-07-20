@@ -568,6 +568,11 @@ async fn stop<W: std::io::Write>(
     }
 }
 
+/// The service reports an unrecognised run handle as "no such run: …"; only that miss falls through to the cached-artifact path, so a genuine daemon error surfaces instead of masquerading as "no such image".
+fn is_unknown_run(message: &str) -> bool {
+    message.contains("no such run")
+}
+
 async fn rm<W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxRmArgs,
@@ -588,9 +593,13 @@ async fn rm<W: std::io::Write>(
                 args.run
             )
         }
-        // An exited run is a spent record; a reference the service knows no run for is a cached sandbox.
+        // An exited run is a spent record.
         Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
-        Response::Error { .. } => remove_cached(svc, &args.run, out).await,
+        // A reference the service knows no run for is a cached sandbox; any other error is a real failure, not a miss.
+        Response::Error { message } if is_unknown_run(&message) => {
+            remove_cached(svc, &args.run, out).await
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -690,8 +699,11 @@ async fn inspect<W: std::io::Write>(
             render_inspect(&details, policy, out)?;
             Ok(0)
         }
-        // Not a running sandbox — fall through to the cached artifact's definition.
-        Response::Error { .. } => inspect_cached(svc, target, out).await,
+        // A reference the service knows no run for is a cached artifact; any other error is a real failure, not a miss.
+        Response::Error { message } if is_unknown_run(&message) => {
+            inspect_cached(svc, target, out).await
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -1479,7 +1491,7 @@ mod tests {
     async fn inspect_falls_back_to_a_cached_sandbox_definition() {
         let svc = CannedService::with_inspect_image(
             Response::Error {
-                message: "no active run with id hermes:1.4.0".into(),
+                message: "no such run: hermes:1.4.0".into(),
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
@@ -1513,7 +1525,7 @@ mod tests {
     async fn inspect_cached_renders_the_image_kind() {
         let image = CannedService::with_inspect_image(
             Response::Error {
-                message: "not running".into(),
+                message: "no such run: x".into(),
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
@@ -1533,13 +1545,33 @@ mod tests {
     async fn inspect_cached_rejects_an_unrelated_image_response() {
         let svc = CannedService::with_inspect_image(
             Response::Error {
-                message: "not running".into(),
+                message: "no such run: x".into(),
             },
             Response::Pong,
         );
         let mut out = Vec::new();
         let err = inspect(&svc, "x", &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn inspect_surfaces_a_non_not_found_inspect_error_without_touching_the_cache() {
+        let svc = CannedService::new(Response::Error {
+            message: "daemon busy".into(),
+        });
+        let mut out = Vec::new();
+        let err = inspect(&svc, "reviewer", &mut out).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("daemon busy"),
+            "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
+        );
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, Request::InspectImage { .. })),
+            "a genuine error must not fall through to the cached-inspect path: {requests:?}"
+        );
     }
 
     fn running_inspect(status: lns_ipc::RunStatus) -> Response {
@@ -1579,7 +1611,7 @@ mod tests {
     async fn rm_removes_a_cached_sandbox_and_reports_freed_layers() {
         let svc = CannedService::with_remove_image(
             Response::Error {
-                message: "no active run with id hermes:1.4.0".into(),
+                message: "no such run: hermes:1.4.0".into(),
             },
             Response::ImageRemoved {
                 reference: "hermes:1.4.0".into(),
@@ -1600,6 +1632,34 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("removed hermes:1.4.0"), "got: {text}");
         assert!(text.contains("freed 3.0 MiB"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn rm_surfaces_a_non_not_found_inspect_error_without_touching_the_cache() {
+        let svc = CannedService::new(Response::Error {
+            message: "daemon busy".into(),
+        });
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("daemon busy"),
+            "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
+        );
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, Request::RemoveImage { .. })),
+            "a genuine error must not fall through to the cached-remove path: {requests:?}"
+        );
     }
 
     #[tokio::test]
@@ -1688,7 +1748,7 @@ mod tests {
     async fn rm_of_a_cached_sandbox_surfaces_the_daemon_error() {
         let svc = CannedService::with_remove_image(
             Response::Error {
-                message: "no active run with id ghcr.io/team/x:1".into(),
+                message: "no such run: ghcr.io/team/x:1".into(),
             },
             Response::Error {
                 message: "no such image: ghcr.io/team/x:1".into(),
@@ -1711,7 +1771,7 @@ mod tests {
     async fn rm_rejects_an_unrelated_remove_response() {
         let svc = CannedService::with_remove_image(
             Response::Error {
-                message: "no active run with id reviewer".into(),
+                message: "no such run: reviewer".into(),
             },
             Response::Pong,
         );
