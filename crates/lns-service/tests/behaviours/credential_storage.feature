@@ -35,7 +35,6 @@ Feature: lns-service credential storage backends
     Then the plaintext JSON file backend at that path is selected
     And the OS keychain is never probed
 
-  @todo
   Scenario: A sign-in takes effect immediately under the keychain backend
     Given the keychain backend is active
     And a workload is running with an unconnected "some-oauth" integration

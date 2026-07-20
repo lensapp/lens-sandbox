@@ -75,6 +75,17 @@ pub fn store() -> Arc<dyn CredentialStore> {
     }
 }
 
+/// Load-modify-save through the active backend; the save fans out to live sessions, which is what makes a sign-in take effect without a restart or file event.
+pub fn persist_entry(
+    id: &str,
+    entry: crate::credential_flow::store::CredentialEntry,
+) -> std::io::Result<()> {
+    let store = store();
+    let mut state = store.load()?;
+    state.insert(id.to_string(), entry);
+    store.save(&state)
+}
+
 pub fn kind() -> Option<BackendKind> {
     ACTIVE
         .read()
@@ -209,6 +220,32 @@ mod tests {
         );
         store().save(&state).unwrap();
         assert_eq!(store().load().unwrap(), state);
+    }
+
+    #[test]
+    #[serial_test::serial(credential_backend)]
+    fn persist_entry_adds_to_existing_state_through_the_active_backend() {
+        use crate::credential_flow::store::CredentialEntry;
+        install(keychain_selection());
+        let mut prior = CredentialStateFile::new();
+        prior.insert("some-provider".into(), CredentialEntry::HostDetect);
+        store().save(&prior).unwrap();
+        persist_entry(
+            "some-oauth",
+            CredentialEntry::Stored {
+                value: "some-secret".into(),
+            },
+        )
+        .unwrap();
+        let state = store().load().unwrap();
+        assert_eq!(
+            state.get("some-provider"),
+            Some(&CredentialEntry::HostDetect)
+        );
+        assert!(matches!(
+            state.get("some-oauth"),
+            Some(CredentialEntry::Stored { .. })
+        ));
     }
 
     #[test]

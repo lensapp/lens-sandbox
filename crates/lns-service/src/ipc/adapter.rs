@@ -461,23 +461,14 @@ fn persist_oauth_token(
     token: &crate::oauth::TokenSet,
     clock: &dyn crate::oauth::Clock,
 ) -> std::io::Result<()> {
-    use crate::credential_flow::store::{
-        CredentialStore, JsonFileCredentialStore, default_credentials_path,
-    };
-    let store = JsonFileCredentialStore::new(default_credentials_path());
-    let mut state = store.load()?;
-    state.insert(id.to_string(), crate::oauth::entry_from_token(clock, token));
-    store.save(&state)
+    crate::credential_flow::backend::persist_entry(id, crate::oauth::entry_from_token(clock, token))
 }
 
 fn persist_pkce_key(id: &str, key: String) -> std::io::Result<()> {
-    use crate::credential_flow::store::{
-        CredentialEntry, CredentialStore, JsonFileCredentialStore, default_credentials_path,
-    };
-    let store = JsonFileCredentialStore::new(default_credentials_path());
-    let mut state = store.load()?;
-    state.insert(id.to_string(), CredentialEntry::Stored { value: key });
-    store.save(&state)
+    crate::credential_flow::backend::persist_entry(
+        id,
+        crate::credential_flow::store::CredentialEntry::Stored { value: key },
+    )
 }
 
 async fn handle_one_shot(

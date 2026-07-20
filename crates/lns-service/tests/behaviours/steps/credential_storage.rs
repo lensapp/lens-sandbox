@@ -79,10 +79,87 @@ fn given_keychain_unreachable(world: &mut BehaviourWorld) {
     world.keychain_unreachable = true;
 }
 
+fn install_rig_backend(world: &mut BehaviourWorld) {
+    let rig = world.credential_keychain();
+    let blob = rig
+        .keychain_blob
+        .clone()
+        .expect("keychain rig carries a blob");
+    let session = rig.session.clone();
+    lns_service::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+        store: Arc::new(lns_policy::keychain::KeychainCredentialStore::new(blob)),
+        kind: BackendKind::Keychain,
+        file_path: None,
+        fallback_reason: None,
+    });
+    lns_service::credential_flow::live::register(&session);
+}
+
+#[given("the keychain backend is active")]
+fn given_keychain_backend_active(world: &mut BehaviourWorld) {
+    install_rig_backend(world);
+}
+
 #[given("the keychain backend is active with no stored state")]
 fn given_keychain_backend_active_empty(world: &mut BehaviourWorld) {
-    let rig = world.credential_keychain();
+    install_rig_backend(world);
+    let rig = world.credential();
     assert!(rig.session.current_state().is_empty());
+}
+
+#[given(regex = r#"^a workload is running with an unconnected "([^"]+)" integration$"#)]
+fn given_unconnected_integration(world: &mut BehaviourWorld, integration_id: String) {
+    let rig = world.credential();
+    assert!(
+        !rig.session.current_state().contains_key(&integration_id),
+        "expected no value decision for {integration_id} yet"
+    );
+}
+
+#[when(regex = r#"^a device sign-in for "([^"]+)" completes$"#)]
+fn when_device_sign_in_completes(world: &mut BehaviourWorld, integration_id: String) {
+    let _ = world.credential();
+    lns_service::credential_flow::backend::persist_entry(
+        &integration_id,
+        CredentialEntry::Oauth {
+            access_token: "some-access".into(),
+            refresh_token: "some-refresh".into(),
+            expires_at: 1_900_000_000,
+            scopes: Vec::new(),
+            account: None,
+        },
+    )
+    .expect("persist the token set through the active backend");
+}
+
+#[then("the running session arms the some-oauth token set without a restart")]
+fn then_session_armed_without_restart(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    match rig.session.current_state().get("some-oauth") {
+        Some(CredentialEntry::Oauth { .. }) => Ok(()),
+        other => Err(format!("expected an armed oauth token set, got {other:?}")),
+    }
+}
+
+#[then("the token set lands in the OS keychain")]
+fn then_token_set_in_keychain(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let blob = rig
+        .keychain_blob
+        .as_ref()
+        .ok_or("rig is not keychain-backed")?;
+    let item = blob
+        .data
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no keychain item was written")?;
+    let state: CredentialStateFile =
+        serde_json::from_str(&item).map_err(|e| format!("keychain item is not the map: {e}"))?;
+    match state.get("some-oauth") {
+        Some(CredentialEntry::Oauth { .. }) => Ok(()),
+        other => Err(format!("expected the oauth token set, got {other:?}")),
+    }
 }
 
 #[given(regex = r#"^LNS_CREDENTIALS_PATH points at a custom path$"#)]
