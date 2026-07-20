@@ -254,6 +254,7 @@ mod tests {
             verification_uri: "https://some-oauth.example/login/device".into(),
             token_fallback: Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             env_var: None,
             injection_domains: vec![],
@@ -274,6 +275,7 @@ mod tests {
             snap.sign_ins[0].token_fallback,
             Some(lns_policy::integrations::TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "the card carries the prompt's token fallback so the UI can offer the pivot"
         );

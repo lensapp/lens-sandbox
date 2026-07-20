@@ -1188,6 +1188,7 @@ mod tests {
             }),
             token_fallback: Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
         }];
         let connectable = crate::credential_flow::integrations::resolve_connectable_integrations(
@@ -1206,6 +1207,7 @@ mod tests {
             offerable[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "the offer carries the integration's token fallback to the network card"
         );

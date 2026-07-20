@@ -1521,10 +1521,29 @@ fn render_credential_card(
                 ui.add_space(8.0);
                 ui.colored_label(
                     window::TEXT_MUTED,
-                    RichText::new("No credential detected on host.")
+                    RichText::new("No token found on this host.")
                         .size(theme::FONT_CAPTION)
                         .italics(),
                 );
+                if let Some(command) = prompt
+                    .token_fallback
+                    .as_ref()
+                    .and_then(|f| f.command.as_deref())
+                {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Create one on your host, then paste it:")
+                            .size(theme::FONT_CAPTION)
+                            .color(window::TEXT_MUTED),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(format!("$ {command}"))
+                            .size(theme::FONT_CAPTION)
+                            .monospace()
+                            .color(window::TEXT_ACCENT),
+                    );
+                }
             }
         },
         |ui| {
@@ -1538,6 +1557,20 @@ fn render_credential_card(
                 ui.add_space(BTN_GAP);
             }
             secret_input(ui, input, "Enter a value");
+            let mut help_action = None;
+            if !prompt.host_value_available
+                && let Some(help) = prompt
+                    .token_fallback
+                    .as_ref()
+                    .and_then(|f| f.help.as_deref())
+            {
+                ui.add_space(6.0);
+                if help_link(ui, "How do I create a token?").clicked() {
+                    help_action = Some(CardAction::OpenBrowser {
+                        url: help.to_string(),
+                    });
+                }
+            }
             ui.add_space(BTN_GAP);
             let submit_enabled = !input.trim().is_empty();
             ui.columns(2, |cols| {
@@ -1552,10 +1585,12 @@ fn render_credential_card(
                     chosen = Some(CredentialDecisionRequest::Deny);
                 }
             });
-            chosen.map(|request| CardAction::DecideCredential {
-                id: id.clone(),
-                request,
-            })
+            chosen
+                .map(|request| CardAction::DecideCredential {
+                    id: id.clone(),
+                    request,
+                })
+                .or(help_action)
         },
     );
     (out.inner, out.response)
@@ -1739,16 +1774,7 @@ fn render_token_fallback(
     let mut event = None;
     if let Some(help) = &fallback.help {
         ui.add_space(6.0);
-        let link = ui.add(
-            egui::Label::new(
-                RichText::new("How do I create a token?")
-                    .size(10.5)
-                    .underline()
-                    .color(window::TEXT_MUTED),
-            )
-            .sense(Sense::click()),
-        );
-        if link.clicked() {
+        if help_link(ui, "How do I create a token?").clicked() {
             event = Some(TokenFallbackEvent::OpenHelp(help.clone()));
         }
     }
@@ -1759,6 +1785,19 @@ fn render_token_fallback(
         event = Some(TokenFallbackEvent::Save(draft.value.trim().to_string()));
     }
     event
+}
+
+fn help_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    use egui::{RichText, Sense};
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(10.5)
+                .underline()
+                .color(window::TEXT_MUTED),
+        )
+        .sense(Sense::click()),
+    )
 }
 
 fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {

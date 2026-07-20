@@ -105,6 +105,7 @@ integrations:
         - kind: bearer_header
           domain: api.anthropic.com
     tokenFallback:
+      command: claude setup-token
       help: https://docs.claude.com/en/docs/claude-code/setup#long-lived-authentication-token
   - id: bedrock
     name: Amazon Bedrock

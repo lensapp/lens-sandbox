@@ -1358,6 +1358,7 @@ pub(crate) mod tests {
         OfferableIntegration {
             token_fallback: Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             ..offerable(id, name, pattern)
         }
@@ -1424,6 +1425,7 @@ pub(crate) mod tests {
             presented[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "an offer for an integration that declares a token fallback carries it to the card"
         );

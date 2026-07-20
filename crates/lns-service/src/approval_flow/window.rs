@@ -992,12 +992,14 @@ mod tests {
         let mut prompt = cred_prompt("c1", "some-oauth");
         prompt.token_fallback = Some(TokenFallback {
             help: Some("https://example.com/pat".into()),
+            command: None,
         });
         s.insert_credential_pending(prompt, false, tx);
         assert_eq!(
             s.snapshot().pending_credentials[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "the card carries the prompt's token fallback so the consent card can offer the pivot"
         );
