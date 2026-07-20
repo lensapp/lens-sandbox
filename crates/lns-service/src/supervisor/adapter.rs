@@ -989,11 +989,16 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(credential_backend)]
-    async fn keychain_backend_spawns_no_file_watcher() {
+    async fn keychain_backend_spawns_no_file_watcher_and_serves_the_installed_store() {
         crate::credential_flow::backend::install(keychain_backend_selection());
+        let store = crate::credential_flow::backend::store();
+        let loaded = store.load().unwrap();
+        let saved = store.save(&CredentialStateFile::new());
         let (session, _rx) = fixture_credential_session_seeding(Arc::new(Vec::new()));
         let watcher = spawn_watcher_if_file_backend(&session).unwrap();
         crate::credential_flow::backend::reset_for_tests();
+        assert!(loaded.is_empty());
+        saved.unwrap();
         assert!(watcher.is_none());
     }
 
