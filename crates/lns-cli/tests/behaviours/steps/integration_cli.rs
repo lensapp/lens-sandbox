@@ -75,6 +75,14 @@ impl IntegrationService for FakeSignIn {
         };
         Box::pin(async move { Ok(outcome) })
     }
+
+    fn revoke_all(&self) -> LocalBoxFuture<'_, anyhow::Result<RevokeOutcome>> {
+        let outcome = match self.outcome {
+            SignInOutcome::ServiceUnavailable => RevokeOutcome::ServiceUnavailable,
+            _ => RevokeOutcome::AllCleared,
+        };
+        Box::pin(async move { Ok(outcome) })
+    }
 }
 
 async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
@@ -458,5 +466,16 @@ fn policy_yaml_unchanged(world: &mut BehaviourWorld) {
         !path.exists(),
         "revoke must not create or touch {}",
         path.display()
+    );
+}
+
+#[then("the command confirms all value decisions are cleared")]
+fn confirms_all_cleared(world: &mut BehaviourWorld) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_eq!(run.exit_code, 0, "output: {}", run.output);
+    assert!(
+        run.output.contains("all stored value decisions"),
+        "expected the cleared-all confirmation, got: {}",
+        run.output
     );
 }

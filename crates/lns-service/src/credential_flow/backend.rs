@@ -107,6 +107,11 @@ pub fn revoke_entry(id: &str) -> std::io::Result<bool> {
     Ok(existed)
 }
 
+/// Overwrites the store with empty state without loading first, so it doubles as the repair for a corrupt blob; the save fans out and disarms every live session.
+pub fn reset_entries() -> std::io::Result<()> {
+    store().save(&CredentialStateFile::new())
+}
+
 pub fn kind() -> Option<BackendKind> {
     ACTIVE
         .read()
@@ -267,6 +272,22 @@ mod tests {
             state.get("some-oauth"),
             Some(CredentialEntry::Stored { .. })
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(credential_backend)]
+    fn reset_entries_rewrites_a_corrupt_blob_clean_without_loading() {
+        install(StoreSelection {
+            store: Arc::new(KeychainCredentialStore::new(Arc::new(FakeBlob {
+                data: Mutex::new(Some("{ not json".into())),
+            }))),
+            kind: BackendKind::Keychain,
+            file_path: None,
+            fallback_reason: None,
+        });
+        assert!(store().load().is_err(), "the corrupt blob must not load");
+        reset_entries().unwrap();
+        assert!(store().load().unwrap().is_empty());
     }
 
     #[test]

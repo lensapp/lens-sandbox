@@ -61,7 +61,9 @@ Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then
 fail at the boundary). The decision is remembered for next time.
 To un-remember one, `lns integration revoke <id>` clears that decision — a running
-sandbox drops it immediately, and the next use prompts again.
+sandbox drops it immediately, and the next use prompts again. `lns integration
+revoke --all` clears every decision at once, which also repairs the store if it
+ever becomes unreadable (the service warns and starts empty in that case).
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
 than a pasted secret it's obtained by an interactive **sign-in**

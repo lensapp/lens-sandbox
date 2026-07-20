@@ -71,6 +71,7 @@ pub enum Request {
     RevokeIntegration {
         id: String,
     },
+    RevokeAllIntegrations,
     ListVolumes,
     CreateVolume {
         name: String,
@@ -183,6 +184,7 @@ pub enum Response {
     IntegrationRevoked {
         existed: bool,
     },
+    AllIntegrationsRevoked,
     RegistryLoginVerified,
     VolumeList {
         volumes: Vec<VolumeInfo>,
@@ -1285,6 +1287,14 @@ mod tests {
             let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
             assert_eq!(decoded, resp);
         }
+        let req = Request::RevokeAllIntegrations;
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+        let resp = Response::AllIntegrationsRevoked;
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
     }
 
     #[test]

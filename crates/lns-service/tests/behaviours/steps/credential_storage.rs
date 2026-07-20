@@ -430,3 +430,40 @@ fn then_response_names_keychain(world: &mut BehaviourWorld) -> Result<(), String
         other => Err(format!("expected a Status response, got {other:?}")),
     }
 }
+
+#[given("the keychain backend is active holding a corrupt item")]
+fn given_keychain_backend_corrupt(world: &mut BehaviourWorld) {
+    install_rig_backend(world);
+    let rig = world.credential();
+    let blob = rig.keychain_blob.as_ref().expect("keychain rig");
+    *blob.data.lock().unwrap() = Some("{ not json".into());
+    assert!(
+        lns_service::credential_flow::backend::store()
+            .load()
+            .is_err(),
+        "the corrupt item must not load"
+    );
+}
+
+#[when("the developer revokes all credentials")]
+async fn when_developer_revokes_all(world: &mut BehaviourWorld) {
+    let response =
+        crate::runner::run_one_shot(&lns_ipc::Request::RevokeAllIntegrations, world.started_at())
+            .await;
+    assert_eq!(response, lns_ipc::Response::AllIntegrationsRevoked);
+}
+
+#[then("the credential state loads back empty")]
+fn then_state_loads_back_empty(world: &mut BehaviourWorld) -> Result<(), String> {
+    let stored = lns_service::credential_flow::backend::store()
+        .load()
+        .map_err(|e| format!("the repaired store must load: {e}"))?;
+    if !stored.is_empty() {
+        return Err(format!("expected empty state, got {stored:?}"));
+    }
+    let rig = world.credential();
+    if !rig.session.current_state().is_empty() {
+        return Err("the running session must be disarmed by the reset".into());
+    }
+    Ok(())
+}

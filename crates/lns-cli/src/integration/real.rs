@@ -134,4 +134,19 @@ impl IntegrationService for RealIntegrationService {
             }
         })
     }
+
+    fn revoke_all(&self) -> LocalBoxFuture<'_, Result<RevokeOutcome>> {
+        Box::pin(async move {
+            match crate::service::real::send_request(&self.socket, &Request::RevokeAllIntegrations)
+                .await
+            {
+                Some(Response::AllIntegrationsRevoked) => Ok(RevokeOutcome::AllCleared),
+                Some(Response::Error { message }) => {
+                    bail!("resetting the credential store failed: {message}")
+                }
+                Some(other) => bail!("unexpected response during revoke: {other:?}"),
+                None => Ok(RevokeOutcome::ServiceUnavailable),
+            }
+        })
+    }
 }

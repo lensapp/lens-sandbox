@@ -291,7 +291,7 @@ lns integration list
 lns integration remove <ID>
 lns integration connect <ID> [--policy <PATH>]
 lns integration disconnect <ID> [--policy <PATH>]
-lns integration revoke <ID>
+lns integration revoke <ID> | --all
 ```
 
 | Subcommand   | Meaning                                                                       |
@@ -301,7 +301,7 @@ lns integration revoke <ID>
 | `remove`     | Remove a user-declared integration; bundled ones cannot be removed.           |
 | `connect`    | Bind an integration's per-machine value decision: a credential integration prompts in the approval window (use the host value, store one, or deny) and an `oauth` integration signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
 | `disconnect` | Disconnect an integration from this directory's policy.                       |
-| `revoke`     | Clear an integration's per-machine value decision; the next use prompts again. |
+| `revoke`     | Clear an integration's per-machine value decision (`--all` clears every one); the next use prompts again. |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header

@@ -63,6 +63,18 @@ Feature: lns-service credential storage backends
     Then the "some-provider" entry is removed from the credential state
     And a subsequent request carrying the some-provider placeholder fires a fresh credential card
 
+  Scenario: Revoking all value decisions clears the store for every sandbox
+    Given the keychain backend is active
+    And a workload is running with a "stored" credential rule for "some-provider"
+    When the developer revokes all credentials
+    Then the "some-provider" entry is removed from the credential state
+    And a subsequent request carrying the some-provider placeholder fires a fresh credential card
+
+  Scenario: Revoking all value decisions repairs a corrupt keychain item
+    Given the keychain backend is active holding a corrupt item
+    When the developer revokes all credentials
+    Then the credential state loads back empty
+
   Scenario: Service status reports the active credential backend
     Given the keychain backend is active
     When a status request is served

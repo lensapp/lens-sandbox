@@ -135,6 +135,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 },
             }
         }
+        Request::RevokeAllIntegrations => match crate::credential_flow::backend::reset_entries() {
+            Ok(()) => Response::AllIntegrationsRevoked,
+            Err(e) => Response::Error {
+                message: format!("could not reset the credential store: {e}"),
+            },
+        },
         Request::CancelRun { run_id } => {
             if crate::run_registry::cancel(run_id) {
                 Response::CancelAccepted
@@ -2295,6 +2301,31 @@ mod tests {
                 Some(lns_ipc::CredentialBackendKind::PlaintextFile)
             ),
             other => panic!("expected a Status response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(credential_backend)]
+    async fn revoke_all_surfaces_a_store_failure_as_an_error_response() {
+        // A store pointed at a directory fails save, the deterministic stand-in for an unwritable backend.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+            store: std::sync::Arc::new(
+                crate::credential_flow::store::JsonFileCredentialStore::new(
+                    dir.path().to_path_buf(),
+                ),
+            ),
+            kind: lns_policy::keychain::BackendKind::File,
+            file_path: Some(dir.path().to_path_buf()),
+            fallback_reason: None,
+        });
+        let response = handle_request(&Request::RevokeAllIntegrations, Instant::now()).await;
+        crate::credential_flow::backend::reset_for_tests();
+        match response {
+            Response::Error { message } => {
+                assert!(message.contains("could not reset"), "{message}");
+            }
+            other => panic!("expected an Error response, got {other:?}"),
         }
     }
 

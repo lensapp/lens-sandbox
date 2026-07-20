@@ -90,8 +90,17 @@ pub struct ConnectArgs {
 
 #[derive(clap::Args)]
 pub struct RevokeArgs {
-    #[arg(help = "Integration id whose stored value decision to clear.")]
-    pub id: String,
+    #[arg(
+        help = "Integration id whose stored value decision to clear.",
+        required_unless_present = "all",
+        conflicts_with = "all"
+    )]
+    pub id: Option<String>,
+    #[arg(
+        long,
+        help = "Clear every stored value decision; also repairs a corrupt credential store."
+    )]
+    pub all: bool,
 }
 
 #[derive(clap::Args)]
@@ -193,20 +202,30 @@ pub async fn revoke(
     service: &dyn IntegrationService,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    match service.revoke(&args.id).await? {
+    let outcome = match &args.id {
+        Some(id) => service.revoke(id).await?,
+        None => service.revoke_all().await?,
+    };
+    match outcome {
         RevokeOutcome::ServiceUnavailable => bail!(
-            "the background service must be running to revoke {:?}; start it with `lns service start`",
-            args.id
+            "the background service must be running to revoke; start it with `lns service start`"
         ),
-        RevokeOutcome::Cleared { existed: true } => {
+        RevokeOutcome::AllCleared => {
             writeln!(
                 writer,
-                "Cleared the stored value decision for {:?}; the next use will prompt again.",
-                args.id
+                "Cleared all stored value decisions; each next use will prompt again."
             )?;
         }
-        RevokeOutcome::Cleared { existed: false } => {
-            writeln!(writer, "No stored value decision for {:?}.", args.id)?;
+        RevokeOutcome::Cleared { existed } => {
+            let id = args.id.as_deref().unwrap_or_default();
+            if existed {
+                writeln!(
+                    writer,
+                    "Cleared the stored value decision for {id:?}; the next use will prompt again."
+                )?;
+            } else {
+                writeln!(writer, "No stored value decision for {id:?}.")?;
+            }
         }
     }
     Ok(0)
@@ -790,6 +809,11 @@ mod tests {
             let outcome = self.revoke_outcome.clone();
             Box::pin(async move { Ok(outcome) })
         }
+
+        fn revoke_all(&self) -> super::service::LocalBoxFuture<'_, Result<RevokeOutcome>> {
+            let outcome = self.revoke_outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
     }
 
     #[tokio::test]
@@ -797,7 +821,8 @@ mod tests {
         let mut out = Vec::new();
         let code = revoke(
             &RevokeArgs {
-                id: "some-oauth".into(),
+                id: Some("some-oauth".into()),
+                all: false,
             },
             &FakeSignIn::revoking(RevokeOutcome::Cleared { existed: true }),
             &mut out,
@@ -817,7 +842,8 @@ mod tests {
         let mut out = Vec::new();
         revoke(
             &RevokeArgs {
-                id: "some-oauth".into(),
+                id: Some("some-oauth".into()),
+                all: false,
             },
             &FakeSignIn::revoking(RevokeOutcome::Cleared { existed: false }),
             &mut out,
@@ -829,10 +855,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_all_confirms_every_decision_cleared() {
+        let mut out = Vec::new();
+        let code = revoke(
+            &RevokeArgs {
+                id: None,
+                all: true,
+            },
+            &FakeSignIn::revoking(RevokeOutcome::AllCleared),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("all stored value decisions"), "{text}");
+    }
+
+    #[tokio::test]
     async fn revoke_fails_clearly_when_the_service_is_unavailable() {
         let err = revoke(
             &RevokeArgs {
-                id: "some-oauth".into(),
+                id: Some("some-oauth".into()),
+                all: false,
             },
             &FakeSignIn::revoking(RevokeOutcome::ServiceUnavailable),
             &mut Vec::new(),

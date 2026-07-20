@@ -21,10 +21,11 @@ pub enum BindOutcome {
     ServiceUnavailable,
 }
 
-/// The result of clearing an integration's per-machine value decision through the service.
+/// The result of clearing per-machine value decisions through the service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevokeOutcome {
     Cleared { existed: bool },
+    AllCleared,
     ServiceUnavailable,
 }
 
@@ -43,4 +44,6 @@ pub trait IntegrationService {
     ) -> LocalBoxFuture<'a, anyhow::Result<BindOutcome>>;
 
     fn revoke<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, anyhow::Result<RevokeOutcome>>;
+
+    fn revoke_all(&self) -> LocalBoxFuture<'_, anyhow::Result<RevokeOutcome>>;
 }
