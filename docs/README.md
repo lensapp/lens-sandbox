@@ -20,6 +20,8 @@ You drive everything through one binary: the `lns` CLI.
   `lns exec`, `lns stop`: define a sandbox with `./lns.yaml`, run it or a
   published reference, resources, environment variables, volumes, published
   ports, interactive vs. detached sessions.
+- **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
+  manifest, seed config, network allowlist, and credential wiring.
 - **[Policy and approvals](policy.md)** — the `lns-policy.yaml` file, the default
   `ask` verdict, the approval window, and editing rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of

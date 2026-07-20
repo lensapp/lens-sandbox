@@ -666,8 +666,18 @@ lns sandbox prune --force
 Removing a cached sandbox is always safe in the durable sense — the next `lns run`
 or `lns pull` simply fetches or rebuilds it again.
 
+## A worked example
+
+[`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
+these pieces together: it runs Claude Code inside a sandbox using `spec.image`
+plus a first-boot install, `spec.env`, a tight `policy` allowlist, the
+`claude-code-subscription` integration, a `.` bind at `/workspace`, and a
+`config/` fileset that seeds the agent's home. Copy its `lns.yaml` and `config/`
+into your project and `lns run`.
+
 ## See also
 
+- [Claude Code example](examples/claude-code/) — a full agent recipe.
 - [Policy and approvals](policy.md) — control what the workload may reach.
 - [Credentials](credentials.md) — give the workload placeholders, not secrets.
 - [CLI reference](cli-reference.md) — the full flag list.
