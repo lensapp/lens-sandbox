@@ -148,6 +148,16 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     if doc.spec.image.trim().is_empty() {
         bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
     }
+    for key in doc.spec.env.keys() {
+        if !is_valid_env_key(key) {
+            bail!(
+                "invalid env key {key:?}: env keys must be non-empty and free of '=', whitespace, and control characters"
+            );
+        }
+    }
+    if let Some(resources) = &doc.spec.resources {
+        validate_resources(resources)?;
+    }
     doc.spec
         .policy
         .validate_local_transport()
@@ -249,6 +259,37 @@ fn overlaps_runtime_namespace(path: &str) -> bool {
         None => true,
         Some(first) => first == ".lens",
     }
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key
+            .chars()
+            .any(|c| c == '=' || c.is_control() || c.is_whitespace())
+}
+
+/// A cpu/memory request is a positive count or size — a bare integer ≥ 1 or a digits-then-unit string like `500m`/`2Gi` whose numeric part is non-zero — while the service's unit-aware resolver keeps ownership of the host ceiling and the fallback for anything else.
+fn quantity_is_positive(quantity: &spec::Quantity) -> bool {
+    match quantity {
+        spec::Quantity::Int(n) => *n >= 1,
+        spec::Quantity::Text(text) => {
+            let digits = text.trim().trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.bytes().any(|b| b != b'0')
+        }
+    }
+}
+
+fn validate_resources(resources: &Resources) -> Result<()> {
+    for (field, quantity) in [("cpu", &resources.cpu), ("memory", &resources.memory)] {
+        if let Some(quantity) = quantity {
+            if !quantity_is_positive(quantity) {
+                bail!("resources.{field} {quantity:?} must be a positive count or size");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_volume(volume: &Volume) -> Result<()> {
@@ -532,6 +573,49 @@ mod tests {
                 "expected {expected:?}, got: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn parse_rejects_env_keys_that_would_produce_a_malformed_entry() {
+        for spec in [
+            r#"{"image":"x:1","env":{"FO=O":"v"}}"#,
+            r#"{"image":"x:1","env":{"FOO\nBAR":"v"}}"#,
+            r#"{"image":"x:1","env":{"FOO BAR":"v"}}"#,
+            r#"{"image":"x:1","env":{"":"v"}}"#,
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid env key"),
+                "spec {spec}: got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_non_positive_resource_request() {
+        for spec in [
+            r#"{"image":"x:1","resources":{"cpu":0}}"#,
+            r#"{"image":"x:1","resources":{"cpu":-2}}"#,
+            r#"{"image":"x:1","resources":{"memory":0}}"#,
+            r#"{"image":"x:1","resources":{"memory":"lots"}}"#,
+            r#"{"image":"x:1","resources":{"memory":"0Gi"}}"#,
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("must be a positive count or size"),
+                "spec {spec}: got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_documented_resource_shapes() {
+        parse(&def_json(r#"{"image":"x:1","resources":{"cpu":2,"memory":"1Gi"}}"#)).unwrap();
+        parse(&def_json(
+            r#"{"image":"x:1","resources":{"cpu":"1500m","memory":"768Mi"}}"#,
+        ))
+        .unwrap();
+        parse(&def_json(r#"{"image":"x:1","resources":{"memory":"640"}}"#)).unwrap();
     }
 
     #[test]
