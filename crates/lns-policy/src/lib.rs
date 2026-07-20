@@ -8,6 +8,7 @@ pub mod credentials;
 mod env_subst;
 pub mod host_bind_decisions;
 pub mod integrations;
+pub mod keychain;
 pub mod providers;
 pub mod registry_auth;
 mod secure_file;
