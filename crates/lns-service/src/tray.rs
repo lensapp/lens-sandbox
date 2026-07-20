@@ -1557,20 +1557,6 @@ fn render_credential_card(
                 ui.add_space(BTN_GAP);
             }
             secret_input(ui, input, "Enter a value");
-            let mut help_action = None;
-            if !prompt.host_value_available
-                && let Some(help) = prompt
-                    .token_fallback
-                    .as_ref()
-                    .and_then(|f| f.help.as_deref())
-            {
-                ui.add_space(6.0);
-                if help_link(ui, "How do I create a token?").clicked() {
-                    help_action = Some(CardAction::OpenBrowser {
-                        url: help.to_string(),
-                    });
-                }
-            }
             ui.add_space(BTN_GAP);
             let submit_enabled = !input.trim().is_empty();
             ui.columns(2, |cols| {
@@ -1585,12 +1571,10 @@ fn render_credential_card(
                     chosen = Some(CredentialDecisionRequest::Deny);
                 }
             });
-            chosen
-                .map(|request| CardAction::DecideCredential {
-                    id: id.clone(),
-                    request,
-                })
-                .or(help_action)
+            chosen.map(|request| CardAction::DecideCredential {
+                id: id.clone(),
+                request,
+            })
         },
     );
     (out.inner, out.response)
