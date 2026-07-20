@@ -98,12 +98,14 @@ pub struct OauthAuth {
     pub injections: Vec<InjectionDef>,
 }
 
-/// An offer-time fallback letting the user paste a token into the integration's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL or hint for creating one.
+/// An offer-time fallback letting the user paste a token into the integration's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL for creating one and `command` an optional host CLI that mints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenFallback {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +591,7 @@ mod tests {
         let mut i = oauth_integration();
         i.token_fallback = Some(TokenFallback {
             help: Some("https://example.com/tokens/new".into()),
+            command: None,
         });
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("tokenFallback:"), "got: {yaml}");
@@ -603,7 +606,10 @@ mod tests {
     #[test]
     fn a_token_fallback_round_trips_with_no_help() {
         let mut i = oauth_integration();
-        i.token_fallback = Some(TokenFallback { help: None });
+        i.token_fallback = Some(TokenFallback {
+            help: None,
+            command: None,
+        });
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("tokenFallback:"), "got: {yaml}");
         assert!(
@@ -804,9 +810,13 @@ mod tests {
             "a subscription OAuth token rides only as Authorization: Bearer, got: {:?}",
             cred.injections
         );
-        assert!(
-            integ.token_fallback.is_some(),
-            "the card must point the user at `claude setup-token`"
+        assert_eq!(
+            integ
+                .token_fallback
+                .as_ref()
+                .and_then(|f| f.command.as_deref()),
+            Some("claude setup-token"),
+            "the card must point the user at `claude setup-token` to mint the token"
         );
     }
 

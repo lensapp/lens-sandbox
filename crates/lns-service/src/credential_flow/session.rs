@@ -1883,6 +1883,7 @@ mod tests {
             n.presented.lock().unwrap()[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "a consent card for an integration with a token fallback offers the pivot"
         );
@@ -2115,6 +2116,7 @@ mod tests {
             "some-oauth".to_string(),
             TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             },
         )]));
         (session, notifier, store, rx, connected)
@@ -2240,6 +2242,7 @@ mod tests {
             sign_ins[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
+                command: None,
             }),
             "a sign-in card for an integration with a token fallback offers the pivot"
         );

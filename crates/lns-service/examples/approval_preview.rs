@@ -179,14 +179,17 @@ fn seed_all() -> Snapshot {
             },
             CredentialCardPrompt {
                 id: "cred-novalue".into(),
-                credential_id: "anthropic".into(),
-                action: "use of anthropic placeholder".into(),
+                credential_id: "some-provider".into(),
+                action: "GET api.some-provider.example/settings".into(),
                 host_value_available: false,
                 oauth_display_name: None,
-                token_fallback: None,
-                env_var: Some("ANTHROPIC_API_KEY".into()),
-                injection_domains: vec!["api.anthropic.com".into()],
-                is_project_defined: true,
+                token_fallback: Some(TokenFallback {
+                    help: Some("https://api.some-provider.example/tokens".into()),
+                    command: Some("some-tool setup-token".into()),
+                }),
+                env_var: Some("SOME_TOKEN".into()),
+                injection_domains: vec!["api.some-provider.example".into()],
+                is_project_defined: false,
             },
             CredentialCardPrompt {
                 id: "cred-oauth".into(),
@@ -196,6 +199,7 @@ fn seed_all() -> Snapshot {
                 oauth_display_name: Some("GitHub".into()),
                 token_fallback: Some(TokenFallback {
                     help: Some("https://github.com/settings/personal-access-tokens/new".into()),
+                    command: None,
                 }),
                 env_var: None,
                 injection_domains: vec!["api.github.com".into(), "github.com".into()],
@@ -209,6 +213,7 @@ fn seed_all() -> Snapshot {
             verification_uri: "https://github.com/login/device".into(),
             token_fallback: Some(TokenFallback {
                 help: Some("https://github.com/settings/personal-access-tokens/new".into()),
+                command: None,
             }),
             env_var: None,
             injection_domains: vec!["api.github.com".into(), "github.com".into()],
