@@ -568,9 +568,9 @@ async fn stop<W: std::io::Write>(
     }
 }
 
-/// The service reports an unrecognised run handle as "no such run: …"; only that miss falls through to the cached-artifact path, so a genuine daemon error surfaces instead of masquerading as "no such image".
+/// The service reports a handle that isn't a live run as either "no such run: …" (nothing resolved) or "no active run with id …" (resolved then gone); only those misses fall through to the cached-artifact path, so a genuine daemon error surfaces instead of masquerading as "no such image".
 fn is_unknown_run(message: &str) -> bool {
-    message.contains("no such run")
+    message.contains("no such run") || message.contains("no active run with id")
 }
 
 async fn rm<W: std::io::Write>(
