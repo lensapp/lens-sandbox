@@ -2265,4 +2265,36 @@ mod tests {
             "pull must cache the sandbox and prefetch its base image, got {refs:?}"
         );
     }
+
+    #[tokio::test]
+    #[serial_test::serial(credential_backend)]
+    async fn revoke_integration_surfaces_a_store_failure_as_an_error_response() {
+        // A store pointed at a directory fails load with a non-NotFound error, the deterministic stand-in for an unreadable backend.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+            store: std::sync::Arc::new(
+                crate::credential_flow::store::JsonFileCredentialStore::new(
+                    dir.path().to_path_buf(),
+                ),
+            ),
+            kind: lns_policy::keychain::BackendKind::File,
+            file_path: Some(dir.path().to_path_buf()),
+            fallback_reason: None,
+        });
+        let response = handle_request(
+            &Request::RevokeIntegration {
+                id: "some-provider".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::credential_flow::backend::reset_for_tests();
+        match response {
+            Response::Error { message } => {
+                assert!(message.contains("could not revoke"), "{message}");
+                assert!(message.contains("some-provider"), "{message}");
+            }
+            other => panic!("expected an Error response, got {other:?}"),
+        }
+    }
 }
