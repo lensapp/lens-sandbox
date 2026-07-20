@@ -731,6 +731,9 @@ fn render_cached_inspect<W: std::io::Write>(
             if let Some(workdir) = &view.workdir {
                 writeln!(out, "workdir: {workdir}")?;
             }
+            for entry in &view.env {
+                writeln!(out, "env: {entry}")?;
+            }
             for mount in &view.mounts {
                 let kind = match mount.kind {
                     lns_ipc::SandboxMountKind::Bind => "bind",
@@ -1488,6 +1491,7 @@ mod tests {
                     ports: Vec::new(),
                     filesets: Vec::new(),
                     integrations: vec!["some-provider".into()],
+                    env: Vec::new(),
                     credentials: Vec::new(),
                     policy_flags: Vec::new(),
                 })),

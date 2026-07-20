@@ -53,6 +53,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        env: Vec::new(),
         credentials: Vec::new(),
         policy_flags: Vec::new(),
     }));
@@ -81,6 +82,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         ],
         filesets: Vec::new(),
         integrations: Vec::new(),
+        env: Vec::new(),
         credentials: Vec::new(),
         policy_flags: Vec::new(),
     }));
@@ -107,6 +109,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
             mount_path: mount,
         }],
         integrations: Vec::new(),
+        env: Vec::new(),
         credentials: Vec::new(),
         policy_flags: Vec::new(),
     }));
@@ -153,6 +156,7 @@ fn inspects_sandbox_credential_with_requirement(
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        env: Vec::new(),
         credentials: vec![lns_ipc::SandboxCredential {
             name,
             env,
@@ -174,10 +178,29 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         ports: Vec::new(),
         filesets: Vec::new(),
         integrations: Vec::new(),
+        env: Vec::new(),
         credentials: Vec::new(),
         policy_flags: vec![
             "permissive defaultVerdict: allow — the sandbox is open by default".into(),
         ],
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox setting env "([^"]+)"$"#)]
+fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        integrations: Vec::new(),
+        env: vec![entry],
+        credentials: Vec::new(),
+        policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
