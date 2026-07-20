@@ -302,12 +302,8 @@ mod tests {
             writer.join().unwrap();
         }
         let state = store().load().unwrap();
-        assert_eq!(
-            state.len(),
-            4 * 50,
-            "a lost update dropped {} entries",
-            4 * 50 - state.len()
-        );
+        let lost = 4 * 50 - state.len();
+        assert_eq!(state.len(), 4 * 50, "a lost update dropped {lost} entries");
     }
 
     #[test]
