@@ -172,6 +172,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     if let Some(workdir) = &def.spec.workdir {
         writeln!(out, "  workdir:      {workdir}")?;
     }
+    for (key, value) in &def.spec.env {
+        writeln!(out, "  env:          {key}={value}")?;
+    }
     for volume in &def.spec.volumes {
         let kind = if volume.is_bind() { "bind" } else { "volume" };
         let mode = if volume.read_only() {
@@ -344,6 +347,21 @@ mod tests {
             String::from_utf8(out)
                 .unwrap()
                 .contains("command:      agent --serve")
+        );
+    }
+
+    #[test]
+    fn inspect_local_renders_env_sorted_by_key() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  env:\n    SHELL: /bin/sh\n    FOO: bar\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("env:          FOO=bar"), "got: {text}");
+        assert!(text.contains("env:          SHELL=/bin/sh"), "got: {text}");
+        assert!(
+            text.find("FOO=bar").unwrap() < text.find("SHELL=/bin/sh").unwrap(),
+            "env should render sorted by key: {text}"
         );
     }
 
