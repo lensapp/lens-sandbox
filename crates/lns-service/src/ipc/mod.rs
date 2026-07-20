@@ -2276,6 +2276,30 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(credential_backend)]
+    async fn status_reports_the_plaintext_file_backend_when_installed() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("creds.json");
+        crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+            store: std::sync::Arc::new(
+                crate::credential_flow::store::JsonFileCredentialStore::new(path.clone()),
+            ),
+            kind: lns_policy::keychain::BackendKind::File,
+            file_path: Some(path),
+            fallback_reason: None,
+        });
+        let response = handle_request(&Request::Status, Instant::now()).await;
+        crate::credential_flow::backend::reset_for_tests();
+        match response {
+            Response::Status(info) => assert_eq!(
+                info.credential_backend,
+                Some(lns_ipc::CredentialBackendKind::PlaintextFile)
+            ),
+            other => panic!("expected a Status response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(credential_backend)]
     async fn revoke_integration_surfaces_a_store_failure_as_an_error_response() {
         // A store pointed at a directory fails load with a non-NotFound error, the deterministic stand-in for an unreadable backend.
         let dir = tempfile::TempDir::new().expect("tempdir");
