@@ -328,8 +328,7 @@ mod tests {
         assert_eq!(
             specs[0].mode & 0o7000,
             0,
-            "a pulled fileset must not carry setuid/setgid/sticky bits — push strips them with & 0o777 and pull must match, else a ref fileset with owner: root ships a setuid-root binary; got mode {:o}",
-            specs[0].mode
+            "a pulled fileset must not carry setuid/setgid/sticky bits — push strips them with & 0o777 and pull must match, else a ref fileset with owner: root ships a setuid-root binary"
         );
     }
 
