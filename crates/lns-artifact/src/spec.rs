@@ -279,7 +279,8 @@ fn is_sha256_digest(value: &str) -> bool {
     }
 }
 
-fn is_digest_pinned_image(reference: &str) -> bool {
+/// True only for a `…@sha256:<64 lowercase hex>` reference; the strict pin check `lns push` shares so a malformed digest is rejected at publish, not pull.
+pub fn is_digest_pinned_image(reference: &str) -> bool {
     match reference.rsplit_once('@') {
         Some((_, digest)) => is_sha256_digest(digest),
         None => false,
