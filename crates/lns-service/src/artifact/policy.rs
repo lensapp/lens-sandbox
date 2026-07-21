@@ -13,7 +13,9 @@ impl GuardrailFlag {
             GuardrailFlag::PermissiveDefaultVerdict => {
                 "permissive defaultVerdict: allow — the sandbox is open by default"
             }
-            GuardrailFlag::WildcardAllow => "wildcard allow (*) — every host is permitted",
+            GuardrailFlag::WildcardAllow => {
+                "wildcard allow — a catch-all or whole-suffix host pattern is permitted"
+            }
             GuardrailFlag::BroadCidrAllow => {
                 "broad CIDR allow — a large address range is permitted"
             }
@@ -21,11 +23,25 @@ impl GuardrailFlag {
     }
 }
 
+/// The warning's broad-CIDR line, kept as generous as the gate's own matcher: any prefix of `/16` or shorter covers 65k+ addresses.
+const BROAD_CIDR_PREFIX: u8 = 16;
+
 fn is_broad_cidr(pattern: &str) -> bool {
     match pattern.split_once('/') {
-        Some((_, prefix)) => prefix.parse::<u8>().map(|len| len <= 8).unwrap_or(false),
+        Some((_, prefix)) => prefix
+            .parse::<u8>()
+            .map(|len| len <= BROAD_CIDR_PREFIX)
+            .unwrap_or(false),
         None => false,
     }
+}
+
+/// A catch-all (`*`) or a wildcard sitting directly on a TLD (`*.com`), both of which the gate honors as a broad allow; a scoped wildcard like `*.example.com` is not.
+fn is_broad_wildcard(pattern: &str) -> bool {
+    pattern == "*"
+        || pattern
+            .strip_prefix("*.")
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
 }
 
 pub fn guardrail_flags(policy: &Policy) -> Vec<GuardrailFlag> {
@@ -37,7 +53,7 @@ pub fn guardrail_flags(policy: &Policy) -> Vec<GuardrailFlag> {
         if rule.verdict != Verdict::Allow {
             continue;
         }
-        if rule.match_pattern == "*" {
+        if is_broad_wildcard(&rule.match_pattern) {
             flags.push(GuardrailFlag::WildcardAllow);
         } else if is_broad_cidr(&rule.match_pattern) {
             flags.push(GuardrailFlag::BroadCidrAllow);
@@ -138,9 +154,29 @@ mod tests {
     #[test]
     fn a_narrow_cidr_is_not_flagged_as_broad() {
         assert!(!is_broad_cidr("10.1.2.3/32"));
+        assert!(!is_broad_cidr("10.0.0.0/24"));
         assert!(!is_broad_cidr("api.example.test"));
         assert!(!is_broad_cidr("bad/prefix"));
         assert!(is_broad_cidr("0.0.0.0/0"));
+        assert!(
+            is_broad_cidr("10.0.0.0/12"),
+            "a /12 the gate honors must warn"
+        );
+        assert!(is_broad_cidr("10.0.0.0/16"));
+    }
+
+    #[test]
+    fn a_whole_tld_wildcard_is_broad_but_a_scoped_one_is_not() {
+        assert!(is_broad_wildcard("*"));
+        assert!(is_broad_wildcard("*.com"));
+        assert!(!is_broad_wildcard("*.example.com"));
+        assert!(!is_broad_wildcard("api.example.test"));
+    }
+
+    #[test]
+    fn guardrail_flags_a_whole_tld_wildcard_the_gate_would_honor() {
+        let flags = guardrail_flags(&allow("*.com"));
+        assert_eq!(flags, vec![GuardrailFlag::WildcardAllow]);
     }
 
     #[test]
