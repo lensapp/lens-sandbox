@@ -1,10 +1,10 @@
 use crate::artifact::assembly::{self, AssembledWorkload, ResolvedSandbox};
 use crate::artifact::fileset::{FilesetBudget, fileset_runtime_specs_with_budget};
-use crate::artifact::{RunPath, dispatch, dispatch_run, resolved_from_sandbox};
+use crate::artifact::{RunPath, dispatch_run, resolved_from_sandbox};
 use crate::image::{RealRegistry, Registry, registry_auth_for};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
-use lns_ipc::{ArtifactInspection, ImageView, SandboxMount, SandboxMountKind};
+use lns_ipc::ArtifactInspection;
 use oci_client::Reference;
 
 /// A resolved sandbox ready to boot: the assembled workload plus the guest-write specs that materialize its filesets into the microVM.
@@ -202,7 +202,6 @@ async fn materialize_filesets(
     Ok(out)
 }
 
-/// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the OCI empty/config layer is skipped and a fileset with no content layer is refused.
 async fn pull_fileset_layers(
     reference: &str,
     content_store: &crate::content_store::ContentStore,
@@ -214,6 +213,7 @@ async fn pull_fileset_layers(
     pull_fileset_layers_with(&registry, &parsed, content_store).await
 }
 
+/// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the fileset is refused before any download unless it is a digest-pinned FileSet artifact within the byte ceiling, and a stream failure leaves no partial content staged.
 async fn pull_fileset_layers_with<R: Registry>(
     registry: &R,
     parsed: &Reference,
@@ -221,8 +221,11 @@ async fn pull_fileset_layers_with<R: Registry>(
 ) -> Result<Vec<std::path::PathBuf>> {
     let (manifest, digest, config) = registry.pull_manifest_and_config(parsed).await?;
     crate::image::verify_digest_pin(parsed, &digest, &parsed.to_string())?;
-    validate_fileset_artifact(parsed, &manifest, &config)?;
-    validate_fileset_layer_sizes(&manifest, lns_artifact::build::MAX_FILESET_BYTES)?;
+    crate::artifact::fileset::validate_fileset_artifact(parsed, &manifest, &config)?;
+    crate::artifact::fileset::validate_fileset_layer_sizes(
+        &manifest,
+        lns_artifact::build::MAX_FILESET_BYTES,
+    )?;
     let content: Vec<_> = manifest.layers.iter().collect();
     if content.is_empty() {
         anyhow::bail!("fileset {parsed} has no content layer");
@@ -245,56 +248,6 @@ async fn pull_fileset_layers_with<R: Registry>(
         blobs.push(installed.path);
     }
     Ok(blobs)
-}
-
-fn validate_fileset_layer_sizes(
-    manifest: &oci_client::manifest::OciImageManifest,
-    max_bytes: u64,
-) -> Result<u64> {
-    let mut total = 0_u64;
-    for layer in &manifest.layers {
-        let size = u64::try_from(layer.size)
-            .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
-        if size > max_bytes.saturating_sub(total) {
-            anyhow::bail!("fileset layers exceed the {max_bytes}-byte limit");
-        }
-        total += size;
-    }
-    Ok(total)
-}
-
-fn validate_fileset_artifact(
-    reference: &Reference,
-    manifest: &oci_client::manifest::OciImageManifest,
-    config: &str,
-) -> Result<()> {
-    let kind = lns_artifact::spec::Kind::FileSet;
-    let expected_artifact_type = kind.artifact_type();
-    if let Some(actual) = manifest.artifact_type.as_deref()
-        && actual != expected_artifact_type
-    {
-        anyhow::bail!("{reference} is not a FileSet artifact: artifact type is {actual}");
-    }
-    let expected_config_media_type = kind.config_media_type();
-    if manifest.config.media_type != expected_config_media_type {
-        anyhow::bail!(
-            "{reference} is not a FileSet artifact: config media type is {}",
-            manifest.config.media_type
-        );
-    }
-    lns_artifact::spec::parse_fileset(config.as_bytes())
-        .with_context(|| format!("validating FileSet config for {reference}"))?;
-    if let Some(layer) = manifest
-        .layers
-        .iter()
-        .find(|layer| layer.media_type != "application/vnd.oci.image.layer.v1.tar")
-    {
-        anyhow::bail!(
-            "FileSet {reference} has unsupported layer media type {}",
-            layer.media_type
-        );
-    }
-    Ok(())
 }
 
 /// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
@@ -344,118 +297,23 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     }
 }
 
-fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc::SandboxPort>> {
-    ports
-        .iter()
-        .map(|port| {
-            Ok(lns_ipc::SandboxPort {
-                host: port
-                    .host
-                    .map(u16::try_from)
-                    .transpose()
-                    .with_context(|| format!("declared host port {:?} out of range", port.host))?,
-                container: u16::try_from(port.container).with_context(|| {
-                    format!("declared container port {} out of range", port.container)
-                })?,
-            })
-        })
-        .collect()
-}
-
-/// Peek a reference's manifest and produce the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared integrations, and any over-broad-policy flags.
 pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
     let registry = crate::image::caching_registry_for(image_ref)?;
-    inspect_with(image_ref, &reference, &registry).await
-}
-
-async fn inspect_with<R: Registry>(
-    image_ref: &str,
-    reference: &Reference,
-    registry: &R,
-) -> Result<ArtifactInspection> {
     let (manifest, digest, config_json) = registry
-        .pull_manifest_and_config(reference)
+        .pull_manifest_and_config(&reference)
         .await
         .with_context(|| format!("inspecting {image_ref}"))?;
-    crate::image::verify_digest_pin(reference, &digest, image_ref)?;
-    match dispatch(
+    crate::image::verify_digest_pin(&reference, &digest, image_ref)?;
+    crate::artifact::inspect::project_inspection(
+        image_ref,
+        digest,
         manifest.artifact_type.as_deref(),
-        Some(manifest.config.media_type.as_str()),
-    )? {
-        RunPath::SingleImage => Ok(ArtifactInspection::Image(ImageView {
-            reference: image_ref.to_string(),
-            digest,
-        })),
-        RunPath::Sandbox => {
-            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
-                .with_context(|| format!("inspecting sandbox {image_ref}"))?;
-            let resolved = resolved_from_sandbox(&def);
-            Ok(ArtifactInspection::Sandbox(Box::new(
-                lns_ipc::SandboxView {
-                    reference: image_ref.to_string(),
-                    digest,
-                    image: resolved.base_image,
-                    workdir: def.spec.workdir.clone(),
-                    mounts: def
-                        .spec
-                        .volumes
-                        .iter()
-                        .map(|volume| SandboxMount {
-                            kind: if volume.is_bind() {
-                                SandboxMountKind::Bind
-                            } else {
-                                SandboxMountKind::Volume
-                            },
-                            source: volume.source().to_string(),
-                            target: volume.target.clone(),
-                            read_only: volume.read_only(),
-                        })
-                        .collect(),
-                    ports: declared_view_ports(&def.spec.ports)?,
-                    filesets: def
-                        .spec
-                        .filesets
-                        .iter()
-                        .map(|fileset| lns_ipc::SandboxFileset {
-                            path: fileset.path.clone(),
-                            reference: fileset.reference.clone(),
-                            mount_path: fileset.mount_path.clone(),
-                        })
-                        .collect(),
-                    integrations: def.spec.integrations,
-                    env: def
-                        .spec
-                        .env
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect(),
-                    credentials: def
-                        .spec
-                        .credentials
-                        .into_iter()
-                        .map(|credential| lns_ipc::SandboxCredential {
-                            name: credential.name,
-                            env: credential.env,
-                            required: credential.required,
-                        })
-                        .collect(),
-                    policy_flags: resolved
-                        .policy
-                        .as_ref()
-                        .map(|p| {
-                            crate::artifact::policy::guardrail_flags(p)
-                                .iter()
-                                .map(|f| f.message().to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                },
-            )))
-        }
-    }
+        &manifest.config.media_type,
+        &config_json,
+    )
 }
 
 #[cfg(test)]
@@ -463,77 +321,11 @@ mod tests {
     use super::*;
     use oci_client::manifest::{OciDescriptor, OciImageManifest};
     use sha2::{Digest, Sha256};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct InspectRegistry {
-        requested: Mutex<Option<String>>,
-    }
-
-    impl Registry for InspectRegistry {
-        async fn pull_manifest_and_config(
-            &self,
-            reference: &Reference,
-        ) -> Result<(OciImageManifest, String, String)> {
-            *self.requested.lock().unwrap() = Some(reference.to_string());
-            Ok((
-                OciImageManifest {
-                    config: OciDescriptor {
-                        media_type: "application/vnd.oci.image.config.v1+json".into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                format!("sha256:{}", "a".repeat(64)),
-                "{}".into(),
-            ))
-        }
-
-        async fn pull_blob(
-            &self,
-            _reference: &Reference,
-            _descriptor: &OciDescriptor,
-            _on_chunk: &(dyn Fn(u64) + Send + Sync),
-        ) -> Result<Vec<u8>> {
-            anyhow::bail!("inspection does not pull layers")
-        }
-
-        async fn pull_blob_to_path(
-            &self,
-            _reference: &Reference,
-            _descriptor: &OciDescriptor,
-            _max_bytes: u64,
-            _path: &std::path::Path,
-            _on_chunk: &(dyn Fn(u64) + Send + Sync),
-        ) -> Result<()> {
-            anyhow::bail!("inspection does not pull layers")
-        }
-    }
-
-    #[tokio::test]
-    async fn a_mutable_tag_stays_unpinned_for_registry_inspection() {
-        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
-        let registry = InspectRegistry {
-            requested: Mutex::new(None),
-        };
-
-        inspect_with(&reference.to_string(), &reference, &registry)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            registry.requested.lock().unwrap().as_deref(),
-            Some("registry.example.test/team/sandbox:latest")
-        );
-    }
 
     struct StreamingRegistry {
         blob: Vec<u8>,
         fail: bool,
-        artifact_type: Option<String>,
-        config_media_type: String,
-        config: String,
-        layer_media_type: String,
         manifest_digest: Option<String>,
         streamed: AtomicBool,
     }
@@ -543,10 +335,6 @@ mod tests {
             Self {
                 blob,
                 fail,
-                artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
-                config_media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
-                config: r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
-                layer_media_type: "application/vnd.oci.image.layer.v1.tar".into(),
                 manifest_digest: None,
                 streamed: AtomicBool::new(false),
             }
@@ -561,13 +349,13 @@ mod tests {
             let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
             Ok((
                 OciImageManifest {
-                    artifact_type: self.artifact_type.clone(),
+                    artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
                     config: OciDescriptor {
-                        media_type: self.config_media_type.clone(),
+                        media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
                         ..Default::default()
                     },
                     layers: vec![OciDescriptor {
-                        media_type: self.layer_media_type.clone(),
+                        media_type: "application/vnd.oci.image.layer.v1.tar".into(),
                         digest,
                         size: self.blob.len() as i64,
                         ..Default::default()
@@ -578,7 +366,7 @@ mod tests {
                     .clone()
                     .or_else(|| reference.digest().map(ToOwned::to_owned))
                     .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
-                self.config.clone(),
+                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
             ))
         }
 
@@ -588,7 +376,7 @@ mod tests {
             _descriptor: &OciDescriptor,
             _on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<Vec<u8>> {
-            anyhow::bail!("fileset pulls must not materialize a blob Vec")
+            anyhow::bail!("fileset pulls must stream, never materialize a blob Vec")
         }
 
         async fn pull_blob_to_path(
@@ -620,59 +408,19 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn sandbox_inspection_discloses_declared_credential_slots() {
-        let mut registry = StreamingRegistry::fileset(Vec::new(), false);
-        registry.artifact_type = Some(lns_artifact::spec::Kind::Sandbox.artifact_type());
-        registry.config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
-        registry.config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}}"#.into();
-        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
-
-        let inspection = inspect_with(&reference.to_string(), &reference, &registry)
-            .await
-            .unwrap();
-
-        let ArtifactInspection::Sandbox(view) = inspection else {
-            panic!("expected a sandbox inspection")
-        };
-        assert_eq!(
-            view.credentials,
-            [lns_ipc::SandboxCredential {
-                name: "some-provider".into(),
-                env: "SOME_TOKEN".into(),
-                required: true,
-            }]
-        );
+    fn pinned_reference() -> Reference {
+        "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn sandbox_inspection_discloses_declared_env_sorted_by_key() {
-        let mut registry = StreamingRegistry::fileset(Vec::new(), false);
-        registry.artifact_type = Some(lns_artifact::spec::Kind::Sandbox.artifact_type());
-        registry.config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
-        registry.config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","env":{"SHELL":"/bin/sh","FOO":"bar"}}}"#.into();
-        let reference: Reference = "registry.example.test/team/sandbox:latest".parse().unwrap();
-
-        let inspection = inspect_with(&reference.to_string(), &reference, &registry)
-            .await
-            .unwrap();
-
-        let ArtifactInspection::Sandbox(view) = inspection else {
-            panic!("expected a sandbox inspection")
-        };
-        assert_eq!(view.env, ["FOO=bar", "SHELL=/bin/sh"]);
-    }
-
-    #[tokio::test]
-    async fn fileset_layers_stream_to_verified_content_without_using_the_vec_api() {
+    async fn fileset_layers_stream_to_verified_content_without_buffering_a_blob_vec() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
         let registry = StreamingRegistry::fileset(vec![7; 512 * 1024], false);
-        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
 
-        let paths = pull_fileset_layers_with(&registry, &reference, &store)
+        let paths = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
             .await
             .unwrap();
 
@@ -687,11 +435,8 @@ mod tests {
         let store = crate::content_store::ContentStore::new(dir.path());
         let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
         registry.manifest_digest = Some(format!("sha256:{}", "b".repeat(64)));
-        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
 
-        let err = pull_fileset_layers_with(&registry, &reference, &store)
+        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
             .await
             .unwrap_err();
 
@@ -702,37 +447,13 @@ mod tests {
         assert!(!registry.streamed.load(Ordering::Relaxed));
     }
 
-    #[test]
-    fn declared_fileset_layers_are_rejected_before_their_aggregate_exceeds_the_limit() {
-        let manifest = OciImageManifest {
-            layers: vec![
-                OciDescriptor {
-                    digest: "sha256:a".into(),
-                    size: 3,
-                    ..Default::default()
-                },
-                OciDescriptor {
-                    digest: "sha256:b".into(),
-                    size: 3,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let err = validate_fileset_layer_sizes(&manifest, 5).unwrap_err();
-        assert!(format!("{err:#}").contains("5-byte limit"));
-    }
-
     #[tokio::test]
     async fn a_failed_fileset_stream_leaves_no_partial_content() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
         let registry = StreamingRegistry::fileset(vec![7; 128 * 1024], true);
-        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
 
-        let err = pull_fileset_layers_with(&registry, &reference, &store)
+        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
             .await
             .unwrap_err();
 
@@ -741,70 +462,5 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(entries, 0);
-    }
-
-    #[tokio::test]
-    async fn a_plain_image_is_refused_before_any_layer_is_downloaded() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::content_store::ContentStore::new(dir.path());
-        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
-        registry.artifact_type = None;
-        registry.config_media_type = "application/vnd.oci.image.config.v1+json".into();
-        registry.config = "{}".into();
-        let reference: Reference = "registry.example.test/team/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
-
-        let err = pull_fileset_layers_with(&registry, &reference, &store)
-            .await
-            .unwrap_err();
-
-        assert!(
-            format!("{err:#}").contains("not a FileSet artifact"),
-            "got: {err:#}"
-        );
-        assert!(!registry.streamed.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn a_fileset_with_the_wrong_config_kind_is_refused_before_download() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::content_store::ContentStore::new(dir.path());
-        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
-        registry.config = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"files"},"spec":{}}"#.into();
-        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
-
-        let err = pull_fileset_layers_with(&registry, &reference, &store)
-            .await
-            .unwrap_err();
-
-        assert!(
-            format!("{err:#}").contains("expected kind FileSet"),
-            "got: {err:#}"
-        );
-        assert!(!registry.streamed.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn a_fileset_with_a_compressed_layer_is_refused_before_download() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::content_store::ContentStore::new(dir.path());
-        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
-        registry.layer_media_type = "application/vnd.oci.image.layer.v1.tar+gzip".into();
-        let reference: Reference = "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()
-            .unwrap();
-
-        let err = pull_fileset_layers_with(&registry, &reference, &store)
-            .await
-            .unwrap_err();
-
-        assert!(
-            format!("{err:#}").contains("unsupported layer media type"),
-            "got: {err:#}"
-        );
-        assert!(!registry.streamed.load(Ordering::Relaxed));
     }
 }

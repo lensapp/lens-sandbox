@@ -1,0 +1,304 @@
+use crate::artifact::{RunPath, dispatch, resolved_from_sandbox};
+use anyhow::{Context, Result};
+use lns_ipc::{ArtifactInspection, ImageView, SandboxMount, SandboxMountKind};
+
+fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc::SandboxPort>> {
+    ports
+        .iter()
+        .map(|port| {
+            Ok(lns_ipc::SandboxPort {
+                host: port
+                    .host
+                    .map(u16::try_from)
+                    .transpose()
+                    .with_context(|| format!("declared host port {:?} out of range", port.host))?,
+                container: u16::try_from(port.container).with_context(|| {
+                    format!("declared container port {} out of range", port.container)
+                })?,
+            })
+        })
+        .collect()
+}
+
+/// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared integrations, and any over-broad-policy flags.
+pub(crate) fn project_inspection(
+    image_ref: &str,
+    digest: String,
+    artifact_type: Option<&str>,
+    config_media_type: &str,
+    config_json: &str,
+) -> Result<ArtifactInspection> {
+    match dispatch(artifact_type, Some(config_media_type))? {
+        RunPath::SingleImage => Ok(ArtifactInspection::Image(ImageView {
+            reference: image_ref.to_string(),
+            digest,
+        })),
+        RunPath::Sandbox => {
+            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
+                .with_context(|| format!("inspecting sandbox {image_ref}"))?;
+            let resolved = resolved_from_sandbox(&def);
+            Ok(ArtifactInspection::Sandbox(Box::new(
+                lns_ipc::SandboxView {
+                    reference: image_ref.to_string(),
+                    digest,
+                    image: resolved.base_image,
+                    workdir: def.spec.workdir.clone(),
+                    mounts: def
+                        .spec
+                        .volumes
+                        .iter()
+                        .map(|volume| SandboxMount {
+                            kind: if volume.is_bind() {
+                                SandboxMountKind::Bind
+                            } else {
+                                SandboxMountKind::Volume
+                            },
+                            source: volume.source().to_string(),
+                            target: volume.target.clone(),
+                            read_only: volume.read_only(),
+                        })
+                        .collect(),
+                    ports: declared_view_ports(&def.spec.ports)?,
+                    filesets: def
+                        .spec
+                        .filesets
+                        .iter()
+                        .map(|fileset| lns_ipc::SandboxFileset {
+                            path: fileset.path.clone(),
+                            reference: fileset.reference.clone(),
+                            mount_path: fileset.mount_path.clone(),
+                        })
+                        .collect(),
+                    integrations: def.spec.integrations,
+                    env: def
+                        .spec
+                        .env
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect(),
+                    credentials: def
+                        .spec
+                        .credentials
+                        .into_iter()
+                        .map(|credential| lns_ipc::SandboxCredential {
+                            name: credential.name,
+                            env: credential.env,
+                            required: credential.required,
+                        })
+                        .collect(),
+                    policy_flags: resolved
+                        .policy
+                        .as_ref()
+                        .map(|p| {
+                            crate::artifact::policy::guardrail_flags(p)
+                                .iter()
+                                .map(|f| f.message().to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lns_ipc::{SandboxCredential, SandboxFileset, SandboxPort, SandboxView};
+
+    fn digest() -> String {
+        format!("sha256:{}", "a".repeat(64))
+    }
+
+    fn project_sandbox(config: &str) -> Result<ArtifactInspection> {
+        let artifact_type = lns_artifact::spec::Kind::Sandbox.artifact_type();
+        let config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
+        project_inspection(
+            "registry.example.test/team/sandbox:latest",
+            digest(),
+            Some(&artifact_type),
+            &config_media_type,
+            config,
+        )
+    }
+
+    #[test]
+    fn a_plain_image_projects_to_an_image_view_carrying_its_digest() {
+        let inspection = project_inspection(
+            "registry.example.test/team/app:latest",
+            digest(),
+            None,
+            "application/vnd.oci.image.config.v1+json",
+            "{}",
+        )
+        .unwrap();
+
+        assert_eq!(
+            inspection,
+            ArtifactInspection::Image(ImageView {
+                reference: "registry.example.test/team/app:latest".into(),
+                digest: digest(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_artifact_type_is_refused() {
+        let err = project_inspection(
+            "registry.example.test/team/app:latest",
+            digest(),
+            Some("application/vnd.acme.thing"),
+            "application/vnd.oci.image.config.v1+json",
+            "{}",
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("unsupported artifact type"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_published_sandbox_config_surfaces_a_parse_error() {
+        let err = project_sandbox("not json").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("inspecting sandbox"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"}],"policy":{"defaultVerdict":"allow"}}}"#;
+
+        let inspection = project_sandbox(config).unwrap();
+
+        assert_eq!(
+            inspection,
+            ArtifactInspection::Sandbox(Box::new(SandboxView {
+                reference: "registry.example.test/team/sandbox:latest".into(),
+                digest: digest(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: Some("/work".into()),
+                mounts: vec![
+                    SandboxMount {
+                        kind: SandboxMountKind::Bind,
+                        source: ".".into(),
+                        target: "/workspace".into(),
+                        read_only: false,
+                    },
+                    SandboxMount {
+                        kind: SandboxMountKind::Volume,
+                        source: "cache".into(),
+                        target: "/root/.cache".into(),
+                        read_only: true,
+                    },
+                ],
+                ports: vec![
+                    SandboxPort {
+                        host: None,
+                        container: 8080,
+                    },
+                    SandboxPort {
+                        host: Some(9090),
+                        container: 3000,
+                    },
+                ],
+                filesets: vec![SandboxFileset {
+                    path: None,
+                    reference: Some(
+                        "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into()
+                    ),
+                    mount_path: "/root/.agent/skills".into(),
+                }],
+                integrations: vec![],
+                env: vec![],
+                credentials: vec![],
+                policy_flags: vec![
+                    "permissive defaultVerdict: allow — the sandbox is open by default".into()
+                ],
+            }))
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_declared_credentials_and_no_flags_without_a_policy() {
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}}"#;
+
+        let inspection = project_sandbox(config).unwrap();
+
+        assert_eq!(
+            inspection,
+            ArtifactInspection::Sandbox(Box::new(SandboxView {
+                reference: "registry.example.test/team/sandbox:latest".into(),
+                digest: digest(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: None,
+                mounts: vec![],
+                ports: vec![],
+                filesets: vec![],
+                integrations: vec![],
+                env: vec![],
+                credentials: vec![SandboxCredential {
+                    name: "some-provider".into(),
+                    env: "SOME_TOKEN".into(),
+                    required: true,
+                }],
+                policy_flags: vec![],
+            }))
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_env_sorted_by_key() {
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","env":{"SHELL":"/bin/sh","FOO":"bar"}}}"#;
+
+        let inspection = project_sandbox(config).unwrap();
+
+        assert_eq!(
+            inspection,
+            ArtifactInspection::Sandbox(Box::new(SandboxView {
+                reference: "registry.example.test/team/sandbox:latest".into(),
+                digest: digest(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: None,
+                mounts: vec![],
+                ports: vec![],
+                filesets: vec![],
+                integrations: vec![],
+                env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
+                credentials: vec![],
+                policy_flags: vec![],
+            }))
+        );
+    }
+
+    #[test]
+    fn a_declared_container_port_out_of_u16_range_is_refused() {
+        let ports = [lns_artifact::spec::Port {
+            host: None,
+            container: 70_000,
+        }];
+        let err = declared_view_ports(&ports).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declared container port 70000 out of range"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_declared_host_port_out_of_u16_range_is_refused() {
+        let ports = [lns_artifact::spec::Port {
+            host: Some(70_000),
+            container: 3000,
+        }];
+        let err = declared_view_ports(&ports).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declared host port"),
+            "got: {err:#}"
+        );
+    }
+}
