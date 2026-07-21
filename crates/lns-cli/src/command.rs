@@ -131,20 +131,32 @@ fn workload_position<'a>(
         return app.find_subcommand(name).map(|cmd| (idx, cmd));
     }
     let sandbox = app.find_subcommand("sandbox")?;
-    let (nested_idx, nested) = nested_workload(raw, idx + 1)?;
+    let (nested_idx, nested) = nested_workload(app, raw, idx + 1)?;
     sandbox.find_subcommand(nested).map(|cmd| (nested_idx, cmd))
 }
 
-fn nested_workload(raw: &[OsString], from: usize) -> Option<(usize, &'static str)> {
-    for (idx, arg) in raw.iter().enumerate().skip(from) {
-        let Some(arg) = arg.to_str() else { continue };
+fn nested_workload(
+    app: &clap::Command,
+    raw: &[OsString],
+    from: usize,
+) -> Option<(usize, &'static str)> {
+    let global = value_consuming_options(app);
+    let mut idx = from;
+    while idx < raw.len() {
+        let Some(arg) = raw[idx].to_str() else {
+            idx += 1;
+            continue;
+        };
         if arg == "--" {
             return None;
         }
-        if arg.starts_with('-') {
-            continue;
+        if arg.starts_with('-') && global.contains(arg) && !arg.contains('=') {
+            idx += 2;
+        } else if arg.starts_with('-') {
+            idx += 1;
+        } else {
+            return workload_subcommand(arg).map(|name| (idx, name));
         }
-        return workload_subcommand(arg).map(|name| (idx, name));
     }
     None
 }
@@ -453,6 +465,43 @@ mod tests {
         assert!(exec.tty);
         assert_eq!(exec.run, "demo");
         assert_eq!(exec.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn nested_run_normalizes_after_a_value_consuming_global_between_sandbox_and_run() {
+        let run = sandbox_run_args(&[
+            "lns",
+            "sandbox",
+            "--log-level",
+            "debug",
+            "run",
+            "-it",
+            "alpine",
+            "sh",
+        ]);
+        assert!(run.interactive, "the -it cluster must still expand");
+        assert!(run.tty);
+        assert_eq!(run.image.as_deref(), Some("alpine"));
+        assert_eq!(run.cmd, ["sh"]);
+    }
+
+    #[test]
+    fn nested_run_normalizes_past_an_equals_form_global_between_sandbox_and_run() {
+        let run = sandbox_run_args(&[
+            "lns",
+            "sandbox",
+            "--log-level=debug",
+            "run",
+            "-it",
+            "alpine",
+            "sh",
+        ]);
+        assert!(
+            run.interactive,
+            "an =-form global carries its own value, not the next token"
+        );
+        assert_eq!(run.image.as_deref(), Some("alpine"));
+        assert_eq!(run.cmd, ["sh"]);
     }
 
     #[test]
