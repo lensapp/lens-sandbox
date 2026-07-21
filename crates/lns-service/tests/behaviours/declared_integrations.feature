@@ -59,6 +59,21 @@ Feature: a sandbox definition's declared integrations are offered, not armed
     Then the allow rule is written to the directory's lns-policy.yaml
     And the sandbox definition is not modified
 
+  Scenario: A credential slot does not open a route past a local deny-by-default
+    Given the machine catalog has a credential integration "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the sandbox definition declares an optional credential slot "some-provider" injected as "SOME_TOKEN"
+    And the directory's lns-policy.yaml denies all by default
+    When the sandbox is launched
+    Then a workload request to "api.some-provider.example" is denied by policy
+
+  Scenario: A connectable sharing a declared integration's domain is suppressed, not offered
+    Given the machine catalog has a credential integration "some-primary" managing "PRIMARY_TOKEN" with a route to "api.shared.example"
+    And the machine catalog has a credential integration "some-secondary" managing "SECONDARY_TOKEN" with a route to "api.shared.example"
+    And the sandbox definition declares integration "some-primary"
+    And the directory's lns-policy.yaml connects no integrations
+    When the sandbox is launched
+    Then "some-secondary" is not offered for a reactive connect
+
   Scenario: An unknown declared integration refuses the launch
     Given the sandbox definition declares integration "some-unknown"
     And the machine catalog has no integration "some-unknown"

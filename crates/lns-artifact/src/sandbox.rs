@@ -713,6 +713,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_a_fileset_mount_path_that_smuggles_a_control_char() {
+        let result = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/.lens\n/x"}]}"#,
+        ));
+        assert!(
+            result.is_err(),
+            "a mountPath of `/.lens\\n/x` slips past overlaps_runtime_namespace (first segment `.lens\\n` != `.lens`) and injects a `/x`-rooted line into the workload-owned chown manifest; it must be refused"
+        );
+    }
+
+    #[test]
     fn parse_rejects_a_relative_or_traversing_fileset_mount_path() {
         for mount in ["skills", "/root/../etc"] {
             let spec = format!(

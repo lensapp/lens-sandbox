@@ -518,3 +518,30 @@ fn integration_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), Stri
         ))
     }
 }
+
+fn definition_with_credential_slot(id: &str, env: &str) -> String {
+    format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"name":"{id}","env":"{env}"}}]}}}}"#
+    )
+}
+
+#[given(
+    regex = r#"^the sandbox definition declares an optional credential slot "([^"]+)" injected as "([^"]+)"$"#
+)]
+fn definition_declares_credential_slot(w: &mut BehaviourWorld, id: String, env: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.definition = Some(definition_with_credential_slot(&id, &env));
+}
+
+#[then(regex = r#"^"([^"]+)" is not offered for a reactive connect$"#)]
+fn integration_is_not_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.offered.contains(&id) {
+        Err(format!(
+            "{id} shares a declared integration's domain and must be suppressed; instead it was offered, so its machine-stored value would arm and inject over the declared credential: {:?}",
+            rig.offered
+        ))
+    } else {
+        Ok(())
+    }
+}

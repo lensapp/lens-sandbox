@@ -1126,6 +1126,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_keeps_the_base_of_a_by_reference_sandbox_run_by_tag() {
+        let sandbox_tag = "registry.example.test/team/sandbox:1";
+        let sandbox_pinned = format!(
+            "registry.example.test/team/sandbox@sha256:{}",
+            "b".repeat(64)
+        );
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(&sandbox_pinned, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let caches = FakeCaches {
+            freed: 4,
+            ..Default::default()
+        };
+
+        let report = prune_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &[running("aa03", sandbox_tag)],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            fs.has(&record_path(Path::new(ROOT), base)),
+            "an auto-pulled sandbox registers its run under the raw tag but records base retention under the resolved digest; prune must still recognize the run as the holder and keep the base, but it was reclaimed: {report:?}"
+        );
+        assert_eq!(
+            caches.swept_with.lock().unwrap()[0],
+            HashSet::from(["sha256:base-layer".to_string()]),
+            "the base image's layer blobs must be kept while the sandbox is running"
+        );
+    }
+
+    #[tokio::test]
     async fn remove_of_a_sandbox_removes_its_unshared_base_image_and_layers() {
         let sandbox = "registry.example.test/team/sandbox:1";
         let base = "registry.example.test/team/base:1";
