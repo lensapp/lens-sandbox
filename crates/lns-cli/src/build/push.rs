@@ -22,6 +22,22 @@ fn registry_auth_for(reference: &Reference) -> RegistryAuth {
     }
 }
 
+/// Only a genuine credential rejection earns the "sign in" recipe; a DNS/connection/server failure surfaces verbatim so the user fixes connectivity, not authentication.
+fn auth_error(
+    reference: &Reference,
+    auth: &RegistryAuth,
+    err: oci_client::errors::OciDistributionError,
+) -> anyhow::Error {
+    use oci_client::errors::OciDistributionError::{AuthenticationFailure, UnauthorizedError};
+    match &err {
+        AuthenticationFailure(_) | UnauthorizedError { .. } => auth_refused(reference, auth, err),
+        _ => anyhow::Error::new(err).context(format!(
+            "could not reach {} to authenticate the push",
+            reference.registry()
+        )),
+    }
+}
+
 fn auth_refused(
     reference: &Reference,
     auth: &RegistryAuth,
@@ -76,7 +92,7 @@ pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
     client
         .auth(&reference, &auth, RegistryOperation::Push)
         .await
-        .map_err(|e| auth_refused(&reference, &auth, e))?;
+        .map_err(|e| auth_error(&reference, &auth, e))?;
     for blob in &built.blobs {
         client
             .push_blob(&reference, blob.data.clone(), &blob.digest)
@@ -139,6 +155,41 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("gh auth"), "{text}");
+    }
+
+    #[test]
+    fn an_authentication_failure_gets_the_login_recipe() {
+        use oci_client::errors::OciDistributionError;
+        let err = auth_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::UnauthorizedError {
+                url: "https://ghcr.io/v2/".into(),
+            },
+        );
+        assert!(
+            format!("{err:#}").contains("no login is stored"),
+            "a 401 must still point at `lns login`: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_surfaces_the_error_without_the_login_recipe() {
+        use oci_client::errors::OciDistributionError;
+        let err = auth_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::GenericError(Some("dns error: failed to lookup ghcr.io".into())),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            !text.contains("no login is stored"),
+            "a connectivity failure must not be misreported as a missing login: {text}"
+        );
+        assert!(
+            text.contains("could not reach ghcr.io") && text.contains("dns error"),
+            "the real connectivity error must surface: {text}"
+        );
     }
 
     #[test]
