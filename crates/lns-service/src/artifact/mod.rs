@@ -122,7 +122,7 @@ pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
         resolved
             .filesets
             .iter()
-            .filter(|fileset| !fileset.reference.contains("@sha256:"))
+            .filter(|fileset| !lns_artifact::spec::is_digest_pinned_image(&fileset.reference))
             .map(|fileset| {
                 format!(
                     "fileset ref {} is not digest-pinned; refusing to run it",
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn published_fileset_problems_refuse_paths_and_floating_refs_but_pass_pinned_refs() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:abc","mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/c"}]}}"#,
         )
         .unwrap();
         let problems = published_fileset_problems(&resolved_from_sandbox(&def));
