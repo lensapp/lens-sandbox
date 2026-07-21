@@ -516,7 +516,20 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
             "invalid volume target {target:?}: must not contain `.` or `..` path segments"
         ));
     }
+    if shadows_runtime_namespace(target) {
+        return Err(format!(
+            "invalid volume target {target:?}: must not overlap the /.lens runtime namespace, which belongs to the sandbox itself"
+        ));
+    }
     Ok(())
+}
+
+/// True for `/` and any path whose first real segment is `.lens`; the runtime tree (supervisor, guest tools) can never be shadowed by a mount, whatever its source.
+fn shadows_runtime_namespace(target: &str) -> bool {
+    match target.split('/').find(|seg| !seg.is_empty() && *seg != ".") {
+        None => true,
+        Some(first) => first == ".lens",
+    }
 }
 
 /// A char that can't safely ride the kernel cmdline value position the guest tokenizes (whitespace splits, `"` toggles quoting); rejected in volume targets, bind sources, and dropped-path names alike.
@@ -1455,6 +1468,18 @@ mod tests {
         validate_volume_target("/srv/..").unwrap_err();
         validate_volume_target("/../etc").unwrap_err();
         validate_volume_target("/a/./b").unwrap_err();
+    }
+
+    #[test]
+    fn validate_volume_target_refuses_shadowing_the_lens_runtime_namespace() {
+        for target in ["/", "/.lens", "/.lens/guest-tools/bin"] {
+            let err = validate_volume_target(target).unwrap_err();
+            assert!(
+                err.contains("/.lens runtime namespace"),
+                "a -v mount over {target:?} must be refused: {err}"
+            );
+        }
+        validate_volume_target("/.lensfoo").unwrap();
     }
 
     #[test]
