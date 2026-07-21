@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::credentials::{
-    CredentialStateFile, CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    CredentialStateFile, CredentialStore, JsonFileCredentialStore, decode_state,
+    default_credentials_path, encode_state,
 };
 
 pub trait KeychainBlob: Send + Sync {
@@ -28,16 +29,13 @@ impl KeychainCredentialStore {
 impl CredentialStore for KeychainCredentialStore {
     fn load(&self) -> io::Result<CredentialStateFile> {
         match self.blob.read()? {
-            Some(text) => serde_json::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Some(text) => decode_state(&text),
             None => Ok(CredentialStateFile::new()),
         }
     }
 
     fn save(&self, state: &CredentialStateFile) -> io::Result<()> {
-        let json = serde_json::to_string(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.blob.write(&json)
+        self.blob.write(&encode_state(state)?)
     }
 }
 

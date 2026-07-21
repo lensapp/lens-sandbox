@@ -166,8 +166,8 @@ fn then_token_set_in_keychain(world: &mut BehaviourWorld) -> Result<(), String> 
         .unwrap()
         .clone()
         .ok_or("no keychain item was written")?;
-    let state: CredentialStateFile =
-        serde_json::from_str(&item).map_err(|e| format!("keychain item is not the map: {e}"))?;
+    let state: CredentialStateFile = lns_policy::credentials::decode_state(&item)
+        .map_err(|e| format!("keychain item is not the versioned state: {e}"))?;
     match state.get("some-oauth") {
         Some(CredentialEntry::Oauth { .. }) => Ok(()),
         other => Err(format!("expected the oauth token set, got {other:?}")),
@@ -268,8 +268,8 @@ fn then_state_lands_in_keychain(world: &mut BehaviourWorld) -> Result<(), String
         .unwrap()
         .clone()
         .ok_or("no keychain item was written")?;
-    let state: CredentialStateFile =
-        serde_json::from_str(&item).map_err(|e| format!("keychain item is not the map: {e}"))?;
+    let state: CredentialStateFile = lns_policy::credentials::decode_state(&item)
+        .map_err(|e| format!("keychain item is not the versioned state: {e}"))?;
     match state.get(FIXTURE_ID) {
         Some(CredentialEntry::Stored { .. }) => Ok(()),
         other => Err(format!(
