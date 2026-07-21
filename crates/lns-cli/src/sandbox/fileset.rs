@@ -84,6 +84,7 @@ fn walk_into<F: Fs + ?Sized>(
                     .with_context(|| format!("non-utf8 fileset path {}", entry_rel.display()))?
                     .to_string(),
                 data,
+                mode: entry.mode,
             });
         }
     }
@@ -124,6 +125,25 @@ mod tests {
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["deep/notes.md", "prompts.md"]);
         assert_eq!(entries[1].data, b"p");
+    }
+
+    #[test]
+    fn walk_carries_each_files_mode_so_the_exec_bit_survives_packing() {
+        let fs = MapFs {
+            executables: ["run.sh".to_string()].into_iter().collect(),
+            ..MapFs::with(&[
+                ("/work/skills/run.sh", "#!/bin/sh"),
+                ("/work/skills/notes.md", "n"),
+            ])
+        };
+        let entries = walk(&fs, Path::new("/work/skills")).unwrap();
+        let modes: std::collections::BTreeMap<&str, u32> =
+            entries.iter().map(|e| (e.path.as_str(), e.mode)).collect();
+        assert_eq!(
+            modes["run.sh"], 0o755,
+            "an executable must keep its exec bit"
+        );
+        assert_eq!(modes["notes.md"], 0o644);
     }
 
     #[test]

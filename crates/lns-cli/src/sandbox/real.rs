@@ -191,9 +191,11 @@ impl super::author::Fs for RealFs {
                     format!("symlink {name} — filesets carry only regular files"),
                 ));
             }
+            use std::os::unix::fs::PermissionsExt;
             entries.push(super::author::DirEntry {
                 name,
                 dir: file_type.is_dir(),
+                mode: entry.metadata()?.permissions().mode() & 0o777,
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
