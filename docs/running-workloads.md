@@ -356,8 +356,9 @@ spec:
   published artifact would see (live files are `spec.volumes`' job). At
   `lns push`, each `path` directory is packed into a deterministic FileSet
   artifact, uploaded alongside the sandbox, and rewritten to a digest-pinned
-  `ref` in the published config — the same publish-time pinning `spec.image`
-  gets.
+  `ref` in the published config. (`spec.image` is published exactly as written —
+  `lns push` does not resolve it; pin it by digest yourself for a reproducible
+  base, as above.)
 - **`ref`** names a pre-published FileSet artifact, always pinned by digest. A
   pulled sandbox's filesets are fetched and materialized at launch; `lns
   inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
