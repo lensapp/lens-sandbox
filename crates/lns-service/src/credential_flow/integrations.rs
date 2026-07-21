@@ -174,17 +174,37 @@ fn domains_overlap(a: &str, b: &str) -> bool {
     host_matches_pattern(a, b) || host_matches_pattern(b, a)
 }
 
+/// Every domain an integration claims: its route patterns plus the domains its credential/oauth injections actually write a token onto (a custom catalog may inject on a domain it doesn't route).
+fn claimed_domains(integ: &Integration) -> impl Iterator<Item = &str> {
+    integ
+        .routes
+        .iter()
+        .map(|r| r.match_pattern.as_str())
+        .chain(
+            integ
+                .credential
+                .iter()
+                .flat_map(|c| c.injections.iter().map(|i| i.domain.as_str())),
+        )
+        .chain(
+            integ
+                .oauth
+                .iter()
+                .flat_map(|o| o.injections.iter().map(|i| i.domain.as_str())),
+        )
+}
+
 /// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied integration's domain.
 pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
     let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
-    // An applied integration owns its route domains; a connectable that overlaps one must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com).
+    // A connectable that shares an applied integration's route or injection domain must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
     let owned_domains: Vec<&str> = catalog
         .iter()
         .filter(|integ| owned.contains(integ.id.as_str()))
-        .flat_map(|integ| integ.routes.iter().map(|r| r.match_pattern.as_str()))
+        .flat_map(claimed_domains)
         .collect();
 
     let mut out = ConnectableIntegrations::default();
@@ -192,11 +212,11 @@ pub fn resolve_connectable_integrations(
         if owned.contains(integ.id.as_str()) {
             continue;
         }
-        if integ.routes.iter().any(|r| {
+        if claimed_domains(integ).any(|domain| {
             owned_domains
                 .iter()
                 .copied()
-                .any(|owned_domain| domains_overlap(owned_domain, r.match_pattern.as_str()))
+                .any(|owned_domain| domains_overlap(owned_domain, domain))
         }) {
             continue;
         }
@@ -469,6 +489,26 @@ mod tests {
         assert!(
             c.providers.is_empty(),
             "a connectable whose wildcard covers the applied integration's host must be suppressed, not just a byte-identical pattern"
+        );
+    }
+
+    #[test]
+    fn connectable_excludes_an_entry_colliding_with_an_applied_injection_domain() {
+        let mut applied = cred_integration(
+            "some-primary",
+            "PRIMARY_TOKEN",
+            "login.some-primary.example",
+        );
+        applied.credential.as_mut().unwrap().injections[0].domain =
+            "api.some-provider.example".into();
+        let catalog = vec![
+            applied,
+            cred_integration("some-other", "OTHER_TOKEN", "api.some-provider.example"),
+        ];
+        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        assert!(
+            c.providers.is_empty(),
+            "a connectable sharing the applied integration's injection domain must be suppressed even when that domain is not among its declared routes"
         );
     }
 
