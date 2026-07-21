@@ -209,6 +209,9 @@ pub fn validate_mount_path(path: &str) -> Result<()> {
     if path.is_empty() {
         bail!("mount path must not be empty");
     }
+    if path.chars().any(char::is_control) {
+        bail!("mount path {path:?} must not contain control characters");
+    }
     if !path.starts_with('/') {
         bail!("mount path {path} must be absolute (start with `/`)");
     }
