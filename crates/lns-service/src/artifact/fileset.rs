@@ -195,13 +195,16 @@ pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
         {
             bail!("fileset entry {} escapes its mount path", path.display());
         }
+        if path.to_string_lossy().chars().any(char::is_control) {
+            bail!("fileset entry {path:?} must not contain control characters");
+        }
         if !entry_type.is_file() {
             bail!(
                 "fileset entry {} is not a regular file (filesets carry only regular files)",
                 path.display()
             );
         }
-        let mode = entry.header().mode().unwrap_or(0o644);
+        let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
         let installed = content_store
             .install_from_reader(&mut entry)
             .with_context(|| format!("installing fileset entry {}", path.display()))?;
@@ -304,11 +307,7 @@ mod tests {
             fileset_runtime_specs("/root/skills", &tar[..], &ContentStore::new(dir.path()));
         assert!(
             result.is_err(),
-            "a newline in a fileset entry name splits into an extra line of the /.lens/fileset-owned chown manifest, letting lns-init lchown an arbitrary absolute path (/etc/shadow); it must be refused, but was accepted as: {:?}",
-            result.map(|specs| specs
-                .iter()
-                .map(|s| s.guest_path.clone())
-                .collect::<Vec<_>>())
+            "a newline in a fileset entry name splits into an extra line of the /.lens/fileset-owned chown manifest, letting lns-init lchown an arbitrary absolute path (/etc/shadow); it must be refused, but was accepted: {result:?}"
         );
     }
 
