@@ -195,6 +195,12 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
                 slot.name
             );
         }
+        if !is_valid_env_key(&slot.env) {
+            bail!(
+                "invalid credential env key {:?}: env keys must be non-empty and free of '=', whitespace, and control characters",
+                slot.env
+            );
+        }
     }
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
@@ -823,6 +829,21 @@ mod tests {
             format!("{err:#}").contains("env var it is injected as"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn parse_rejects_a_credential_env_key_that_would_produce_a_malformed_entry() {
+        for spec in [
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN=x"}]}"#,
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN\nLD_PRELOAD"}]}"#,
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME TOKEN"}]}"#,
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid credential env key"),
+                "spec {spec}: got: {err:#}"
+            );
+        }
     }
 
     #[test]
