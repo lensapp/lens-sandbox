@@ -105,7 +105,17 @@ fn launch(
         .network
         .allowed_routes
         .extend(applied.routes.iter().cloned());
-    let connectable = resolve_connectable_with_slots(&policy, &resolved.credentials, &rig.catalog);
+    let declared_integrations = resolved
+        .policy
+        .as_ref()
+        .map(|p| p.integrations.clone())
+        .unwrap_or_default();
+    let connectable = resolve_connectable_with_slots(
+        &policy,
+        &resolved.credentials,
+        &declared_integrations,
+        &rig.catalog,
+    );
     rig.providers = applied
         .providers
         .iter()
