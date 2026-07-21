@@ -54,18 +54,24 @@ An integration reaches a project's workloads in any of three ways:
 
 - **Declared in the sandbox definition.** List its id under `spec.integrations`
   in [`./lns.yaml`](running-workloads.md#defining-a-sandbox). Declaring is
-  disclosure and arming in one: anyone who runs the sandbox — from the local
-  definition or a published copy — gets the integration armed at launch, with no
-  per-directory setup. An id the machine's catalog doesn't know refuses the
-  launch and points at `lns integration add`.
+  disclosure, not arming: the id is surfaced at launch but never force-armed —
+  no placeholder is seeded and no route is opened on its behalf, even for a
+  credential already bound on this machine. The workload is offered a live
+  connect the first time it reaches the integration's domain; accepting it arms
+  the integration and records the id in this directory's
+  [`lns-policy.yaml`](policy.md). This is what keeps an untrusted published
+  sandbox from spending a bound credential or opening a route behind your back.
+  An id the machine's catalog doesn't know refuses the launch and points at
+  `lns integration add`.
 - **Required as a credential slot.** A definition's `spec.credentials` entry
   names an integration, the env var it is injected as (remapping the catalog
-  default), and whether the workload requires it. A slot arms like a declared
-  integration under the slot's env name. A **required** slot with no value
-  bound on the machine refuses the launch before any microVM boots — naming
-  the credential, its injection target, and the `lns integration connect` fix —
-  and a credential you've denied refuses distinctly. An optional slot runs
-  reactively. A required `oauth`-kind slot blocks on the sign-in instead.
+  default), and whether the workload requires it — the explicit way a sandbox
+  insists on a credential. A bound slot arms silently under the slot's env name.
+  A **required** slot with no value bound on the machine refuses the launch
+  before any microVM boots — naming the credential, its injection target, and
+  the `lns integration connect` fix — and a credential you've denied refuses
+  distinctly. An optional slot runs reactively. A required `oauth`-kind slot
+  blocks on the sign-in instead.
 - **Connected to the directory.** `lns integration connect` binds the
   integration's per-machine [value decision](credentials.md#value-decisions) —
   the approval-window card for a credential integration, the sign-in for an
@@ -89,15 +95,18 @@ integrations:
   - gitlab
 ```
 
-The two sources union at launch. However an integration is armed — declared or
-connected — its declared routes are allowed and its placeholder is seeded. The
-first request carrying that placeholder follows the ordinary credential
+Only an integration you have **connected** to this directory arms at launch: its
+declared routes are allowed and its placeholder is seeded, and the first request
+carrying that placeholder follows the ordinary credential
 [value decision](credentials.md#value-decisions) — it pauses for approval if you
 haven't bound a value yet, where you choose to use the host value, store one, or
-deny. A declared `oauth` integration with no sign-in on this machine blocks the
-launch until the sign-in completes, so the workload never starts half-armed. A
-new integration reaches a workload only at launch, so relaunch a running sandbox
-to pick it up.
+deny. A **declared** id from a sandbox definition never arms on its own; it is
+offered reactively on first use, so an untrusted published sandbox can't open a
+route or spend a bound credential without your say-so. A **required credential
+slot** is the exception a sandbox uses to insist on a credential — it refuses
+the launch when unbound (or blocks on the sign-in for an `oauth` slot), so the
+workload never starts half-provisioned. A new integration reaches a workload
+only at launch, so relaunch a running sandbox to pick it up.
 
 ## The catalog file
 

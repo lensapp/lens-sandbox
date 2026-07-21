@@ -81,7 +81,7 @@ fn allowed_by_every_ceiling(rule: &RouteRule, ceilings: &[&Policy]) -> bool {
         .all(|ceiling| ceiling.network.allowed_routes.contains(rule))
 }
 
-/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and connected integrations union.
+/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and only the user's overlay integrations are applied — an artifact-declared integration the user hasn't connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
 // Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
@@ -118,19 +118,13 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     } else {
         Verdict::Ask
     };
-    let mut integrations = overlay.integrations.clone();
-    for id in baseline.into_iter().flat_map(|b| &b.integrations) {
-        if !integrations.contains(id) {
-            integrations.push(id.clone());
-        }
-    }
     Policy {
         network: NetworkPolicy {
             allowed_routes: routes,
             default_verdict,
             default_transport: overlay.network.default_transport,
         },
-        integrations,
+        integrations: overlay.integrations.clone(),
     }
 }
 
@@ -218,23 +212,25 @@ mod tests {
     }
 
     #[test]
-    fn merge_honors_a_deny_default_and_unions_integrations() {
+    fn merge_honors_a_deny_default_and_applies_only_overlay_integrations() {
         let mut overlay = Policy::default();
         overlay.network.default_verdict = Verdict::Deny;
         overlay.connect("some-overlay-integration");
         let mut baseline = Policy::default();
-        baseline.connect("some-baseline-integration");
+        baseline.connect("some-artifact-integration");
         let merged = merge_effective(Some(&baseline), &overlay);
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
         assert!(
             merged
                 .integrations
-                .contains(&"some-overlay-integration".to_string())
+                .contains(&"some-overlay-integration".to_string()),
+            "an integration the user connected in this directory is applied"
         );
         assert!(
-            merged
+            !merged
                 .integrations
-                .contains(&"some-baseline-integration".to_string())
+                .contains(&"some-artifact-integration".to_string()),
+            "an artifact-declared integration is never force-armed by the merge; it stays connectable and is offered on first use"
         );
     }
 

@@ -40,7 +40,7 @@ pub fn plan_slot(slot: &CredentialSlot, binding: Option<Binding>) -> SlotPlan {
     }
 }
 
-/// Plan each definition-declared integration for the launch gate: an `oauth` id with no armed machine grant blocks the boot on a required connect (the sign-in), while a credential id stays armed — its consent gate is the reactive per-machine value decision at first use. Ids the catalog lacks are the unknown-id refusal's job, not this gate's.
+/// Plan each launch-gated id (a definition's required credential slots): an `oauth` id with no armed machine grant blocks the boot on a required connect (the sign-in), while a credential id stays armed — its consent gate is the reactive per-machine value decision at first use. Ids the catalog lacks are the unknown-id refusal's job, not this gate's.
 pub fn plan_declared_integrations(
     declared: &[String],
     catalog: &[Integration],
@@ -103,17 +103,13 @@ pub fn resolve_connect(prompt: &ConnectPrompt, choice: ConnectChoice) -> SlotOut
     }
 }
 
-/// The ids the sign-in gate plans: the definition's declared integrations plus its required credential slots, deduplicated in declaration order.
-pub fn sign_in_gate_ids(
-    policy: Option<&lns_policy::Policy>,
-    slots: &[CredentialSlot],
-) -> Vec<String> {
+/// The ids the sign-in gate plans: only the definition's required credential slots, deduplicated in declaration order. A bare `spec.integrations` id is disclosure, not a launch contract — it is never force-armed and so never blocks the boot; its consent is the reactive connect offer on first use.
+pub fn sign_in_gate_ids(slots: &[CredentialSlot]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    policy
-        .map(|p| p.integrations.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .chain(slots.iter().filter(|s| s.required).map(|s| s.name.clone()))
+    slots
+        .iter()
+        .filter(|s| s.required)
+        .map(|s| s.name.clone())
         .filter(|id| seen.insert(id.clone()))
         .collect()
 }
@@ -402,12 +398,13 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_gate_ids_unions_declared_integrations_with_required_slots_once_each() {
-        let policy = lns_policy::Policy {
-            integrations: vec!["some-provider".into(), "some-oauth".into()],
-            ..lns_policy::Policy::default()
-        };
+    fn sign_in_gate_ids_are_the_required_slots_only_once_each() {
         let slots = vec![
+            CredentialSlot {
+                name: "some-oauth".into(),
+                env: "SOME_OAUTH_TOKEN".into(),
+                required: true,
+            },
             CredentialSlot {
                 name: "some-oauth".into(),
                 env: "SOME_OAUTH_TOKEN".into(),
@@ -425,19 +422,11 @@ mod tests {
             },
         ];
         assert_eq!(
-            sign_in_gate_ids(Some(&policy), &slots),
-            vec![
-                "some-provider".to_string(),
-                "some-oauth".to_string(),
-                "other-provider".to_string(),
-            ],
-            "required slots join once; an optional slot never blocks a sign-in"
+            sign_in_gate_ids(&slots),
+            vec!["some-oauth".to_string(), "other-provider".to_string()],
+            "required slots join once; an optional slot never blocks a sign-in; a bare declared id never gates"
         );
-        assert_eq!(
-            sign_in_gate_ids(None, &slots),
-            vec!["some-oauth".to_string(), "other-provider".to_string()]
-        );
-        assert!(sign_in_gate_ids(None, &[]).is_empty());
+        assert!(sign_in_gate_ids(&[]).is_empty());
     }
 
     #[test]

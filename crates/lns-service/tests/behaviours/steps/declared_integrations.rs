@@ -1,18 +1,18 @@
 use cucumber::{given, then, when};
-use lns_policy::credentials::CredentialEntry;
 use lns_policy::integrations::{
     AuthKind, CredentialAuth, Integration, IntegrationRoute, OauthAuth, OauthFlow,
 };
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
-    BootGate, ConnectChoice, SlotPlan, boot_gate, gate_required_slots, plan_declared_integrations,
-    resolve_connect, sign_in_gate_ids,
+    BootGate, SlotPlan, boot_gate, gate_required_slots, plan_declared_integrations,
+    sign_in_gate_ids,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::integrations::{
-    resolve_applied_with_slots, unknown_integration_ids, unknown_integrations_refusal,
+    resolve_applied_with_slots, resolve_connectable_with_slots, unknown_integration_ids,
+    unknown_integrations_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
 
@@ -88,7 +88,7 @@ fn launch(
         return;
     }
     let plans = plan_declared_integrations(
-        &sign_in_gate_ids(resolved.policy.as_ref(), &resolved.credentials),
+        &sign_in_gate_ids(&resolved.credentials),
         &rig.catalog,
         &rig.store,
     );
@@ -105,6 +105,7 @@ fn launch(
         .network
         .allowed_routes
         .extend(applied.routes.iter().cloned());
+    let connectable = resolve_connectable_with_slots(&policy, &resolved.credentials, &rig.catalog);
     rig.providers = applied
         .providers
         .iter()
@@ -115,6 +116,11 @@ fn launch(
                 p.placeholder().to_string(),
             )
         })
+        .collect();
+    rig.offered = connectable
+        .providers
+        .iter()
+        .map(|p| p.id().to_string())
         .collect();
     rig.running_policy = Some(policy);
 }
@@ -141,25 +147,10 @@ fn catalog_has_integration(w: &mut BehaviourWorld, id: String, env: String) {
     rig.catalog.push(credential_integration(&id, &env, None));
 }
 
-#[given(regex = r#"^the machine catalog has credential integrations "([^"]+)" and "([^"]+)"$"#)]
-fn catalog_has_two_integrations(w: &mut BehaviourWorld, first: String, second: String) {
-    let rig = w.declared.get_or_insert_with(Default::default);
-    for id in [&first, &second] {
-        let env = format!("{}_TOKEN", id.to_uppercase().replace('-', "_"));
-        rig.catalog.push(credential_integration(id, &env, None));
-    }
-}
-
 #[given(regex = r#"^the sandbox definition declares integration "([^"]+)"$"#)]
 fn definition_declares_one(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(definition_declaring(&[&id]));
-}
-
-#[given(regex = r#"^the sandbox definition declares integrations "([^"]+)" and "([^"]+)"$"#)]
-fn definition_declares_two(w: &mut BehaviourWorld, first: String, second: String) {
-    let rig = w.declared.get_or_insert_with(Default::default);
-    rig.definition = Some(definition_declaring(&[&first, &second]));
 }
 
 #[given(regex = r#"^a published sandbox artifact declares integration "([^"]+)"$"#)]
@@ -253,59 +244,6 @@ fn store_has_no_grant(w: &mut BehaviourWorld, id: String) {
     );
 }
 
-#[given(regex = r#"^a launch blocked on the "([^"]+)" sign-in$"#)]
-fn launch_blocked_on_sign_in(w: &mut BehaviourWorld, id: String) {
-    {
-        let rig = w.declared.get_or_insert_with(Default::default);
-        rig.catalog.push(oauth_integration(&id));
-        rig.definition = Some(definition_declaring(&[&id]));
-    }
-    relaunch(w);
-    let rig = w.declared.as_ref().expect("relaunch built the rig");
-    assert_eq!(
-        rig.pending.as_ref().map(|p| p.integration.as_str()),
-        Some(id.as_str()),
-        "the launch must be blocked on the {id} sign-in"
-    );
-}
-
-#[when("the sign-in completes")]
-fn sign_in_completes(w: &mut BehaviourWorld) {
-    {
-        let rig = w.declared.as_mut().expect("a launch is blocked");
-        let prompt = rig.pending.take().expect("a sign-in is pending");
-        assert!(
-            resolve_connect(&prompt, ConnectChoice::Connect).starts_workload(),
-            "a completed sign-in must release the launch"
-        );
-        rig.store.insert(
-            prompt.integration.clone(),
-            CredentialEntry::Oauth {
-                access_token: "some-access".into(),
-                refresh_token: "some-refresh".into(),
-                expires_at: 9999,
-                scopes: vec![],
-                account: None,
-            },
-        );
-    }
-    relaunch(w);
-}
-
-#[when("the developer declines the sign-in")]
-fn sign_in_declined(w: &mut BehaviourWorld) {
-    let rig = w.declared.as_mut().expect("a launch is blocked");
-    let prompt = rig.pending.take().expect("a sign-in is pending");
-    let outcome = resolve_connect(&prompt, ConnectChoice::Decline);
-    if !outcome.starts_workload() {
-        rig.aborted = true;
-        rig.error = Some(format!(
-            "sign-in for integration {} did not complete; launch aborted",
-            prompt.integration
-        ));
-    }
-}
-
 #[then(regex = r#"^a sign-in prompt for "([^"]+)" is shown before the workload starts$"#)]
 fn sign_in_prompt_shown(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
@@ -331,22 +269,14 @@ fn workload_waits_for_sign_in(w: &mut BehaviourWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[then(regex = r#"^the workload starts with the "([^"]+)" placeholder seeded$"#)]
-fn workload_starts_with_placeholder(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+#[then("the workload starts")]
+fn workload_starts(w: &mut BehaviourWorld) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     if rig.running_policy.is_none() {
         return Err(format!(
             "the workload did not start; pending: {:?}, error: {:?}",
             rig.pending, rig.error
         ));
-    }
-    let armed = rig
-        .providers
-        .iter()
-        .find(|(pid, _, _)| pid == &id)
-        .ok_or_else(|| format!("no provider seeds {id}; armed: {:?}", rig.providers))?;
-    if armed.2.is_empty() {
-        return Err(format!("{id} was seeded without a placeholder"));
     }
     Ok(())
 }
@@ -364,20 +294,17 @@ fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.as_ref().expect("relaunch built the rig");
     assert!(
         rig.running_policy.is_some(),
-        "the declared launch must arm and start; error: {:?}",
+        "the declared launch must start (a declared integration is offered, not armed); error: {:?}",
         rig.error
     );
     w.credential();
     w.approval();
 }
 
-#[given(regex = r#"^the directory's lns-policy.yaml denies "([^"]+)"$"#)]
-fn overlay_denies(w: &mut BehaviourWorld, host: String) {
+#[given("the directory's lns-policy.yaml denies all by default")]
+fn overlay_denies_by_default(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.overlay
-        .network
-        .allowed_routes
-        .push(lns_policy::RouteRule::deny_host(host));
+    rig.overlay.network.default_verdict = Verdict::Deny;
 }
 
 #[when(regex = r#"^the developer approves a new destination "([^"]+)" with "always allow"$"#)]
@@ -545,33 +472,49 @@ fn running_policy_allows(w: &mut BehaviourWorld, host: String) -> Result<(), Str
     }
 }
 
-#[then(regex = r#"^the workload's environment seeds "([^"]+)" and "([^"]+)" each exactly once$"#)]
-fn env_seeds_each_once(
-    w: &mut BehaviourWorld,
-    first: String,
-    second: String,
-) -> Result<(), String> {
+#[then(regex = r#"^the workload's environment does not seed the "([^"]+)" placeholder$"#)]
+fn env_does_not_seed_placeholder(w: &mut BehaviourWorld, env: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
-    for id in [&first, &second] {
-        let count = rig.providers.iter().filter(|(pid, _, _)| pid == id).count();
-        if count != 1 {
-            return Err(format!(
-                "expected {id} to be seeded exactly once, found {count}; armed: {:?}",
-                rig.providers
-            ));
-        }
+    if let Some(err) = &rig.error {
+        return Err(format!("the launch failed: {err}"));
     }
-    Ok(())
+    match rig.providers.iter().find(|(_, var, _)| var == &env) {
+        Some(seeded) => Err(format!(
+            "{env} was armed at launch, but a declared integration must only be offered: {seeded:?}"
+        )),
+        None => Ok(()),
+    }
 }
 
-#[then("the launch is aborted")]
-fn launch_aborted(w: &mut BehaviourWorld) {
-    let rig = w.declared.as_ref().expect("a launch happened");
-    assert!(rig.aborted, "the launch was not aborted");
+#[then(regex = r#"^the running policy does not allow the "([^"]+)" route$"#)]
+fn running_policy_does_not_allow(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
+    let policy = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.running_policy.as_ref())
+        .ok_or("no running policy was produced")?;
+    match policy
+        .network
+        .allowed_routes
+        .iter()
+        .find(|r| r.match_pattern == host && r.verdict == Verdict::Allow)
+    {
+        Some(rule) => Err(format!(
+            "an allow route for {host} was opened on the sandbox's behalf: {rule:?}"
+        )),
+        None => Ok(()),
+    }
 }
 
-#[then("the workload never starts")]
-fn workload_never_starts(w: &mut BehaviourWorld) {
-    let rig = w.declared.as_ref().expect("a launch happened");
-    assert!(rig.running_policy.is_none(), "the workload started");
+#[then(regex = r#"^"([^"]+)" is offered for a reactive connect$"#)]
+fn integration_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.offered.contains(&id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {id} to be offered for a reactive connect, offered: {:?}",
+            rig.offered
+        ))
+    }
 }
