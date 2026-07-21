@@ -136,11 +136,27 @@ async fn load_records<F: Fs>(fs: &F, images_root: &Path) -> Result<Vec<ImageReco
     Ok(records)
 }
 
+/// Whether a run's registered image and a record's reference name the same image, bridging the by-reference case where the run holds the tag it was given while the record is keyed by the digest that tag resolved to.
+fn same_image(run_image: &str, reference: &str) -> bool {
+    let (Ok(run), Ok(record)) = (
+        run_image.parse::<oci_client::Reference>(),
+        reference.parse::<oci_client::Reference>(),
+    ) else {
+        return false;
+    };
+    if run.whole() == record.whole() {
+        return true;
+    }
+    run.registry() == record.registry()
+        && run.repository() == record.repository()
+        && (run.digest().is_some() != record.digest().is_some())
+}
+
 fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
     active
         .iter()
         .filter(|r| matches!(r.status, lns_ipc::RunStatus::Running))
-        .find(|r| normalize_reference(&r.image).is_ok_and(|whole| whole == reference))
+        .find(|r| same_image(&r.image, reference))
         .map(|r| r.id.clone())
 }
 
@@ -1122,6 +1138,46 @@ mod tests {
         assert_eq!(
             caches.swept_with.lock().unwrap()[0],
             HashSet::from(["sha256:base-layer".to_string()])
+        );
+    }
+
+    #[test]
+    fn same_image_bridges_a_by_reference_run_tag_to_its_resolved_digest_record() {
+        let tag = "registry.example.test/team/sandbox:1";
+        let digest = format!(
+            "registry.example.test/team/sandbox@sha256:{}",
+            "c".repeat(64)
+        );
+        assert!(same_image(tag, tag), "an exact reference is the same image");
+        assert!(
+            same_image(tag, &digest),
+            "a run registered by tag holds the record keyed by the digest that tag resolved to"
+        );
+        assert!(
+            same_image(&digest, tag),
+            "the bridge holds in both directions"
+        );
+        assert!(
+            !same_image(tag, "registry.example.test/team/sandbox:2"),
+            "two distinct tags of one repository are not the same image"
+        );
+        assert!(
+            !same_image(
+                &digest,
+                &format!(
+                    "registry.example.test/team/sandbox@sha256:{}",
+                    "d".repeat(64)
+                )
+            ),
+            "two distinct digests of one repository are not the same image"
+        );
+        assert!(
+            !same_image(tag, "registry.example.test/team/base:1"),
+            "different repositories are never the same image"
+        );
+        assert!(
+            !same_image("", tag),
+            "an unparseable reference matches nothing"
         );
     }
 
