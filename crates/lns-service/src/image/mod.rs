@@ -317,12 +317,19 @@ pub(crate) async fn pull_inner<R: Registry>(
                 descriptor.digest
             );
         }
+        if descriptor.size <= 0 {
+            anyhow::bail!(
+                "layer {i} declares a non-positive size {} (digest {}); a registry that under-declares a layer then over-streams could evade the buffered-blob cap",
+                descriptor.size,
+                descriptor.digest
+            );
+        }
     }
 
     let total_bytes: u64 = manifest
         .layers
         .iter()
-        .map(|d| d.size.max(0) as u64)
+        .map(|d| d.size as u64)
         .fold(0u64, u64::saturating_add);
     if total_bytes > MAX_TOTAL_DECLARED_LAYER_BYTES {
         anyhow::bail!(
@@ -1333,6 +1340,26 @@ mod tests {
             calls.iter().all(|c| !c.starts_with("blob:")),
             "no blob may be fetched once the declared-size ceiling is exceeded; calls={calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn pull_inner_rejects_a_non_positive_declared_layer_size_before_fetching() {
+        for size in [0i64, -1] {
+            let mut img = build_two_layer_image();
+            img.manifest.layers[0].size = size;
+            let registry = img.into_registry();
+            let (_dir, cache) = cache();
+            let err = pull_inner(&registry, "alpine:3.20", &cache)
+                .await
+                .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("non-positive size"), "size {size}: got: {msg}");
+            let calls = registry.calls.lock().unwrap();
+            assert!(
+                calls.iter().all(|c| !c.starts_with("blob:")),
+                "a layer declaring size {size} must be refused before any blob fetch; calls={calls:?}"
+            );
+        }
     }
 
     #[tokio::test]
