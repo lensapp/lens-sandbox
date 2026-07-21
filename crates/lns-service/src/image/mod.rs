@@ -38,19 +38,30 @@ pub(crate) trait Registry: Send + Sync {
 
 pub(crate) struct CountingSink<'a> {
     buf: Vec<u8>,
+    max_bytes: u64,
     on_chunk: &'a (dyn Fn(u64) + Send + Sync),
 }
 
 impl<'a> CountingSink<'a> {
-    pub(crate) fn new(on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
+    pub(crate) fn new(max_bytes: u64, on_chunk: &'a (dyn Fn(u64) + Send + Sync)) -> Self {
         Self {
             buf: Vec::new(),
+            max_bytes,
             on_chunk,
         }
     }
 
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.buf
+    }
+}
+
+/// The in-memory ceiling for a buffered blob: its declared descriptor size, clamped to the global layer ceiling, so a registry that under-declares then over-streams can't OOM the service.
+pub(crate) fn blob_byte_cap(declared_size: i64) -> u64 {
+    if declared_size > 0 {
+        (declared_size as u64).min(MAX_TOTAL_DECLARED_LAYER_BYTES)
+    } else {
+        MAX_TOTAL_DECLARED_LAYER_BYTES
     }
 }
 
@@ -61,9 +72,19 @@ impl tokio::io::AsyncWrite for CountingSink<'_> {
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let sink = self.get_mut();
-        (sink.on_chunk)(buf.len() as u64);
-        sink.buf.extend_from_slice(buf);
-        std::task::Poll::Ready(Ok(buf.len()))
+        if !buf.is_empty() && sink.buf.len() as u64 >= sink.max_bytes {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("blob exceeds the {}-byte limit", sink.max_bytes),
+            )));
+        }
+        let remaining = sink.max_bytes.saturating_sub(sink.buf.len() as u64);
+        let allowed = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        (sink.on_chunk)(allowed as u64);
+        sink.buf.extend_from_slice(&buf[..allowed]);
+        std::task::Poll::Ready(Ok(allowed))
     }
 
     fn poll_flush(
@@ -1508,13 +1529,38 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let seen = Mutex::new(Vec::<u64>::new());
         let on_chunk = |n: u64| seen.lock().unwrap().push(n);
-        let mut sink = CountingSink::new(&on_chunk);
+        let mut sink = CountingSink::new(64, &on_chunk);
         sink.write_all(b"hello ").await.unwrap();
         sink.write_all(b"world").await.unwrap();
         sink.flush().await.unwrap();
         sink.shutdown().await.unwrap();
         assert_eq!(sink.into_bytes(), b"hello world");
         assert_eq!(*seen.lock().unwrap(), vec![6, 5]);
+    }
+
+    #[tokio::test]
+    async fn counting_sink_stops_before_buffering_beyond_its_declared_cap() {
+        use tokio::io::AsyncWriteExt;
+        let mut sink = CountingSink::new(3, &|_| {});
+        let err = sink.write_all(b"four").await.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "a blob that overruns its declared size must be refused, not buffered whole"
+        );
+        assert_eq!(sink.into_bytes(), b"fou");
+    }
+
+    #[test]
+    fn blob_byte_cap_uses_the_declared_size_and_backstops_an_unknown_one() {
+        assert_eq!(blob_byte_cap(42), 42);
+        assert_eq!(blob_byte_cap(0), MAX_TOTAL_DECLARED_LAYER_BYTES);
+        assert_eq!(blob_byte_cap(-1), MAX_TOTAL_DECLARED_LAYER_BYTES);
+        assert_eq!(
+            blob_byte_cap(i64::MAX),
+            MAX_TOTAL_DECLARED_LAYER_BYTES,
+            "a declared size over the global ceiling is clamped to it"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

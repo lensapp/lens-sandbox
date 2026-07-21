@@ -112,7 +112,7 @@ impl Registry for RealRegistry {
         descriptor: &OciDescriptor,
         on_chunk: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<Vec<u8>> {
-        let mut out = CountingSink::new(on_chunk);
+        let mut out = CountingSink::new(super::blob_byte_cap(descriptor.size), on_chunk);
         self.client
             .pull_blob(reference, descriptor, &mut out)
             .await
@@ -206,9 +206,9 @@ pub async fn pull(image: &str, layer_cache: &LayerCache) -> Result<PulledImage> 
     let _shared = crate::image_store::lock_shared().await;
     let registry = caching_registry_for(image)?;
     let pulled = pull_inner(&registry, image, layer_cache).await?;
-    if let Err(e) = crate::image_store::record(&pulled).await {
-        crate::log::warn!("image index write failed for {image} ({e:#}); continuing");
-    }
+    crate::image_store::record(&pulled)
+        .await
+        .with_context(|| format!("recording the image index for {image}"))?;
     Ok(pulled)
 }
 
