@@ -280,9 +280,10 @@ lns policy remove <PATTERN>
 
 Manage the credential-integration catalog — the services whose credentials reach a
 workload. The catalog is machine-global (`~/.lns-integrations.yaml`). An integration
-declared in a sandbox definition's `spec.integrations` arms at launch with no
-further setup; connecting one records it under `integrations:` in a directory's
-`lns-policy.yaml` for directories without a definition.
+declared in a sandbox definition's `spec.integrations` is only offered — the
+workload is prompted to connect it on first use, never armed automatically;
+connecting one (here or reactively) arms it and records it under `integrations:`
+in that directory's `lns-policy.yaml`.
 
 ```bash
 lns integration add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]

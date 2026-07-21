@@ -276,19 +276,28 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the sandbox's shipped network policy at boot: name it as the deny-dominant baseline under the local overlay, and warn prominently if it is over-broad (permissive default / wildcard / broad CIDR).
+/// Disclose the sandbox's shipped network policy and declared integrations at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared integrations are offered on first use, never armed automatically.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
     };
-    crate::log::info!(
-        "policy",
-        "this sandbox ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
-    );
-    let summary =
-        crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));
-    if !summary.is_empty() {
-        crate::log::warn!("{summary}");
+    if policy.network != lns_policy::NetworkPolicy::default() {
+        crate::log::info!(
+            "policy",
+            "this sandbox ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
+        );
+        let summary =
+            crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));
+        if !summary.is_empty() {
+            crate::log::warn!("{summary}");
+        }
+    }
+    if !policy.integrations.is_empty() {
+        crate::log::info!(
+            "policy",
+            "this sandbox requests integrations ({}); each is offered on first use — accept its connect card to arm it — never armed automatically",
+            policy.integrations.join(", ")
+        );
     }
 }
 

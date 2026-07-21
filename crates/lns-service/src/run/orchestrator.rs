@@ -91,12 +91,7 @@ async fn orchestrate(
             &plan.workload.credentials,
         )?;
         crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
-        gate_declared_sign_ins(
-            plan.workload.policy.as_ref(),
-            &plan.workload.credentials,
-            &frame_tx,
-        )
-        .await?;
+        gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
     let launch = sandbox_plan
         .as_ref()
@@ -442,9 +437,8 @@ async fn orchestrate(
     Ok(session_code)
 }
 
-/// Block the boot on any definition-declared oauth integration — under `spec.integrations` or a required credential slot — with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete.
+/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. A bare `spec.integrations` id never gates here — it is offered reactively on first use.
 async fn gate_declared_sign_ins(
-    policy: Option<&lns_policy::Policy>,
     credentials: &[lns_artifact::spec::CredentialSlot],
     frame_tx: &Sender<WireFrame>,
 ) -> Result<()> {
@@ -457,7 +451,7 @@ async fn gate_declared_sign_ins(
     };
     use lns_ipc::Response;
 
-    let declared = sign_in_gate_ids(policy, credentials);
+    let declared = sign_in_gate_ids(credentials);
     if declared.is_empty() {
         return Ok(());
     }
