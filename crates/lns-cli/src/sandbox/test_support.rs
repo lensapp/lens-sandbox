@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,7 @@ pub(crate) struct MapFs {
     pub files: RefCell<HashMap<PathBuf, String>>,
     pub unreadable: bool,
     pub fail_write: bool,
+    pub executables: HashSet<String>,
 }
 
 impl MapFs {
@@ -56,6 +57,12 @@ impl Fs for MapFs {
         Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-        map_dir_entries(self.files.borrow().keys(), dir)
+        let mut entries = map_dir_entries(self.files.borrow().keys(), dir)?;
+        for entry in &mut entries {
+            if self.executables.contains(&entry.name) {
+                entry.mode = 0o755;
+            }
+        }
+        Ok(entries)
     }
 }

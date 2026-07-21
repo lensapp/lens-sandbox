@@ -13,11 +13,12 @@ pub const MAX_FILESET_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum number of regular files in a FileSet artifact.
 pub const MAX_FILESET_ENTRIES: usize = 100_000;
 
-/// One file to pack into a FileSet layer: a path relative to the mount root and its bytes.
+/// One file to pack into a FileSet layer: a path relative to the mount root, its bytes, and its permission bits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub path: String,
     pub data: Vec<u8>,
+    pub mode: u32,
 }
 
 /// A content-addressed blob to upload before its referencing manifest.
@@ -98,7 +99,7 @@ pub fn build_artifact(doc: &[u8]) -> Result<BuiltArtifact> {
     })
 }
 
-/// Pack a directory's files into a FileSet artifact mounting at `mount_path`; the tar layer is deterministic (entries sorted, metadata zeroed) so identical inputs yield identical digests.
+/// Pack a directory's files into a FileSet artifact mounting at `mount_path`; the tar layer is deterministic (entries sorted, uid/gid/mtime zeroed, each file's mode preserved) so identical inputs yield identical digests.
 pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Result<BuiltArtifact> {
     spec::validate_mount_path(mount_path).context("fileset mount path")?;
     validate_fileset_entries(entries, MAX_FILESET_BYTES, MAX_FILESET_ENTRIES)?;
@@ -190,7 +191,7 @@ fn tar_layer(entries: &[FileEntry]) -> Result<Vec<u8>> {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
         header.set_size(entry.data.len() as u64);
-        header.set_mode(0o644);
+        header.set_mode(entry.mode);
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
@@ -302,10 +303,50 @@ mod tests {
     }
 
     fn entry(path: &str, data: &str) -> FileEntry {
+        entry_mode(path, data, 0o644)
+    }
+
+    fn entry_mode(path: &str, data: &str, mode: u32) -> FileEntry {
         FileEntry {
             path: path.into(),
             data: data.as_bytes().to_vec(),
+            mode,
         }
+    }
+
+    #[test]
+    fn build_fileset_preserves_each_entrys_mode_in_the_tar_layer() {
+        let built = build_fileset(
+            "hooks",
+            "/root/.agent/hooks",
+            &[
+                entry_mode("run.sh", "#!/bin/sh\n", 0o755),
+                entry("notes.md", "x"),
+            ],
+        )
+        .unwrap();
+        let layer = built
+            .blobs
+            .iter()
+            .find(|b| b.media_type == LAYER_MEDIA_TYPE)
+            .expect("a tar layer blob");
+        let modes: std::collections::BTreeMap<String, u32> =
+            tar::Archive::new(layer.data.as_slice())
+                .entries()
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (
+                        e.path().unwrap().to_string_lossy().into_owned(),
+                        e.header().mode().unwrap(),
+                    )
+                })
+                .collect();
+        assert_eq!(
+            modes["run.sh"], 0o755,
+            "an executable fileset file must keep its exec bit through push→pull"
+        );
+        assert_eq!(modes["notes.md"], 0o644);
     }
 
     #[test]

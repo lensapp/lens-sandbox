@@ -45,6 +45,7 @@ pub trait Fs {
 pub struct DirEntry {
     pub name: String,
     pub dir: bool,
+    pub mode: u32,
 }
 
 /// Derive a directory listing from a flat path-keyed map, so every in-memory fake Fs shares one implementation.
@@ -72,7 +73,11 @@ pub fn map_dir_entries<'a>(
     }
     Ok(seen
         .into_iter()
-        .map(|(name, dir)| DirEntry { name, dir })
+        .map(|(name, dir)| DirEntry {
+            name,
+            dir,
+            mode: if dir { 0o755 } else { 0o644 },
+        })
         .collect())
 }
 
