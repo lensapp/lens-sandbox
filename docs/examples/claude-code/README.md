@@ -59,8 +59,10 @@ lns push "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"    
 ```
 
 Two artifacts upload: the sandbox definition and the packed `./config` fileset
-(digest-pinned). The base image is referenced by digest, not re-uploaded — a
-consumer pulls it from its origin (`docker.io`).
+(digest-pinned). The base image is referenced as written in `spec.image`, not
+re-uploaded — a consumer pulls it from its origin (`docker.io`). `lns push`
+does not resolve the tag to a digest, so pin `spec.image` by digest yourself if
+you need a byte-reproducible base.
 
 Run it from anywhere. `.` binds to the *consumer's* directory, and the seed
 config and policy baseline arrive inside the artifact:
