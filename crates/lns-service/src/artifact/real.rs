@@ -42,6 +42,14 @@ pub(crate) async fn peek_and_plan(
                 .with_context(|| format!("parsing published sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
+            if let Err(e) =
+                crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
+                    .await
+            {
+                crate::log::warn!(
+                    "recording the sandbox index for {image_ref} failed ({e:#}); its base image is unprotected from prune until pulled"
+                );
+            }
             disclose_effective_policy(resolved.policy.as_ref());
             let problems = crate::artifact::published_fileset_problems(&resolved);
             if !problems.is_empty() {

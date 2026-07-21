@@ -73,6 +73,22 @@ pub fn artifact_record_for(
     }
 }
 
+/// The dependency-only index record a sandbox *run* writes so its base image is protected from `rm`/`prune` while the sandbox is live or cached — the same base linkage `lns pull` persists, minus the base's own layer record (boot writes that).
+fn artifact_run_record(
+    reference: &str,
+    digest: &str,
+    base_image: &str,
+    pulled_unix_secs: u64,
+) -> Result<ImageRecord> {
+    Ok(ImageRecord {
+        reference: normalize_reference(reference)?,
+        digest: digest.to_string(),
+        dependencies: vec![normalize_reference(base_image)?],
+        layers: Vec::new(),
+        pulled_unix_secs,
+    })
+}
+
 pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
     ImageRecord {
         reference: pulled.reference.whole(),
@@ -370,6 +386,13 @@ pub async fn record(pulled: &PulledImage) -> Result<()> {
         &record_for(pulled, now_unix_secs()),
     )
     .await
+}
+
+/// Persist the sandbox→base dependency for a live run so a concurrent `rm`/`prune` can't delete the base out from under a sandbox launched by reference (auto-pull-on-run, never explicitly pulled).
+pub async fn record_artifact_run(reference: &str, digest: &str, base_image: &str) -> Result<()> {
+    let record = artifact_run_record(reference, digest, base_image, now_unix_secs())?;
+    let _shared = lock_shared().await;
+    record_with(&real::RealFs, &images_root()?, &record).await
 }
 
 pub async fn pull_with<F: Fs>(
@@ -1168,6 +1191,36 @@ mod tests {
         assert!(fs.has(&record_path(Path::new(ROOT), base)));
     }
 
+    #[test]
+    fn artifact_run_record_links_the_running_sandbox_to_its_normalized_base() {
+        let base = format!("registry.example.test/team/base@sha256:{}", "a".repeat(64));
+        let record =
+            artifact_run_record("ghcr.io/team/agent:1", "sha256:manifest", &base, 42).unwrap();
+        assert_eq!(record.reference, "ghcr.io/team/agent:1");
+        assert_eq!(record.digest, "sha256:manifest");
+        assert_eq!(record.dependencies, vec![base]);
+        assert!(record.layers.is_empty());
+        assert_eq!(record.pulled_unix_secs, 42);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_artifact_run_protects_its_base_from_removal() {
+        let base = "registry.example.test/team/base:1";
+        let sandbox_record =
+            artifact_run_record("registry.example.test/team/agent:1", "sha256:m", base, 7).unwrap();
+        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
+
+        let err = remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], base)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("required by cached sandbox"),
+            "a base recorded by an auto-pull-on-run sandbox must not be removable: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn remove_refuses_a_base_image_required_by_a_cached_sandbox() {
         let sandbox = "registry.example.test/team/sandbox:1";
@@ -1383,6 +1436,27 @@ mod tests {
             vec!["registry.example.test/cov/lifecycle:1".to_string()]
         );
         assert!(list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn record_artifact_run_persists_the_sandbox_dependency_under_the_cache_root() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let base = format!("registry.example.test/team/base@sha256:{}", "a".repeat(64));
+
+        record_artifact_run("registry.example.test/team/agent:1", "sha256:m", &base)
+            .await
+            .unwrap();
+
+        let listed = list().await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|i| i.reference == "registry.example.test/team/agent:1"),
+            "an auto-pull-on-run sandbox must land in the index so its base is protected"
+        );
     }
 
     #[tokio::test]
