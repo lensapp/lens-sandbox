@@ -4,6 +4,7 @@ pub mod assembly;
 pub mod audit;
 pub mod credential_boot;
 pub mod fileset;
+pub mod inspect;
 pub mod policy;
 pub mod real;
 pub mod resources;
