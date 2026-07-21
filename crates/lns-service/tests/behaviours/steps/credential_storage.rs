@@ -79,6 +79,15 @@ fn given_keychain_unreachable(world: &mut BehaviourWorld) {
     world.keychain_unreachable = true;
 }
 
+/// Drops any prior guard first so its uninstall cannot wipe the fresh install; the world holds the new guard until the scenario ends.
+fn hold_installed_backend(
+    world: &mut BehaviourWorld,
+    selection: lns_policy::keychain::StoreSelection,
+) {
+    drop(world.backend_guard.take());
+    world.backend_guard = Some(lns_service::credential_flow::backend::install(selection));
+}
+
 fn install_rig_backend(world: &mut BehaviourWorld) {
     let rig = world.credential_keychain();
     let blob = rig
@@ -86,12 +95,15 @@ fn install_rig_backend(world: &mut BehaviourWorld) {
         .clone()
         .expect("keychain rig carries a blob");
     let session = rig.session.clone();
-    lns_service::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
-        store: Arc::new(lns_policy::keychain::KeychainCredentialStore::new(blob)),
-        kind: BackendKind::Keychain,
-        file_path: None,
-        fallback_reason: None,
-    });
+    hold_installed_backend(
+        world,
+        lns_policy::keychain::StoreSelection {
+            store: Arc::new(lns_policy::keychain::KeychainCredentialStore::new(blob)),
+            kind: BackendKind::Keychain,
+            file_path: None,
+            fallback_reason: None,
+        },
+    );
     lns_service::credential_flow::live::register(&session);
 }
 
@@ -187,7 +199,12 @@ fn when_service_selects_backend(world: &mut BehaviourWorld) {
     let probe = Arc::new(AtomicBool::new(false));
     world.keychain_probe_invoked = Some(probe.clone());
     let unreachable = world.keychain_unreachable;
+    let scratch_home = tempfile::TempDir::new()
+        .expect("scratch HOME so the fallback default path never points at the real home");
+    let _home = EnvGuard::set("HOME", &scratch_home.path().display().to_string());
+    drop(world.backend_guard.take());
     let mut chosen: Option<(BackendKind, Option<std::path::PathBuf>)> = None;
+    let mut installed = None;
     let warning = captured_warnings(|| {
         let selection = select_credential_store(move || {
             probe.store(true, Ordering::SeqCst);
@@ -201,8 +218,9 @@ fn when_service_selects_backend(world: &mut BehaviourWorld) {
             }
         });
         chosen = Some((selection.kind, selection.file_path.clone()));
-        lns_service::credential_flow::backend::install(selection);
+        installed = Some(lns_service::credential_flow::backend::install(selection));
     });
+    world.backend_guard = installed;
     let (kind, path) = chosen.expect("selection ran");
     world.selected_backend = Some(kind);
     world.selected_file_path = path;
@@ -332,12 +350,15 @@ fn given_file_backend_active(world: &mut BehaviourWorld) {
     let rig = world.credential();
     let path = rig.credentials_path.clone();
     let session = rig.session.clone();
-    lns_service::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
-        store: Arc::new(JsonFileCredentialStore::new(path.clone())),
-        kind: BackendKind::File,
-        file_path: Some(path),
-        fallback_reason: None,
-    });
+    hold_installed_backend(
+        world,
+        lns_policy::keychain::StoreSelection {
+            store: Arc::new(JsonFileCredentialStore::new(path.clone())),
+            kind: BackendKind::File,
+            file_path: Some(path),
+            fallback_reason: None,
+        },
+    );
     lns_service::credential_flow::live::register(&session);
 }
 

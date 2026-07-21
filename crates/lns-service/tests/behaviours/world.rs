@@ -35,6 +35,8 @@ pub struct BehaviourWorld {
     pub selection_warning: Option<String>,
     /// Restores LNS_CREDENTIALS_PATH when the scenario ends.
     pub env_guard: Option<crate::steps::credential_storage::EnvGuard>,
+    /// Uninstalls the process-global credential backend when the scenario ends.
+    pub backend_guard: Option<lns_service::credential_flow::backend::InstalledBackend>,
 
     /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
     pub oauth_id: Option<String>,

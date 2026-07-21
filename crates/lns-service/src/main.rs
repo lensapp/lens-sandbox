@@ -20,10 +20,11 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("Starting", "lns-service (socket: {})", socket.display());
 
-    credential_flow::backend::install(lns_policy::keychain::select_credential_store(|| {
-        lns_policy::keychain::real::KeyringBlob::open()
-            .map(|blob| Arc::new(blob) as Arc<dyn lns_policy::keychain::KeychainBlob>)
-    }));
+    let _credential_backend =
+        credential_flow::backend::install(lns_policy::keychain::select_credential_store(|| {
+            lns_policy::keychain::real::KeyringBlob::open()
+                .map(|blob| Arc::new(blob) as Arc<dyn lns_policy::keychain::KeychainBlob>)
+        }));
 
     let window_state = WindowState::new();
     approval_window::install(window_state.clone());

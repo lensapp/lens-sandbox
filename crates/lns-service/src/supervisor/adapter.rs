@@ -990,15 +990,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(credential_backend)]
     async fn keychain_backend_spawns_no_file_watcher_and_serves_the_installed_store() {
-        crate::credential_flow::backend::install(keychain_backend_selection());
+        let _backend = crate::credential_flow::backend::install(keychain_backend_selection());
         let store = crate::credential_flow::backend::store();
-        let loaded = store.load().unwrap();
-        let saved = store.save(&CredentialStateFile::new());
+        assert!(store.load().unwrap().is_empty());
+        store.save(&CredentialStateFile::new()).unwrap();
         let (session, _rx) = fixture_credential_session_seeding(Arc::new(Vec::new()));
         let watcher = spawn_watcher_if_file_backend(&session).unwrap();
-        crate::credential_flow::backend::reset_for_tests();
-        assert!(loaded.is_empty());
-        saved.unwrap();
         assert!(watcher.is_none());
     }
 
@@ -1007,17 +1004,17 @@ mod tests {
     async fn file_backend_spawns_the_credentials_watcher() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("lns-credentials.json");
-        crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
-            store: Arc::new(crate::credential_flow::store::JsonFileCredentialStore::new(
-                path.clone(),
-            )),
-            kind: lns_policy::keychain::BackendKind::File,
-            file_path: Some(path),
-            fallback_reason: None,
-        });
+        let _backend =
+            crate::credential_flow::backend::install(lns_policy::keychain::StoreSelection {
+                store: Arc::new(crate::credential_flow::store::JsonFileCredentialStore::new(
+                    path.clone(),
+                )),
+                kind: lns_policy::keychain::BackendKind::File,
+                file_path: Some(path),
+                fallback_reason: None,
+            });
         let (session, _rx) = fixture_credential_session_seeding(Arc::new(Vec::new()));
         let watcher = spawn_watcher_if_file_backend(&session).unwrap();
-        crate::credential_flow::backend::reset_for_tests();
         assert!(watcher.is_some());
     }
 

@@ -22,6 +22,17 @@ static ACTIVE: RwLock<Option<ActiveBackend>> = RwLock::new(None);
 // Serializes whole load-modify-save transactions so concurrent writers can't drop each other's entries (lost update).
 static RMW: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Keeps the selected backend installed; dropping it uninstalls, restoring the default-file fallback — scenario/test scoping, held for the process lifetime in production.
+#[derive(Debug)]
+#[must_use = "dropping this guard uninstalls the credential backend"]
+pub struct InstalledBackend(());
+
+impl Drop for InstalledBackend {
+    fn drop(&mut self) {
+        *ACTIVE.write().expect("credential backend lock poisoned") = None;
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     *ACTIVE.write().expect("credential backend lock poisoned") = None;
@@ -55,7 +66,7 @@ impl CredentialStore for NotifyingStore {
     }
 }
 
-pub fn install(selection: StoreSelection) {
+pub fn install(selection: StoreSelection) -> InstalledBackend {
     if let Some(reason) = &selection.fallback_reason {
         let path = selection
             .file_path
@@ -72,6 +83,7 @@ pub fn install(selection: StoreSelection) {
         kind: selection.kind,
         file_path: selection.file_path,
     });
+    InstalledBackend(())
 }
 
 /// Uninstalled (unit tests, direct callers) behaves as the pre-keychain default: the JSON file at the default path.
@@ -210,7 +222,7 @@ mod tests {
     #[test]
     #[serial_test::serial(credential_backend)]
     fn installing_a_keychain_selection_exposes_the_kind_and_no_watch_path() {
-        install(keychain_selection());
+        let _backend = install(keychain_selection());
         assert_eq!(kind(), Some(BackendKind::Keychain));
         assert_eq!(file_watch_path(), None);
     }
@@ -218,7 +230,7 @@ mod tests {
     #[test]
     #[serial_test::serial(credential_backend)]
     fn installing_a_file_selection_exposes_the_kind_and_its_watch_path() {
-        install(file_selection(None));
+        let _backend = install(file_selection(None));
         assert_eq!(kind(), Some(BackendKind::File));
         assert_eq!(
             file_watch_path(),
@@ -229,7 +241,7 @@ mod tests {
     #[test]
     #[serial_test::serial(credential_backend)]
     fn install_warns_that_values_rest_in_plaintext_when_falling_back() {
-        let output = captured_output(|| install(file_selection(Some("no secret service"))));
+        let output = captured_output(|| drop(install(file_selection(Some("no secret service")))));
         assert!(output.contains("plaintext"), "{output}");
         assert!(output.contains("no secret service"), "{output}");
     }
@@ -237,14 +249,14 @@ mod tests {
     #[test]
     #[serial_test::serial(credential_backend)]
     fn install_stays_silent_when_the_keychain_was_selected() {
-        let output = captured_output(|| install(keychain_selection()));
+        let output = captured_output(|| drop(install(keychain_selection())));
         assert!(output.is_empty(), "{output}");
     }
 
     #[test]
     #[serial_test::serial(credential_backend)]
     fn installed_store_saves_through_the_selected_backend() {
-        install(keychain_selection());
+        let _backend = install(keychain_selection());
         let mut state = CredentialStateFile::new();
         state.insert(
             "some-provider".into(),
@@ -258,7 +270,7 @@ mod tests {
     #[serial_test::serial(credential_backend)]
     fn persist_entry_adds_to_existing_state_through_the_active_backend() {
         use crate::credential_flow::store::CredentialEntry;
-        install(keychain_selection());
+        let _backend = install(keychain_selection());
         let mut prior = CredentialStateFile::new();
         prior.insert("some-provider".into(), CredentialEntry::HostDetect);
         store().save(&prior).unwrap();
@@ -284,7 +296,7 @@ mod tests {
     #[serial_test::serial(credential_backend)]
     fn concurrent_persists_never_drop_each_others_entries() {
         use crate::credential_flow::store::CredentialEntry;
-        install(keychain_selection());
+        let _backend = install(keychain_selection());
         let writers: Vec<_> = (0..4)
             .map(|w| {
                 std::thread::spawn(move || {
@@ -309,7 +321,7 @@ mod tests {
     #[test]
     #[serial_test::serial(credential_backend)]
     fn reset_entries_rewrites_a_corrupt_blob_clean_without_loading() {
-        install(StoreSelection {
+        let _backend = install(StoreSelection {
             store: Arc::new(KeychainCredentialStore::new(Arc::new(FakeBlob {
                 data: Mutex::new(Some("{ not json".into())),
             }))),
