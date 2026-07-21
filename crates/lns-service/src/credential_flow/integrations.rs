@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use lns_policy::integrations::{AuthKind, Integration, OauthAuth, OauthFlow};
 use lns_policy::providers::ProviderDef;
-use lns_policy::{Policy, RouteRule};
+use lns_policy::{Policy, RouteRule, Verdict};
 
 use crate::credential_flow::providers::DefProvider;
 
@@ -135,6 +135,7 @@ pub fn resolve_applied_with_slots(
     base.integrations
         .retain(|id| !slot_ids.contains(id.as_str()));
     let mut out = resolve_applied_integrations(&base, catalog);
+    let ceiling_denies = policy.network.default_verdict == Verdict::Deny;
     for slot in slots {
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
             continue;
@@ -143,8 +144,11 @@ pub fn resolve_applied_with_slots(
             def.env_var = slot.env.clone();
             out.providers.push(DefProvider::new(def));
         }
-        out.routes
-            .extend(integ.routes.iter().map(|r| r.to_route_rule()));
+        // A slot is artifact-declared, so its route must not widen the user's deny-by-default lockdown.
+        if !ceiling_denies {
+            out.routes
+                .extend(integ.routes.iter().map(|r| r.to_route_rule()));
+        }
         if let Some(o) = signin_oauth(integ) {
             out.oauth_configs.insert(integ.id.clone(), o.clone());
         }
@@ -159,13 +163,14 @@ pub fn resolve_applied_with_slots(
 pub fn resolve_connectable_with_slots(
     policy: &Policy,
     slots: &[lns_artifact::spec::CredentialSlot],
+    declared: &[String],
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
     let mut owned = policy.clone();
     owned
         .integrations
         .extend(slots.iter().map(|s| s.name.clone()));
-    resolve_connectable_integrations(&owned, catalog)
+    resolve_connectable_with_declared(&owned, declared, catalog)
 }
 
 /// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
@@ -199,12 +204,20 @@ pub fn resolve_connectable_integrations(
     policy: &Policy,
     catalog: &[Integration],
 ) -> ConnectableIntegrations {
+    resolve_connectable_with_declared(policy, &[], catalog)
+}
+
+/// Connectables minus any colliding with a domain already spoken for — by an applied credential (`policy.integrations`) or by an artifact-declared, offered-not-armed integration (`declared`) — so a colliding entry's machine-global stored value can never inject over the credential that owns that domain (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
+fn resolve_connectable_with_declared(
+    policy: &Policy,
+    declared: &[String],
+    catalog: &[Integration],
+) -> ConnectableIntegrations {
     let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
-    // A connectable that shares an applied integration's route or injection domain must not ride the same run — otherwise its machine-global stored value would inject over the applied integration's credential (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
-    let owned_domains: Vec<&str> = catalog
+    let protected: HashSet<&str> = owned
         .iter()
-        .filter(|integ| owned.contains(integ.id.as_str()))
-        .flat_map(claimed_domains)
+        .copied()
+        .chain(declared.iter().map(String::as_str))
         .collect();
 
     let mut out = ConnectableIntegrations::default();
@@ -212,12 +225,18 @@ pub fn resolve_connectable_integrations(
         if owned.contains(integ.id.as_str()) {
             continue;
         }
-        if claimed_domains(integ).any(|domain| {
-            owned_domains
-                .iter()
-                .copied()
-                .any(|owned_domain| domains_overlap(owned_domain, domain))
-        }) {
+        let integ_domains: Vec<&str> = claimed_domains(integ).collect();
+        let collides = catalog
+            .iter()
+            .filter(|other| other.id != integ.id && protected.contains(other.id.as_str()))
+            .flat_map(claimed_domains)
+            .any(|guarded| {
+                integ_domains
+                    .iter()
+                    .copied()
+                    .any(|d| domains_overlap(guarded, d))
+            });
+        if collides {
             continue;
         }
         if let Some(p) = wire_provider(integ) {
@@ -796,6 +815,7 @@ mod tests {
         let c = resolve_connectable_with_slots(
             &policy_applying(&[]),
             &[slot("some-provider", "SOME_TOKEN", false)],
+            &[],
             &catalog,
         );
         assert!(

@@ -492,7 +492,15 @@ pub(super) async fn start(
     let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
     let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog integrations are seeded unarmed so their use offers a live connect.
-    let connectable = resolve_connectable_with_slots(&policy, sandbox_credentials, &catalog);
+    let declared_integrations = sandbox_policy
+        .map(|p| p.integrations.clone())
+        .unwrap_or_default();
+    let connectable = resolve_connectable_with_slots(
+        &policy,
+        sandbox_credentials,
+        &declared_integrations,
+        &catalog,
+    );
     policy.network.allowed_routes.extend(applied.routes);
     let connectable_ids: HashSet<String> = connectable
         .providers
