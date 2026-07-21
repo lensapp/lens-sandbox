@@ -487,6 +487,18 @@ mod tests {
     }
 
     #[test]
+    fn validate_mount_path_rejects_control_characters() {
+        assert!(
+            validate_mount_path("/.lens\n/etc").is_err(),
+            "a newline in a mount path is line-injected into the newline-delimited /.lens/fileset-owned chown manifest and must be refused at the validation chokepoint"
+        );
+        assert!(
+            validate_mount_path("/ok\u{7f}/x").is_err(),
+            "any control character in a mount path must be refused"
+        );
+    }
+
+    #[test]
     fn from_kind_str_round_trips_and_rejects_unknown() {
         for kind in ALL_KINDS {
             assert_eq!(Kind::from_kind_str(kind.as_str()), Some(kind));

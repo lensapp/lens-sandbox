@@ -182,6 +182,19 @@ mod tests {
     }
 
     #[test]
+    fn published_fileset_problems_refuses_a_truncated_or_malformed_digest_ref() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"ref":"reg/skills@sha256:abc","mountPath":"/a"}]}}"#,
+        )
+        .unwrap();
+        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
+        assert!(
+            !problems.is_empty(),
+            "a fileset ref with a truncated @sha256 digest is not digest-pinned and must be refused by the trust gate, not admitted by a loose contains(\"@sha256:\") check: {problems:?}"
+        );
+    }
+
+    #[test]
     fn an_empty_artifact_type_and_config_type_is_treated_as_a_plain_image() {
         assert_eq!(dispatch(Some(""), Some("")).unwrap(), RunPath::SingleImage);
     }
