@@ -22,6 +22,7 @@ pub trait Producer {
     ) -> LocalBoxFuture<'a, Result<()>>;
 }
 
+#[derive(Debug)]
 pub struct PackedFileset {
     pub built: BuiltArtifact,
     pub reference: String,
@@ -73,7 +74,7 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
                 reference: pinned,
             });
         } else if let Some(declared) = &fileset.reference
-            && !declared.contains("@sha256:")
+            && !lns_artifact::spec::is_digest_pinned_image(declared)
         {
             bail!(
                 "fileset ref {declared} is not digest-pinned; a published sandbox pins every fileset by digest"
@@ -364,14 +365,33 @@ mod tests {
 
     #[tokio::test]
     async fn push_keeps_a_digest_pinned_declared_ref_verbatim() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
-        let (rewritten, packed) =
-            pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
+        let pinned = format!(
+            "registry.example.test/team/skills@sha256:{}",
+            "a".repeat(64)
+        );
+        let doc = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","filesets":[{{"ref":"{pinned}","mountPath":"/s"}}]}}}}"#
+        );
+        let (rewritten, packed) = pack_path_filesets(
+            &fs_with_skills(),
+            cwd(),
+            doc.as_bytes(),
+            "ghcr.io/team/hermes:1.4.0",
+        )
+        .unwrap();
         assert!(packed.is_empty());
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(
-            value["spec"]["filesets"][0]["ref"],
-            "registry.example.test/team/skills@sha256:abc"
+        assert_eq!(value["spec"]["filesets"][0]["ref"], pinned);
+    }
+
+    #[tokio::test]
+    async fn push_refuses_a_declared_fileset_ref_with_a_malformed_digest() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
+        let err = pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0")
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not digest-pinned"),
+            "a truncated sha256 must not pass as pinned: {err:#}"
         );
     }
 
