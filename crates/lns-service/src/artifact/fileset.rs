@@ -297,6 +297,44 @@ mod tests {
     }
 
     #[test]
+    fn a_fileset_entry_name_with_a_newline_is_refused() {
+        let tar = raw_tar("seed\n/etc/shadow", b"x");
+        let dir = tempfile::tempdir().unwrap();
+        let result =
+            fileset_runtime_specs("/root/skills", &tar[..], &ContentStore::new(dir.path()));
+        assert!(
+            result.is_err(),
+            "a newline in a fileset entry name splits into an extra line of the /.lens/fileset-owned chown manifest, letting lns-init lchown an arbitrary absolute path (/etc/shadow); it must be refused, but was accepted as: {:?}",
+            result.map(|specs| specs
+                .iter()
+                .map(|s| s.guest_path.clone())
+                .collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn expansion_strips_the_setuid_bit_from_a_fileset_file() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(1);
+        header.set_mode(0o4755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "helper", &b"x"[..])
+            .unwrap();
+        let tar = builder.into_inner().unwrap();
+        let (_dir, specs) = expand("/opt/tools", &tar);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0].mode & 0o7000,
+            0,
+            "a pulled fileset must not carry setuid/setgid/sticky bits — push strips them with & 0o777 and pull must match, else a ref fileset with owner: root ships a setuid-root binary; got mode {:o}",
+            specs[0].mode
+        );
+    }
+
+    #[test]
     fn expands_files_under_the_mount_path_as_streamed_content_specs() {
         let tar = tar_with(&[("deep.md", b"research"), ("nested/tools.md", b"tools")]);
         let (dir, specs) = expand("/root/.some-agent/skills", &tar);
