@@ -29,7 +29,7 @@ pub enum SandboxCommand {
     #[command(about = "Scaffold a default ./lns.yaml (kind: Sandbox) in this directory.")]
     Init,
     #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
-    Validate,
+    Validate(SandboxValidateArgs),
     #[command(
         about = "Build ./lns.yaml and upload it to a registry as a sandbox artifact, in one step."
     )]
@@ -67,6 +67,17 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
     Prune(SandboxPruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct SandboxValidateArgs {
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Definition file to validate instead of ./lns.yaml; its directory roots the definition's relative filesets."
+    )]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -353,7 +364,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
-        SandboxCommand::Init | SandboxCommand::Validate => {
+        SandboxCommand::Init | SandboxCommand::Validate(_) => {
             bail!("author commands run offline, not through the service dispatch")
         }
         SandboxCommand::Push(_) => {
@@ -1155,7 +1166,7 @@ mod tests {
         let svc = CannedService::new(Response::Pong);
         for cmd in [
             SandboxCommand::Init,
-            SandboxCommand::Validate,
+            SandboxCommand::Validate(SandboxValidateArgs { file: None }),
             SandboxCommand::Inspect(SandboxInspectArgs { run: None }),
         ] {
             let mut out = Vec::new();

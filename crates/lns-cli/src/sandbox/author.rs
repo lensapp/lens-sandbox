@@ -84,7 +84,7 @@ pub fn map_dir_entries<'a>(
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
 pub fn is_offline(cmd: &SandboxCommand) -> bool {
     match cmd {
-        SandboxCommand::Init | SandboxCommand::Validate => true,
+        SandboxCommand::Init | SandboxCommand::Validate(_) => true,
         SandboxCommand::Inspect(args) => is_local_inspect(args.run.as_deref()),
         _ => false,
     }
@@ -99,6 +99,14 @@ pub fn is_local_inspect(target: Option<&str>) -> bool {
 
 fn yaml_path(cwd: &Path) -> PathBuf {
     cwd.join(LNS_YAML)
+}
+
+/// The `--file` selector names the definition to operate on; the default stays `./lns.yaml`.
+pub fn selected_definition_path(file: Option<&Path>, cwd: &Path) -> PathBuf {
+    match file {
+        Some(file) => crate::run::target::normalize(&cwd.join(file)),
+        None => yaml_path(cwd),
+    }
 }
 
 pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
@@ -128,8 +136,18 @@ pub fn load_definition_json_at<F: Fs>(fs: &F, path: &Path) -> Result<Vec<u8>> {
     serde_json::to_vec(&value).context("normalizing the definition to json")
 }
 
-pub fn validate<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
-    let json = load_definition_json(fs, cwd)?;
+pub fn validate<F: Fs, W: Write>(
+    fs: &F,
+    cwd: &Path,
+    file: Option<&Path>,
+    out: &mut W,
+) -> Result<i32> {
+    let path = selected_definition_path(file, cwd);
+    let project_dir = path.parent().unwrap_or(cwd);
+    let name = file
+        .map(|f| f.display().to_string())
+        .unwrap_or_else(|| LNS_YAML.to_string());
+    let json = load_definition_json_at(fs, &path)?;
     let mut problems = match lns_artifact::validate::validate(&json) {
         Ok(()) => Vec::new(),
         Err(problems) => problems,
@@ -137,13 +155,13 @@ pub fn validate<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32>
     if problems.is_empty()
         && let Ok(def) = lns_artifact::sandbox::parse(&json)
     {
-        problems.extend(super::fileset::path_fileset_problems(fs, cwd, &def));
+        problems.extend(super::fileset::path_fileset_problems(fs, project_dir, &def));
     }
     if problems.is_empty() {
-        writeln!(out, "{LNS_YAML} is valid.")?;
+        writeln!(out, "{name} is valid.")?;
         return Ok(0);
     }
-    writeln!(out, "{LNS_YAML} is not valid:")?;
+    writeln!(out, "{name} is not valid:")?;
     for problem in &problems {
         writeln!(out, "  - {problem}")?;
     }
@@ -254,7 +272,9 @@ mod tests {
     #[test]
     fn is_offline_matches_the_author_verbs_and_local_inspects_only() {
         assert!(is_offline(&SandboxCommand::Init));
-        assert!(is_offline(&SandboxCommand::Validate));
+        assert!(is_offline(&SandboxCommand::Validate(
+            crate::sandbox::SandboxValidateArgs { file: None }
+        )));
         assert!(is_offline(&inspect_cmd(None)));
         assert!(is_offline(&inspect_cmd(Some("."))));
         assert!(is_offline(&inspect_cmd(Some("lns.yaml"))));
@@ -303,16 +323,52 @@ mod tests {
     fn validate_passes_a_well_formed_definition() {
         let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
-        let code = validate(&fs, cwd(), &mut out).unwrap();
+        let code = validate(&fs, cwd(), None, &mut out).unwrap();
         assert_eq!(code, 0);
         assert!(String::from_utf8(out).unwrap().contains("is valid"));
+    }
+
+    #[test]
+    fn validate_file_selector_roots_filesets_at_the_files_directory_and_names_it() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
+        let fs = MapFs::with(&[
+            ("/other/lns.dev.yaml", yaml),
+            ("/other/skills/prompts.md", "p"),
+        ]);
+        let mut out = Vec::new();
+        let code = validate(
+            &fs,
+            cwd(),
+            Some(Path::new("../other/lns.dev.yaml")),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("../other/lns.dev.yaml is valid."),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn validate_file_selector_reports_problems_under_the_selected_name() {
+        let fs = fake(
+            "/work/lns.dev.yaml",
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec: {}\n",
+        );
+        let mut out = Vec::new();
+        let code = validate(&fs, cwd(), Some(Path::new("lns.dev.yaml")), &mut out).unwrap();
+        assert_eq!(code, 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("lns.dev.yaml is not valid:"), "got: {text}");
     }
 
     #[test]
     fn validate_surfaces_a_missing_file() {
         let fs = MapFs::default();
         let mut out = Vec::new();
-        let err = validate(&fs, cwd(), &mut out).unwrap_err();
+        let err = validate(&fs, cwd(), None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("lns init"));
     }
 
@@ -320,7 +376,7 @@ mod tests {
     fn validate_surfaces_malformed_yaml() {
         let fs = fake("/work/lns.yaml", "spec: [unterminated");
         let mut out = Vec::new();
-        let err = validate(&fs, cwd(), &mut out).unwrap_err();
+        let err = validate(&fs, cwd(), None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
     }
 
@@ -377,7 +433,7 @@ mod tests {
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
         );
         let mut out = Vec::new();
-        let code = validate(&fs, cwd(), &mut out).unwrap();
+        let code = validate(&fs, cwd(), None, &mut out).unwrap();
         assert_eq!(code, 1);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("fileset ./skills"), "got: {text}");

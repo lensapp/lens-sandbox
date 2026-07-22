@@ -147,7 +147,9 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
     let mut out = std::io::stdout();
     match command {
         super::SandboxCommand::Init => super::author::init(&RealFs, &cwd, &mut out),
-        super::SandboxCommand::Validate => super::author::validate(&RealFs, &cwd, &mut out),
+        super::SandboxCommand::Validate(args) => {
+            super::author::validate(&RealFs, &cwd, args.file.as_deref(), &mut out)
+        }
         super::SandboxCommand::Inspect(args) => {
             super::author::inspect_local(&RealFs, &cwd, args.run.as_deref(), &mut out)
         }

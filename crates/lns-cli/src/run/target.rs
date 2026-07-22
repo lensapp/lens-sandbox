@@ -87,7 +87,7 @@ fn is_yaml_file_name(path: &Path) -> bool {
 }
 
 // components() already normalizes interior `.` away, so only ParentDir needs lexical handling.
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
