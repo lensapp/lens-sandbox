@@ -126,9 +126,14 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
 }
 
 pub fn load_definition_json_at<F: Fs>(fs: &F, path: &Path) -> Result<Vec<u8>> {
+    let hint = if path.file_name() == Some(LNS_YAML.as_ref()) {
+        "; run `lns init` to scaffold one"
+    } else {
+        ""
+    };
     let yaml = fs
         .read_to_string(path)
-        .with_context(|| format!("reading {}; run `lns init` to scaffold one", path.display()))?;
+        .with_context(|| format!("reading {}{hint}", path.display()))?;
     let value: serde_json::Value =
         serde_yaml::from_str(&yaml).with_context(|| format!("parsing {}", path.display()))?;
     serde_json::to_vec(&value).context("normalizing the definition to json")
@@ -371,6 +376,19 @@ mod tests {
         let mut out = Vec::new();
         let err = validate(&fs, cwd(), None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("lns init"));
+    }
+
+    #[test]
+    fn a_missing_variant_file_does_not_hint_lns_init() {
+        let fs = MapFs::default();
+        let mut out = Vec::new();
+        let err = validate(&fs, cwd(), Some(Path::new("lns.dev.yaml")), &mut out).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("lns.dev.yaml"), "got: {text}");
+        assert!(
+            !text.contains("lns init"),
+            "`lns init` cannot scaffold a variant: {text}"
+        );
     }
 
     #[test]
