@@ -5,8 +5,11 @@ fn main() {
 }
 
 fn emit_build_sha() {
-    for name in ["HEAD", "index"] {
-        if let Some(path) = git_path(name) {
+    let mut watched = vec!["HEAD".to_string(), "index".to_string()];
+    // A commit moves the branch ref HEAD points at, not the HEAD file itself.
+    watched.extend(git_head_ref());
+    for name in watched {
+        if let Some(path) = git_path(&name) {
             println!("cargo:rerun-if-changed={path}");
         }
     }
@@ -16,6 +19,18 @@ fn emit_build_sha() {
         None => "unknown".to_string(),
     };
     println!("cargo:rustc-env=LNS_BUILD_SHA={stamp}");
+}
+
+fn git_head_ref() -> Option<String> {
+    let out = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head_ref = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!head_ref.is_empty()).then_some(head_ref)
 }
 
 fn git_short_sha() -> Option<String> {

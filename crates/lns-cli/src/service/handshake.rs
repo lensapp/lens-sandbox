@@ -223,7 +223,9 @@ mod tests {
             &Compat::BuildDrift {
                 running: "0ldbuild".into(),
             },
-            Some(std::path::Path::new("/Users/alice/Library/LaunchAgents/run.lns.service.plist")),
+            Some(std::path::Path::new(
+                "/Users/alice/Library/LaunchAgents/run.lns.service.plist",
+            )),
         )
         .expect("a persisting drift after relaunch must warn");
         assert!(w.contains("0ldbuild"), "{w}");
