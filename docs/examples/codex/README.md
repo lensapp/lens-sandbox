@@ -8,9 +8,10 @@ policy are the boundary — nothing leaves the sandbox except the hosts you allo
 
 ## Files
 
-- **`lns.yaml`** — the sandbox definition: a `node:lts-alpine` base that installs
-  Codex CLI (`@openai/codex`, latest) on first boot, the network allowlist, and
-  the declared port `1455` for the sign-in callback.
+- **`lns.yaml`** — the sandbox definition: a `curlimages/curl` base that fetches
+  the latest Codex CLI on first boot (Codex is a single static Rust binary —
+  the musl build from its GitHub releases, no Node.js/npm needed), the network
+  allowlist, and the declared port `1455` for the sign-in callback.
 - **`config/`** — seed state mounted at the workload's home (`/home/sandbox`):
   - `config/.codex/config.toml` — prefers ChatGPT sign-in over an API key,
     pre-trusts `/workspace`, and runs Codex with `approval_policy = "never"` and
@@ -49,8 +50,10 @@ cd your-project      # now contains lns.yaml + config/
 lns run
 ```
 
-The first boot runs `npm install -g @openai/codex`; the microVM is ephemeral,
-so each cold start reinstalls it (the `allowedRoutes` keep `registry.npmjs.org`
+The first boot downloads the latest `codex-<arch>-unknown-linux-musl` release
+binary from GitHub; the microVM is ephemeral, so each cold start re-downloads
+it (the `allowedRoutes` keep `github.com` and
+`release-assets.githubusercontent.com` — the release-download redirect target —
 open for that reason). On first run, Codex's onboarding offers **Sign in with
 ChatGPT** — pick it and open the printed URL on your host.
 
@@ -78,5 +81,9 @@ pass `-P` (or `-p 1455:1455`) when you need to sign in, or use
   network boundary. That's metered API-key auth, not your ChatGPT plan.
 - The network allowlist is deliberately tight; anything else the agent reaches
   for pauses on an approval card (`defaultVerdict: ask`). If you bake Codex
-  into a custom image and `lns push` it, you can drop the `registry.npmjs.org`
-  route and the runtime install entirely.
+  into a custom image and `lns push` it, you can drop the two GitHub routes
+  and the first-boot download entirely.
+- The base image matters more than it looks: the guest's egress goes through
+  the sandbox's filtering proxy, and busybox `wget` can't speak HTTPS through
+  it — `curl` can, which is why the base is `curlimages/curl` rather than bare
+  `alpine`.
