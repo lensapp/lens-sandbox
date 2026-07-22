@@ -137,8 +137,10 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             }
         }
     }
-    if !world.project_filesets.is_empty() {
+    if !world.project_filesets.is_empty() || !world.project_inline_filesets.is_empty() {
         spec_tail.push_str("\n  filesets:");
+    }
+    if !world.project_filesets.is_empty() {
         for (dir, file, mount, owner) in &world.project_filesets {
             let fileset_dir = root.join(dir);
             std::fs::create_dir_all(&fileset_dir).expect("create fileset dir");
@@ -148,6 +150,16 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             if let Some(owner) = owner {
                 spec_tail.push_str(&format!("\n      owner: {owner}"));
             }
+        }
+    }
+    for (file, content, mount, owner) in &world.project_inline_filesets {
+        spec_tail.push_str(&format!("\n    - inline:\n        {file}: |-"));
+        for line in content.split('\n') {
+            spec_tail.push_str(&format!("\n          {line}"));
+        }
+        spec_tail.push_str(&format!("\n      mountPath: {mount}"));
+        if let Some(owner) = owner {
+            spec_tail.push_str(&format!("\n      owner: {owner}"));
         }
     }
     let definition = format!(
@@ -861,6 +873,32 @@ fn project_declares_root_fileset(world: &mut E2eWorld, dir: String, file: String
     world
         .project_filesets
         .push((dir, file, mount, Some("root".into())));
+}
+
+#[given(
+    regex = r#"^the project declares inline file \"([^\"]+)\" with content `([^`]*)` mounted at \"([^\"]+)\"$"#
+)]
+fn project_declares_inline_fileset(
+    world: &mut E2eWorld,
+    file: String,
+    content: String,
+    mount: String,
+) {
+    world
+        .project_inline_filesets
+        .push((file, content, mount, None));
+}
+
+#[given(
+    regex = r#"^the project declares root-owned inline file \"([^\"]+)\" mounted at \"([^\"]+)\"$"#
+)]
+fn project_declares_root_inline_fileset(world: &mut E2eWorld, file: String, mount: String) {
+    world.project_inline_filesets.push((
+        file,
+        "root-owned inline payload".into(),
+        mount,
+        Some("root".into()),
+    ));
 }
 
 #[then("the run output carries no signature warning")]

@@ -36,5 +36,26 @@ spec:
       source: .
       target: /workspace
   filesets:
-    - path: ./config
+    - inline:
+        .claude.json: |
+          {
+            "hasCompletedOnboarding": true,
+            "theme": "dark",
+            "projects": {
+              "/workspace": {
+                "hasTrustDialogAccepted": true
+              }
+            }
+          }
+        .claude/settings.json: |
+          {
+            "permissions": {
+              "defaultMode": "bypassPermissions"
+            },
+            "skipDangerousModePermissionPrompt": true,
+            "skipAutoPermissionPrompt": true,
+            "sandbox": {
+              "enabled": false
+            }
+          }
       mountPath: /home/sandbox

@@ -140,6 +140,49 @@ async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
     world.pushed_ref = Some(reference);
 }
 
+#[when(
+    regex = r#"^the user pushes a sandbox declaring a root-owned inline file with content \"([^\"]+)\" in one step$"#
+)]
+async fn push_sandbox_with_inline_fileset(world: &mut E2eWorld, content: String) {
+    let host = world.registry.as_ref().expect("a registry").host();
+    let reference = format!("{host}/e2e-inline-sandbox:1");
+    let base = seed_base_image(&host).await;
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-inline-sandbox\nspec:\n  image: {base}\n  filesets:\n    - inline:\n        mcp.json: {content}\n      mountPath: /etc/agent\n      owner: root\n"
+    );
+    let env = cache_env(world);
+    let project = world.home.as_ref().expect("home set by cache_env").path();
+    std::fs::write(project.join("lns.yaml"), definition).expect("write inline lns.yaml fixture");
+
+    let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
+    assert_eq!(
+        pushed.exit_code, 0,
+        "lns push must upload the self-contained inline sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    world.pushed_ref = Some(reference);
+    world.result = Some(pushed);
+}
+
+#[then("no companion FileSet artifact is uploaded")]
+fn no_companion_fileset_artifact(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("inline push result");
+    assert!(
+        !result.stdout.contains("pushed fileset"),
+        "inline push must not publish a companion FileSet:\n{}",
+        result.stdout
+    );
+    let repositories = world
+        .registry
+        .as_ref()
+        .expect("a registry")
+        .manifest_repositories();
+    assert!(
+        repositories.iter().all(|name| !name.contains("fileset")),
+        "inline push unexpectedly published a FileSet repository: {repositories:?}"
+    );
+}
+
 #[then("the registry serves the pushed artifact at its ref")]
 async fn registry_serves_pushed(world: &mut E2eWorld) {
     let reference = world.pushed_ref.clone().expect("a ref was pushed");

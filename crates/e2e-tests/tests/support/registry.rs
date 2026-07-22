@@ -13,7 +13,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Store {
     blobs: HashMap<String, Vec<u8>>,
     manifests: HashMap<(String, String), Manifest>,
@@ -21,7 +21,7 @@ struct Store {
     next_upload: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Manifest {
     bytes: Vec<u8>,
     content_type: String,
@@ -32,6 +32,7 @@ struct Manifest {
 pub struct LocalRegistry {
     port: u16,
     online: Arc<AtomicBool>,
+    store: Arc<Mutex<Store>>,
 }
 
 impl LocalRegistry {
@@ -40,18 +41,23 @@ impl LocalRegistry {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local registry");
         let port = listener.local_addr().expect("registry addr").port();
         let store = Arc::new(Mutex::new(Store::default()));
+        let server_store = store.clone();
         let online = Arc::new(AtomicBool::new(true));
         let server_online = online.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let store = store.clone();
+                let store = server_store.clone();
                 let online = server_online.clone();
                 std::thread::spawn(move || {
                     let _ = serve(stream, &store, &online);
                 });
             }
         });
-        Self { port, online }
+        Self {
+            port,
+            online,
+            store,
+        }
     }
 
     /// The `host:port` a ref should target (e.g. `127.0.0.1:5000/some/repo:1`).
@@ -61,6 +67,20 @@ impl LocalRegistry {
 
     pub fn set_online(&self, online: bool) {
         self.online.store(online, Ordering::SeqCst);
+    }
+
+    pub fn manifest_repositories(&self) -> Vec<String> {
+        let mut repositories: Vec<_> = self
+            .store
+            .lock()
+            .expect("registry store lock")
+            .manifests
+            .keys()
+            .map(|(name, _)| name.clone())
+            .collect();
+        repositories.sort();
+        repositories.dedup();
+        repositories
     }
 }
 
