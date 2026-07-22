@@ -25,6 +25,9 @@ You drive everything through one binary: the `lns` CLI.
 - **[Example: Codex CLI (ChatGPT subscription)](examples/codex-chatgpt-subscription/)** —
   the same recipe shape for OpenAI's Codex CLI, signed in with a ChatGPT plan
   through a published callback port.
+- **[Example: Codex CLI (OpenAI API key)](examples/codex-openai-api-key/)** —
+  the stateless variant: usage-based billing via the `openai` integration, the
+  real key injected at the boundary and never inside the guest.
 - **[Policy and approvals](policy.md)** — the `lns-policy.yaml` file, the default
   `ask` verdict, the approval window, and editing rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of

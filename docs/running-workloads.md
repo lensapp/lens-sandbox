@@ -719,6 +719,8 @@ into your project and `lns run`.
 - [Claude Code example](examples/claude-code/) — a full agent recipe.
 - [Codex CLI (ChatGPT subscription) example](examples/codex-chatgpt-subscription/) —
   the same shape with browser-based sign-in through a published port.
+- [Codex CLI (OpenAI API key) example](examples/codex-openai-api-key/) — the
+  stateless variant with boundary-injected API-key auth.
 - [Policy and approvals](policy.md) — control what the workload may reach.
 - [Credentials](credentials.md) — give the workload placeholders, not secrets.
 - [CLI reference](cli-reference.md) — the full flag list.

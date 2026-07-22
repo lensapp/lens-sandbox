@@ -89,9 +89,9 @@ or use `codex login --device-auth` and skip the port entirely.
   also why the sandbox works only on this trust footing: the volume holds a
   real credential, and `lns volume rm codex-home` is how you revoke it locally
   (then sign out of the session at chatgpt.com).
-- Prefer keeping credentials out of the guest entirely? Bind the `openai`
-  integration instead (declare `integrations: [openai]`): the workload sees an
-  `OPENAI_API_KEY`-shaped placeholder and the real key is injected at the
+- Prefer keeping credentials out of the guest entirely? Use the
+  [`codex-openai-api-key`](../codex-openai-api-key/) sibling: the workload sees
+  an `OPENAI_API_KEY`-shaped placeholder and the real key is injected at the
   network boundary. That's metered API-key auth, not your ChatGPT plan.
 - The network allowlist is deliberately tight; anything else the agent reaches
   for pauses on an approval card (`defaultVerdict: ask`). If you bake Codex
