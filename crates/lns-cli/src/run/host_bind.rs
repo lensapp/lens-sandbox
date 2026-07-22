@@ -31,36 +31,8 @@ impl DirScan for RealDirScan {
     }
 }
 
-const EXACT_SECRET_NAMES: &[&str] = &[
-    ".npmrc",
-    ".netrc",
-    ".git-credentials",
-    ".pgpass",
-    ".pypirc",
-    ".yarnrc.yml",
-    "auth.json",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    "credentials",
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".kube",
-    ".azure",
-    ".oci",
-    ".docker",
-];
-
 pub fn looks_like_secret(name: &str) -> bool {
-    name.starts_with(".env")
-        || name.starts_with("credentials.")
-        || name.ends_with(".pem")
-        || name.ends_with(".key")
-        || name.ends_with(".ppk")
-        || name.ends_with(".keystore")
-        || EXACT_SECRET_NAMES.contains(&name)
+    lns_artifact::sandbox::looks_like_secret_name(name)
 }
 
 fn secret_shaped_top_level(scan: &dyn DirScan, root: &Path) -> Vec<String> {

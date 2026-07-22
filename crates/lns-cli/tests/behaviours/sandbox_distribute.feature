@@ -67,6 +67,15 @@ Feature: distributing a sandbox
     And the output contains ".env"
     And nothing is pushed
 
+  @todo
+  Scenario: push carries inline files in the sandbox artifact without a companion fileset artifact
+    Given a valid lns.yaml in the current directory declaring an inline fileset at "/home/sandbox"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And only the sandbox artifact is pushed
+    And the published sandbox config carries the inline content unchanged
+
   Scenario: pull hands the reference to the service and reports the digest
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
     When the user runs sandbox command "pull ghcr.io/team/hermes:1.4.0"

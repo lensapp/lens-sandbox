@@ -325,6 +325,7 @@ mod tests {
         lns_artifact::sandbox::FilesetEntry {
             path: path.map(str::to_string),
             reference: reference.map(str::to_string),
+            inline: None,
             mount_path: "/s".into(),
             owner: lns_artifact::sandbox::FilesetOwner::default(),
         }

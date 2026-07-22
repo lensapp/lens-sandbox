@@ -7,6 +7,29 @@ use crate::spec::{self, CredentialSlot, Metadata, Port, Resources};
 
 pub const API_VERSION: &str = "lns.run/v1";
 pub const KIND: &str = "Sandbox";
+pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
+
+const EXACT_SECRET_NAMES: &[&str] = &[
+    ".npmrc",
+    ".netrc",
+    ".git-credentials",
+    ".pgpass",
+    ".pypirc",
+    ".yarnrc.yml",
+    "auth.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "credentials",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".azure",
+    ".oci",
+    ".docker",
+];
 
 /// True when a document declares the user-facing `lns.run/v1` API group.
 pub fn is_sandbox_definition(config_json: &[u8]) -> bool {
@@ -100,6 +123,8 @@ pub struct FilesetEntry {
     pub path: Option<String>,
     #[serde(rename = "ref", default)]
     pub reference: Option<String>,
+    #[serde(default)]
+    pub inline: Option<BTreeMap<String, String>>,
     #[serde(rename = "mountPath")]
     pub mount_path: String,
     #[serde(default)]
@@ -236,16 +261,23 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
 }
 
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
-    match (&fileset.path, &fileset.reference) {
-        (Some(_), Some(_)) | (None, None) => bail!(
-            "fileset targeting {} must set either path or ref",
+    let source_count = usize::from(fileset.path.is_some())
+        + usize::from(fileset.reference.is_some())
+        + usize::from(fileset.inline.is_some());
+    if source_count != 1 || fileset.inline.as_ref().is_some_and(BTreeMap::is_empty) {
+        bail!(
+            "fileset targeting {} must set exactly one of path, ref, or inline",
             fileset.mount_path
-        ),
-        (Some(path), None) if path.is_empty() => bail!("fileset path must not be empty"),
-        (None, Some(reference)) if reference.is_empty() => {
-            bail!("fileset ref must not be empty")
-        }
-        _ => {}
+        );
+    }
+    if fileset.path.as_ref().is_some_and(String::is_empty) {
+        bail!("fileset path must not be empty");
+    }
+    if fileset.reference.as_ref().is_some_and(String::is_empty) {
+        bail!("fileset ref must not be empty");
+    }
+    if let Some(inline) = &fileset.inline {
+        validate_inline_files(inline)?;
     }
     spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")?;
     if overlaps_runtime_namespace(&fileset.mount_path) {
@@ -255,6 +287,52 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
+    for (path, content) in inline {
+        validate_inline_path(path)?;
+        if content.len() > MAX_INLINE_FILE_BYTES {
+            bail!(
+                "inline file {path:?} exceeds the {MAX_INLINE_FILE_BYTES}-byte limit; use a path or ref fileset"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_inline_path(path: &str) -> Result<()> {
+    let segments: Vec<&str> = path.split('/').collect();
+    if path.is_empty()
+        || path.starts_with('/')
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+        || path.chars().any(char::is_control)
+    {
+        bail!(
+            "inline file path {path:?} must be a safe relative path beneath its fileset mountPath"
+        );
+    }
+    if segments
+        .iter()
+        .any(|segment| looks_like_secret_name(segment))
+    {
+        bail!(
+            "inline fileset contains a secret-shaped file: {path} — real secrets stay outside the workload"
+        );
+    }
+    Ok(())
+}
+
+pub fn looks_like_secret_name(name: &str) -> bool {
+    name.starts_with(".env")
+        || name.starts_with("credentials.")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".ppk")
+        || name.ends_with(".keystore")
+        || EXACT_SECRET_NAMES.contains(&name)
 }
 
 fn overlaps_runtime_namespace(path: &str) -> bool {
@@ -654,6 +732,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_reads_an_inline_fileset_without_changing_its_text() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"inline":{".claude/settings.json":"{\"enabled\":true}\n"},"mountPath":"/home/sandbox"}]}"#,
+        ))
+        .unwrap();
+        let inline = def.spec.filesets[0].inline.as_ref().expect("inline source");
+        assert_eq!(
+            inline.get(".claude/settings.json").map(String::as_str),
+            Some("{\"enabled\":true}\n")
+        );
+        assert_eq!(def.spec.filesets[0].owner, FilesetOwner::Workload);
+    }
+
+    #[test]
+    fn parse_requires_exactly_one_fileset_source() {
+        for entry in [
+            r#"{"path":"./skills","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
+            r#"{"ref":"reg/skills@sha256:abc","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
+            r#"{"inline":{},"mountPath":"/s"}"#,
+        ] {
+            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("exactly one of path, ref, or inline"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_refuses_unsafe_and_secret_shaped_inline_paths() {
+        for path in [
+            "/etc/settings.json",
+            "../settings.json",
+            ".claude/../state.json",
+            ".aws/credentials.json",
+            "nested/.env.local",
+        ] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"inline":{{"{path}":"x"}},"mountPath":"/s"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(format!("{err:#}").contains(path), "{path}: got {err:#}");
+        }
+    }
+
+    #[test]
+    fn parse_enforces_the_inline_limit_per_file() {
+        let accepted = "a".repeat(128 * 1024);
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{
+                "inline": {"settings.json": accepted},
+                "mountPath": "/s"
+            }]
+        });
+        parse(&def_json(&spec.to_string())).unwrap();
+
+        let oversized = "a".repeat(128 * 1024 + 1);
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{
+                "inline": {"settings.json": oversized},
+                "mountPath": "/s"
+            }]
+        });
+        let err = parse(&def_json(&spec.to_string())).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("settings.json"), "got: {message}");
+        assert!(message.contains("131072-byte limit"), "got: {message}");
+        assert!(message.contains("path or ref fileset"), "got: {message}");
+    }
+
+    #[test]
     fn parse_defaults_fileset_owner_to_workload_so_seeded_state_is_rewritable() {
         let def = parse(&def_json(
             r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/home/sandbox"}]}"#,
@@ -706,7 +858,7 @@ mod tests {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("either path or ref"),
+                format!("{err:#}").contains("exactly one of path, ref, or inline"),
                 "got: {err:#}"
             );
         }
