@@ -109,14 +109,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 "Request::ExecImage must be dispatched via handle_exec, not handle_request"
             )
         }
-        Request::BeginIntegrationSignIn { .. } => {
+        Request::BeginConnectorSignIn { .. } => {
             unreachable!(
-                "Request::BeginIntegrationSignIn must be dispatched via handle_integration_sign_in, not handle_request"
+                "Request::BeginConnectorSignIn must be dispatched via handle_connector_sign_in, not handle_request"
             )
         }
-        Request::BindIntegrationCredential { .. } => {
+        Request::BindConnectorCredential { .. } => {
             unreachable!(
-                "Request::BindIntegrationCredential must be dispatched via handle_credential_bind, not handle_request"
+                "Request::BindConnectorCredential must be dispatched via handle_credential_bind, not handle_request"
             )
         }
         Request::CancelRun { run_id } => {
@@ -569,11 +569,11 @@ mod tests {
 
     #[tokio::test]
     #[should_panic(
-        expected = "BeginIntegrationSignIn must be dispatched via handle_integration_sign_in"
+        expected = "BeginConnectorSignIn must be dispatched via handle_connector_sign_in"
     )]
-    async fn begin_integration_sign_in_via_handle_request_panics() {
+    async fn begin_connector_sign_in_via_handle_request_panics() {
         let _ = handle_request(
-            &Request::BeginIntegrationSignIn {
+            &Request::BeginConnectorSignIn {
                 id: "some-oauth".into(),
             },
             Instant::now(),
@@ -583,11 +583,11 @@ mod tests {
 
     #[tokio::test]
     #[should_panic(
-        expected = "BindIntegrationCredential must be dispatched via handle_credential_bind"
+        expected = "BindConnectorCredential must be dispatched via handle_credential_bind"
     )]
-    async fn bind_integration_credential_via_handle_request_panics() {
+    async fn bind_connector_credential_via_handle_request_panics() {
         let _ = handle_request(
-            &Request::BindIntegrationCredential {
+            &Request::BindConnectorCredential {
                 id: "some-provider".into(),
             },
             Instant::now(),

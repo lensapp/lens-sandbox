@@ -86,7 +86,7 @@ async fn orchestrate(
         (None, None) => None,
     };
     if let Some(plan) = &sandbox_plan {
-        crate::artifact::real::refuse_unknown_integrations(
+        crate::artifact::real::refuse_unknown_connectors(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,
         )?;
@@ -437,13 +437,13 @@ async fn orchestrate(
     Ok(session_code)
 }
 
-/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. A bare `spec.integrations` id never gates here — it is offered reactively on first use.
+/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
 async fn gate_declared_sign_ins(
     credentials: &[lns_artifact::spec::CredentialSlot],
     frame_tx: &Sender<WireFrame>,
 ) -> Result<()> {
     use crate::artifact::credential_boot::{
-        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_integrations, resolve_connect,
+        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_connectors, resolve_connect,
         sign_in_gate_ids,
     };
     use crate::credential_flow::store::{
@@ -455,15 +455,15 @@ async fn gate_declared_sign_ins(
     if declared.is_empty() {
         return Ok(());
     }
-    let user = lns_policy::integrations::Catalog::load_or_default(
-        &lns_policy::integrations::default_integrations_path(),
+    let user = lns_policy::connectors::Catalog::load_or_default(
+        &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let catalog = lns_policy::connectors::effective_connectors(&user);
     let state = JsonFileCredentialStore::new(default_credentials_path())
         .load()
         .unwrap_or_default();
-    let plans = plan_declared_integrations(&declared, &catalog, &state);
+    let plans = plan_declared_connectors(&declared, &catalog, &state);
     if boot_gate(&plans) == BootGate::StartWorkload {
         return Ok(());
     }
@@ -471,16 +471,16 @@ async fn gate_declared_sign_ins(
         let SlotPlan::Connect(prompt) = plan else {
             continue;
         };
-        let id = prompt.integration.clone();
+        let id = prompt.connector.clone();
         let _ = frame_tx
             .send(WireFrame::Json(Response::RunLog {
                 level: lns_ipc::LogLevel::Info,
                 verb: None,
-                message: format!("integration {id} needs a sign-in before the workload starts"),
+                message: format!("connector {id} needs a sign-in before the workload starts"),
             }))
             .await;
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
-        let sign_in = crate::ipc::adapter::run_integration_sign_in(&id, progress_tx);
+        let sign_in = crate::ipc::adapter::run_connector_sign_in(&id, progress_tx);
         tokio::pin!(sign_in);
         let terminal = loop {
             tokio::select! {
@@ -509,11 +509,11 @@ async fn gate_declared_sign_ins(
                     continue;
                 }
                 anyhow::bail!(
-                    "sign-in for integration {id} did not complete ({reason}); launch aborted"
+                    "sign-in for connector {id} did not complete ({reason}); launch aborted"
                 );
             }
             other => {
-                anyhow::bail!("unexpected sign-in response for integration {id}: {other:?}");
+                anyhow::bail!("unexpected sign-in response for connector {id}: {other:?}");
             }
         }
     }

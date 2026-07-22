@@ -10,7 +10,7 @@ use crate::approval_flow::protocol::{
 };
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
-use lns_policy::integrations::TokenFallback;
+use lns_policy::connectors::TokenFallback;
 use lns_policy::{Policy, PolicyStore, RouteRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -18,19 +18,19 @@ pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 /// Supplies the registry credentials packed into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
 pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 
-/// Maps a reloaded policy's `integrations:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
-pub type IntegrationRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send + Sync>;
+/// Maps a reloaded policy's `connectors:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
+pub type ConnectorRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send + Sync>;
 
-/// A connectable integration whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
-pub struct OfferableIntegration {
+/// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
+pub struct OfferableConnector {
     pub id: String,
     pub display_name: String,
     pub patterns: Vec<String>,
     pub token_fallback: Option<TokenFallback>,
 }
 
-/// Connects an integration interactively and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery. `connect_with_token` arms a pasted token instead of running the interactive sign-in.
-pub trait IntegrationConnector: Send + Sync {
+/// Connects a connector interactively and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery. `connect_with_token` arms a pasted token instead of running the interactive sign-in.
+pub trait ConnectPort: Send + Sync {
     fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
     fn connect_with_token<'a>(
         &'a self,
@@ -57,9 +57,9 @@ pub struct PendingPrompt {
     pub id: String,
     pub host: String,
     pub action: String,
-    /// Some(display name) when `host` matches a connectable integration, so the card offers to connect it before the plain allow/deny.
+    /// Some(display name) when `host` matches a connectable connector, so the card offers to connect it before the plain allow/deny.
     pub offer: Option<String>,
-    /// Some when the offered integration declares a token fallback, so the offer card can also reveal "use a token instead".
+    /// Some when the offered connector declares a token fallback, so the offer card can also reveal "use a token instead".
     pub token_fallback: Option<TokenFallback>,
 }
 
@@ -73,7 +73,7 @@ struct PendingEntry {
 
 #[derive(Debug, Clone)]
 struct OfferRef {
-    integration_id: String,
+    connector_id: String,
     display_name: String,
 }
 
@@ -85,9 +85,9 @@ pub struct ApprovalSession {
     sink: FrameSink,
     timeout: Duration,
     credentials_provider: OnceLock<CredentialsProvider>,
-    integration_routes: OnceLock<IntegrationRouteDeriver>,
-    offerable: Vec<OfferableIntegration>,
-    connector: OnceLock<Arc<dyn IntegrationConnector>>,
+    connector_routes: OnceLock<ConnectorRouteDeriver>,
+    offerable: Vec<OfferableConnector>,
+    connector: OnceLock<Arc<dyn ConnectPort>>,
     connecting: Mutex<HashSet<String>>,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
     policy_floor: OnceLock<Policy>,
@@ -115,7 +115,7 @@ impl ApprovalSession {
             sink,
             timeout,
             credentials_provider: OnceLock::new(),
-            integration_routes: OnceLock::new(),
+            connector_routes: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
@@ -124,8 +124,8 @@ impl ApprovalSession {
         }
     }
 
-    /// Captures the run's connectable integrations so a held request to one of their domains offers to connect before the plain allow/deny.
-    pub fn with_offers(mut self, offerable: Vec<OfferableIntegration>) -> Self {
+    /// Captures the run's connectable connectors so a held request to one of their domains offers to connect before the plain allow/deny.
+    pub fn with_offers(mut self, offerable: Vec<OfferableConnector>) -> Self {
         self.offerable = offerable;
         self
     }
@@ -135,9 +135,9 @@ impl ApprovalSession {
         let _ = self.credentials_provider.set(provider);
     }
 
-    /// Installs the integration-route deriver once at boot so a watcher reload re-applies a connected integration's routes instead of dropping them; idempotent, the first wins.
-    pub fn set_integration_route_deriver(&self, deriver: IntegrationRouteDeriver) {
-        let _ = self.integration_routes.set(deriver);
+    /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
+    pub fn set_connector_route_deriver(&self, deriver: ConnectorRouteDeriver) {
+        let _ = self.connector_routes.set(deriver);
     }
 
     /// Installs a sandbox's shipped policy as an always-merged floor, so a watcher reload of the local overlay can never drop the sandbox's rules; idempotent, the first wins.
@@ -145,8 +145,8 @@ impl ApprovalSession {
         let _ = self.policy_floor.set(floor);
     }
 
-    /// Installs the integration connector once the credential subsystem exists; idempotent, the first wins.
-    pub fn set_connector(&self, connector: Arc<dyn IntegrationConnector>) {
+    /// Installs the connect port once the credential subsystem exists; idempotent, the first wins.
+    pub fn set_connector(&self, connector: Arc<dyn ConnectPort>) {
         let _ = self.connector.set(connector);
     }
 
@@ -154,20 +154,20 @@ impl ApprovalSession {
         let _ = self.ledger.set(recorder);
     }
 
-    fn offer_for_host(&self, host: &str) -> Option<&OfferableIntegration> {
+    fn offer_for_host(&self, host: &str) -> Option<&OfferableConnector> {
         self.offerable
             .iter()
             .find(|i| i.patterns.iter().any(|p| host_matches_pattern(p, host)))
     }
 
-    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the integration is already connected this run.
+    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected this run.
     fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String, Option<TokenFallback>)> {
         let integ = self.offer_for_host(host)?;
         let already_connected = self
             .policy
             .lock()
             .expect("policy mutex poisoned")
-            .integrations
+            .connectors
             .iter()
             .any(|i| i == &integ.id);
         (!already_connected).then(|| {
@@ -197,13 +197,13 @@ impl ApprovalSession {
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
         let matched = self.offer_id_and_name_for(&req.host);
         let offer_ref = matched.as_ref().map(|(id, name, _)| OfferRef {
-            integration_id: id.clone(),
+            connector_id: id.clone(),
             display_name: name.clone(),
         });
-        // While a connect for this integration is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
+        // While a connect for this connector is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
         let coalesced = offer_ref
             .as_ref()
-            .is_some_and(|o| self.is_connecting(&o.integration_id));
+            .is_some_and(|o| self.is_connecting(&o.connector_id));
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         if pending.contains_key(&req.id) {
             return;
@@ -259,24 +259,24 @@ impl ApprovalSession {
             target: entry.host.clone(),
             decision,
             reason: (!entry.reason.is_empty()).then(|| entry.reason.clone()),
-            integration: entry.offer.as_ref().map(|o| o.integration_id.clone()),
+            connector: entry.offer.as_ref().map(|o| o.connector_id.clone()),
         });
     }
 
-    fn record_offer_decision(&self, integration_id: &str, connected: bool) {
+    fn record_offer_decision(&self, connector_id: &str, connected: bool) {
         let Some(recorder) = self.ledger.get() else {
             return;
         };
         recorder.record(LedgerEvent::Approval {
-            kind: ApprovalKind::Integration,
-            target: integration_id.to_string(),
+            kind: ApprovalKind::Connector,
+            target: connector_id.to_string(),
             decision: if connected {
                 LedgerDecision::AllowOnce
             } else {
                 LedgerDecision::DenyOnce
             },
             reason: None,
-            integration: Some(integration_id.to_string()),
+            connector: Some(connector_id.to_string()),
         });
     }
 
@@ -297,50 +297,50 @@ impl ApprovalSession {
             .remove(id)
     }
 
-    /// Accepts a held request's integration offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
+    /// Accepts a held request's connector offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
     pub async fn connect_offer(&self, id: &str) -> DecisionOutcome {
         self.connect_offer_with(id, None).await
     }
 
-    /// Accepts a held request's integration offer by arming a pasted token instead of the interactive connect. See [`Self::connect_offer_with`].
+    /// Accepts a held request's connector offer by arming a pasted token instead of the interactive connect. See [`Self::connect_offer_with`].
     pub async fn connect_offer_with_token(&self, id: &str, value: String) -> DecisionOutcome {
         self.connect_offer_with(id, Some(value)).await
     }
 
-    /// Drives one connect for the offered integration and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same integration coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
+    /// Drives one connect for the offered connector and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same connector coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
     async fn connect_offer_with(&self, id: &str, token: Option<String>) -> DecisionOutcome {
         let Some(offer) = self.offer_of(id) else {
             return DecisionOutcome::UnknownId;
         };
-        if !self.begin_connecting(&offer.integration_id) {
+        if !self.begin_connecting(&offer.connector_id) {
             // Another card already started this connect; its batch will release this request too.
             self.notifier.dismiss(id);
             return DecisionOutcome::Resolved;
         }
-        // Hide every offer card for this integration so the sign-in card isn't covered; the requests stay held for the batch release.
-        for request_id in self.offer_request_ids(&offer.integration_id) {
+        // Hide every offer card for this connector so the sign-in card isn't covered; the requests stay held for the batch release.
+        for request_id in self.offer_request_ids(&offer.connector_id) {
             self.notifier.dismiss(&request_id);
         }
         let connected = match self.connector.get() {
             Some(connector) => match token {
                 Some(value) => {
                     connector
-                        .connect_with_token(&offer.integration_id, value)
+                        .connect_with_token(&offer.connector_id, value)
                         .await
                 }
-                None => connector.connect(&offer.integration_id).await,
+                None => connector.connect(&offer.connector_id).await,
             },
             None => false,
         };
-        self.finish_connecting(&offer.integration_id);
+        self.finish_connecting(&offer.connector_id);
         self.notifier.connect_finished(&offer.display_name);
         let decision = if connected {
             Decision::AllowOnce
         } else {
             Decision::DenyOnce
         };
-        self.record_offer_decision(&offer.integration_id, connected);
-        for request_id in self.drain_offer_requests(&offer.integration_id) {
+        self.record_offer_decision(&offer.connector_id, connected);
+        for request_id in self.drain_offer_requests(&offer.connector_id) {
             self.send_decision_frame(&request_id, decision);
         }
         DecisionOutcome::Resolved
@@ -371,22 +371,22 @@ impl ApprovalSession {
             .remove(id);
     }
 
-    fn offer_request_ids(&self, integration_id: &str) -> Vec<String> {
+    fn offer_request_ids(&self, connector_id: &str) -> Vec<String> {
         self.pending
             .lock()
             .expect("pending mutex poisoned")
             .iter()
-            .filter(|(_, e)| offers_integration(e, integration_id))
+            .filter(|(_, e)| offers_connector(e, connector_id))
             .map(|(id, _)| id.clone())
             .collect()
     }
 
-    /// Removes and returns every held request offering `integration_id`.
-    fn drain_offer_requests(&self, integration_id: &str) -> Vec<String> {
+    /// Removes and returns every held request offering `connector_id`.
+    fn drain_offer_requests(&self, connector_id: &str) -> Vec<String> {
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         let ids: Vec<String> = pending
             .iter()
-            .filter(|(_, e)| offers_integration(e, integration_id))
+            .filter(|(_, e)| offers_connector(e, connector_id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -406,12 +406,12 @@ impl ApprovalSession {
             pending
                 .iter()
                 .filter(|(_, entry)| entry.deadline <= now)
-                // A request offering an integration that's mid sign-in must not be swept; its connect releases it.
+                // A request offering a connector that's mid sign-in must not be swept; its connect releases it.
                 .filter(|(_, entry)| {
                     entry
                         .offer
                         .as_ref()
-                        .is_none_or(|o| !connecting.contains(&o.integration_id))
+                        .is_none_or(|o| !connecting.contains(&o.connector_id))
                 })
                 .map(|(id, _)| id.clone())
                 .collect()
@@ -436,11 +436,11 @@ impl ApprovalSession {
         if let Some(floor) = self.policy_floor.get() {
             new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
         }
-        if let Some(derive) = self.integration_routes.get() {
+        if let Some(derive) = self.connector_routes.get() {
             new_policy
                 .network
                 .allowed_routes
-                .extend(derive(&new_policy.integrations));
+                .extend(derive(&new_policy.connectors));
         }
         *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
         let credentials = self.current_credentials();
@@ -487,8 +487,8 @@ impl ApprovalSession {
         }
     }
 
-    /// Connects an integration live: records the id under `integrations:` and persists only that, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
-    pub fn connect_integration(&self, id: &str, routes: Vec<RouteRule>) {
+    /// Connects a connector live: records the id under `connectors:` and persists only that, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
+    pub fn connect_connector(&self, id: &str, routes: Vec<RouteRule>) {
         let (to_persist, live_network) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             policy.connect(id);
@@ -503,13 +503,13 @@ impl ApprovalSession {
         }));
         if let Err(e) = self.store.save(&to_persist) {
             self.notifier.inform(&format!(
-                "integration connected in-memory but not persisted: {e}"
+                "connector connected in-memory but not persisted: {e}"
             ));
         }
     }
 }
 
-/// Matches a request host against an integration route pattern, case-insensitively as DNS names are: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
+/// Matches a request host against a connector route pattern, case-insensitively as DNS names are: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
 pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     let pattern = pattern.to_ascii_lowercase();
     let host = host.to_ascii_lowercase();
@@ -525,11 +525,11 @@ pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     }
 }
 
-fn offers_integration(entry: &PendingEntry, integration_id: &str) -> bool {
+fn offers_connector(entry: &PendingEntry, connector_id: &str) -> bool {
     entry
         .offer
         .as_ref()
-        .is_some_and(|o| o.integration_id == integration_id)
+        .is_some_and(|o| o.connector_id == connector_id)
 }
 
 fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
@@ -673,7 +673,7 @@ pub(crate) mod tests {
                 target: "api.foo.com".into(),
                 decision: LedgerDecision::AllowAlways,
                 reason: Some("policy-ambiguous".into()),
-                integration: None,
+                connector: None,
             }
         );
     }
@@ -695,7 +695,7 @@ pub(crate) mod tests {
                 target: "api.foo.com".into(),
                 decision: LedgerDecision::DenyOnce,
                 reason: None,
-                integration: None,
+                connector: None,
             }
         );
     }
@@ -1153,9 +1153,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn apply_external_policy_re_derives_a_connected_integrations_routes() {
+    fn apply_external_policy_re_derives_a_connected_connectors_routes() {
         let (s, _n, _store, mut rx) = fixture();
-        s.set_integration_route_deriver(Box::new(|ids| {
+        s.set_connector_route_deriver(Box::new(|ids| {
             ids.iter()
                 .filter(|id| id.as_str() == "some-oauth")
                 .map(|_| RouteRule::allow_host("api.some-oauth.example"))
@@ -1170,7 +1170,7 @@ pub(crate) mod tests {
         assert_eq!(
             routes.len(),
             1,
-            "a reloaded id-only policy gets its integration route back live, not dropped"
+            "a reloaded id-only policy gets its connector route back live, not dropped"
         );
         assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
         assert_eq!(
@@ -1277,12 +1277,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connect_integration_persists_only_the_id_but_emits_the_route_live() {
+    fn connect_connector_persists_only_the_id_but_emits_the_route_live() {
         let (s, _n, store, mut rx) = fixture();
-        s.connect_integration("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
+        s.connect_connector("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
         let saves = store.saves.lock().unwrap();
         assert_eq!(saves.len(), 1, "the connection is persisted once");
-        assert_eq!(saves[0].integrations, ["gitlab"]);
+        assert_eq!(saves[0].connectors, ["gitlab"]);
         assert!(
             !saves[0]
                 .network
@@ -1301,10 +1301,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connect_integration_informs_when_persist_fails() {
+    fn connect_connector_informs_when_persist_fails() {
         let (s, n, store, _rx) = fixture();
         store.fail_next(io::ErrorKind::PermissionDenied, "disk full");
-        s.connect_integration("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
+        s.connect_connector("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
         let informed = n.informed.lock().unwrap();
         assert_eq!(informed.len(), 1);
         assert!(informed[0].contains("not persisted"), "got: {:?}", informed);
@@ -1326,7 +1326,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl IntegrationConnector for FakeConnector {
+    impl ConnectPort for FakeConnector {
         fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
             Box::pin(async move {
                 self.connected.lock().unwrap().push(id.to_string());
@@ -1348,8 +1348,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn offerable(id: &str, name: &str, pattern: &str) -> OfferableIntegration {
-        OfferableIntegration {
+    fn offerable(id: &str, name: &str, pattern: &str) -> OfferableConnector {
+        OfferableConnector {
             id: id.into(),
             display_name: name.into(),
             patterns: vec![pattern.into()],
@@ -1357,8 +1357,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn offerable_with_fallback(id: &str, name: &str, pattern: &str) -> OfferableIntegration {
-        OfferableIntegration {
+    fn offerable_with_fallback(id: &str, name: &str, pattern: &str) -> OfferableConnector {
+        OfferableConnector {
             token_fallback: Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
                 command: None,
@@ -1368,7 +1368,7 @@ pub(crate) mod tests {
     }
 
     fn offer_session(
-        offers: Vec<OfferableIntegration>,
+        offers: Vec<OfferableConnector>,
         connector: Option<Arc<FakeConnector>>,
     ) -> (
         ApprovalSession,
@@ -1388,7 +1388,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn submit_pending_with_a_matching_offer_presents_the_integration_display_name() {
+    fn submit_pending_with_a_matching_offer_presents_the_connector_display_name() {
         let (s, n, _rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
@@ -1397,7 +1397,7 @@ pub(crate) mod tests {
         assert_eq!(
             n.presented.lock().unwrap()[0].offer.as_deref(),
             Some("GitHub"),
-            "a held request to an integration domain offers to connect it"
+            "a held request to a connector domain offers to connect it"
         );
     }
 
@@ -1412,7 +1412,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn submit_pending_surfaces_the_offered_integrations_token_fallback() {
+    fn submit_pending_surfaces_the_offered_connectors_token_fallback() {
         let (s, n, _rx) = offer_session(
             vec![offerable_with_fallback(
                 "some-oauth",
@@ -1430,7 +1430,7 @@ pub(crate) mod tests {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),
-            "an offer for an integration that declares a token fallback carries it to the card"
+            "an offer for a connector that declares a token fallback carries it to the card"
         );
     }
 
@@ -1504,7 +1504,7 @@ pub(crate) mod tests {
         assert_eq!(
             connector.connected.lock().unwrap().as_slice(),
             &["some-oauth".to_string()],
-            "accepting the offer drives a connect of the matched integration"
+            "accepting the offer drives a connect of the matched connector"
         );
         assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
         assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
@@ -1542,7 +1542,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_accepted_integration_offer_records_an_integration_allow() {
+    async fn an_accepted_connector_offer_records_an_connector_allow() {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, _n, _rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
@@ -1558,17 +1558,17 @@ pub(crate) mod tests {
         assert_eq!(
             *only_approval(&events),
             LedgerEvent::Approval {
-                kind: ApprovalKind::Integration,
+                kind: ApprovalKind::Connector,
                 target: "some-oauth".into(),
                 decision: LedgerDecision::AllowOnce,
                 reason: None,
-                integration: Some("some-oauth".into()),
+                connector: Some("some-oauth".into()),
             }
         );
     }
 
     #[tokio::test]
-    async fn a_failed_integration_connect_records_an_integration_deny() {
+    async fn a_failed_connector_connect_records_an_connector_deny() {
         let connector = Arc::new(FakeConnector::new(false));
         let (s, _n, _rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
@@ -1584,11 +1584,11 @@ pub(crate) mod tests {
         assert_eq!(
             *only_approval(&events),
             LedgerEvent::Approval {
-                kind: ApprovalKind::Integration,
+                kind: ApprovalKind::Connector,
                 target: "some-oauth".into(),
                 decision: LedgerDecision::DenyOnce,
                 reason: None,
-                integration: Some("some-oauth".into()),
+                connector: Some("some-oauth".into()),
             }
         );
     }
@@ -1620,7 +1620,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn connect_offer_releases_every_held_request_for_the_integration() {
+    async fn connect_offer_releases_every_held_request_for_the_connector() {
         let connector = Arc::new(FakeConnector::new(true));
         let (s, n, mut rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
@@ -1634,7 +1634,7 @@ pub(crate) mod tests {
         assert_eq!(
             connector.connected.lock().unwrap().as_slice(),
             &["some-oauth".to_string()],
-            "one sign-in serves every held request for the integration"
+            "one sign-in serves every held request for the connector"
         );
         let a = decision_frame(&mut rx);
         let b = decision_frame(&mut rx);
@@ -1726,7 +1726,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn submit_pending_coalesces_a_request_while_its_integration_is_connecting() {
+    fn submit_pending_coalesces_a_request_while_its_connector_is_connecting() {
         let (s, n, _rx) = offer_session(
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
@@ -1777,7 +1777,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn submit_pending_does_not_offer_an_already_connected_integration() {
+    fn submit_pending_does_not_offer_an_already_connected_connector() {
         let mut policy = Policy::default();
         policy.connect("some-oauth");
         let notifier = Arc::new(RecordingNotifier::default());
@@ -1791,7 +1791,7 @@ pub(crate) mod tests {
         assert_eq!(
             notifier.presented.lock().unwrap()[0].offer,
             None,
-            "a connected integration is not re-offered"
+            "a connected connector is not re-offered"
         );
     }
 

@@ -664,8 +664,8 @@ fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow)
                 Some(&row.ts),
             );
             sandbox_field(ui, state, &row.run);
-            if let Some(integration) = &row.integration {
-                field(ui, state, "Integration", integration, None);
+            if let Some(connector) = &row.connector {
+                field(ui, state, "Connector", connector, None);
             }
             if let Some(obj) = row.raw.as_object() {
                 for (key, value) in obj {

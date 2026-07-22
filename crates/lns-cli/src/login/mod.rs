@@ -8,7 +8,7 @@ use lns_policy::registry_auth::{
 };
 
 use crate::command::{CommandSpec, subcommand};
-use crate::integration::LocalBoxFuture;
+use crate::connector::LocalBoxFuture;
 
 mod real;
 

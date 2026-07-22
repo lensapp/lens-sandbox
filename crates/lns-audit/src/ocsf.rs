@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 pub struct Row {
     pub kind: String,
     pub detail: String,
-    pub integration: Option<String>,
+    pub connector: Option<String>,
     pub run: String,
     pub ts: String,
 }
@@ -19,7 +19,7 @@ pub fn read(event: &Map<String, Value>) -> Result<Row> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        integration: opt(um, "lns_integration"),
+        connector: opt(um, "lns_connector"),
         run: text(um, "lns_run"),
         ts: text(um, "lns_ts"),
     })
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(row.kind, "connection");
         assert_eq!(row.run, "9e8d7c6b0000");
         assert_eq!(row.ts, "2026-06-29T14:00:00Z");
-        assert_eq!(row.integration.as_deref(), Some("some-oauth"));
+        assert_eq!(row.connector.as_deref(), Some("some-oauth"));
         assert_eq!(
             row.detail, "connect some-oauth (oauth) @user [repo]",
             "detail is the event's own message, not re-derived by the reader"
@@ -100,11 +100,11 @@ mod tests {
     }
 
     #[test]
-    fn a_per_run_event_has_no_integration_and_surfaces_its_message() {
+    fn a_per_run_event_has_no_connector_and_surfaces_its_message() {
         let row = read(&obj(&lns_ocsf::volume_mount(&octx("r"), "data", "/data"))).unwrap();
         assert_eq!(row.kind, "volume");
         assert_eq!(row.detail, "data → /data");
-        assert!(row.integration.is_none());
+        assert!(row.connector.is_none());
     }
 
     #[test]

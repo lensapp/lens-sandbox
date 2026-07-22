@@ -73,7 +73,7 @@ fn dst_endpoint(url: &str) -> Value {
 
 pub fn connection(
     ctx: &Context,
-    integration: &str,
+    connector: &str,
     auth: &str,
     account: Option<&str>,
     scopes: &[String],
@@ -90,16 +90,16 @@ pub fn connection(
     .set(
         "message",
         format!(
-            "connect {integration} ({auth}) {} [{}]",
+            "connect {connector} ({auth}) {} [{}]",
             account.unwrap_or("-"),
             scopes.join(", ")
         )
         .into(),
     )
-    .set("user", json!({"name": account.unwrap_or(integration)}))
-    .set("service", json!({"name": integration}))
+    .set("user", json!({"name": account.unwrap_or(connector)}))
+    .set("service", json!({"name": connector}))
     .set("auth_protocol_id", auth_protocol_id(auth).into())
-    .note("lns_integration", integration.into())
+    .note("lns_connector", connector.into())
     .note("lns_auth", auth.into());
     if let Some(account) = account {
         ev = ev.note("lns_account", account.into());
@@ -115,7 +115,7 @@ pub fn connection(
 
 pub fn credential_use(
     ctx: &Context,
-    integration: &str,
+    connector: &str,
     auth: &str,
     fingerprint: Option<&str>,
     dest: &[String],
@@ -131,7 +131,7 @@ pub fn credential_use(
     .set(
         "message",
         format!(
-            "use {integration}{} → {}",
+            "use {connector}{} → {}",
             fingerprint
                 .map(|fp| format!(" fp {fp}"))
                 .unwrap_or_default(),
@@ -139,13 +139,13 @@ pub fn credential_use(
         )
         .into(),
     )
-    .set("user", json!({"name": integration}))
+    .set("user", json!({"name": connector}))
     .set("auth_protocol_id", auth_protocol_id(auth).into())
-    .note("lns_integration", integration.into())
+    .note("lns_connector", connector.into())
     .note("lns_auth", auth.into());
     match dest.first() {
         Some(first) => ev = ev.set("dst_endpoint", json!({"domain": first})),
-        None => ev = ev.set("service", json!({"name": integration})),
+        None => ev = ev.set("service", json!({"name": connector})),
     }
     if let Some(fingerprint) = fingerprint {
         ev = ev.note("lns_fp", fingerprint.into());
@@ -162,7 +162,7 @@ pub fn approval(
     target: &str,
     decision: &str,
     reason: Option<&str>,
-    integration: Option<&str>,
+    connector: Option<&str>,
 ) -> Value {
     let allowed = decision.starts_with("allow");
     let sev = if allowed {
@@ -200,8 +200,8 @@ pub fn approval(
     if let Some(reason) = reason {
         ev = ev.note("lns_reason", reason.into());
     }
-    if let Some(integration) = integration {
-        ev = ev.note("lns_integration", integration.into());
+    if let Some(connector) = connector {
+        ev = ev.note("lns_connector", connector.into());
     }
     ev.build()
 }
@@ -375,7 +375,7 @@ pub fn sandbox_run(
     ctx: &Context,
     reference: &str,
     digest: &str,
-    integrations: &[String],
+    connectors: &[String],
     policy_hash: &str,
 ) -> Value {
     let mut ev = Event::new(
@@ -394,8 +394,8 @@ pub fn sandbox_run(
     .note("lns_sandbox", reference.into())
     .note("lns_sandbox_digest", digest.into())
     .note("lns_policy_hash", policy_hash.into());
-    if !integrations.is_empty() {
-        ev = ev.note("lns_integrations", json!(integrations));
+    if !connectors.is_empty() {
+        ev = ev.note("lns_connectors", json!(connectors));
     }
     ev.build()
 }
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_without_an_account_names_the_user_after_the_integration() {
+    fn connection_without_an_account_names_the_user_after_the_connector() {
         let ev = connection(&ctx(), "some-oauth", "apikey", None, &[], None);
         assert_schema_valid(&ev);
         assert_eq!(ev["user"]["name"], "some-oauth");
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(ev["disposition"], "Blocked");
         assert_eq!(ev["finding_info"]["title"], "credential");
         assert_eq!(ev["unmapped"]["lns_decision"], "deny_always");
-        assert_eq!(ev["unmapped"]["lns_integration"], "some-provider");
+        assert_eq!(ev["unmapped"]["lns_connector"], "some-provider");
         assert!(ev["unmapped"].get("lns_reason").is_none());
     }
 
@@ -624,12 +624,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_run_records_the_reference_resolved_digest_and_integrations() {
+    fn sandbox_run_records_the_reference_resolved_digest_and_connectors() {
         let ev = sandbox_run(
             &ctx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
-            &["some-integration".into()],
+            &["some-connector".into()],
             "sha256:po1icy",
         );
         assert_schema_valid(&ev);
@@ -645,14 +645,14 @@ mod tests {
             "the audit must pin which bytes actually ran, not just the mutable tag"
         );
         assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
-        assert_eq!(ev["unmapped"]["lns_integrations"][0], "some-integration");
+        assert_eq!(ev["unmapped"]["lns_connectors"][0], "some-connector");
     }
 
     #[test]
-    fn sandbox_run_omits_the_integrations_note_when_there_are_none() {
+    fn sandbox_run_omits_the_connectors_note_when_there_are_none() {
         let ev = sandbox_run(&ctx(), "reg/some-agent:1", "sha256:beef", &[], "sha256:p");
         assert_schema_valid(&ev);
-        assert!(ev["unmapped"].get("lns_integrations").is_none());
+        assert!(ev["unmapped"].get("lns_connectors").is_none());
         assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:p");
     }
 

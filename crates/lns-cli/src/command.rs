@@ -65,7 +65,7 @@ pub fn registry() -> Vec<CommandSpec> {
         crate::service::SPEC,
         crate::update::SPEC,
         crate::policy::SPEC,
-        crate::integration::SPEC,
+        crate::connector::SPEC,
         crate::config::SPEC,
         crate::login::LOGIN_SPEC,
         crate::login::LOGOUT_SPEC,

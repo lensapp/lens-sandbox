@@ -1,32 +1,31 @@
 use cucumber::{given, then, when};
-use lns_policy::integrations::{
-    AuthKind, CredentialAuth, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+use lns_policy::connectors::{
+    AuthKind, Connector, ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow,
 };
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
-    BootGate, SlotPlan, boot_gate, gate_required_slots, plan_declared_integrations,
-    sign_in_gate_ids,
+    BootGate, SlotPlan, boot_gate, gate_required_slots, plan_declared_connectors, sign_in_gate_ids,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
-use lns_service::credential_flow::integrations::{
-    resolve_applied_with_slots, resolve_connectable_with_slots, unknown_integration_ids,
-    unknown_integrations_refusal,
+use lns_service::credential_flow::connectors::{
+    resolve_applied_with_slots, resolve_connectable_with_slots, unknown_connector_ids,
+    unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
 
 use crate::world::BehaviourWorld;
 
-fn credential_integration(id: &str, env_var: &str, route: Option<&str>) -> Integration {
+fn credential_connector(id: &str, env_var: &str, route: Option<&str>) -> Connector {
     let domain = route.unwrap_or("api.example.test");
-    Integration {
+    Connector {
         id: id.into(),
         name: None,
         auth_kind: AuthKind::Credential,
         routes: route
             .map(|host| {
-                vec![IntegrationRoute {
+                vec![ConnectorRoute {
                     match_pattern: host.into(),
                     transport: None,
                     scheme: None,
@@ -56,7 +55,7 @@ fn definition_declaring(ids: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","integrations":[{list}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":[{list}]}}}}"#
     )
 }
 
@@ -75,19 +74,19 @@ fn launch(
     let mut declared = resolved
         .policy
         .as_ref()
-        .map(|p| p.integrations.clone())
+        .map(|p| p.connectors.clone())
         .unwrap_or_default();
     declared.extend(resolved.credentials.iter().map(|slot| slot.name.clone()));
-    let unknown = unknown_integration_ids(&declared, &rig.catalog);
+    let unknown = unknown_connector_ids(&declared, &rig.catalog);
     if !unknown.is_empty() {
-        rig.error = Some(unknown_integrations_refusal(&unknown));
+        rig.error = Some(unknown_connectors_refusal(&unknown));
         return;
     }
     if let Err(failure) = gate_required_slots(&resolved.credentials, &rig.catalog, &rig.store) {
         rig.error = Some(failure.as_message());
         return;
     }
-    let plans = plan_declared_integrations(
+    let plans = plan_declared_connectors(
         &sign_in_gate_ids(&resolved.credentials),
         &rig.catalog,
         &rig.store,
@@ -105,15 +104,15 @@ fn launch(
         .network
         .allowed_routes
         .extend(applied.routes.iter().cloned());
-    let declared_integrations = resolved
+    let declared_connectors = resolved
         .policy
         .as_ref()
-        .map(|p| p.integrations.clone())
+        .map(|p| p.connectors.clone())
         .unwrap_or_default();
     let connectable = resolve_connectable_with_slots(
         &policy,
         &resolved.credentials,
-        &declared_integrations,
+        &declared_connectors,
         &rig.catalog,
     );
     rig.providers = applied
@@ -136,40 +135,33 @@ fn launch(
 }
 
 #[given(
-    regex = r#"^the machine catalog has a credential integration "([^"]+)" managing "([^"]+)" with a route to "([^"]+)"$"#
+    regex = r#"^the machine catalog has a credential connector "([^"]+)" managing "([^"]+)" with a route to "([^"]+)"$"#
 )]
-fn catalog_has_integration_with_route(
-    w: &mut BehaviourWorld,
-    id: String,
-    env: String,
-    host: String,
-) {
+fn catalog_has_connector_with_route(w: &mut BehaviourWorld, id: String, env: String, host: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.catalog
-        .push(credential_integration(&id, &env, Some(&host)));
+        .push(credential_connector(&id, &env, Some(&host)));
 }
 
-#[given(
-    regex = r#"^the machine catalog has a credential integration "([^"]+)" managing "([^"]+)"$"#
-)]
-fn catalog_has_integration(w: &mut BehaviourWorld, id: String, env: String) {
+#[given(regex = r#"^the machine catalog has a credential connector "([^"]+)" managing "([^"]+)"$"#)]
+fn catalog_has_connector(w: &mut BehaviourWorld, id: String, env: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.catalog.push(credential_integration(&id, &env, None));
+    rig.catalog.push(credential_connector(&id, &env, None));
 }
 
-#[given(regex = r#"^the sandbox definition declares integration "([^"]+)"$"#)]
+#[given(regex = r#"^the sandbox definition declares connector "([^"]+)"$"#)]
 fn definition_declares_one(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(definition_declaring(&[&id]));
 }
 
-#[given(regex = r#"^a published sandbox artifact declares integration "([^"]+)"$"#)]
+#[given(regex = r#"^a published sandbox artifact declares connector "([^"]+)"$"#)]
 fn published_declares_one(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(definition_declaring(&[&id]));
 }
 
-#[given("the directory's lns-policy.yaml connects no integrations")]
+#[given("the directory's lns-policy.yaml connects no connectors")]
 fn overlay_connects_nothing(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay = Policy::default();
@@ -178,7 +170,7 @@ fn overlay_connects_nothing(w: &mut BehaviourWorld) {
 #[given(regex = r#"^the directory's lns-policy.yaml connects "([^"]+)"$"#)]
 fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.overlay.integrations.push(id);
+    rig.overlay.connectors.push(id);
 }
 
 #[when("the sandbox is launched")]
@@ -204,8 +196,8 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
     launch(w, resolved.map(|def| resolved_from_sandbox(&def)));
 }
 
-fn oauth_integration(id: &str) -> Integration {
-    Integration {
+fn oauth_connector(id: &str) -> Connector {
+    Connector {
         id: id.into(),
         name: None,
         auth_kind: AuthKind::Oauth,
@@ -239,10 +231,10 @@ fn relaunch(w: &mut BehaviourWorld) {
     launch(w, plan_local_sandbox(definition.as_bytes()));
 }
 
-#[given(regex = r#"^the machine catalog has an oauth integration "([^"]+)"$"#)]
+#[given(regex = r#"^the machine catalog has an oauth connector "([^"]+)"$"#)]
 fn catalog_has_oauth(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.catalog.push(oauth_integration(&id));
+    rig.catalog.push(oauth_connector(&id));
 }
 
 #[given(regex = r#"^the per-machine credential store has no grant for "([^"]+)"$"#)]
@@ -258,10 +250,10 @@ fn store_has_no_grant(w: &mut BehaviourWorld, id: String) {
 fn sign_in_prompt_shown(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     match &rig.pending {
-        Some(prompt) if prompt.integration == id => Ok(()),
+        Some(prompt) if prompt.connector == id => Ok(()),
         Some(prompt) => Err(format!(
             "the launch is blocked on {}, not {id}",
-            prompt.integration
+            prompt.connector
         )),
         None => Err("the launch was not blocked on a sign-in".to_string()),
     }
@@ -291,12 +283,12 @@ fn workload_starts(w: &mut BehaviourWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[given(regex = r#"^a launched sandbox whose definition declares integration "([^"]+)"$"#)]
+#[given(regex = r#"^a launched sandbox whose definition declares connector "([^"]+)"$"#)]
 fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
     {
         let rig = w.declared.get_or_insert_with(Default::default);
         rig.catalog
-            .push(credential_integration(&id, "SOME_TOKEN", None));
+            .push(credential_connector(&id, "SOME_TOKEN", None));
         rig.definition = Some(definition_declaring(&[&id]));
         rig.definition_snapshot = rig.definition.clone();
     }
@@ -304,7 +296,7 @@ fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.as_ref().expect("relaunch built the rig");
     assert!(
         rig.running_policy.is_some(),
-        "the declared launch must start (a declared integration is offered, not armed); error: {:?}",
+        "the declared launch must start (a declared connector is offered, not armed); error: {:?}",
         rig.error
     );
     w.credential();
@@ -349,7 +341,7 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
         .as_ref()
         .and_then(|r| r.running_policy.as_ref())
         .ok_or("no running policy was produced")?;
-    // The guest gate is first-match-wins; the merged policy must present the deny before the integration's allow.
+    // The guest gate is first-match-wins; the merged policy must present the deny before the connector's allow.
     let verdict = policy
         .network
         .allowed_routes
@@ -396,8 +388,8 @@ fn definition_not_modified(w: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
-#[given(regex = r#"^the machine catalog has no integration "([^"]+)"$"#)]
-fn catalog_lacks_integration(w: &mut BehaviourWorld, id: String) {
+#[given(regex = r#"^the machine catalog has no connector "([^"]+)"$"#)]
+fn catalog_lacks_connector(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     assert!(
         rig.catalog.iter().all(|i| i.id != id),
@@ -427,18 +419,18 @@ fn error_names(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     }
 }
 
-#[then(regex = r#"^the error points at `lns integration add`$"#)]
+#[then(regex = r#"^the error points at `lns connector add`$"#)]
 fn error_points_at_add(w: &mut BehaviourWorld) -> Result<(), String> {
     let error = w
         .declared
         .as_ref()
         .and_then(|r| r.error.as_ref())
         .ok_or("no launch error was recorded")?;
-    if error.contains("`lns integration add`") {
+    if error.contains("`lns connector add`") {
         Ok(())
     } else {
         Err(format!(
-            "expected the error to point at `lns integration add`, got: {error}"
+            "expected the error to point at `lns connector add`, got: {error}"
         ))
     }
 }
@@ -490,7 +482,7 @@ fn env_does_not_seed_placeholder(w: &mut BehaviourWorld, env: String) -> Result<
     }
     match rig.providers.iter().find(|(_, var, _)| var == &env) {
         Some(seeded) => Err(format!(
-            "{env} was armed at launch, but a declared integration must only be offered: {seeded:?}"
+            "{env} was armed at launch, but a declared connector must only be offered: {seeded:?}"
         )),
         None => Ok(()),
     }
@@ -517,7 +509,7 @@ fn running_policy_does_not_allow(w: &mut BehaviourWorld, host: String) -> Result
 }
 
 #[then(regex = r#"^"([^"]+)" is offered for a reactive connect$"#)]
-fn integration_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+fn connector_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     if rig.offered.contains(&id) {
         Ok(())
@@ -544,11 +536,11 @@ fn definition_declares_credential_slot(w: &mut BehaviourWorld, id: String, env: 
 }
 
 #[then(regex = r#"^"([^"]+)" is not offered for a reactive connect$"#)]
-fn integration_is_not_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+fn connector_is_not_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     if rig.offered.contains(&id) {
         Err(format!(
-            "{id} shares a declared integration's domain and must be suppressed; instead it was offered, so its machine-stored value would arm and inject over the declared credential: {:?}",
+            "{id} shares a declared connector's domain and must be suppressed; instead it was offered, so its machine-stored value would arm and inject over the declared credential: {:?}",
             rig.offered
         ))
     } else {

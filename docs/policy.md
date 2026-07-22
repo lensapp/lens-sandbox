@@ -127,7 +127,7 @@ re-approve them.
 
 - [Credentials](credentials.md) — credential decisions live alongside network
   policy and follow the same allow / deny / ask model.
-- [Integrations](integrations.md) — connecting an integration records it under
-  `integrations:` and allows the routes it declares.
+- [Connectors](connectors.md) — connecting a connector records it under
+  `connectors:` and allows the routes it declares.
 - [Running workloads](running-workloads.md) — `--policy` and the run summary.
 - [CLI reference](cli-reference.md) — the full `lns policy` flag list.

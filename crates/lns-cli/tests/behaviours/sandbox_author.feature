@@ -16,7 +16,7 @@ Feature: authoring a sandbox
     And the file "lns.yaml" contains "resources:"
     And the file "lns.yaml" contains "defaultVerdict: ask"
     And the file "lns.yaml" contains "allowedRoutes:"
-    And the file "lns.yaml" contains "integrations:"
+    And the file "lns.yaml" contains "connectors:"
     And the file "lns.yaml" contains "credentials:"
     And the file "lns.yaml" contains "filesets:"
     And the file "lns.yaml" contains "ports:"

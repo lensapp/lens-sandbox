@@ -121,7 +121,7 @@ fn resolve_published(world: &mut BehaviourWorld, project: String) {
             .collect(),
         ports: Vec::new(),
         filesets: Vec::new(),
-        integrations: Vec::new(),
+        connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
         policy_flags: Vec::new(),

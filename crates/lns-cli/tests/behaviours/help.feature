@@ -40,6 +40,6 @@ Feature: users discover the CLI surface
     Then the exit code is 0
     And the output contains "Usage: lns audit"
     And the output contains "SANDBOX"
-    And the output contains "--integration"
+    And the output contains "--connector"
     And the output contains "--kind"
     And the output contains "--json"

@@ -16,10 +16,10 @@ pub enum AuthKind {
     Oauth,
 }
 
-/// A route an integration needs reachable. Verdict is implicitly `allow`; `transport` defaults to direct. Materializes into a full [`RouteRule`] at run time.
+/// A route a connector needs reachable. Verdict is implicitly `allow`; `transport` defaults to direct. Materializes into a full [`RouteRule`] at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IntegrationRoute {
+pub struct ConnectorRoute {
     #[serde(rename = "match")]
     pub match_pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,7 +32,7 @@ pub struct IntegrationRoute {
     pub rules: Vec<HttpRule>,
 }
 
-impl IntegrationRoute {
+impl ConnectorRoute {
     /// HTTP-level `rules` can only be enforced when the proxy terminates TLS, so declaring them implies termination.
     pub fn to_route_rule(&self) -> RouteRule {
         RouteRule {
@@ -56,7 +56,7 @@ pub struct CredentialAuth {
     pub injections: Vec<InjectionDef>,
 }
 
-/// Which interactive sign-in an `oauth` integration uses: the RFC 8628 device flow (default) or the browser-redirect authorization-code + PKCE flow.
+/// Which interactive sign-in an `oauth` connector uses: the RFC 8628 device flow (default) or the browser-redirect authorization-code + PKCE flow.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OauthFlow {
@@ -71,7 +71,7 @@ impl OauthFlow {
     }
 }
 
-/// Interactive sign-in configuration for an `oauth` integration: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce; `clientSecret` is set only for confidential device clients (e.g. Google) that require it in the token exchange.
+/// Interactive sign-in configuration for an `oauth` connector: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce; `clientSecret` is set only for confidential device clients (e.g. Google) that require it in the token exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OauthAuth {
@@ -98,7 +98,7 @@ pub struct OauthAuth {
     pub injections: Vec<InjectionDef>,
 }
 
-/// An offer-time fallback letting the user paste a token into the integration's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL for creating one and `command` an optional host CLI that mints it.
+/// An offer-time fallback letting the user paste a token into the connector's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL for creating one and `command` an optional host CLI that mints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenFallback {
@@ -110,13 +110,13 @@ pub struct TokenFallback {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Integration {
+pub struct Connector {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub auth_kind: AuthKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<IntegrationRoute>,
+    pub routes: Vec<ConnectorRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialAuth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +125,7 @@ pub struct Integration {
     pub token_fallback: Option<TokenFallback>,
 }
 
-impl Integration {
+impl Connector {
     /// The user-facing label for cards and prompts; falls back to the id when no `name` is set.
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
@@ -135,7 +135,7 @@ impl Integration {
     pub fn validate(&self) -> Result<(), String> {
         match self.auth_kind {
             AuthKind::Credential if self.credential.is_none() => Err(format!(
-                "integration {:?} declares authKind credential but has no `credential:` block",
+                "connector {:?} declares authKind credential but has no `credential:` block",
                 self.id
             )),
             AuthKind::Oauth => self.validate_oauth(),
@@ -146,17 +146,17 @@ impl Integration {
     fn validate_oauth(&self) -> Result<(), String> {
         let Some(oauth) = self.oauth.as_ref() else {
             return Err(format!(
-                "integration {:?} declares authKind oauth but has no `oauth:` block",
+                "connector {:?} declares authKind oauth but has no `oauth:` block",
                 self.id
             ));
         };
         match oauth.flow {
             OauthFlow::Device if oauth.device_authorization_endpoint.is_none() => Err(format!(
-                "integration {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
+                "connector {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
                 self.id
             )),
             OauthFlow::Pkce if oauth.authorization_endpoint.is_none() => Err(format!(
-                "integration {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
+                "connector {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
                 self.id
             )),
             _ => Ok(()),
@@ -168,24 +168,19 @@ impl Integration {
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     #[serde(default)]
-    pub integrations: Vec<Integration>,
+    pub connectors: Vec<Connector>,
 }
 
 impl Catalog {
     fn validate(&self) -> Result<(), String> {
-        for i in &self.integrations {
+        for i in &self.connectors {
             i.validate()?;
         }
         NetworkPolicy {
             allowed_routes: self
-                .integrations
+                .connectors
                 .iter()
-                .flat_map(|integration| {
-                    integration
-                        .routes
-                        .iter()
-                        .map(IntegrationRoute::to_route_rule)
-                })
+                .flat_map(|connector| connector.routes.iter().map(ConnectorRoute::to_route_rule))
                 .collect(),
             ..NetworkPolicy::default()
         }
@@ -228,43 +223,43 @@ mod build_env {
     include!(concat!(env!("OUT_DIR"), "/env_substitutions.rs"));
 }
 
-static BUNDLED: LazyLock<Vec<Integration>> = LazyLock::new(|| {
+static BUNDLED: LazyLock<Vec<Connector>> = LazyLock::new(|| {
     let resolved = crate::env_subst::apply_substitutions(
-        include_str!("integrations.yaml"),
+        include_str!("connectors.yaml"),
         build_env::ENV_SUBSTITUTIONS,
     );
-    parse_catalog(&resolved).integrations
+    parse_catalog(&resolved).connectors
 });
 
 /// Panics on a malformed or inconsistent manifest; the shipped catalog is test-proven well-formed, so the production caller never hits those arms.
 fn parse_catalog(yaml_src: &str) -> Catalog {
     let catalog: Catalog =
-        serde_yaml::from_str(yaml_src).expect("bundled integration catalog must be valid YAML");
-    let consistent = "bundled integration catalog must be internally consistent";
+        serde_yaml::from_str(yaml_src).expect("bundled connector catalog must be valid YAML");
+    let consistent = "bundled connector catalog must be internally consistent";
     catalog.validate().expect(consistent);
     catalog
 }
 
-pub fn bundled_integrations() -> &'static [Integration] {
+pub fn bundled_connectors() -> &'static [Connector] {
     BUNDLED.as_slice()
 }
 
-/// Falls back to `./.lns-integrations.yaml` when `HOME` is unset rather than panicking.
-pub fn default_integrations_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LNS_INTEGRATIONS_PATH") {
+/// Falls back to `./.lns-connectors.yaml` when `HOME` is unset rather than panicking.
+pub fn default_connectors_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("LNS_CONNECTORS_PATH") {
         return PathBuf::from(p);
     }
     std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".lns-integrations.yaml"))
-        .unwrap_or_else(|| PathBuf::from(".lns-integrations.yaml"))
+        .map(|h| PathBuf::from(h).join(".lns-connectors.yaml"))
+        .unwrap_or_else(|| PathBuf::from(".lns-connectors.yaml"))
 }
 
 /// The effective catalog is the bundled set extended with user entries whose id isn't already shipped — a bundled id can never be shadowed.
-pub fn effective_integrations(user: &Catalog) -> Vec<Integration> {
-    let mut out: Vec<Integration> = bundled_integrations().to_vec();
+pub fn effective_connectors(user: &Catalog) -> Vec<Connector> {
+    let mut out: Vec<Connector> = bundled_connectors().to_vec();
     let bundled_ids: HashSet<&str> = out.iter().map(|i| i.id.as_str()).collect();
-    let extra: Vec<Integration> = user
-        .integrations
+    let extra: Vec<Connector> = user
+        .connectors
         .iter()
         .filter(|i| !bundled_ids.contains(i.id.as_str()))
         .cloned()
@@ -352,8 +347,8 @@ mod tests {
         }
     }
 
-    fn pkce_integration() -> Integration {
-        Integration {
+    fn pkce_connector() -> Connector {
+        Connector {
             id: "examplepkce".into(),
             name: None,
             auth_kind: AuthKind::Oauth,
@@ -368,8 +363,8 @@ mod tests {
         }
     }
 
-    fn route(host: &str) -> IntegrationRoute {
-        IntegrationRoute {
+    fn route(host: &str) -> ConnectorRoute {
+        ConnectorRoute {
             match_pattern: host.into(),
             transport: None,
             scheme: None,
@@ -378,8 +373,8 @@ mod tests {
         }
     }
 
-    fn sample_integration() -> Integration {
-        Integration {
+    fn sample_connector() -> Connector {
+        Connector {
             id: "acme".into(),
             name: None,
             auth_kind: AuthKind::Credential,
@@ -394,8 +389,8 @@ mod tests {
         }
     }
 
-    fn oauth_integration() -> Integration {
-        Integration {
+    fn oauth_connector() -> Connector {
+        Connector {
             id: "examplehub".into(),
             name: None,
             auth_kind: AuthKind::Oauth,
@@ -411,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn a_simple_integration_route_round_trips_as_just_a_match() {
+    fn a_simple_connector_route_round_trips_as_just_a_match() {
         let r = route("gitlab.com");
         let yaml = serde_yaml::to_string(&r).unwrap();
         assert!(yaml.contains("match: gitlab.com"), "got: {yaml}");
@@ -421,13 +416,13 @@ mod tests {
                 && !yaml.contains("tlsTerminate"),
             "a bare route must stay minimal: {yaml}"
         );
-        let parsed: IntegrationRoute = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: ConnectorRoute = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, r);
     }
 
     #[test]
-    fn a_least_privilege_integration_route_round_trips_with_scheme_and_http_rules() {
-        let r = IntegrationRoute {
+    fn a_least_privilege_connector_route_round_trips_with_scheme_and_http_rules() {
+        let r = ConnectorRoute {
             match_pattern: "gitlab.com".into(),
             transport: None,
             scheme: Some(Scheme::Https),
@@ -440,7 +435,7 @@ mod tests {
         let yaml = serde_yaml::to_string(&r).unwrap();
         assert!(yaml.contains("scheme: https"), "got: {yaml}");
         assert!(yaml.contains("path: /api/v4/**"), "got: {yaml}");
-        let parsed: IntegrationRoute = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: ConnectorRoute = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, r);
     }
 
@@ -463,7 +458,7 @@ mod tests {
 
     #[test]
     fn to_route_rule_implies_tls_termination_when_http_rules_are_present() {
-        let r = IntegrationRoute {
+        let r = ConnectorRoute {
             match_pattern: "gitlab.com".into(),
             transport: None,
             scheme: Some(Scheme::Https),
@@ -507,19 +502,19 @@ mod tests {
     }
 
     #[test]
-    fn credential_integration_round_trips_with_a_named_credential_block() {
-        let i = sample_integration();
+    fn credential_connector_round_trips_with_a_named_credential_block() {
+        let i = sample_connector();
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("authKind: credential"), "got: {yaml}");
         assert!(yaml.contains("credential:"), "got: {yaml}");
         assert!(yaml.contains("envVar: ACME_API_KEY"), "got: {yaml}");
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn an_oauth_integration_round_trips_with_an_oauth_block_and_no_credential_block() {
-        let i = oauth_integration();
+    fn an_oauth_connector_round_trips_with_an_oauth_block_and_no_credential_block() {
+        let i = oauth_connector();
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("authKind: oauth"), "got: {yaml}");
         assert!(yaml.contains("oauth:"), "got: {yaml}");
@@ -529,26 +524,26 @@ mod tests {
             !yaml.contains("credential:"),
             "an oauth entry must not carry a credential block: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn an_oauth_integration_round_trips_an_optional_client_secret() {
-        let mut i = oauth_integration();
+    fn an_oauth_connector_round_trips_an_optional_client_secret() {
+        let mut i = oauth_connector();
         i.oauth.as_mut().unwrap().client_secret = Some("some-client-secret".into());
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(
             yaml.contains("clientSecret: some-client-secret"),
             "got: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn an_oauth_integration_without_a_client_secret_omits_it_from_yaml() {
-        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+    fn an_oauth_connector_without_a_client_secret_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_connector()).unwrap();
         assert!(
             !yaml.contains("clientSecret"),
             "a public-client oauth entry must not serialize an empty client secret: {yaml}"
@@ -557,7 +552,7 @@ mod tests {
 
     #[test]
     fn display_name_prefers_an_explicit_name_and_falls_back_to_id() {
-        let mut i = sample_integration();
+        let mut i = sample_connector();
         assert_eq!(
             i.display_name(),
             "acme",
@@ -568,18 +563,18 @@ mod tests {
     }
 
     #[test]
-    fn an_integration_round_trips_its_optional_display_name() {
-        let mut i = oauth_integration();
+    fn an_connector_round_trips_its_optional_display_name() {
+        let mut i = oauth_connector();
         i.name = Some("ExampleHub".into());
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("name: ExampleHub"), "got: {yaml}");
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn an_integration_without_a_name_omits_it_from_yaml() {
-        let yaml = serde_yaml::to_string(&sample_integration()).unwrap();
+    fn an_connector_without_a_name_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&sample_connector()).unwrap();
         assert!(
             !yaml.contains("name:"),
             "an absent name must not serialize: {yaml}"
@@ -587,8 +582,8 @@ mod tests {
     }
 
     #[test]
-    fn an_integration_round_trips_its_optional_token_fallback_with_a_help_url() {
-        let mut i = oauth_integration();
+    fn an_connector_round_trips_its_optional_token_fallback_with_a_help_url() {
+        let mut i = oauth_connector();
         i.token_fallback = Some(TokenFallback {
             help: Some("https://example.com/tokens/new".into()),
             command: None,
@@ -599,13 +594,13 @@ mod tests {
             yaml.contains("help: https://example.com/tokens/new"),
             "got: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
     fn a_token_fallback_round_trips_with_no_help() {
-        let mut i = oauth_integration();
+        let mut i = oauth_connector();
         i.token_fallback = Some(TokenFallback {
             help: None,
             command: None,
@@ -616,13 +611,13 @@ mod tests {
             !yaml.contains("help:"),
             "an absent help must not serialize: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn an_integration_without_a_token_fallback_omits_it_from_yaml() {
-        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+    fn an_connector_without_a_token_fallback_omits_it_from_yaml() {
+        let yaml = serde_yaml::to_string(&oauth_connector()).unwrap();
         assert!(
             !yaml.contains("tokenFallback"),
             "an absent token fallback must not serialize: {yaml}"
@@ -630,8 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_a_credential_integration_missing_its_block() {
-        let bad = Integration {
+    fn validate_rejects_a_credential_connector_missing_its_block() {
+        let bad = Connector {
             id: "x".into(),
             name: None,
             auth_kind: AuthKind::Credential,
@@ -645,13 +640,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_a_well_formed_credential_integration() {
-        assert!(sample_integration().validate().is_ok());
+    fn validate_accepts_a_well_formed_credential_connector() {
+        assert!(sample_connector().validate().is_ok());
     }
 
     #[test]
-    fn validate_rejects_an_oauth_integration_missing_its_block() {
-        let bad = Integration {
+    fn validate_rejects_an_oauth_connector_missing_its_block() {
+        let bad = Connector {
             id: "x".into(),
             name: None,
             auth_kind: AuthKind::Oauth,
@@ -665,25 +660,25 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_a_well_formed_oauth_integration() {
-        assert!(oauth_integration().validate().is_ok());
+    fn validate_accepts_a_well_formed_oauth_connector() {
+        assert!(oauth_connector().validate().is_ok());
     }
 
     #[test]
     fn an_oauth_block_defaults_to_the_device_flow_and_omits_it_from_yaml() {
-        let yaml = serde_yaml::to_string(&oauth_integration()).unwrap();
+        let yaml = serde_yaml::to_string(&oauth_connector()).unwrap();
         assert!(
             !yaml.contains("flow:"),
             "the default device flow must not serialize: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.oauth.unwrap().flow, OauthFlow::Device);
     }
 
     #[test]
-    fn a_pkce_oauth_integration_round_trips_with_flow_and_an_authorization_endpoint_and_no_client_id()
-     {
-        let i = pkce_integration();
+    fn a_pkce_oauth_connector_round_trips_with_flow_and_an_authorization_endpoint_and_no_client_id()
+    {
+        let i = pkce_connector();
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(yaml.contains("flow: pkce"), "got: {yaml}");
         assert!(
@@ -698,37 +693,37 @@ mod tests {
             !yaml.contains("deviceAuthorizationEndpoint:"),
             "a pkce entry has no device endpoint: {yaml}"
         );
-        let parsed: Integration = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, i);
     }
 
     #[test]
-    fn validate_accepts_a_pkce_oauth_integration_without_a_client_id() {
-        assert!(pkce_integration().validate().is_ok());
+    fn validate_accepts_a_pkce_oauth_connector_without_a_client_id() {
+        assert!(pkce_connector().validate().is_ok());
     }
 
     #[test]
-    fn validate_rejects_a_pkce_oauth_integration_missing_its_authorization_endpoint() {
-        let mut i = pkce_integration();
+    fn validate_rejects_a_pkce_oauth_connector_missing_its_authorization_endpoint() {
+        let mut i = pkce_connector();
         i.oauth.as_mut().unwrap().authorization_endpoint = None;
         let err = i.validate().unwrap_err();
         assert!(err.contains("authorizationEndpoint"), "got: {err}");
     }
 
     #[test]
-    fn validate_rejects_a_device_oauth_integration_missing_its_device_authorization_endpoint() {
-        let mut i = oauth_integration();
+    fn validate_rejects_a_device_oauth_connector_missing_its_device_authorization_endpoint() {
+        let mut i = oauth_connector();
         i.oauth.as_mut().unwrap().device_authorization_endpoint = None;
         let err = i.validate().unwrap_err();
         assert!(err.contains("deviceAuthorizationEndpoint"), "got: {err}");
     }
 
     #[test]
-    fn catalog_round_trips_and_empty_integrations_is_the_default() {
+    fn catalog_round_trips_and_empty_connectors_is_the_default() {
         let empty: Catalog = serde_yaml::from_str("{}").unwrap();
-        assert!(empty.integrations.is_empty());
+        assert!(empty.connectors.is_empty());
         let c = Catalog {
-            integrations: vec![sample_integration()],
+            connectors: vec![sample_connector()],
         };
         let parsed: Catalog = serde_yaml::from_str(&serde_yaml::to_string(&c).unwrap()).unwrap();
         assert_eq!(parsed, c);
@@ -736,10 +731,7 @@ mod tests {
 
     #[test]
     fn bundled_catalog_parses_and_ships_services() {
-        let ids: HashSet<&str> = bundled_integrations()
-            .iter()
-            .map(|i| i.id.as_str())
-            .collect();
+        let ids: HashSet<&str> = bundled_connectors().iter().map(|i| i.id.as_str()).collect();
         assert!(
             !ids.is_empty(),
             "the bundled catalog should ship at least one service"
@@ -748,7 +740,7 @@ mod tests {
 
     #[test]
     fn bundled_openai_injects_a_bearer_header() {
-        let openai = bundled_integrations()
+        let openai = bundled_connectors()
             .iter()
             .find(|i| i.id == "openai")
             .expect("openai is bundled");
@@ -765,7 +757,7 @@ mod tests {
 
     #[test]
     fn bundled_anthropic_covers_both_x_api_key_and_bearer_for_openai_compatible_clients() {
-        let anthropic = bundled_integrations()
+        let anthropic = bundled_connectors()
             .iter()
             .find(|i| i.id == "anthropic")
             .expect("anthropic is bundled");
@@ -791,7 +783,7 @@ mod tests {
 
     #[test]
     fn bundled_claude_code_subscription_bearer_injects_an_oat01_token_on_the_anthropic_api() {
-        let integ = bundled_integrations()
+        let integ = bundled_connectors()
             .iter()
             .find(|i| i.id == "claude-code-subscription")
             .expect("claude-code-subscription is bundled");
@@ -822,7 +814,7 @@ mod tests {
 
     #[test]
     fn bundled_bedrock_injects_a_bearer_header_on_the_regional_runtime_and_control_planes() {
-        let bedrock = bundled_integrations()
+        let bedrock = bundled_connectors()
             .iter()
             .find(|i| i.id == "bedrock")
             .expect("bedrock is bundled");
@@ -842,7 +834,7 @@ mod tests {
 
     #[test]
     fn bundled_linear_injects_a_bearer_header() {
-        let linear = bundled_integrations()
+        let linear = bundled_connectors()
             .iter()
             .find(|i| i.id == "linear")
             .expect("linear is bundled");
@@ -859,7 +851,7 @@ mod tests {
 
     #[test]
     fn bundled_telegram_injects_via_uri_placeholder() {
-        let telegram = bundled_integrations()
+        let telegram = bundled_connectors()
             .iter()
             .find(|i| i.id == "telegram")
             .expect("telegram is bundled");
@@ -876,17 +868,14 @@ mod tests {
 
     #[test]
     fn bundled_catalog_ships_gitlab_and_huggingface() {
-        let ids: HashSet<&str> = bundled_integrations()
-            .iter()
-            .map(|i| i.id.as_str())
-            .collect();
+        let ids: HashSet<&str> = bundled_connectors().iter().map(|i| i.id.as_str()).collect();
         assert!(ids.contains("gitlab"), "got: {ids:?}");
         assert!(ids.contains("huggingface"), "got: {ids:?}");
     }
 
     #[test]
     fn bundled_gitlab_injects_both_private_token_for_glab_and_bearer_for_oauth_clients() {
-        let gitlab = bundled_integrations()
+        let gitlab = bundled_connectors()
             .iter()
             .find(|i| i.id == "gitlab")
             .expect("gitlab is bundled");
@@ -908,8 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn every_bundled_integration_is_valid_with_a_self_identifying_placeholder_and_routes() {
-        for i in bundled_integrations() {
+    fn every_bundled_connector_is_valid_with_a_self_identifying_placeholder_and_routes() {
+        for i in bundled_connectors() {
             assert!(i.validate().is_ok(), "{} is inconsistent", i.id);
             let placeholder = match i.auth_kind {
                 AuthKind::Credential => {
@@ -934,8 +923,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_ships_github_as_an_oauth_integration() {
-        let gh = bundled_integrations()
+    fn bundled_catalog_ships_github_as_an_oauth_connector() {
+        let gh = bundled_connectors()
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
@@ -962,7 +951,7 @@ mod tests {
 
     #[test]
     fn bundled_github_resolves_its_account_from_the_user_endpoint() {
-        let gh = bundled_integrations()
+        let gh = bundled_connectors()
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
@@ -980,7 +969,7 @@ mod tests {
 
     #[test]
     fn bundled_github_declares_a_token_fallback_so_a_blocked_oauth_can_pivot_to_a_pat() {
-        let gh = bundled_integrations()
+        let gh = bundled_connectors()
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
@@ -999,8 +988,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_ships_openrouter_as_a_pkce_integration() {
-        let or = bundled_integrations()
+    fn bundled_catalog_ships_openrouter_as_a_pkce_connector() {
+        let or = bundled_connectors()
             .iter()
             .find(|i| i.id == "openrouter")
             .expect("openrouter is bundled");
@@ -1037,7 +1026,7 @@ mod tests {
     #[test]
     fn bundled_google_signs_in_via_oauth_device_flow_with_a_client_secret_and_injects_a_bearer_header()
      {
-        let google = bundled_integrations()
+        let google = bundled_connectors()
             .iter()
             .find(|i| i.id == "google")
             .expect("google is bundled");
@@ -1074,8 +1063,8 @@ mod tests {
     }
 
     #[test]
-    fn no_bundled_integration_commits_a_literal_oauth_client_id() {
-        let raw = include_str!("integrations.yaml");
+    fn no_bundled_connector_commits_a_literal_oauth_client_id() {
+        let raw = include_str!("connectors.yaml");
         for line in raw.lines() {
             if let Some(rest) = line.trim_start().strip_prefix("clientId:") {
                 let value = rest.trim();
@@ -1088,8 +1077,8 @@ mod tests {
     }
 
     #[test]
-    fn no_bundled_integration_commits_a_literal_oauth_client_secret() {
-        let raw = include_str!("integrations.yaml");
+    fn no_bundled_connector_commits_a_literal_oauth_client_secret() {
+        let raw = include_str!("connectors.yaml");
         for line in raw.lines() {
             if let Some(rest) = line.trim_start().strip_prefix("clientSecret:") {
                 let value = rest.trim();
@@ -1103,7 +1092,7 @@ mod tests {
 
     #[test]
     fn the_github_oauth_client_id_is_sourced_from_the_build_env() {
-        let raw = include_str!("integrations.yaml");
+        let raw = include_str!("connectors.yaml");
         assert!(
             raw.contains("clientId: \"${LNS_OAUTH_CLIENT_ID_GITHUB}\""),
             "the github oauth client_id must come from the LNS_OAUTH_CLIENT_ID_GITHUB build var, not a committed literal"
@@ -1111,26 +1100,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bundled integration catalog must be valid YAML")]
+    #[should_panic(expected = "bundled connector catalog must be valid YAML")]
     fn parse_catalog_panics_on_malformed_yaml() {
-        parse_catalog("integrations: [ this is : not valid");
+        parse_catalog("connectors: [ this is : not valid");
     }
 
     #[test]
-    #[should_panic(expected = "bundled integration catalog must be internally consistent")]
+    #[should_panic(expected = "bundled connector catalog must be internally consistent")]
     fn parse_catalog_panics_on_a_credential_entry_missing_its_block() {
-        parse_catalog("integrations:\n  - id: x\n    authKind: credential\n");
+        parse_catalog("connectors:\n  - id: x\n    authKind: credential\n");
     }
 
     #[test]
     fn a_bundled_entry_pasted_into_a_user_file_deserializes_identically() {
-        let entry = bundled_integrations()[0].clone();
+        let entry = bundled_connectors()[0].clone();
         let as_user_catalog = Catalog {
-            integrations: vec![entry.clone()],
+            connectors: vec![entry.clone()],
         };
         let yaml = serde_yaml::to_string(&as_user_catalog).unwrap();
         let parsed: Catalog = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.integrations, vec![entry]);
+        assert_eq!(parsed.connectors, vec![entry]);
     }
 
     #[test]
@@ -1143,25 +1132,25 @@ mod tests {
     #[test]
     fn load_or_default_reads_an_existing_user_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-integrations.yaml");
+        let path = dir.path().join(".lns-connectors.yaml");
         Catalog {
-            integrations: vec![sample_integration()],
+            connectors: vec![sample_connector()],
         }
         .save_atomic(&path)
         .unwrap();
         let c = Catalog::load_or_default(&path).unwrap();
-        assert_eq!(c.integrations.len(), 1);
-        assert_eq!(c.integrations[0].id, "acme");
+        assert_eq!(c.connectors.len(), 1);
+        assert_eq!(c.connectors[0].id, "acme");
     }
 
     #[test]
     fn load_or_default_rejects_an_upstream_route_transport() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-integrations.yaml");
-        let mut integration = sample_integration();
-        integration.routes[0].transport = Some(Transport::Upstream);
+        let path = dir.path().join(".lns-connectors.yaml");
+        let mut connector = sample_connector();
+        connector.routes[0].transport = Some(Transport::Upstream);
         Catalog {
-            integrations: vec![integration],
+            connectors: vec![connector],
         }
         .save_atomic(&path)
         .unwrap();
@@ -1187,7 +1176,7 @@ mod tests {
     fn load_or_default_surfaces_invalid_yaml_as_io_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("broken.yaml");
-        fs::write(&path, "integrations: not-a-list\n").unwrap();
+        fs::write(&path, "connectors: not-a-list\n").unwrap();
         let err = Catalog::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
@@ -1196,11 +1185,7 @@ mod tests {
     fn load_or_default_rejects_an_inconsistent_credential_entry_as_invalid_data() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("inconsistent.yaml");
-        fs::write(
-            &path,
-            "integrations:\n  - id: x\n    authKind: credential\n",
-        )
-        .unwrap();
+        fs::write(&path, "connectors:\n  - id: x\n    authKind: credential\n").unwrap();
         let err = Catalog::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
@@ -1208,9 +1193,9 @@ mod tests {
     #[test]
     fn save_atomic_round_trips_creates_parent_and_leaves_no_tmp() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("nested/dir/.lns-integrations.yaml");
+        let path = dir.path().join("nested/dir/.lns-connectors.yaml");
         let c = Catalog {
-            integrations: vec![sample_integration()],
+            connectors: vec![sample_connector()],
         };
         c.save_atomic(&path).unwrap();
         assert!(path.exists());
@@ -1221,10 +1206,10 @@ mod tests {
     #[test]
     fn file_catalog_store_save_writes_yaml_readable_by_load_or_default() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-integrations.yaml");
+        let path = dir.path().join(".lns-connectors.yaml");
         let store = FileCatalogStore::new(path.clone());
         let c = Catalog {
-            integrations: vec![sample_integration()],
+            connectors: vec![sample_connector()],
         };
         store.save(&c).unwrap();
         assert_eq!(Catalog::load_or_default(&path).unwrap(), c);
@@ -1235,39 +1220,39 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let not_a_dir = dir.path().join("file");
         fs::write(&not_a_dir, b"").unwrap();
-        let store = FileCatalogStore::new(not_a_dir.join("nested/.lns-integrations.yaml"));
+        let store = FileCatalogStore::new(not_a_dir.join("nested/.lns-connectors.yaml"));
         let err = store.save(&Catalog::default()).unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 
     #[test]
-    fn effective_integrations_is_bundled_only_for_an_empty_user_catalog() {
-        let eff = effective_integrations(&Catalog::default());
-        assert_eq!(eff.len(), bundled_integrations().len());
+    fn effective_connectors_is_bundled_only_for_an_empty_user_catalog() {
+        let eff = effective_connectors(&Catalog::default());
+        assert_eq!(eff.len(), bundled_connectors().len());
     }
 
     #[test]
-    fn effective_integrations_appends_a_user_only_integration() {
+    fn effective_connectors_appends_a_user_only_connector() {
         let user = Catalog {
-            integrations: vec![sample_integration()],
+            connectors: vec![sample_connector()],
         };
-        let eff = effective_integrations(&user);
-        assert_eq!(eff.len(), bundled_integrations().len() + 1);
+        let eff = effective_connectors(&user);
+        assert_eq!(eff.len(), bundled_connectors().len() + 1);
         assert!(eff.iter().any(|i| i.id == "acme"));
     }
 
     #[test]
-    fn effective_integrations_drops_a_user_entry_that_shadows_a_bundled_id() {
-        let mut shadow = sample_integration();
+    fn effective_connectors_drops_a_user_entry_that_shadows_a_bundled_id() {
+        let mut shadow = sample_connector();
         shadow.id = "gitlab".into();
         shadow.credential = Some(credential("EVIL", "lns-evil", "gitlab.com"));
         let user = Catalog {
-            integrations: vec![shadow],
+            connectors: vec![shadow],
         };
-        let eff = effective_integrations(&user);
+        let eff = effective_connectors(&user);
         assert_eq!(
             eff.len(),
-            bundled_integrations().len(),
+            bundled_connectors().len(),
             "a user shadow must not add a second gitlab"
         );
         let gitlab = eff.iter().find(|i| i.id == "gitlab").unwrap();
@@ -1280,37 +1265,37 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn default_integrations_path_uses_override_when_set() {
+    fn default_connectors_path_uses_override_when_set() {
         use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_INTEGRATIONS_PATH", "/tmp/custom-integrations.yaml");
+        let _g1 = EnvVarGuard::set("LNS_CONNECTORS_PATH", "/tmp/custom-connectors.yaml");
         let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
         assert_eq!(
-            default_integrations_path(),
-            PathBuf::from("/tmp/custom-integrations.yaml")
+            default_connectors_path(),
+            PathBuf::from("/tmp/custom-connectors.yaml")
         );
     }
 
     #[test]
     #[serial_test::serial(env)]
-    fn default_integrations_path_falls_back_to_home_dotfile() {
+    fn default_connectors_path_falls_back_to_home_dotfile() {
         use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_INTEGRATIONS_PATH");
+        let _g1 = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
         let _g2 = EnvVarGuard::set("HOME", "/home/dev");
         assert_eq!(
-            default_integrations_path(),
-            PathBuf::from("/home/dev/.lns-integrations.yaml")
+            default_connectors_path(),
+            PathBuf::from("/home/dev/.lns-connectors.yaml")
         );
     }
 
     #[test]
     #[serial_test::serial(env)]
-    fn default_integrations_path_falls_back_to_cwd_when_home_unset() {
+    fn default_connectors_path_falls_back_to_cwd_when_home_unset() {
         use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_INTEGRATIONS_PATH");
+        let _g1 = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
         let _g2 = EnvVarGuard::unset("HOME");
         assert_eq!(
-            default_integrations_path(),
-            PathBuf::from(".lns-integrations.yaml")
+            default_connectors_path(),
+            PathBuf::from(".lns-connectors.yaml")
         );
     }
 }

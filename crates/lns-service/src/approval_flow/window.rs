@@ -8,7 +8,7 @@ use crate::approval_flow::session::PendingPrompt;
 use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
 use crate::credential_flow::store::CredentialEntry;
 use crate::oauth::SignInPivot;
-use lns_policy::integrations::TokenFallback;
+use lns_policy::connectors::TokenFallback;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
@@ -16,11 +16,11 @@ pub struct DecisionDelivery {
     pub action: RequestAction,
 }
 
-/// What the user chose on a network card: one of the wire decisions, accepting the integration offer via its interactive connect, or connecting it with a pasted token. The latter two are host-only actions that drive a connect rather than a per-request verdict.
+/// What the user chose on a network card: one of the wire decisions, accepting the connector offer via its interactive connect, or connecting it with a pasted token. The latter two are host-only actions that drive a connect rather than a per-request verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
-    ConnectIntegration,
+    ConnectConnector,
     UseToken { value: String },
 }
 
@@ -31,7 +31,7 @@ pub struct CredentialDecisionDelivery {
     pub request: CredentialDecisionRequest,
 }
 
-/// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time; `oauth_display_name` is `Some` for an oauth integration, making the card a browser-sign-in consent rather than a value prompt.
+/// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time; `oauth_display_name` is `Some` for an oauth connector, making the card a browser-sign-in consent rather than a value prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialCardPrompt {
     pub id: String,
@@ -45,7 +45,7 @@ pub struct CredentialCardPrompt {
     pub is_project_defined: bool,
 }
 
-/// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the integration lets a blocked user pivot to a pasted token.
+/// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignInCard {
     pub credential_id: String,
@@ -324,17 +324,17 @@ impl WindowState {
         self.deliver(id, RequestAction::Decide(decision))
     }
 
-    /// Accepts the integration offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
+    /// Accepts the connector offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
     pub fn connect_offer(&self, id: &str) -> bool {
-        self.route_offer(id, RequestAction::ConnectIntegration)
+        self.route_offer(id, RequestAction::ConnectConnector)
     }
 
-    /// Accepts the integration offer by connecting it with a pasted token. See [`Self::route_offer`].
+    /// Accepts the connector offer by connecting it with a pasted token. See [`Self::route_offer`].
     pub fn use_offer_token(&self, id: &str, value: String) -> bool {
         self.route_offer(id, RequestAction::UseToken { value })
     }
 
-    /// Routes one connect action for the clicked request and immediately drops every other offer card for the same integration, so no sibling card flashes up before the in-flight connect releases them all. The clicked card's slot is kept by a connecting placeholder until the connect resolves.
+    /// Routes one connect action for the clicked request and immediately drops every other offer card for the same connector, so no sibling card flashes up before the in-flight connect releases them all. The clicked card's slot is kept by a connecting placeholder until the connect resolves.
     fn route_offer(&self, id: &str, action: RequestAction) -> bool {
         let mut g = self.lock();
         let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
@@ -370,7 +370,7 @@ impl WindowState {
         true
     }
 
-    /// Declines the integration offer: clears the offer on every held request for that integration so each falls back to the plain allow/deny (rather than re-offering via a sibling card) without resolving them; returns whether an offer was present to clear.
+    /// Declines the connector offer: clears the offer on every held request for that connector so each falls back to the plain allow/deny (rather than re-offering via a sibling card) without resolving them; returns whether an offer was present to clear.
     pub fn decline_offer(&self, id: &str) -> bool {
         let mut g = self.lock();
         let Some(name) = g
@@ -418,7 +418,7 @@ impl WindowState {
             .retain(|e| e.display_name != display_name);
     }
 
-    /// Drops every connecting placeholder regardless of integration; used on run teardown so an in-flight connect can't keep the window pinned after the workload is gone.
+    /// Drops every connecting placeholder regardless of connector; used on run teardown so an in-flight connect can't keep the window pinned after the workload is gone.
     pub fn clear_all_connecting(&self) {
         self.lock().connecting.clear();
     }
@@ -434,7 +434,7 @@ pub struct Snapshot {
     pub pending_credentials: Vec<CredentialCardPrompt>,
     pub sign_ins: Vec<SignInCard>,
     pub informs: Vec<String>,
-    /// Display names of integrations whose accepted connect is still in flight, each holding its card's slot.
+    /// Display names of connectors whose accepted connect is still in flight, each holding its card's slot.
     pub connecting: Vec<String>,
     /// Every entry above in arrival order, so a card keeps its place in the stack as others come and go.
     pub order: Vec<StackItem>,
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(s.pending_count(), 0, "accepting the offer clears the card");
         let got = rx.try_recv().expect("delivery");
         assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectIntegration);
+        assert_eq!(got.action, RequestAction::ConnectConnector);
     }
 
     #[test]
@@ -811,7 +811,7 @@ mod tests {
         );
         let got = rx.try_recv().expect("delivery");
         assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectIntegration);
+        assert_eq!(got.action, RequestAction::ConnectConnector);
         assert!(
             rx.try_recv().is_err(),
             "only one connect is routed; the in-flight connect releases the siblings"
@@ -899,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn decline_offer_clears_every_card_for_the_same_integration() {
+    fn decline_offer_clears_every_card_for_the_same_connector() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(

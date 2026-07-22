@@ -111,9 +111,9 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n    {key}: {value}"));
         }
     }
-    if !world.project_integrations.is_empty() {
-        spec_tail.push_str("\n  integrations:");
-        for id in &world.project_integrations {
+    if !world.project_connectors.is_empty() {
+        spec_tail.push_str("\n  connectors:");
+        for id in &world.project_connectors {
             spec_tail.push_str(&format!("\n    - {id}"));
         }
     }
@@ -240,22 +240,22 @@ fn host_bind_source(world: &E2eWorld) -> String {
         .into_owned()
 }
 
-#[given(regex = r#"^the home's integration catalog declares "([^"]+)" managing "([^"]+)"$"#)]
+#[given(regex = r#"^the home's connector catalog declares "([^"]+)" managing "([^"]+)"$"#)]
 fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
     let home = world
         .home
         .as_ref()
         .expect("Given a clean lns cache home before writing a catalog");
     let catalog = format!(
-        "integrations:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
+        "connectors:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
     );
-    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
-        .expect("write the user integration catalog");
+    std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
+        .expect("write the user connector catalog");
 }
 
-#[given(regex = r#"^the project definition declares integration "([^"]+)"$"#)]
-fn project_declares_integration(world: &mut E2eWorld, id: String) {
-    world.project_integrations.push(id);
+#[given(regex = r#"^the project definition declares connector "([^"]+)"$"#)]
+fn project_declares_connector(world: &mut E2eWorld, id: String) {
+    world.project_connectors.push(id);
 }
 
 #[given(regex = r#"^the project definition requires credential "([^"]+)" injected as "([^"]+)"$"#)]
@@ -279,7 +279,7 @@ fn project_sets_env(world: &mut E2eWorld, key: String, value: String) {
 }
 
 #[given(
-    regex = r#"^the home's integration catalog declares an oauth integration "([^"]+)" signing in at "([^"]+)"$"#
+    regex = r#"^the home's connector catalog declares an oauth connector "([^"]+)" signing in at "([^"]+)"$"#
 )]
 fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: String) {
     let home = world
@@ -287,10 +287,10 @@ fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: Strin
         .as_ref()
         .expect("Given a clean lns cache home before writing a catalog");
     let catalog = format!(
-        "integrations:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
+        "connectors:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
     );
-    std::fs::write(home.path().join(".lns-integrations.yaml"), catalog)
-        .expect("write the user integration catalog");
+    std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
+        .expect("write the user connector catalog");
 }
 
 #[when("the user runs the sandbox definition")]

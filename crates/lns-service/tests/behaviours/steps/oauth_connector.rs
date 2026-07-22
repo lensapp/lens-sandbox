@@ -30,7 +30,7 @@ fn last_decision_kind(rig: &mut CredentialRig) -> Option<CredentialDecisionKind>
 }
 
 #[given(
-    regex = r#"^an unconnected "([^"]+)" oauth integration whose sign-in will (complete|expire|be denied)$"#
+    regex = r#"^an unconnected "([^"]+)" oauth connector whose sign-in will (complete|expire|be denied)$"#
 )]
 fn given_unconnected_oauth(world: &mut BehaviourWorld, id: String, outcome: String) {
     let outcome = match outcome.as_str() {
@@ -82,7 +82,7 @@ async fn when_accepts_the_prompt(world: &mut BehaviourWorld) {
     }
 }
 
-#[then(regex = r#"^the "([^"]+)" integration is connected live$"#)]
+#[then(regex = r#"^the "([^"]+)" connector is connected live$"#)]
 fn then_connected_live(world: &mut BehaviourWorld, id: String) -> Result<(), String> {
     if !world.credential().connected.lock().unwrap().contains(&id) {
         return Err(format!("{id} was not connected live"));
@@ -90,7 +90,7 @@ fn then_connected_live(world: &mut BehaviourWorld, id: String) -> Result<(), Str
     Ok(())
 }
 
-#[then(regex = r#"^the "([^"]+)" integration is not connected$"#)]
+#[then(regex = r#"^the "([^"]+)" connector is not connected$"#)]
 fn then_not_connected(world: &mut BehaviourWorld, id: String) -> Result<(), String> {
     if world.credential().connected.lock().unwrap().contains(&id) {
         return Err(format!("{id} must not be connected after a failed sign-in"));

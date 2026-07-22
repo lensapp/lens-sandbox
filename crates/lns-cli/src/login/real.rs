@@ -9,7 +9,7 @@ use tokio::net::UnixStream;
 
 use super::{LoginArgs, LoginOutcome, LogoutArgs, RegistryVerifier};
 use crate::command::{RunCtx, RunFuture};
-use crate::integration::LocalBoxFuture;
+use crate::connector::LocalBoxFuture;
 
 pub fn run_login<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {

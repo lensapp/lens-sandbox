@@ -29,8 +29,8 @@ fn given_image_env(world: &mut BehaviourWorld, key: String, value: String) {
         .push(format!("{key}={value}"));
 }
 
-#[given(regex = r#"^a connected integration manages the "([^"]+)" credential variable$"#)]
-fn given_integration_manages(world: &mut BehaviourWorld, env_var: String) {
+#[given(regex = r#"^a connected connector manages the "([^"]+)" credential variable$"#)]
+fn given_connector_manages(world: &mut BehaviourWorld, env_var: String) {
     world.managed_vars.push(env_var);
 }
 

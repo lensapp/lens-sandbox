@@ -5,7 +5,7 @@ use lns_ipc::{Request, Response};
 
 use super::VolumeService;
 use crate::command::{RunCtx, RunFuture};
-use crate::integration::LocalBoxFuture;
+use crate::connector::LocalBoxFuture;
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {

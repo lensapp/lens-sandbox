@@ -8,9 +8,9 @@ Feature: a credential bind fails closed when no approval window can appear
 
   Scenario: connect fails cleanly when the service runs headless
     Given a clean lns cache home
-    And the home's integration catalog declares "some-provider" managing "SOME_TOKEN"
+    And the home's connector catalog declares "some-provider" managing "SOME_TOKEN"
     And the Lens Sandbox service is running headless in that home
-    When the user connects integration "some-provider"
+    When the user connects connector "some-provider"
     Then the exit code is non-zero
     And the output contains "no display"
     And the output contains "did not complete"

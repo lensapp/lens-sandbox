@@ -16,7 +16,7 @@ Feature: the sandbox is the one noun, on a two-tier surface
     And the output contains "sandbox"
     And the output contains "volume"
     And the output contains "policy"
-    And the output contains "integration"
+    And the output contains "connector"
 
   Scenario: the front page hides the sandbox-only verbs
     When I run "lns --help"

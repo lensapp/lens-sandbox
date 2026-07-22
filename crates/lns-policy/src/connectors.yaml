@@ -1,4 +1,4 @@
-integrations:
+connectors:
   - id: gitlab
     authKind: credential
     routes:

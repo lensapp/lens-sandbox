@@ -14,18 +14,18 @@ Feature: credential placeholders cross the boundary as fakes, never real secrets
     Then the exit code is 0
     And the output contains "LNSPLACEHOLDER"
 
-  Scenario: a definition-declared integration is not armed in the guest, only offered
+  Scenario: a definition-declared connector is not armed in the guest, only offered
     Given a clean lns cache home
-    And the home's integration catalog declares "some-provider" managing "SOME_TOKEN"
+    And the home's connector catalog declares "some-provider" managing "SOME_TOKEN"
     And the Lens Sandbox service is running in that home
-    And the project definition declares integration "some-provider"
+    And the project definition declares connector "some-provider"
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox env'"
     Then the exit code is 0
     And the output does not contain "SOME_TOKEN=some-provider-LNSPLACEHOLDER"
 
   Scenario: a credential slot arms in the guest under the slot's env name
     Given a clean lns cache home
-    And the home's integration catalog declares "some-provider" managing "SOME_TOKEN"
+    And the home's connector catalog declares "some-provider" managing "SOME_TOKEN"
     And the Lens Sandbox service is running in that home
     And the project definition declares credential "some-provider" injected as "PROVIDER_KEY"
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox env'"

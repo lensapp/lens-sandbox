@@ -4,7 +4,7 @@ pub mod chord;
 pub mod cli;
 pub mod command;
 pub mod config;
-pub mod integration;
+pub mod connector;
 pub mod log;
 pub mod login;
 pub mod policy;

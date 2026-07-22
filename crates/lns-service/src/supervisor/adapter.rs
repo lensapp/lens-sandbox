@@ -16,8 +16,8 @@ use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
-use crate::credential_flow::integrations::{
-    applied_integration_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
+use crate::credential_flow::connectors::{
+    applied_connector_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -130,11 +130,11 @@ async fn decision_delivery_loop(
             RequestAction::Decide(decision) => {
                 session.record_decision(&delivery.id, decision);
             }
-            // Accepting an integration offer drives a connect (async) rather than a per-request verdict.
-            RequestAction::ConnectIntegration => {
+            // Accepting a connector offer drives a connect (async) rather than a per-request verdict.
+            RequestAction::ConnectConnector => {
                 session.connect_offer(&delivery.id).await;
             }
-            // A pasted token connects the integration without the interactive sign-in.
+            // A pasted token connects the connector without the interactive sign-in.
             RequestAction::UseToken { value } => {
                 session.connect_offer_with_token(&delivery.id, value).await;
             }
@@ -223,21 +223,19 @@ fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> Credent
     }
 }
 
-/// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-integrations.yaml` doesn't break a run — the bundled catalog still applies.
-fn load_user_catalog_or_warn(path: &Path) -> lns_policy::integrations::Catalog {
-    match lns_policy::integrations::Catalog::load_or_default(path) {
+/// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-connectors.yaml` doesn't break a run — the bundled catalog still applies.
+fn load_user_catalog_or_warn(path: &Path) -> lns_policy::connectors::Catalog {
+    match lns_policy::connectors::Catalog::load_or_default(path) {
         Ok(catalog) => catalog,
         Err(e) => {
             let path_str = path.display();
-            log::warn!(
-                "could not load {path_str} ({e}); using the bundled integration catalog only"
-            );
-            lns_policy::integrations::Catalog::default()
+            log::warn!("could not load {path_str} ({e}); using the bundled connector catalog only");
+            lns_policy::connectors::Catalog::default()
         }
     }
 }
 
-/// The env vars seeded as placeholders for this run's connected and connectable integrations; stripped from `-e` so a real secret can't bypass the placeholder.
+/// The env vars seeded as placeholders for this run's connected and connectable connectors; stripped from `-e` so a real secret can't bypass the placeholder.
 fn collect_managed_env_vars(providers: &[DefProvider]) -> Vec<String> {
     providers.iter().map(|p| p.env_var().to_string()).collect()
 }
@@ -285,29 +283,29 @@ fn make_policy_emitter(
     })
 }
 
-/// A watcher reload replaces the live policy from disk, where connected integrations are recorded id-only; this deriver re-applies their catalog routes so the reload doesn't drop them.
-fn make_integration_route_deriver(
-    catalog: Vec<lns_policy::integrations::Integration>,
-) -> crate::approval_flow::session::IntegrationRouteDeriver {
-    Box::new(move |ids| applied_integration_routes(ids, &catalog))
+/// A watcher reload replaces the live policy from disk, where connected connectors are recorded id-only; this deriver re-applies their catalog routes so the reload doesn't drop them.
+fn make_connector_route_deriver(
+    catalog: Vec<lns_policy::connectors::Connector>,
+) -> crate::approval_flow::session::ConnectorRouteDeriver {
+    Box::new(move |ids| applied_connector_routes(ids, &catalog))
 }
 
-/// Connecting an un-connected catalog integration allows its routes on the approval session's live policy (and persists `integrations:`), so the held request proceeds without a relaunch.
+/// Connecting an un-connected catalog connector allows its routes on the approval session's live policy (and persists `connectors:`), so the held request proceeds without a relaunch.
 fn make_connect_emitter(
     session: Arc<ApprovalSession>,
     routes: Arc<HashMap<String, Vec<RouteRule>>>,
 ) -> crate::credential_flow::session::ConnectEmitter {
     Box::new(move |id| {
         let rules = routes.get(id).cloned().unwrap_or_default();
-        session.connect_integration(id, rules);
+        session.connect_connector(id, rules);
     })
 }
 
-/// Pairs each connectable integration's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
+/// Pairs each connectable connector's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
 fn build_offerable(
-    connectable: &crate::credential_flow::integrations::ConnectableIntegrations,
-    catalog: &[lns_policy::integrations::Integration],
-) -> Vec<crate::approval_flow::session::OfferableIntegration> {
+    connectable: &crate::credential_flow::connectors::ConnectableConnectors,
+    catalog: &[lns_policy::connectors::Connector],
+) -> Vec<crate::approval_flow::session::OfferableConnector> {
     connectable
         .routes
         .iter()
@@ -321,7 +319,7 @@ fn build_offerable(
                 .iter()
                 .find(|i| &i.id == id)
                 .and_then(|i| i.token_fallback.clone());
-            crate::approval_flow::session::OfferableIntegration {
+            crate::approval_flow::session::OfferableConnector {
                 id: id.clone(),
                 display_name,
                 patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
@@ -336,11 +334,11 @@ struct CredentialConnector {
     credential_session: Weak<CredentialSession>,
 }
 
-impl crate::approval_flow::session::IntegrationConnector for CredentialConnector {
+impl crate::approval_flow::session::ConnectPort for CredentialConnector {
     fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
         Box::pin(async move {
             match self.credential_session.upgrade() {
-                Some(cs) => cs.connect_integration_now(id).await,
+                Some(cs) => cs.connect_connector_now(id).await,
                 None => false,
             }
         })
@@ -352,7 +350,7 @@ impl crate::approval_flow::session::IntegrationConnector for CredentialConnector
     ) -> futures_util::future::BoxFuture<'a, bool> {
         Box::pin(async move {
             match self.credential_session.upgrade() {
-                Some(cs) => cs.connect_integration_with_token(id, value),
+                Some(cs) => cs.connect_connector_with_token(id, value),
                 None => false,
             }
         })
@@ -369,12 +367,12 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The per-integration oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by integration id.
+/// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
 struct OauthWiring {
     configs: HashMap<String, crate::oauth::OauthConfig>,
     pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
     display_names: HashMap<String, String>,
-    token_fallbacks: HashMap<String, lns_policy::integrations::TokenFallback>,
+    token_fallbacks: HashMap<String, lns_policy::connectors::TokenFallback>,
 }
 
 async fn start_credential_subsystem(
@@ -425,7 +423,7 @@ async fn start_credential_subsystem(
         )
         .with_custom_providers(custom_providers)
         .with_bundled_ids(
-            lns_policy::integrations::bundled_integrations()
+            lns_policy::connectors::bundled_connectors()
                 .iter()
                 .map(|i| i.id.clone())
                 .collect(),
@@ -486,19 +484,19 @@ pub(super) async fn start(
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
     let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
-    // Applied integrations resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
+    // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
-        load_user_catalog_or_warn(&lns_policy::integrations::default_integrations_path());
-    let catalog = lns_policy::integrations::effective_integrations(&user_catalog);
+        load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
+    let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
     let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
-    // Un-connected catalog integrations are seeded unarmed so their use offers a live connect.
-    let declared_integrations = sandbox_policy
-        .map(|p| p.integrations.clone())
+    // Un-connected catalog connectors are seeded unarmed so their use offers a live connect.
+    let declared_connectors = sandbox_policy
+        .map(|p| p.connectors.clone())
         .unwrap_or_default();
     let connectable = resolve_connectable_with_slots(
         &policy,
         sandbox_credentials,
-        &declared_integrations,
+        &declared_connectors,
         &catalog,
     );
     policy.network.allowed_routes.extend(applied.routes);
@@ -510,7 +508,7 @@ pub(super) async fn start(
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let mut custom = applied.providers;
-    // Connectable (undeclared) integrations stay known for an on-domain connect offer but are detect-only, so they never seed a phantom placeholder into the workload env.
+    // Connectable (undeclared) connectors stay known for an on-domain connect offer but are detect-only, so they never seed a phantom placeholder into the workload env.
     custom.extend(
         connectable
             .providers
@@ -536,7 +534,7 @@ pub(super) async fn start(
             .with_offers(offerable),
     );
 
-    session.set_integration_route_deriver(make_integration_route_deriver(catalog.clone()));
+    session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
     if let Some(baseline) = sandbox_policy {
         session.set_policy_floor(baseline.clone());
     }
@@ -568,7 +566,7 @@ pub(super) async fn start(
         .filter(|i| i.oauth.is_some())
         .map(|i| (i.id.clone(), i.display_name().to_string()))
         .collect();
-    let token_fallbacks: HashMap<String, lns_policy::integrations::TokenFallback> = catalog
+    let token_fallbacks: HashMap<String, lns_policy::connectors::TokenFallback> = catalog
         .iter()
         .filter_map(|i| i.token_fallback.clone().map(|tf| (i.id.clone(), tf)))
         .collect();
@@ -651,7 +649,7 @@ mod tests {
         token_connects: std::sync::Mutex<Vec<(String, String)>>,
     }
 
-    impl crate::approval_flow::session::IntegrationConnector for RecordingConnector {
+    impl crate::approval_flow::session::ConnectPort for RecordingConnector {
         fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
             Box::pin(async move {
                 self.connects.lock().unwrap().push(id.to_string());
@@ -707,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_connect_action_to_connect_offer() {
         use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
-        use crate::approval_flow::session::OfferableIntegration;
+        use crate::approval_flow::session::OfferableConnector;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
 
         let notifier = Arc::new(RecordingNotifier::default());
@@ -721,7 +719,7 @@ mod tests {
                 frame_tx,
                 std::time::Duration::from_secs(30),
             )
-            .with_offers(vec![OfferableIntegration {
+            .with_offers(vec![OfferableConnector {
                 id: "some-oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.some-oauth.example".into()],
@@ -743,7 +741,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
         tx.send(DecisionDelivery {
             id: "r1".into(),
-            action: RequestAction::ConnectIntegration,
+            action: RequestAction::ConnectConnector,
         })
         .unwrap();
         drop(tx);
@@ -770,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_use_token_action_to_connect_offer_with_token() {
         use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
-        use crate::approval_flow::session::OfferableIntegration;
+        use crate::approval_flow::session::OfferableConnector;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
 
         let notifier = Arc::new(RecordingNotifier::default());
@@ -784,7 +782,7 @@ mod tests {
                 frame_tx,
                 std::time::Duration::from_secs(30),
             )
-            .with_offers(vec![OfferableIntegration {
+            .with_offers(vec![OfferableConnector {
                 id: "some-oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.some-oauth.example".into()],
@@ -988,11 +986,11 @@ mod tests {
 
     #[test]
     fn load_user_catalog_or_warn_reads_an_existing_user_catalog() {
-        use lns_policy::integrations::{AuthKind, Catalog, CredentialAuth, Integration};
+        use lns_policy::connectors::{AuthKind, Catalog, Connector, CredentialAuth};
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().join(".lns-integrations.yaml");
+        let path = dir.path().join(".lns-connectors.yaml");
         Catalog {
-            integrations: vec![Integration {
+            connectors: vec![Connector {
                 id: "acme".into(),
                 name: None,
                 auth_kind: AuthKind::Credential,
@@ -1009,19 +1007,19 @@ mod tests {
         .save_atomic(&path)
         .unwrap();
         let catalog = load_user_catalog_or_warn(&path);
-        assert_eq!(catalog.integrations.len(), 1);
-        assert_eq!(catalog.integrations[0].id, "acme");
+        assert_eq!(catalog.connectors.len(), 1);
+        assert_eq!(catalog.connectors[0].id, "acme");
     }
 
     #[test]
     fn load_user_catalog_or_warn_defaults_to_empty_and_warns_on_load_error() {
         init_tracing_capture();
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().join(".lns-integrations.yaml");
-        std::fs::write(&path, "integrations: not-a-list\n").unwrap();
+        let path = dir.path().join(".lns-connectors.yaml");
+        std::fs::write(&path, "connectors: not-a-list\n").unwrap();
         let catalog = load_user_catalog_or_warn(&path);
         assert!(
-            catalog.integrations.is_empty(),
+            catalog.connectors.is_empty(),
             "a malformed user catalog must surface as empty so the run still gets the bundled set"
         );
     }
@@ -1104,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn make_connect_emitter_connects_the_integration_on_the_approval_session() {
+    fn make_connect_emitter_connects_the_connector_on_the_approval_session() {
         let (session, mut rx) = fixture_session();
         while rx.try_recv().is_ok() {}
         let mut routes = HashMap::new();
@@ -1114,7 +1112,7 @@ mod tests {
         );
         let connect = make_connect_emitter(session.clone(), Arc::new(routes));
         connect("gitlab");
-        assert_eq!(session.current_policy().integrations, ["gitlab"]);
+        assert_eq!(session.current_policy().connectors, ["gitlab"]);
         assert!(
             session
                 .current_policy()
@@ -1122,7 +1120,7 @@ mod tests {
                 .allowed_routes
                 .iter()
                 .any(|r| r.match_pattern == "gitlab.com"),
-            "the integration's route is allowed live"
+            "the connector's route is allowed live"
         );
         assert!(rx.try_recv().is_ok(), "a Policy frame is emitted");
     }
@@ -1132,17 +1130,17 @@ mod tests {
         let (session, _rx) = fixture_session();
         let connect = make_connect_emitter(session.clone(), Arc::new(HashMap::new()));
         connect("gitlab");
-        assert_eq!(session.current_policy().integrations, ["gitlab"]);
+        assert_eq!(session.current_policy().connectors, ["gitlab"]);
     }
 
     #[test]
-    fn make_integration_route_deriver_maps_connected_ids_to_catalog_routes() {
-        use lns_policy::integrations::{AuthKind, Integration, IntegrationRoute};
-        let catalog = vec![Integration {
+    fn make_connector_route_deriver_maps_connected_ids_to_catalog_routes() {
+        use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute};
+        let catalog = vec![Connector {
             id: "some-oauth".into(),
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
                 scheme: None,
@@ -1153,7 +1151,7 @@ mod tests {
             oauth: None,
             token_fallback: None,
         }];
-        let derive = make_integration_route_deriver(catalog);
+        let derive = make_connector_route_deriver(catalog);
         let routes = derive(&["some-oauth".to_string()]);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
@@ -1165,14 +1163,14 @@ mod tests {
 
     #[test]
     fn build_offerable_pairs_id_display_name_route_patterns_and_token_fallback() {
-        use lns_policy::integrations::{
-            AuthKind, Integration, IntegrationRoute, OauthAuth, TokenFallback,
+        use lns_policy::connectors::{
+            AuthKind, Connector, ConnectorRoute, OauthAuth, TokenFallback,
         };
-        let catalog = vec![Integration {
+        let catalog = vec![Connector {
             id: "some-oauth".into(),
             name: Some("GitHub".into()),
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
                 scheme: None,
@@ -1183,7 +1181,7 @@ mod tests {
             oauth: Some(OauthAuth {
                 userinfo_endpoint: None,
                 account_field: None,
-                flow: lns_policy::integrations::OauthFlow::Device,
+                flow: lns_policy::connectors::OauthFlow::Device,
                 client_id: Some("Iv1.x".into()),
                 client_secret: None,
                 scopes: vec![],
@@ -1199,7 +1197,7 @@ mod tests {
                 command: None,
             }),
         }];
-        let connectable = crate::credential_flow::integrations::resolve_connectable_integrations(
+        let connectable = crate::credential_flow::connectors::resolve_connectable_connectors(
             &Policy::default(),
             &catalog,
         );
@@ -1217,14 +1215,14 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),
-            "the offer carries the integration's token fallback to the network card"
+            "the offer carries the connector's token fallback to the network card"
         );
     }
 
     #[test]
     fn build_offerable_falls_back_to_the_id_when_the_catalog_lacks_the_entry() {
-        use crate::credential_flow::integrations::ConnectableIntegrations;
-        let connectable = ConnectableIntegrations {
+        use crate::credential_flow::connectors::ConnectableConnectors;
+        let connectable = ConnectableConnectors {
             routes: HashMap::from([(
                 "stray".to_string(),
                 vec![lns_policy::RouteRule::allow_host("x.example")],
@@ -1243,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_connector_delegates_to_the_session_while_alive() {
-        use crate::approval_flow::session::IntegrationConnector;
+        use crate::approval_flow::session::ConnectPort;
         use crate::credential_flow::notification::NoopCredentialNotifier;
         use std::collections::HashSet;
         let (store, _dir) = tempfile_credential_store();
@@ -1270,7 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_connector_returns_false_when_the_session_is_dropped() {
-        use crate::approval_flow::session::IntegrationConnector;
+        use crate::approval_flow::session::ConnectPort;
         let (session, _frame_rx) = fixture_credential_session();
         let connector = CredentialConnector {
             credential_session: Arc::downgrade(&session),
@@ -1281,7 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_connector_connect_with_token_delegates_to_the_session_while_alive() {
-        use crate::approval_flow::session::IntegrationConnector;
+        use crate::approval_flow::session::ConnectPort;
         use crate::credential_flow::notification::NoopCredentialNotifier;
         use crate::credential_flow::store::CredentialEntry;
         use std::collections::HashSet;
@@ -1318,7 +1316,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_connector_connect_with_token_returns_false_when_the_session_is_dropped() {
-        use crate::approval_flow::session::IntegrationConnector;
+        use crate::approval_flow::session::ConnectPort;
         let (session, _frame_rx) = fixture_credential_session();
         let connector = CredentialConnector {
             credential_session: Arc::downgrade(&session),
@@ -1617,7 +1615,7 @@ mod tests {
         assert_eq!(
             connected.lock().unwrap().as_slice(),
             &["acme".to_string()],
-            "the connectable integration is still connected live"
+            "the connectable connector is still connected live"
         );
         let mut allowed = false;
         while let Ok(frame) = frame_rx.try_recv() {

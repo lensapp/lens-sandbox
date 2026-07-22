@@ -4,11 +4,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-const MANIFEST: &str = "src/integrations.yaml";
+const MANIFEST: &str = "src/connectors.yaml";
 
 fn main() {
     println!("cargo:rerun-if-changed={MANIFEST}");
-    let yaml = fs::read_to_string(MANIFEST).expect("integrations.yaml must be readable");
+    let yaml = fs::read_to_string(MANIFEST).expect("connectors.yaml must be readable");
 
     let mut generated = String::from("pub(crate) static ENV_SUBSTITUTIONS: &[(&str, &str)] = &[\n");
     for name in scan_env_refs(&yaml) {

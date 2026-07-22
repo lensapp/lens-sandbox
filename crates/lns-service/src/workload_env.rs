@@ -6,7 +6,7 @@ pub struct WorkloadEnv {
     pub refused: Vec<String>,
 }
 
-/// A var is managed when the run's providers — its custom providers and the catalog integrations — declare it; managed vars are seeded as placeholders, never carried from `-e`.
+/// A var is managed when the run's providers — its custom providers and the catalog connectors — declare it; managed vars are seeded as placeholders, never carried from `-e`.
 fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
     extra_managed.iter().any(|m| m == env_var)
 }
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn a_connected_integrations_env_var_is_refused_and_dropped() {
+    fn a_connected_connectors_env_var_is_refused_and_dropped() {
         let c = compose_workload_env(
             None,
             &["GITLAB_TOKEN=glpat_real".into(), "SAFE=1".into()],
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(
             c.env,
             ["SAFE=1"],
-            "the integration token must not reach the workload"
+            "the connector token must not reach the workload"
         );
         assert_eq!(c.refused, ["GITLAB_TOKEN"]);
     }
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn run_workload_env_refuses_a_connected_integration_var_via_extra_managed() {
+    fn run_workload_env_refuses_a_connected_connector_var_via_extra_managed() {
         let c = run_workload_env(
             None,
             &["GITLAB_TOKEN=real".into()],
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_env_omits_a_connected_integrations_value_from_the_log() {
+    fn injected_env_omits_a_connected_connectors_value_from_the_log() {
         let env = injected_env(
             &["A=1".into(), "GITLAB_TOKEN=glpat_real".into()],
             &["GITLAB_TOKEN".to_string()],
@@ -343,7 +343,7 @@ mod tests {
         assert!(env.contains_key("A"));
         assert!(
             !env.contains_key("GITLAB_TOKEN"),
-            "a connected integration's real token must never land in the audit log"
+            "a connected connector's real token must never land in the audit log"
         );
     }
 

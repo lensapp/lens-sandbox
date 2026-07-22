@@ -164,7 +164,7 @@ mod tests {
             target: "api.foo.com:443".into(),
             decision: Decision::AllowAlways,
             reason: None,
-            integration: None,
+            connector: None,
         }
     }
 
@@ -174,7 +174,7 @@ mod tests {
             run: run.to_string(),
             microvm: "calm-finch".into(),
             event: LedgerEvent::Connection {
-                integration: "some-oauth".into(),
+                connector: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: Some("@hchen".into()),
                 scopes: vec!["repo".into()],
@@ -213,7 +213,7 @@ mod tests {
         let row = lns_audit::read(&events[0]).unwrap();
         assert_eq!(row.run, "aa49");
         assert_eq!(row.kind, "connection");
-        assert_eq!(row.integration.as_deref(), Some("some-oauth"));
+        assert_eq!(row.connector.as_deref(), Some("some-oauth"));
         assert_eq!(
             row.detail, "connect some-oauth (oauth) @hchen [repo]",
             "the OCSF line reads back to the same connection the record described"
@@ -299,7 +299,7 @@ mod tests {
             target: "x".into(),
             decision: Decision::DenyOnce,
             reason: Some("policy-ambiguous".into()),
-            integration: None,
+            connector: None,
         });
         drop(recorder);
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
@@ -360,7 +360,7 @@ mod tests {
                 target: target.into(),
                 decision: Decision::AllowOnce,
                 reason: None,
-                integration: None,
+                connector: None,
             });
         }
         drop(recorder);

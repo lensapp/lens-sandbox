@@ -30,7 +30,7 @@ Feature: lns-service injects user env into the workload without breaching the cr
     Then the workload's environment contains PORT set to "4000"
 
   Scenario: -e for a managed credential var is refused; the placeholder stands
-    Given a connected integration manages the "SOME_TOKEN" credential variable
+    Given a connected connector manages the "SOME_TOKEN" credential variable
     When the user runs `lns run -e SOME_TOKEN=some-secret someimage`
     Then the workload's SOME_TOKEN override is dropped and refused
     And a warning states the SOME_TOKEN override was refused because it is a managed credential

@@ -13,7 +13,7 @@ pub struct TimelineRow {
     pub kind: String,
     pub detail: String,
     pub raw: Value,
-    pub integration: Option<String>,
+    pub connector: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -76,7 +76,7 @@ fn read_ledger_row(
         run: row.run,
         kind: row.kind,
         detail: row.detail,
-        integration: row.integration,
+        connector: row.connector,
         raw: Value::Object(event),
     })
 }
@@ -137,7 +137,7 @@ fn read_run_row(line: &str, run_id: &str) -> std::result::Result<TimelineRow, St
         run: run_id.to_string(),
         kind: row.kind,
         detail: row.detail,
-        integration: row.integration,
+        connector: row.connector,
         raw: Value::Object(obj),
     })
 }
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(timeline.rows.len(), 2);
         assert_eq!(timeline.rows[0].kind, "connection", "14:02:11 is newest");
         assert_eq!(timeline.rows[1].kind, "egress");
-        assert_eq!(timeline.rows[0].integration.as_deref(), Some("some-oauth"));
+        assert_eq!(timeline.rows[0].connector.as_deref(), Some("some-oauth"));
         assert_eq!(timeline.rows[1].detail, "GET api.example.test:443");
         assert!(timeline.warnings.is_empty());
     }
@@ -353,7 +353,7 @@ mod tests {
                 kind: "env".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                integration: None,
+                connector: None,
             },
             TimelineRow {
                 ts: "t".into(),
@@ -362,7 +362,7 @@ mod tests {
                 kind: "volume".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                integration: None,
+                connector: None,
             },
             TimelineRow {
                 ts: "t".into(),
@@ -371,7 +371,7 @@ mod tests {
                 kind: "env".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                integration: None,
+                connector: None,
             },
         ];
         sort_newest_first(&mut rows);

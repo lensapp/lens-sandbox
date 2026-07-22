@@ -87,14 +87,14 @@ fn error_says_denied(w: &mut BehaviourWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[then(regex = r#"^the error points at `lns integration connect ([^`]+)`$"#)]
+#[then(regex = r#"^the error points at `lns connector connect ([^`]+)`$"#)]
 fn error_points_at_connect(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
     let error = launch_error(w)?;
-    if error.contains(&format!("`lns integration connect {id}`")) {
+    if error.contains(&format!("`lns connector connect {id}`")) {
         Ok(())
     } else {
         Err(format!(
-            "expected the error to point at `lns integration connect {id}`, got: {error}"
+            "expected the error to point at `lns connector connect {id}`, got: {error}"
         ))
     }
 }
@@ -131,7 +131,7 @@ fn no_value_decision_prompt(w: &mut BehaviourWorld) -> Result<(), String> {
     if let Some(pending) = &rig.pending {
         return Err(format!(
             "the launch blocked on a prompt for {}",
-            pending.integration
+            pending.connector
         ));
     }
     if rig.running_policy.is_none() {

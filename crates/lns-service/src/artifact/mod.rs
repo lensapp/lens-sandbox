@@ -61,10 +61,10 @@ pub fn dispatch_run(
     Ok(path)
 }
 
-/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor integrations plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
+/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
-    let ships_policy = def.spec.policy != lns_policy::NetworkPolicy::default()
-        || !def.spec.integrations.is_empty();
+    let ships_policy =
+        def.spec.policy != lns_policy::NetworkPolicy::default() || !def.spec.connectors.is_empty();
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         local_filesets: def
@@ -100,7 +100,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         resources: def.spec.resources.clone(),
         policy: ships_policy.then(|| lns_policy::Policy {
             network: def.spec.policy.clone(),
-            integrations: def.spec.integrations.clone(),
+            connectors: def.spec.connectors.clone(),
         }),
         credentials: def.spec.credentials.clone(),
     }
@@ -133,7 +133,7 @@ pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
     problems
 }
 
-/// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, integrations, and resources apply identically.
+/// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
 pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"defaultVerdict":"deny"},"integrations":["some-provider"]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"defaultVerdict":"deny"},"connectors":["some-provider"]}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
@@ -225,11 +225,11 @@ mod tests {
             .policy
             .expect("a flat sandbox carries its inline policy");
         assert_eq!(policy.network.default_verdict, lns_policy::Verdict::Deny);
-        assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+        assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
     }
 
     #[test]
-    fn a_definition_shipping_no_policy_or_integrations_plans_without_a_baseline() {
+    fn a_definition_shipping_no_policy_or_connectors_plans_without_a_baseline() {
         let def = lns_artifact::sandbox::parse(
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#,
         )
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn plan_local_sandbox_resolves_the_definition_like_a_published_one() {
         let resolved = plan_local_sandbox(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","integrations":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
         )
         .unwrap();
         assert_eq!(resolved.base_image, "ghcr.io/team/base:1");
@@ -253,7 +253,7 @@ mod tests {
             "resources must survive the plan"
         );
         let policy = resolved.policy.expect("the plan carries the inline policy");
-        assert_eq!(policy.integrations, vec!["some-provider".to_string()]);
+        assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
     }
 
     #[test]

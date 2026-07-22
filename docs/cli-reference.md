@@ -142,13 +142,13 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), integrations, and any over-broad-policy flag; or a plain `Image`. |
+| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, and any over-broad-policy flag; or a plain `Image`. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
 | `prune`    | —              | Remove every cached sandbox not held by a running one, reclaiming disk. Requires `-f`/`--force` — there is no interactive prompt. |
 
 The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: Sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
-`workdir`, `volumes`, `env`, `policy`, and `integrations`. Declarative mounts
+`workdir`, `volumes`, `env`, `policy`, and `connectors`. Declarative mounts
 accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
 `readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).
@@ -203,7 +203,7 @@ Show one chronological timeline of every audit event across all sandboxes — or
 ```bash
 lns audit                                   # every event, every sandbox, newest first
 lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
-lns audit [--integration <id>] [--kind <kind>] [--json]
+lns audit [--connector <id>] [--kind <kind>] [--json]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
@@ -214,9 +214,9 @@ unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 
 Filters compose:
 
-- `--integration <id>` — only events for one integration. Discover the ids with
-  `lns integration list`; they also appear in the `DETAIL` column. Per-run egress/mount
-  events carry no integration, so this narrows the stream to ledger events.
+- `--connector <id>` — only events for one connector. Discover the ids with
+  `lns connector list`; they also appear in the `DETAIL` column. Per-run egress/mount
+  events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
   `connection`, `credential`.
 - `--json` — one raw JSON event per line instead of the table.
@@ -279,36 +279,36 @@ lns policy remove <PATTERN>
 `PATTERN` is a host, wildcard (`*.github.com`), CIDR, or `host:port`. See
 [Policy and approvals](policy.md).
 
-## `lns integration`
+## `lns connector`
 
-Manage the credential-integration catalog — the services whose credentials reach a
-workload. The catalog is machine-global (`~/.lns-integrations.yaml`). An integration
-declared in a sandbox definition's `spec.integrations` is only offered — the
+Manage the credential-connector catalog — the services whose credentials reach a
+workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
+declared in a sandbox definition's `spec.connectors` is only offered — the
 workload is prompted to connect it on first use, never armed automatically;
-connecting one (here or reactively) arms it and records it under `integrations:`
+connecting one (here or reactively) arms it and records it under `connectors:`
 in that directory's `lns-policy.yaml`.
 
 ```bash
-lns integration add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
-lns integration list
-lns integration remove <ID>
-lns integration connect <ID> [--policy <PATH>]
-lns integration disconnect <ID> [--policy <PATH>]
+lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
+lns connector list
+lns connector remove <ID>
+lns connector connect <ID> [--policy <PATH>]
+lns connector disconnect <ID> [--policy <PATH>]
 ```
 
 | Subcommand   | Meaning                                                                       |
 | ------------ | ----------------------------------------------------------------------------- |
-| `add`        | Declare a credential integration in your machine-global catalog.              |
-| `list`       | List the bundled and user-declared integrations and their auth kind.          |
-| `remove`     | Remove a user-declared integration; bundled ones cannot be removed.           |
-| `connect`    | Bind an integration's per-machine value decision: a credential integration prompts in the approval window (use the host value, store one, or deny) and an `oauth` integration signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
-| `disconnect` | Disconnect an integration from this directory's policy.                       |
+| `add`        | Declare a credential connector in your machine-global catalog.              |
+| `list`       | List the bundled and user-declared connectors and their auth kind.          |
+| `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
+| `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
+| `disconnect` | Disconnect a connector from this directory's policy.                       |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
 name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
-connected integration are made interactively in the approval window — see
-[Credentials](credentials.md) and [Integrations](integrations.md).
+connected connector are made interactively in the approval window — see
+[Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`
 

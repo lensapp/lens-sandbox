@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use lns_policy::Policy;
-use lns_policy::integrations::{
-    AuthKind, Catalog, CredentialAuth, Integration, IntegrationRoute, bundled_integrations,
-    effective_integrations,
+use lns_policy::connectors::{
+    AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, bundled_connectors,
+    effective_connectors,
 };
 use lns_policy::providers::is_self_identifying;
 
@@ -15,36 +15,34 @@ use crate::run::summary::policy_path;
 mod real;
 mod sign_in;
 
-pub use real::RealIntegrationSignIn;
-pub use sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+pub use real::RealConnectorSignIn;
+pub use sign_in::{BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
 
 #[derive(clap::Args)]
-pub struct IntegrationArgs {
+pub struct ConnectorArgs {
     #[command(subcommand)]
-    pub command: IntegrationCommand,
+    pub command: ConnectorCommand,
 }
 
 #[derive(clap::Subcommand)]
-pub enum IntegrationCommand {
-    #[command(about = "Declare a credential integration in your machine-global catalog.")]
-    Add(IntegrationAddArgs),
-    #[command(about = "List the bundled and user-declared integrations.")]
+pub enum ConnectorCommand {
+    #[command(about = "Declare a credential connector in your machine-global catalog.")]
+    Add(ConnectorAddArgs),
+    #[command(about = "List the bundled and user-declared connectors.")]
     List,
-    #[command(about = "Remove a user-declared integration; bundled ones cannot be removed.")]
-    Remove(IntegrationRemoveArgs),
+    #[command(about = "Remove a user-declared connector; bundled ones cannot be removed.")]
+    Remove(ConnectorRemoveArgs),
     #[command(
-        about = "Bind an integration's per-machine value decision (oauth integrations sign in); records the id in this directory's policy."
+        about = "Bind a connector's per-machine value decision (oauth connectors sign in); records the id in this directory's policy."
     )]
     Connect(ConnectArgs),
-    #[command(about = "Disconnect an integration from this directory's policy.")]
+    #[command(about = "Disconnect a connector from this directory's policy.")]
     Disconnect(DisconnectArgs),
 }
 
 #[derive(clap::Args)]
-pub struct IntegrationAddArgs {
-    #[arg(
-        help = "New integration id; must not collide with a bundled or existing user integration."
-    )]
+pub struct ConnectorAddArgs {
+    #[arg(help = "New connector id; must not collide with a bundled or existing user connector.")]
     pub id: String,
     #[arg(long, help = "Environment variable the placeholder is seeded into.")]
     pub env_var: String,
@@ -57,7 +55,7 @@ pub struct IntegrationAddArgs {
     pub inject: Vec<lns_policy::providers::InjectionDef>,
     #[arg(
         long = "route",
-        help = "A host pattern the integration needs reachable. Repeatable."
+        help = "A host pattern the connector needs reachable. Repeatable."
     )]
     pub route: Vec<String>,
     #[arg(
@@ -68,14 +66,14 @@ pub struct IntegrationAddArgs {
 }
 
 #[derive(clap::Args)]
-pub struct IntegrationRemoveArgs {
-    #[arg(help = "User-declared integration id to remove.")]
+pub struct ConnectorRemoveArgs {
+    #[arg(help = "User-declared connector id to remove.")]
     pub id: String,
 }
 
 #[derive(clap::Args)]
 pub struct ConnectArgs {
-    #[arg(help = "Integration id to connect (from `lns integration list`).")]
+    #[arg(help = "Connector id to connect (from `lns connector list`).")]
     pub id: String,
     #[arg(
         long,
@@ -86,7 +84,7 @@ pub struct ConnectArgs {
 
 #[derive(clap::Args)]
 pub struct DisconnectArgs {
-    #[arg(help = "Integration id to disconnect.")]
+    #[arg(help = "Connector id to disconnect.")]
     pub id: String,
     #[arg(
         long,
@@ -146,13 +144,13 @@ fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, Strin
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
-        subcommand::<IntegrationArgs>("integration")
-            .about("Manage the credential-integration catalog (connectable services)."),
+        subcommand::<ConnectorArgs>("connector")
+            .about("Manage the credential-connector catalog (connectable services)."),
     )
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
-    name: "integration",
+    name: "connector",
     augment,
     run: real::run,
     announces_update_check: true,
@@ -160,18 +158,18 @@ pub const SPEC: CommandSpec = CommandSpec {
 };
 
 pub async fn run(
-    cmd: &IntegrationCommand,
+    cmd: &ConnectorCommand,
     cwd: &Path,
     catalog_path: &Path,
-    signin: &dyn IntegrationSignIn,
+    signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
-        IntegrationCommand::Add(args) => add(args, catalog_path, writer),
-        IntegrationCommand::List => list(catalog_path, writer),
-        IntegrationCommand::Remove(args) => remove(args, catalog_path, writer),
-        IntegrationCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
-        IntegrationCommand::Disconnect(args) => disconnect(args, cwd, writer),
+        ConnectorCommand::Add(args) => add(args, catalog_path, writer),
+        ConnectorCommand::List => list(catalog_path, writer),
+        ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
+        ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
+        ConnectorCommand::Disconnect(args) => disconnect(args, cwd, writer),
     }
 }
 
@@ -181,7 +179,7 @@ fn generate_placeholder(id: &str) -> String {
 }
 
 fn is_bundled(id: &str) -> bool {
-    bundled_integrations().iter().any(|i| i.id == id)
+    bundled_connectors().iter().any(|i| i.id == id)
 }
 
 fn load_catalog(path: &Path) -> Result<Catalog> {
@@ -195,16 +193,16 @@ fn kind_word(kind: AuthKind) -> &'static str {
     }
 }
 
-fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     if is_bundled(&args.id) {
         bail!(
-            "{:?} is a bundled integration and cannot be redeclared",
+            "{:?} is a bundled connector and cannot be redeclared",
             args.id
         );
     }
     let mut catalog = load_catalog(catalog_path)?;
-    if catalog.integrations.iter().any(|i| i.id == args.id) {
-        bail!("integration {:?} already exists in your catalog", args.id);
+    if catalog.connectors.iter().any(|i| i.id == args.id) {
+        bail!("connector {:?} already exists in your catalog", args.id);
     }
     let placeholder = match &args.placeholder {
         Some(p) if !is_self_identifying(p) => bail!(
@@ -216,7 +214,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
     let routes = args
         .route
         .iter()
-        .map(|host| IntegrationRoute {
+        .map(|host| ConnectorRoute {
             match_pattern: host.clone(),
             transport: None,
             scheme: None,
@@ -224,7 +222,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
             rules: Vec::new(),
         })
         .collect();
-    catalog.integrations.push(Integration {
+    catalog.connectors.push(Connector {
         id: args.id.clone(),
         name: None,
         auth_kind: AuthKind::Credential,
@@ -240,7 +238,7 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
     catalog
         .save_atomic(catalog_path)
         .with_context(|| format!("writing {}", catalog_path.display()))?;
-    writeln!(writer, "Declared integration {:?} in your catalog", args.id)?;
+    writeln!(writer, "Declared connector {:?} in your catalog", args.id)?;
     writeln!(
         writer,
         "Connect it to a project with `lns connect {}`.",
@@ -251,10 +249,10 @@ fn add(args: &IntegrationAddArgs, catalog_path: &Path, writer: &mut impl Write) 
 
 fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    for i in bundled_integrations() {
+    for i in bundled_connectors() {
         writeln!(writer, "{}  (bundled)  {}", i.id, kind_word(i.auth_kind))?;
     }
-    for i in &user.integrations {
+    for i in &user.connectors {
         // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
         if is_bundled(&i.id) {
             continue;
@@ -264,27 +262,20 @@ fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     Ok(0)
 }
 
-fn remove(
-    args: &IntegrationRemoveArgs,
-    catalog_path: &Path,
-    writer: &mut impl Write,
-) -> Result<i32> {
+fn remove(args: &ConnectorRemoveArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     if is_bundled(&args.id) {
-        bail!(
-            "{:?} is a bundled integration and cannot be removed",
-            args.id
-        );
+        bail!("{:?} is a bundled connector and cannot be removed", args.id);
     }
     let mut catalog = load_catalog(catalog_path)?;
-    let before = catalog.integrations.len();
-    catalog.integrations.retain(|i| i.id != args.id);
-    if catalog.integrations.len() == before {
-        bail!("no integration {:?} in your catalog to remove", args.id);
+    let before = catalog.connectors.len();
+    catalog.connectors.retain(|i| i.id != args.id);
+    if catalog.connectors.len() == before {
+        bail!("no connector {:?} in your catalog to remove", args.id);
     }
     catalog
         .save_atomic(catalog_path)
         .with_context(|| format!("writing {}", catalog_path.display()))?;
-    writeln!(writer, "Removed integration {:?}", args.id)?;
+    writeln!(writer, "Removed connector {:?}", args.id)?;
     Ok(0)
 }
 
@@ -292,18 +283,15 @@ pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
-    signin: &dyn IntegrationSignIn,
+    signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    let effective = effective_integrations(&user);
+    let effective = effective_connectors(&user);
     let Some(integ) = effective.iter().find(|i| i.id == args.id) else {
-        bail!(
-            "unknown integration {:?}; see `lns integration list`",
-            args.id
-        );
+        bail!("unknown connector {:?}; see `lns connector list`", args.id);
     };
-    // An oauth integration authenticates by an interactive sign-in; a credential integration binds its per-machine value decision through the approval-window card. Either way the id is recorded only on success.
+    // An oauth connector authenticates by an interactive sign-in; a credential connector binds its per-machine value decision through the approval-window card. Either way the id is recorded only on success.
     let closing = if integ.auth_kind == AuthKind::Oauth {
         match signin.sign_in(&args.id, writer).await? {
             SignInOutcome::ServiceUnavailable => bail!(
@@ -373,7 +361,7 @@ pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::integrations::{OauthAuth, OauthFlow};
+    use lns_policy::connectors::{OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
 
@@ -457,8 +445,8 @@ mod tests {
         assert!(err.contains("does not take a header name"), "got: {err}");
     }
 
-    fn add_args(id: &str) -> IntegrationAddArgs {
-        IntegrationAddArgs {
+    fn add_args(id: &str) -> ConnectorAddArgs {
+        ConnectorAddArgs {
             id: id.into(),
             env_var: "ACME_API_KEY".into(),
             inject: vec![InjectionDef {
@@ -472,23 +460,23 @@ mod tests {
     }
 
     fn catalog_at(dir: &Path) -> std::path::PathBuf {
-        dir.join(".lns-integrations.yaml")
+        dir.join(".lns-connectors.yaml")
     }
 
     fn load(path: &Path) -> Catalog {
         Catalog::load_or_default(path).unwrap()
     }
 
-    fn write_user_catalog(path: &Path, integrations: Vec<Integration>) {
-        Catalog { integrations }.save_atomic(path).unwrap();
+    fn write_user_catalog(path: &Path, connectors: Vec<Connector>) {
+        Catalog { connectors }.save_atomic(path).unwrap();
     }
 
-    fn oauth_integration(id: &str) -> Integration {
-        Integration {
+    fn oauth_connector(id: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: "api.somesaas.com".into(),
                 transport: None,
                 scheme: None,
@@ -521,14 +509,14 @@ mod tests {
     }
 
     #[test]
-    fn add_declares_a_new_user_integration_with_routes_and_injection() {
+    fn add_declares_a_new_user_connector_with_routes_and_injection() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         let mut out = Vec::new();
         add(&add_args("acme"), &path, &mut out).unwrap();
         let catalog = load(&path);
-        assert_eq!(catalog.integrations.len(), 1);
-        let acme = &catalog.integrations[0];
+        assert_eq!(catalog.connectors.len(), 1);
+        let acme = &catalog.connectors[0];
         assert_eq!(acme.id, "acme");
         assert_eq!(acme.auth_kind, AuthKind::Credential);
         assert_eq!(acme.routes[0].match_pattern, "api.acme.corp");
@@ -545,7 +533,7 @@ mod tests {
         args.placeholder = Some("acme_LNSPLACEHOLDER".into());
         add(&args, &path, &mut Vec::new()).unwrap();
         assert_eq!(
-            load(&path).integrations[0]
+            load(&path).connectors[0]
                 .credential
                 .as_ref()
                 .unwrap()
@@ -585,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn list_shows_bundled_and_user_integrations_labelled() {
+    fn list_shows_bundled_and_user_connectors_labelled() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
@@ -597,10 +585,10 @@ mod tests {
     }
 
     #[test]
-    fn list_labels_an_oauth_user_integration() {
+    fn list_labels_an_oauth_user_connector() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
-        write_user_catalog(&path, vec![oauth_integration("somesaas")]);
+        write_user_catalog(&path, vec![oauth_connector("somesaas")]);
         let mut out = Vec::new();
         list(&path, &mut out).unwrap();
         assert!(
@@ -617,7 +605,7 @@ mod tests {
         let path = catalog_at(dir.path());
         write_user_catalog(
             &path,
-            vec![Integration {
+            vec![Connector {
                 id: "gitlab".into(),
                 name: None,
                 auth_kind: AuthKind::Credential,
@@ -645,30 +633,30 @@ mod tests {
     fn list_surfaces_a_malformed_catalog_as_an_error() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
-        std::fs::write(&path, "integrations: not-a-list\n").unwrap();
+        std::fs::write(&path, "connectors: not-a-list\n").unwrap();
         let err = list(&path, &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("loading"));
     }
 
     #[test]
-    fn remove_deletes_a_user_integration() {
+    fn remove_deletes_a_user_connector() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
         remove(
-            &IntegrationRemoveArgs { id: "acme".into() },
+            &ConnectorRemoveArgs { id: "acme".into() },
             &path,
             &mut Vec::new(),
         )
         .unwrap();
-        assert!(load(&path).integrations.is_empty());
+        assert!(load(&path).connectors.is_empty());
     }
 
     #[test]
     fn remove_rejects_a_bundled_id() {
         let dir = TempDir::new().unwrap();
         let err = remove(
-            &IntegrationRemoveArgs {
+            &ConnectorRemoveArgs {
                 id: "gitlab".into(),
             },
             &catalog_at(dir.path()),
@@ -682,7 +670,7 @@ mod tests {
     fn remove_errors_on_an_unknown_user_id() {
         let dir = TempDir::new().unwrap();
         let err = remove(
-            &IntegrationRemoveArgs { id: "ghost".into() },
+            &ConnectorRemoveArgs { id: "ghost".into() },
             &catalog_at(dir.path()),
             &mut Vec::new(),
         )
@@ -714,7 +702,7 @@ mod tests {
             }
         }
     }
-    impl IntegrationSignIn for FakeSignIn {
+    impl ConnectorSignIn for FakeSignIn {
         fn sign_in<'a>(
             &'a self,
             id: &'a str,
@@ -741,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_writes_a_bundled_integration_id_into_the_policy() {
+    async fn connect_writes_a_bundled_connector_id_into_the_policy() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
         let mut out = Vec::new();
@@ -758,11 +746,11 @@ mod tests {
         .await
         .unwrap();
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
-        assert_eq!(policy.integrations, ["gitlab"]);
+        assert_eq!(policy.connectors, ["gitlab"]);
     }
 
     #[tokio::test]
-    async fn connect_rejects_an_unknown_integration() {
+    async fn connect_rejects_an_unknown_connector() {
         let dir = TempDir::new().unwrap();
         let err = connect(
             &ConnectArgs {
@@ -776,14 +764,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("unknown integration"));
+        assert!(format!("{err:#}").contains("unknown connector"));
     }
 
     #[tokio::test]
-    async fn connect_signs_in_an_oauth_integration_then_records_it() {
+    async fn connect_signs_in_an_oauth_connector_then_records_it() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
-        write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
+        write_user_catalog(&catalog, vec![oauth_connector("somesaas")]);
         connect(
             &ConnectArgs {
                 id: "somesaas".into(),
@@ -798,9 +786,9 @@ mod tests {
         .unwrap();
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert_eq!(
-            policy.integrations,
+            policy.connectors,
             ["somesaas"],
-            "a completed sign-in records the integration"
+            "a completed sign-in records the connector"
         );
     }
 
@@ -808,7 +796,7 @@ mod tests {
     async fn connect_to_oauth_fails_without_recording_when_sign_in_does_not_complete() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
-        write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
+        write_user_catalog(&catalog, vec![oauth_connector("somesaas")]);
         let err = connect(
             &ConnectArgs {
                 id: "somesaas".into(),
@@ -824,8 +812,8 @@ mod tests {
         assert!(format!("{err:#}").contains("access_denied"), "got: {err:#}");
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert!(
-            policy.integrations.is_empty(),
-            "a failed sign-in must not record the integration"
+            policy.connectors.is_empty(),
+            "a failed sign-in must not record the connector"
         );
     }
 
@@ -898,8 +886,8 @@ mod tests {
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert!(
-            policy.integrations.is_empty(),
-            "a failed bind must not record the integration"
+            policy.connectors.is_empty(),
+            "a failed bind must not record the connector"
         );
     }
 
@@ -928,7 +916,7 @@ mod tests {
     async fn connect_to_oauth_reports_when_the_service_is_unavailable() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
-        write_user_catalog(&catalog, vec![oauth_integration("somesaas")]);
+        write_user_catalog(&catalog, vec![oauth_connector("somesaas")]);
         let err = connect(
             &ConnectArgs {
                 id: "somesaas".into(),
@@ -948,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_removes_a_connected_integration() {
+    async fn disconnect_removes_a_connected_connector() {
         let dir = TempDir::new().unwrap();
         let catalog = catalog_at(dir.path());
         connect(
@@ -973,7 +961,7 @@ mod tests {
         )
         .unwrap();
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
-        assert!(policy.integrations.is_empty());
+        assert!(policy.connectors.is_empty());
     }
 
     #[test]
@@ -996,7 +984,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut out = Vec::new();
         run(
-            &IntegrationCommand::List,
+            &ConnectorCommand::List,
             dir.path(),
             &catalog_at(dir.path()),
             &FakeSignIn::completed(),
@@ -1016,7 +1004,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         run(
-            &IntegrationCommand::Add(add_args("acme")),
+            &ConnectorCommand::Add(add_args("acme")),
             dir.path(),
             &path,
             &FakeSignIn::completed(),
@@ -1024,9 +1012,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(load(&path).integrations.len(), 1);
+        assert_eq!(load(&path).connectors.len(), 1);
         run(
-            &IntegrationCommand::Remove(IntegrationRemoveArgs { id: "acme".into() }),
+            &ConnectorCommand::Remove(ConnectorRemoveArgs { id: "acme".into() }),
             dir.path(),
             &path,
             &FakeSignIn::completed(),
@@ -1034,7 +1022,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(load(&path).integrations.is_empty());
+        assert!(load(&path).connectors.is_empty());
     }
 
     #[tokio::test]
@@ -1042,7 +1030,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         run(
-            &IntegrationCommand::Connect(ConnectArgs {
+            &ConnectorCommand::Connect(ConnectArgs {
                 id: "gitlab".into(),
                 policy: None,
             }),
@@ -1056,11 +1044,11 @@ mod tests {
         assert_eq!(
             Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
                 .unwrap()
-                .integrations,
+                .connectors,
             ["gitlab"]
         );
         run(
-            &IntegrationCommand::Disconnect(DisconnectArgs {
+            &ConnectorCommand::Disconnect(DisconnectArgs {
                 id: "gitlab".into(),
                 policy: None,
             }),
@@ -1074,7 +1062,7 @@ mod tests {
         assert!(
             Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
                 .unwrap()
-                .integrations
+                .connectors
                 .is_empty()
         );
     }

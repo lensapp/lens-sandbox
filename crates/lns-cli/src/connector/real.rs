@@ -7,31 +7,31 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_as
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use super::sign_in::{BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
 use crate::command::{RunCtx, RunFuture};
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = super::IntegrationArgs::from_arg_matches(matches)?;
+        let args = super::ConnectorArgs::from_arg_matches(matches)?;
         let cwd = ctx.cwd()?;
-        let catalog_path = lns_policy::integrations::default_integrations_path();
-        let signin = RealIntegrationSignIn::new(crate::service::socket_path()?);
+        let catalog_path = lns_policy::connectors::default_connectors_path();
+        let signin = RealConnectorSignIn::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        crate::integration::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
+        crate::connector::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
     })
 }
 
-pub struct RealIntegrationSignIn {
+pub struct RealConnectorSignIn {
     socket: PathBuf,
 }
 
-impl RealIntegrationSignIn {
+impl RealConnectorSignIn {
     pub fn new(socket: PathBuf) -> Self {
         Self { socket }
     }
 }
 
-impl IntegrationSignIn for RealIntegrationSignIn {
+impl ConnectorSignIn for RealConnectorSignIn {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
@@ -41,7 +41,7 @@ impl IntegrationSignIn for RealIntegrationSignIn {
             let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
                 return Ok(SignInOutcome::ServiceUnavailable);
             };
-            let frame = encode_frame(&Request::BeginIntegrationSignIn { id: id.to_string() })
+            let frame = encode_frame(&Request::BeginConnectorSignIn { id: id.to_string() })
                 .context("encoding sign-in request")?;
             stream
                 .write_all(&frame)
@@ -91,7 +91,7 @@ impl IntegrationSignIn for RealIntegrationSignIn {
             let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
                 return Ok(BindOutcome::ServiceUnavailable);
             };
-            let frame = encode_frame(&Request::BindIntegrationCredential { id: id.to_string() })
+            let frame = encode_frame(&Request::BindConnectorCredential { id: id.to_string() })
                 .context("encoding bind request")?;
             stream
                 .write_all(&frame)

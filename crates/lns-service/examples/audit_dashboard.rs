@@ -43,7 +43,7 @@ fn ctx<'a>(ts: &'a str, run: &'a str, microvm: &'a str) -> lns_ocsf::Context<'a>
     }
 }
 
-fn ocsf_row(ts: &str, run: &str, integration: Option<&str>, raw: Value) -> TimelineRow {
+fn ocsf_row(ts: &str, run: &str, connector: Option<&str>, raw: Value) -> TimelineRow {
     let kind = raw["unmapped"]["lns_kind"]
         .as_str()
         .unwrap_or_default()
@@ -56,7 +56,7 @@ fn ocsf_row(ts: &str, run: &str, integration: Option<&str>, raw: Value) -> Timel
         kind,
         detail,
         raw,
-        integration: integration.map(str::to_string),
+        connector: connector.map(str::to_string),
     }
 }
 

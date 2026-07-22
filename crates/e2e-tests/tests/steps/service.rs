@@ -93,12 +93,12 @@ fn service_is_running_headless_in_home(world: &mut E2eWorld) {
     start_service_with(world, &[("LNS_HEADLESS", "1")]);
 }
 
-#[when(regex = r#"^the user connects integration "([^"]+)"$"#)]
-fn connect_integration(world: &mut E2eWorld, id: String) {
+#[when(regex = r#"^the user connects connector "([^"]+)"$"#)]
+fn connect_connector(world: &mut E2eWorld, id: String) {
     let home = world
         .home
         .as_ref()
-        .expect("a home holds the integration catalog")
+        .expect("a home holds the connector catalog")
         .path()
         .to_path_buf();
     let mut envs: Vec<(&str, std::ffi::OsString)> = vec![("HOME", home.clone().into())];
@@ -107,7 +107,7 @@ fn connect_integration(world: &mut E2eWorld, id: String) {
     }
     let result = crate::specutil::run_cli_with_timeout_in_dir(
         &home,
-        vec!["integration".to_string(), "connect".to_string(), id],
+        vec!["connector".to_string(), "connect".to_string(), id],
         envs,
         std::time::Duration::from_secs(30),
     );

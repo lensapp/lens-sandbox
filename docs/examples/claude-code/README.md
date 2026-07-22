@@ -9,7 +9,7 @@ hosts you allow.
 
 - **`lns.yaml`** — the sandbox definition: a `node:lts-alpine` base that installs
   Claude Code on first boot, the network allowlist, and the
-  `claude-code-subscription` integration.
+  `claude-code-subscription` connector.
 - **`config/`** — seed state mounted at the workload's home (`/home/sandbox`):
   - `config/.claude.json` — skips onboarding and pre-accepts the `/workspace`
     trust dialog.

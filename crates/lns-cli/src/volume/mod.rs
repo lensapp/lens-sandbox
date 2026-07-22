@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use lns_ipc::{Request, Response, VolumeInfo};
 
 use crate::command::{CommandSpec, subcommand};
-use crate::integration::LocalBoxFuture;
+use crate::connector::LocalBoxFuture;
 
 mod real;
 
