@@ -46,6 +46,7 @@ async fn build_push_and_pull_round_trip_through_the_local_registry() {
         .push_manifest_raw(&reference, built.manifest.clone(), content_type)
         .await
         .expect("push manifest");
+    assert_eq!(reg.manifest_repositories(), vec!["some/sandbox"]);
 
     let (manifest, _digest, config) = client
         .pull_manifest_and_config(&reference, &RegistryAuth::Anonymous)

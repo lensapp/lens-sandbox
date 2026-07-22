@@ -67,7 +67,7 @@ The `spec` fields:
 | `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names a connector (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns connector connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
-| `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
+| `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 
 Check the definition offline — no network, no service — with `validate` and a
@@ -371,6 +371,12 @@ spec:
     - ref: ghcr.io/team/settings@sha256:…   # a pre-published FileSet artifact
       mountPath: /root/.agent/settings
       owner: root                 # pinned input: the workload can't rewrite it
+    - inline:                     # small text files kept in lns.yaml itself
+        .claude/settings.json: |
+          {"permissions":{"defaultMode":"bypassPermissions"}}
+        mcp.json: |
+          {"mcpServers":{}}
+      mountPath: /home/sandbox
 ```
 
 - **`path`** names a directory in the authoring project. A local `lns run`
@@ -386,7 +392,15 @@ spec:
   inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
   review what a sandbox ships before running it, and the run summary
   discloses them as `Fileset:` lines.
-- Each entry sets exactly one of `path`/`ref`. `mountPath` is an absolute
+- **`inline`** maps safe relative file paths to UTF-8 text. It is useful for
+  small settings such as `mcp.json` or agent configuration when the definition
+  should stay self-contained. Each file is limited to 128 KiB after YAML
+  parsing. Inline files remain in the published sandbox config, so `lns push`
+  does not create a companion FileSet artifact for them. Inspect and run output
+  disclose the inline source, mount path, and owner, never the file contents.
+- Each entry sets exactly one of `path`/`ref`/`inline`. `inline` must contain at
+  least one file. Every inline key must be a relative path without empty, `.`,
+  or `..` components. `mountPath` is an absolute
   guest path; duplicates — including collisions with a volume `target` — are
   rejected offline, as is any mount into the sandbox's own `/.lens` runtime
   namespace.
@@ -398,6 +412,7 @@ spec:
   MCP configs an agent must not rewrite mid-run. Either way the snapshot is
   ephemeral: changes die with the microVM.
 - A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
+  fileset, or as any path component in an `inline`
   fileset refuses `validate`, `run`, and `push` outright: a fileset is baked
   into an artifact, so there is no keep/drop prompt to catch it later — real
   secrets stay outside the workload. Ship the tool's *configuration* in a
@@ -695,7 +710,7 @@ or `lns pull` simply fetches or rebuilds it again.
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
 plus a first-boot install, `spec.env`, a tight `policy` allowlist, the
 `claude-code-subscription` connector, a `.` bind at `/workspace`, and a
-`config/` fileset that seeds the agent's home. Copy its `lns.yaml` and `config/`
+self-contained inline fileset that seeds the agent's home. Copy its `lns.yaml`
 into your project and `lns run`.
 
 ## See also

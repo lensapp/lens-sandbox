@@ -86,6 +86,11 @@ fn output_contains(world: &mut E2eWorld, needle: String) -> Result<(), String> {
     assert_contains(&combined, &needle, "output")
 }
 
+#[then(regex = r#"^the output contains `([^`]*)`$"#)]
+fn output_contains_literal(world: &mut E2eWorld, needle: String) -> Result<(), String> {
+    output_contains(world, needle)
+}
+
 #[then(regex = r#"^the output does not contain "([^"]*)"$"#)]
 fn output_does_not_contain(world: &mut E2eWorld, needle: String) -> Result<(), String> {
     let res = world.result.as_ref().ok_or("no CLI run captured")?;

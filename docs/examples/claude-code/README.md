@@ -9,21 +9,20 @@ hosts you allow.
 
 - **`lns.yaml`** — the sandbox definition: a `node:lts-alpine` base that installs
   Claude Code on first boot, the network allowlist, and the
-  `claude-code-subscription` connector.
-- **`config/`** — seed state mounted at the workload's home (`/home/sandbox`):
-  - `config/.claude.json` — skips onboarding and pre-accepts the `/workspace`
-    trust dialog.
-  - `config/.claude/settings.json` — runs Claude in `bypassPermissions` and turns
-    **off Claude's own sandbox**. Both are redundant here: the lns microVM is
-    already the sandbox, so the agent should run freely inside it.
+  `claude-code-subscription` connector, and inline seed state mounted at the
+  workload's home (`/home/sandbox`). The inline `.claude.json` skips onboarding
+  and pre-accepts the `/workspace` trust dialog. The inline
+  `.claude/settings.json` runs Claude in `bypassPermissions` and turns **off
+  Claude's own sandbox**. Both are redundant here: the lns microVM is already
+  the sandbox, so the agent should run freely inside it.
 
 ## Use it
 
-Copy `lns.yaml` and `config/` into the project you want the agent to work on
-(`.` is bound at `/workspace`, so it operates on that directory), then run:
+Copy the self-contained `lns.yaml` into the project you want the agent to work
+on (`.` is bound at `/workspace`, so it operates on that directory), then run:
 
 ```bash
-cd your-project      # now contains lns.yaml + config/
+cd your-project      # now contains lns.yaml
 lns run
 ```
 
@@ -58,9 +57,9 @@ lns push --dry-run "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:
 lns push "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"             # for real
 ```
 
-Two artifacts upload: the sandbox definition and the packed `./config` fileset
-(digest-pinned). The base image is referenced as written in `spec.image`, not
-re-uploaded — a consumer pulls it from its origin (`docker.io`). `lns push`
+One artifact uploads: the sandbox definition, including its inline fileset. The
+base image is referenced as written in `spec.image`, not re-uploaded — a
+consumer pulls it from its origin (`docker.io`). `lns push`
 does not resolve the tag to a digest, so pin `spec.image` by digest yourself if
 you need a byte-reproducible base.
 
@@ -93,10 +92,9 @@ echo "https://github.com/users/$(gh api user --jq .login)/packages/container/pac
 echo "https://github.com/users/$(gh api user --jq .login)/packages/container/claude-code/settings"   # visibility / access
 ```
 
-The package lists your tags plus an untagged digest — that untagged one is the
-`./config` fileset. It starts **private**; make it public or grant access on the
-settings page for someone else to pull, and they will also need `docker.io` reach
-for the base image.
+The package starts **private**; make it public or grant access on the settings
+page for someone else to pull. They will also need `docker.io` reach for the
+base image.
 
 ## Notes
 
@@ -104,5 +102,6 @@ for the base image.
   needed for the first-boot install; if you bake Claude Code into a custom image
   and `lns push` it, you can drop that route and the runtime install entirely.
 - Everything except `/workspace` is ephemeral. Session history and any config
-  Claude writes at runtime die with the microVM; the seed `config/` is one-way
-  (host → guest). Attach a named volume if you want state to persist.
+  Claude writes at runtime die with the microVM; the inline seed is restored
+  from `lns.yaml` on every run. Attach a named volume if you want state to
+  persist.
