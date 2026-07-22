@@ -42,7 +42,6 @@ Feature: a sandbox's declared filesets are planned into the launch
     When the local definition is planned
     Then the plan ships no chown manifest
 
-  @todo
   Scenario: planning an inline fileset writes its exact content beneath the mount path
     Given a sandbox declaring inline file ".claude/settings.json" with content `{"enabled":true}` at "/home/sandbox"
     When the sandbox is planned
@@ -51,14 +50,12 @@ Feature: a sandbox's declared filesets are planned into the launch
     And the plan ships a chown manifest listing "/home/sandbox/.claude/settings.json"
     And the plan ships a chown manifest listing "/home/sandbox"
 
-  @todo
   Scenario: a root-owned inline fileset stays outside workload ownership
     Given a sandbox declaring root-owned inline file "mcp.json" at "/etc/agent"
     When the sandbox is planned
     Then the plan carries an inline guest-write spec for "/etc/agent/mcp.json"
     And the plan ships no chown manifest
 
-  @todo
   Scenario: a published sandbox may carry inline files without a pinned fileset ref
     Given a published sandbox declaring an inline file at "/home/sandbox"
     When the sandbox is planned

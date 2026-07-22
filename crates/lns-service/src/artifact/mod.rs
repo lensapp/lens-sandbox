@@ -79,6 +79,21 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                 })
             })
             .collect(),
+        inline_filesets: def
+            .spec
+            .filesets
+            .iter()
+            .filter_map(|fileset| {
+                fileset
+                    .inline
+                    .as_ref()
+                    .map(|files| assembly::InlineFileset {
+                        files: files.clone(),
+                        mount_path: fileset.mount_path.clone(),
+                        owner: fileset.owner,
+                    })
+            })
+            .collect(),
         filesets: def
             .spec
             .filesets

@@ -8,10 +8,18 @@ pub struct LocalFileset {
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineFileset {
+    pub files: BTreeMap<String, String>,
+    pub mount_path: String,
+    pub owner: lns_artifact::sandbox::FilesetOwner,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedSandbox {
     pub base_image: String,
     pub local_filesets: Vec<LocalFileset>,
+    pub inline_filesets: Vec<InlineFileset>,
     pub filesets: Vec<ResolvedFileset>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,

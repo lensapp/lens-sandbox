@@ -193,6 +193,7 @@ async fn materialize_filesets(
         }
         out.absorb(fileset.owner, mount, specs);
     }
+    crate::artifact::fileset::inline_fileset_specs(&resolved.inline_filesets, &mut out);
     Ok(out)
 }
 
