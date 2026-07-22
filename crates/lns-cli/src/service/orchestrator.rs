@@ -127,6 +127,13 @@ struct PublishedTarget {
     filesets: Vec<(String, String)>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PublishedMountDisclosure {
+    volumes: Vec<lns_ipc::VolumeMount>,
+    binds: Vec<lns_ipc::BindSpec>,
+    filesets: Vec<(String, String)>,
+}
+
 fn published_target(
     reference: &str,
     inspection: lns_ipc::ArtifactInspection,
@@ -156,6 +163,22 @@ async fn preflight_published(socket: &Path, reference: &str) -> Result<Published
         image: reference.to_string(),
     };
     await_published_preflight(reference, real::send_request(socket, &request)).await
+}
+
+fn published_mount_disclosure(
+    published: Option<&PublishedTarget>,
+    cwd: &Path,
+) -> Result<Option<PublishedMountDisclosure>> {
+    let Some(published) = published else {
+        return Ok(None);
+    };
+    let resolved = crate::run::declarative::resolve(&published.defaults, cwd, None, Vec::new())?;
+    let (volumes, binds) = crate::cli::split_mounts(&resolved.mounts);
+    Ok(Some(PublishedMountDisclosure {
+        volumes,
+        binds,
+        filesets: published.filesets.clone(),
+    }))
 }
 
 async fn await_published_preflight(
@@ -235,6 +258,7 @@ pub async fn run_image(
         (_, Some(published)) => published.filesets.clone(),
         _ => Vec::new(),
     };
+    let pull_confirm_mounts = published_mount_disclosure(published.as_ref(), &cwd)?;
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
@@ -245,13 +269,13 @@ pub async fn run_image(
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
-    if published.is_some() {
+    if let Some(pull_confirm_mounts) = pull_confirm_mounts.as_ref() {
         let reference = target.image();
         let mounts = crate::run::pull_confirm::PulledMounts {
             reference: &reference,
-            binds: &bind_specs,
-            volumes: &volumes,
-            filesets: &args.filesets,
+            binds: &pull_confirm_mounts.binds,
+            volumes: &pull_confirm_mounts.volumes,
+            filesets: &pull_confirm_mounts.filesets,
         };
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
@@ -1140,6 +1164,64 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("no manifest digest"));
+    }
+
+    #[test]
+    fn published_mount_disclosure_resolves_only_the_pulled_sandbox_mounts() {
+        let published = PublishedTarget {
+            image: "registry.example.test/team/sandbox@sha256:abc".into(),
+            defaults: crate::run::declarative::Defaults {
+                workdir: None,
+                mounts: vec![
+                    crate::run::declarative::MountDefault {
+                        bind: true,
+                        source: ".".into(),
+                        target: "/workspace".into(),
+                        read_only: false,
+                    },
+                    crate::run::declarative::MountDefault {
+                        bind: false,
+                        source: "cache".into(),
+                        target: "/cache".into(),
+                        read_only: true,
+                    },
+                ],
+                ports: Vec::new(),
+            },
+            filesets: vec![(
+                "registry.example.test/team/skills@sha256:bbbbbbbbbbbb…".into(),
+                "/root/.agent/skills".into(),
+            )],
+        };
+
+        let mounts = published_mount_disclosure(Some(&published), Path::new("/consumer")).unwrap();
+        assert_eq!(
+            mounts,
+            Some(PublishedMountDisclosure {
+                volumes: vec![lns_ipc::VolumeMount {
+                    name: "cache".into(),
+                    target: "/cache".into(),
+                    read_only: true,
+                }],
+                binds: vec![lns_ipc::BindSpec {
+                    host_source: "/consumer".into(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                }],
+                filesets: vec![(
+                    "registry.example.test/team/skills@sha256:bbbbbbbbbbbb…".into(),
+                    "/root/.agent/skills".into(),
+                )],
+            })
+        );
+    }
+
+    #[test]
+    fn published_mount_disclosure_is_absent_for_a_local_run() {
+        assert_eq!(
+            published_mount_disclosure(None, Path::new("/consumer")).unwrap(),
+            None
+        );
     }
 
     #[tokio::test(start_paused = true)]
