@@ -1,4 +1,4 @@
-# Codex CLI in a sandbox
+# Codex CLI in a sandbox (ChatGPT subscription)
 
 Runs [Codex CLI](https://developers.openai.com/codex/cli) inside a Lens Sandbox
 microVM, signed in with your ChatGPT plan via
@@ -75,9 +75,9 @@ This recipe is a normal sandbox artifact: `lns push` it once and `lns run` it
 by reference from any directory, exactly as walked through in the
 [Claude Code example](../claude-code/README.md#publish-and-run-from-a-registry).
 One codex-specific caveat: a *pulled* sandbox's declared ports are disclosure,
-not a grant — a bare `lns run ghcr.io/you/codex:0.1.0` publishes nothing, so
-pass `-P` (or `-p 1455:1455`) when you need to sign in, or use
-`codex login --device-auth` and skip the port entirely.
+not a grant — a bare `lns run ghcr.io/you/codex-chatgpt-subscription:0.1.0`
+publishes nothing, so pass `-P` (or `-p 1455:1455`) when you need to sign in,
+or use `codex login --device-auth` and skip the port entirely.
 
 ## Notes
 

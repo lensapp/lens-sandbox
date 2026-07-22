@@ -1,7 +1,7 @@
 apiVersion: lns.run/v1
 kind: Sandbox
 metadata:
-  name: codex
+  name: codex-chatgpt-subscription
 spec:
   image: docker.io/curlimages/curl:latest
   command: sh -lc "export PATH=$HOME/.local/bin:$PATH; mkdir -p $HOME/.codex $HOME/.local/bin; [ -f $HOME/.codex/config.toml ] || cp /opt/codex-seed/.codex/config.toml $HOME/.codex/config.toml; command -v codex >/dev/null || { arch=$(uname -m); curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-$arch-unknown-linux-musl.tar.gz | tar -xzf - -C $HOME/.local/bin; mv $HOME/.local/bin/codex-$arch-unknown-linux-musl $HOME/.local/bin/codex; }; exec codex"

@@ -22,8 +22,9 @@ You drive everything through one binary: the `lns` CLI.
   ports, interactive vs. detached sessions.
 - **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
   manifest, seed config, network allowlist, and credential wiring.
-- **[Example: Codex CLI](examples/codex/)** — the same recipe shape for OpenAI's
-  Codex CLI, signed in with a ChatGPT plan through a published callback port.
+- **[Example: Codex CLI (ChatGPT subscription)](examples/codex-chatgpt-subscription/)** —
+  the same recipe shape for OpenAI's Codex CLI, signed in with a ChatGPT plan
+  through a published callback port.
 - **[Policy and approvals](policy.md)** — the `lns-policy.yaml` file, the default
   `ask` verdict, the approval window, and editing rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of
