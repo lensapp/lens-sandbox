@@ -85,7 +85,9 @@ pub fn map_dir_entries<'a>(
 pub fn is_offline(cmd: &SandboxCommand) -> bool {
     match cmd {
         SandboxCommand::Init | SandboxCommand::Validate(_) => true,
-        SandboxCommand::Inspect(args) => is_local_inspect(args.run.as_deref()),
+        SandboxCommand::Inspect(args) => {
+            args.file.is_some() || is_local_inspect(args.run.as_deref())
+        }
         _ => false,
     }
 }
@@ -168,11 +170,13 @@ pub fn inspect_local<F: Fs, W: Write>(
     fs: &F,
     cwd: &Path,
     target: Option<&str>,
+    file: Option<&Path>,
     out: &mut W,
 ) -> Result<i32> {
-    let path = match target {
-        Some(target) => crate::run::target::definition_file(target, cwd),
-        None => yaml_path(cwd),
+    let path = match (target, file) {
+        (Some(_), Some(_)) => bail!("pass an inspect target or --file, not both"),
+        (Some(target), None) => crate::run::target::definition_file(target, cwd),
+        (None, file) => selected_definition_path(file, cwd),
     };
     let json = load_definition_json_at(fs, &path)?;
     let def = lns_artifact::sandbox::parse(&json)
@@ -262,6 +266,7 @@ mod tests {
     fn inspect_cmd(target: Option<&str>) -> SandboxCommand {
         SandboxCommand::Inspect(crate::sandbox::SandboxInspectArgs {
             run: target.map(str::to_string),
+            file: None,
         })
     }
 
@@ -380,7 +385,7 @@ mod tests {
     fn inspect_local_renders_the_effective_definition() {
         let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
-        let code = inspect_local(&fs, cwd(), None, &mut out).unwrap();
+        let code = inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(
@@ -399,7 +404,7 @@ mod tests {
         let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  command: agent --serve\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
-        inspect_local(&fs, cwd(), None, &mut out).unwrap();
+        inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -412,7 +417,7 @@ mod tests {
         let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  env:\n    SHELL: /bin/sh\n    FOO: bar\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
-        inspect_local(&fs, cwd(), None, &mut out).unwrap();
+        inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("env:          FOO=bar"), "got: {text}");
         assert!(text.contains("env:          SHELL=/bin/sh"), "got: {text}");
@@ -448,7 +453,7 @@ mod tests {
         let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
-        inspect_local(&fs, cwd(), Some("."), &mut out).unwrap();
+        inspect_local(&fs, cwd(), Some("."), None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("fileset:      ./skills -> /root/.agent/skills"),
@@ -466,10 +471,50 @@ mod tests {
     fn inspect_local_renders_another_directorys_definition_by_path() {
         let fs = fake("/other/lns.yaml", valid_yaml());
         let mut out = Vec::new();
-        let code = inspect_local(&fs, cwd(), Some("../other"), &mut out).unwrap();
+        let code = inspect_local(&fs, cwd(), Some("../other"), None, &mut out).unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("ghcr.io/team/base:1"), "got: {text}");
+    }
+
+    #[test]
+    fn inspect_file_selector_renders_the_named_definition() {
+        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", valid_yaml()),
+            ("/work/lns.dev.yaml", variant),
+        ]);
+        let mut out = Vec::new();
+        let code =
+            inspect_local(&fs, cwd(), None, Some(Path::new("lns.dev.yaml")), &mut out).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("ghcr.io/team/dev:1"), "got: {text}");
+    }
+
+    #[test]
+    fn inspect_refuses_a_target_and_file_selector_together() {
+        let fs = fake("/work/lns.yaml", valid_yaml());
+        let mut out = Vec::new();
+        let err = inspect_local(
+            &fs,
+            cwd(),
+            Some("."),
+            Some(Path::new("lns.dev.yaml")),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not both"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_file_selector_inspect_is_offline() {
+        assert!(is_offline(&SandboxCommand::Inspect(
+            crate::sandbox::SandboxInspectArgs {
+                run: None,
+                file: Some(std::path::PathBuf::from("lns.dev.yaml")),
+            }
+        )));
     }
 
     #[test]
@@ -479,7 +524,7 @@ mod tests {
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
         );
         let mut out = Vec::new();
-        let err = inspect_local(&fs, cwd(), None, &mut out).unwrap_err();
+        let err = inspect_local(&fs, cwd(), None, None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("not a valid sandbox"));
     }
 }

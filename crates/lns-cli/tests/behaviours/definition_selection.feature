@@ -43,7 +43,6 @@ Feature: selecting the sandbox definition file
     Then the exit code is 0
     And the pushed artifact carries the definition from "lns.dev.yaml"
 
-  @todo
   Scenario: inspect renders a named yaml file's definition offline
     Given a sandbox definition file "lns.dev.yaml" in the current directory
     When the user runs sandbox command "inspect ./lns.dev.yaml"

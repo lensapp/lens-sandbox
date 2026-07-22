@@ -172,9 +172,13 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
         super::SandboxCommand::Validate(args) => {
             super::author::validate(&RealFs, &cwd, args.file.as_deref(), &mut out)
         }
-        super::SandboxCommand::Inspect(args) => {
-            super::author::inspect_local(&RealFs, &cwd, args.run.as_deref(), &mut out)
-        }
+        super::SandboxCommand::Inspect(args) => super::author::inspect_local(
+            &RealFs,
+            &cwd,
+            args.run.as_deref(),
+            args.file.as_deref(),
+            &mut out,
+        ),
         _ => unreachable!("run_author is only called for offline author verbs"),
     }
 }
