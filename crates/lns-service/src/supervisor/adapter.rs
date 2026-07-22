@@ -210,11 +210,22 @@ fn sweep_once(weak: &Weak<ApprovalSession>) -> bool {
 }
 
 /// Defaults to empty and warns on store error, so a malformed credential store doesn't silently wipe the developer's rules at startup.
-fn load_credentials_or_warn(store: &dyn CredentialStore) -> CredentialStateFile {
+fn load_credentials_or_warn(
+    store: &dyn CredentialStore,
+    file_path: Option<&Path>,
+) -> CredentialStateFile {
     match store.load() {
         Ok(state) => state,
         Err(e) => {
-            log::warn!("could not load stored credential state ({e}); starting empty");
+            match file_path {
+                Some(path) => {
+                    let path_str = path.display();
+                    log::warn!("could not load {path_str} ({e}); starting empty");
+                }
+                None => {
+                    log::warn!("could not load stored credential state ({e}); starting empty");
+                }
+            }
             CredentialStateFile::new()
         }
     }
@@ -384,7 +395,10 @@ async fn start_credential_subsystem(
 ) -> Result<CredentialSubsystem> {
     // Per-machine state independent of `--policy`: the backend chosen at boot (keychain or file).
     let credential_store: Arc<dyn CredentialStore> = crate::credential_flow::backend::store();
-    let mut initial_credential_state = load_credentials_or_warn(credential_store.as_ref());
+    let mut initial_credential_state = load_credentials_or_warn(
+        credential_store.as_ref(),
+        crate::credential_flow::backend::file_watch_path().as_deref(),
+    );
     // Renew any oauth grant that expired since last use before the session arms it (the dominant case; a mid-run expiry falls back to the held-request re-prompt).
     crate::oauth::refresh_due_entries(
         &mut initial_credential_state,
@@ -1025,21 +1039,82 @@ mod tests {
         let mut seeded = CredentialStateFile::new();
         seeded.insert("some-provider".into(), CredentialEntry::HostDetect);
         store.save(&seeded).unwrap();
-        let state = load_credentials_or_warn(store.as_ref());
+        let state = load_credentials_or_warn(store.as_ref(), None);
         assert!(state.contains_key("some-provider"));
     }
 
+    fn captured_warnings(f: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     #[test]
-    fn load_credentials_or_warn_defaults_to_empty_and_warns_on_store_error() {
-        init_tracing_capture();
+    fn load_credentials_or_warn_names_the_file_when_the_file_backend_is_active() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "{ this is not valid json").unwrap();
         let store = crate::credential_flow::store::JsonFileCredentialStore::new(path.clone());
-        let state = load_credentials_or_warn(&store);
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "poison".into(),
+            crate::credential_flow::store::CredentialEntry::HostDetect,
+        );
+        let warning = captured_warnings(|| {
+            state = load_credentials_or_warn(&store, Some(&path));
+        });
         assert!(
             state.is_empty(),
             "malformed credentials file must surface as empty in-memory state, got {state:?}"
+        );
+        let path_str = path.display().to_string();
+        assert!(
+            warning.contains(&path_str),
+            "warning must name the unreadable file so it can be diagnosed, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn load_credentials_or_warn_omits_the_path_when_the_keychain_backend_is_active() {
+        struct FailingStore;
+        impl CredentialStore for FailingStore {
+            fn load(&self) -> std::io::Result<CredentialStateFile> {
+                Err(std::io::Error::other("keychain blob corrupt"))
+            }
+            fn save(&self, _state: &CredentialStateFile) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "poison".into(),
+            crate::credential_flow::store::CredentialEntry::HostDetect,
+        );
+        let warning = captured_warnings(|| {
+            state = load_credentials_or_warn(&FailingStore, None);
+        });
+        assert!(state.is_empty());
+        assert!(
+            warning.contains("could not load stored credential state"),
+            "keychain backend has no file to name, got: {warning}"
         );
     }
 
