@@ -789,6 +789,13 @@ mod tests {
     }
 
     #[test]
+    fn an_unparseable_port_bind_preserves_the_source_text() {
+        let ev = port_publish(&ctx(), "invalid", 3000, 3000, "tcp", false);
+        assert_eq!(ev["unmapped"]["lns_bind"], "invalid:3000");
+        assert_eq!(ev["message"], "published invalid:3000 → guest:3000/tcp");
+    }
+
+    #[test]
     fn phrasing_helpers_cover_every_decision_and_outcome_branch() {
         assert_eq!(decision_word("allow_once"), "allow-once");
         assert_eq!(decision_word("deny_always"), "deny-always");
