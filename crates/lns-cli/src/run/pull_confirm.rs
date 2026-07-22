@@ -17,6 +17,23 @@ impl PulledMounts<'_> {
     }
 }
 
+/// The disclosure covers what the pulled artifact itself will mount: author-declared mounts that survived the consumer's -v overrides, never the consumer's own entries.
+pub fn artifact_declared_mounts(
+    resolved_mounts: &[lns_ipc::MountSpec],
+    consumer_targets: &[String],
+) -> (Vec<lns_ipc::VolumeMount>, Vec<lns_ipc::BindSpec>) {
+    let declared: Vec<lns_ipc::MountSpec> = resolved_mounts
+        .iter()
+        .filter(|mount| {
+            !consumer_targets
+                .iter()
+                .any(|target| target == mount.target())
+        })
+        .cloned()
+        .collect();
+    crate::cli::split_mounts(&declared)
+}
+
 pub fn confirm_pulled_mounts(
     mounts: &PulledMounts,
     assume_yes: bool,
@@ -135,6 +152,65 @@ mod tests {
             volumes,
             filesets,
         }
+    }
+
+    fn named_spec(name: &str, target: &str) -> lns_ipc::MountSpec {
+        lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+            name: name.into(),
+            target: target.into(),
+            read_only: false,
+        })
+    }
+
+    fn bind_spec(source: &str, target: &str) -> lns_ipc::MountSpec {
+        lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
+            host_source: source.into(),
+            target: target.into(),
+            read_only: false,
+        })
+    }
+
+    #[test]
+    fn a_consumer_override_of_a_declared_target_is_not_disclosed() {
+        let resolved = [bind_spec("/tmp/safe", "/workspace")];
+        let (volumes, binds) = artifact_declared_mounts(&resolved, &["/workspace".to_string()]);
+        assert!(
+            volumes.is_empty() && binds.is_empty(),
+            "the prompt must not name a declared mount the consumer's -v override dropped"
+        );
+    }
+
+    #[test]
+    fn consumer_added_mounts_are_not_disclosed_but_declared_survivors_are() {
+        let resolved = [
+            named_spec("cache", "/cache"),
+            bind_spec("/tmp/extra", "/extra"),
+        ];
+        let (volumes, binds) = artifact_declared_mounts(&resolved, &["/extra".to_string()]);
+        assert_eq!(
+            volumes,
+            vec![lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/cache".into(),
+                read_only: false,
+            }],
+            "a declared mount the consumer did not touch stays disclosed"
+        );
+        assert!(
+            binds.is_empty(),
+            "the consumer's own -v mount needs no consent prompt"
+        );
+    }
+
+    #[test]
+    fn without_consumer_mounts_every_declared_mount_is_disclosed() {
+        let resolved = [
+            bind_spec("/Users/me/proj", "/workspace"),
+            named_spec("cache", "/cache"),
+        ];
+        let (volumes, binds) = artifact_declared_mounts(&resolved, &[]);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(volumes.len(), 1);
     }
 
     #[test]
