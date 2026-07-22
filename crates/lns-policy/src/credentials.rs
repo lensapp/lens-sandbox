@@ -59,6 +59,47 @@ pub fn has_armed_entry(state: &CredentialStateFile, id: &str) -> bool {
     }
 }
 
+pub const CREDENTIAL_SCHEMA_VERSION: u64 = 1;
+
+fn invalid_data<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e)
+}
+
+/// Renders the state in the versioned envelope every backend (file and keychain) persists.
+pub fn encode_state(state: &CredentialStateFile) -> io::Result<String> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        version: u64,
+        entries: &'a CredentialStateFile,
+    }
+    serde_json::to_string_pretty(&Envelope {
+        version: CREDENTIAL_SCHEMA_VERSION,
+        entries: state,
+    })
+    .map_err(invalid_data)
+}
+
+/// A bare map is the pre-versioning format and still loads; a version above the current one refuses to load rather than misread (or later clobber) a newer build's data.
+pub fn decode_state(text: &str) -> io::Result<CredentialStateFile> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(invalid_data)?;
+    let Some(version) = value.get("version") else {
+        return serde_json::from_value(value).map_err(invalid_data);
+    };
+    match version.as_u64() {
+        Some(v) if v <= CREDENTIAL_SCHEMA_VERSION => {
+            let entries = value
+                .get("entries")
+                .cloned()
+                .ok_or_else(|| invalid_data("credential store envelope carries no entries"))?;
+            serde_json::from_value(entries).map_err(invalid_data)
+        }
+        Some(newer) => Err(invalid_data(format!(
+            "credential store schema v{newer} is newer than this build understands (v{CREDENTIAL_SCHEMA_VERSION}); update lns or run `lns integration revoke --all` to reset"
+        ))),
+        None => Err(invalid_data("credential store version is not a number")),
+    }
+}
+
 /// Falls back to `./.lns-credentials.json` when `HOME` is unset rather than panicking.
 pub fn default_credentials_path() -> PathBuf {
     if let Some(p) = std::env::var_os("LNS_CREDENTIALS_PATH") {
@@ -82,16 +123,14 @@ impl JsonFileCredentialStore {
 impl CredentialStore for JsonFileCredentialStore {
     fn load(&self) -> io::Result<CredentialStateFile> {
         match fs::read_to_string(&self.path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Ok(text) => decode_state(&text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(HashMap::new()),
             Err(e) => Err(e),
         }
     }
 
     fn save(&self, state: &CredentialStateFile) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let json = encode_state(state)?;
         crate::secure_file::write_json_secret_atomic(&self.path, json.as_bytes())
     }
 }
@@ -283,6 +322,66 @@ mod tests {
         store.save(&second).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded, second);
+    }
+
+    #[test]
+    fn save_persists_the_versioned_envelope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = JsonFileCredentialStore::new(path.clone());
+        store.save(&sample_state()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["version"], CREDENTIAL_SCHEMA_VERSION);
+        assert_eq!(
+            raw["entries"]["some-provider"],
+            json!({"kind": "host-detect"})
+        );
+    }
+
+    #[test]
+    fn legacy_bare_map_still_loads_and_upgrades_on_the_next_save() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("creds.json");
+        fs::write(&path, r#"{"some-provider": {"kind": "host-detect"}}"#).unwrap();
+        let store = JsonFileCredentialStore::new(path.clone());
+        let state = store.load().unwrap();
+        assert_eq!(
+            state.get("some-provider"),
+            Some(&CredentialEntry::HostDetect)
+        );
+        store.save(&state).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["version"], CREDENTIAL_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_newer_schema_version_refuses_to_load_and_says_why() {
+        let err = decode_state(r#"{"version": 2, "entries": {}}"#).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let msg = err.to_string();
+        assert!(msg.contains("v2") && msg.contains("newer"), "{msg}");
+    }
+
+    #[test]
+    fn an_envelope_without_entries_is_invalid_data() {
+        let err = decode_state(r#"{"version": 1}"#).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn an_envelope_with_malformed_entries_is_invalid_data() {
+        let err =
+            decode_state(r#"{"version": 1, "entries": {"x": {"kind": "nope"}}}"#).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_non_numeric_version_is_invalid_data() {
+        let err = decode_state(r#"{"version": "one", "entries": {}}"#).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("not a number"), "{err}");
     }
 
     #[test]

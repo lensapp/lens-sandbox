@@ -52,20 +52,20 @@ pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
     })
 }
 
-pub fn service_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn service_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::ServiceArgs::from_arg_matches(matches)?;
-        dispatch(&args.command).await?;
+        dispatch(&args.command, ctx.out).await?;
         Ok(0)
     })
 }
 
-pub async fn dispatch(cmd: &super::ServiceCommand) -> Result<()> {
+pub async fn dispatch(cmd: &super::ServiceCommand, out: &mut dyn std::io::Write) -> Result<()> {
     let client = real_client()?;
     match cmd {
         super::ServiceCommand::Start => super::cmd_start(&client).await,
         super::ServiceCommand::Stop => super::cmd_stop(&client).await,
-        super::ServiceCommand::Status => super::cmd_status(&client).await,
+        super::ServiceCommand::Status => super::cmd_status(&client, out).await,
         super::ServiceCommand::Enable => super::cmd_enable(&client).await,
         super::ServiceCommand::Disable => super::cmd_disable(&client).await,
     }

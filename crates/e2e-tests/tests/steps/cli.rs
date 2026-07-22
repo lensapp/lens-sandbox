@@ -39,6 +39,9 @@ fn i_run(world: &mut E2eWorld, cmd_line: String) {
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
     }
+    if let Some(creds) = world.credentials_path() {
+        envs.push(("LNS_CREDENTIALS_PATH", creds.into()));
+    }
     let result = if envs.is_empty() {
         run_cli(args)
     } else {

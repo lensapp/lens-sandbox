@@ -13,10 +13,10 @@ use crate::command::{CommandSpec, subcommand};
 use crate::run::summary::policy_path;
 
 mod real;
-mod sign_in;
+mod service;
 
-pub use real::RealIntegrationSignIn;
-pub use sign_in::{BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+pub use real::RealIntegrationService;
+pub use service::{BindOutcome, IntegrationService, LocalBoxFuture, RevokeOutcome, SignInOutcome};
 
 #[derive(clap::Args)]
 pub struct IntegrationArgs {
@@ -38,6 +38,10 @@ pub enum IntegrationCommand {
     Connect(ConnectArgs),
     #[command(about = "Disconnect an integration from this directory's policy.")]
     Disconnect(DisconnectArgs),
+    #[command(
+        about = "Clear an integration's per-machine value decision; the next use re-prompts."
+    )]
+    Revoke(RevokeArgs),
 }
 
 #[derive(clap::Args)]
@@ -82,6 +86,21 @@ pub struct ConnectArgs {
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct RevokeArgs {
+    #[arg(
+        help = "Integration id whose stored value decision to clear.",
+        required_unless_present = "all",
+        conflicts_with = "all"
+    )]
+    pub id: Option<String>,
+    #[arg(
+        long,
+        help = "Clear every stored value decision; also repairs a corrupt credential store."
+    )]
+    pub all: bool,
 }
 
 #[derive(clap::Args)]
@@ -163,16 +182,53 @@ pub async fn run(
     cmd: &IntegrationCommand,
     cwd: &Path,
     catalog_path: &Path,
-    signin: &dyn IntegrationSignIn,
+    service: &dyn IntegrationService,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
         IntegrationCommand::Add(args) => add(args, catalog_path, writer),
         IntegrationCommand::List => list(catalog_path, writer),
         IntegrationCommand::Remove(args) => remove(args, catalog_path, writer),
-        IntegrationCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
+        IntegrationCommand::Connect(args) => {
+            connect(args, cwd, catalog_path, service, writer).await
+        }
         IntegrationCommand::Disconnect(args) => disconnect(args, cwd, writer),
+        IntegrationCommand::Revoke(args) => revoke(args, service, writer).await,
     }
+}
+
+pub async fn revoke(
+    args: &RevokeArgs,
+    service: &dyn IntegrationService,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let outcome = match &args.id {
+        Some(id) => service.revoke(id).await?,
+        None => service.revoke_all().await?,
+    };
+    match outcome {
+        RevokeOutcome::ServiceUnavailable => bail!(
+            "the background service must be running to revoke; start it with `lns service start`"
+        ),
+        RevokeOutcome::AllCleared => {
+            writeln!(
+                writer,
+                "Cleared all stored value decisions; each next use will prompt again."
+            )?;
+        }
+        RevokeOutcome::Cleared { existed } => {
+            let id = args.id.as_deref().unwrap_or_default();
+            if existed {
+                writeln!(
+                    writer,
+                    "Cleared the stored value decision for {id:?}; the next use will prompt again."
+                )?;
+            } else {
+                writeln!(writer, "No stored value decision for {id:?}.")?;
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
@@ -292,7 +348,7 @@ pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
-    signin: &dyn IntegrationSignIn,
+    service: &dyn IntegrationService,
     writer: &mut impl Write,
 ) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
@@ -305,7 +361,7 @@ pub async fn connect(
     };
     // An oauth integration authenticates by an interactive sign-in; a credential integration binds its per-machine value decision through the approval-window card. Either way the id is recorded only on success.
     let closing = if integ.auth_kind == AuthKind::Oauth {
-        match signin.sign_in(&args.id, writer).await? {
+        match service.sign_in(&args.id, writer).await? {
             SignInOutcome::ServiceUnavailable => bail!(
                 "the background service must be running to sign in to {:?}; start it with `lns service start`",
                 args.id
@@ -319,7 +375,7 @@ pub async fn connect(
             ),
         }
     } else {
-        match signin.bind_credential(&args.id, writer).await? {
+        match service.bind_credential(&args.id, writer).await? {
             BindOutcome::ServiceUnavailable => bail!(
                 "the background service must be running to bind {:?}; start it with `lns service start`",
                 args.id
@@ -693,33 +749,40 @@ mod tests {
     struct FakeSignIn {
         outcome: SignInOutcome,
         bind: BindOutcome,
+        revoke_outcome: RevokeOutcome,
     }
     impl FakeSignIn {
         fn completed() -> Self {
-            Self {
-                outcome: SignInOutcome::Completed,
-                bind: BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored),
-            }
+            Self::returning(SignInOutcome::Completed)
         }
         fn returning(outcome: SignInOutcome) -> Self {
             Self {
                 outcome,
                 bind: BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored),
+                revoke_outcome: RevokeOutcome::Cleared { existed: true },
             }
         }
         fn binding(bind: BindOutcome) -> Self {
             Self {
                 outcome: SignInOutcome::Completed,
                 bind,
+                revoke_outcome: RevokeOutcome::Cleared { existed: true },
+            }
+        }
+        fn revoking(revoke_outcome: RevokeOutcome) -> Self {
+            Self {
+                outcome: SignInOutcome::Completed,
+                bind: BindOutcome::Completed(lns_ipc::CredentialBindDecision::Stored),
+                revoke_outcome,
             }
         }
     }
-    impl IntegrationSignIn for FakeSignIn {
+    impl IntegrationService for FakeSignIn {
         fn sign_in<'a>(
             &'a self,
             id: &'a str,
             out: &'a mut dyn Write,
-        ) -> super::sign_in::LocalBoxFuture<'a, Result<SignInOutcome>> {
+        ) -> super::service::LocalBoxFuture<'a, Result<SignInOutcome>> {
             let outcome = self.outcome.clone();
             Box::pin(async move {
                 writeln!(out, "(signing in to {id})")?;
@@ -731,13 +794,97 @@ mod tests {
             &'a self,
             id: &'a str,
             out: &'a mut dyn Write,
-        ) -> super::sign_in::LocalBoxFuture<'a, Result<BindOutcome>> {
+        ) -> super::service::LocalBoxFuture<'a, Result<BindOutcome>> {
             let bind = self.bind.clone();
             Box::pin(async move {
                 writeln!(out, "(binding {id})")?;
                 Ok(bind)
             })
         }
+
+        fn revoke<'a>(
+            &'a self,
+            _id: &'a str,
+        ) -> super::service::LocalBoxFuture<'a, Result<RevokeOutcome>> {
+            let outcome = self.revoke_outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+
+        fn revoke_all(&self) -> super::service::LocalBoxFuture<'_, Result<RevokeOutcome>> {
+            let outcome = self.revoke_outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_confirms_a_cleared_value_decision() {
+        let mut out = Vec::new();
+        let code = revoke(
+            &RevokeArgs {
+                id: Some("some-oauth".into()),
+                all: false,
+            },
+            &FakeSignIn::revoking(RevokeOutcome::Cleared { existed: true }),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Cleared") && text.contains("some-oauth"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_reports_when_no_value_decision_existed() {
+        let mut out = Vec::new();
+        revoke(
+            &RevokeArgs {
+                id: Some("some-oauth".into()),
+                all: false,
+            },
+            &FakeSignIn::revoking(RevokeOutcome::Cleared { existed: false }),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("No stored value decision"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn revoke_all_confirms_every_decision_cleared() {
+        let mut out = Vec::new();
+        let code = revoke(
+            &RevokeArgs {
+                id: None,
+                all: true,
+            },
+            &FakeSignIn::revoking(RevokeOutcome::AllCleared),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("all stored value decisions"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn revoke_fails_clearly_when_the_service_is_unavailable() {
+        let err = revoke(
+            &RevokeArgs {
+                id: Some("some-oauth".into()),
+                all: false,
+            },
+            &FakeSignIn::revoking(RevokeOutcome::ServiceUnavailable),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lns service start"), "{err:#}");
     }
 
     #[tokio::test]

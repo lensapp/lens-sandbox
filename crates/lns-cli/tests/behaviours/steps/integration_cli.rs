@@ -3,7 +3,9 @@ use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::integration::IntegrationArgs;
-use lns_cli::integration::{self, BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use lns_cli::integration::{
+    self, BindOutcome, IntegrationService, LocalBoxFuture, RevokeOutcome, SignInOutcome,
+};
 use lns_policy::Policy;
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,7 +26,7 @@ struct FakeSignIn {
     outcome: SignInOutcome,
     pkce: bool,
 }
-impl IntegrationSignIn for FakeSignIn {
+impl IntegrationService for FakeSignIn {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
@@ -64,6 +66,22 @@ impl IntegrationSignIn for FakeSignIn {
             writeln!(out, "Decide how \"{id}\" binds in the approval window…")?;
             Ok(bind)
         })
+    }
+
+    fn revoke<'a>(&'a self, _id: &'a str) -> LocalBoxFuture<'a, anyhow::Result<RevokeOutcome>> {
+        let outcome = match self.outcome {
+            SignInOutcome::ServiceUnavailable => RevokeOutcome::ServiceUnavailable,
+            _ => RevokeOutcome::Cleared { existed: true },
+        };
+        Box::pin(async move { Ok(outcome) })
+    }
+
+    fn revoke_all(&self) -> LocalBoxFuture<'_, anyhow::Result<RevokeOutcome>> {
+        let outcome = match self.outcome {
+            SignInOutcome::ServiceUnavailable => RevokeOutcome::ServiceUnavailable,
+            _ => RevokeOutcome::AllCleared,
+        };
+        Box::pin(async move { Ok(outcome) })
     }
 }
 
@@ -285,6 +303,11 @@ fn service_available(world: &mut BehaviourWorld) {
     world.signin_outcome = Some(SignInOutcome::Completed);
 }
 
+#[given("the background service is available")]
+fn service_available_for_revoke(world: &mut BehaviourWorld) {
+    world.signin_outcome = Some(SignInOutcome::Completed);
+}
+
 #[given("the background service is not available")]
 fn service_unavailable(world: &mut BehaviourWorld) {
     world.signin_outcome = Some(SignInOutcome::ServiceUnavailable);
@@ -293,6 +316,11 @@ fn service_unavailable(world: &mut BehaviourWorld) {
 #[when(regex = r#"^the developer runs "lns integration connect (\S+)"$"#)]
 async fn run_connect(world: &mut BehaviourWorld, id: String) {
     run_integration(world, &["connect", &id]).await;
+}
+
+#[when(regex = r#"^the developer runs "lns integration revoke (\S+)"$"#)]
+async fn run_revoke(world: &mut BehaviourWorld, id: String) {
+    run_integration(world, &["revoke", &id]).await;
 }
 
 #[when(regex = r#"^the developer runs "lns integration list"$"#)]
@@ -406,5 +434,48 @@ fn listed_as_kind(world: &mut BehaviourWorld, id: String, kind: String) {
     assert!(
         line.trim_end().ends_with(&kind),
         "expected {id} listed as {kind}, got line: {line}"
+    );
+}
+
+#[then(regex = r#"^the command confirms the "([^"]+)" value decision is cleared$"#)]
+fn confirms_cleared(world: &mut BehaviourWorld, id: String) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_eq!(run.exit_code, 0, "output: {}", run.output);
+    assert!(
+        run.output.contains("Cleared") && run.output.contains(&id),
+        "expected a cleared confirmation for {id}, got: {}",
+        run.output
+    );
+}
+
+#[then("the command fails noting the service is needed to revoke")]
+fn fails_needing_service_to_revoke(world: &mut BehaviourWorld) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_ne!(run.exit_code, 0, "output: {}", run.output);
+    assert!(
+        run.output.contains("revoke") && run.output.contains("lns service start"),
+        "expected a service-needed failure, got: {}",
+        run.output
+    );
+}
+
+#[then("lns-policy.yaml is unchanged")]
+fn policy_yaml_unchanged(world: &mut BehaviourWorld) {
+    let path = policy_file(world);
+    assert!(
+        !path.exists(),
+        "revoke must not create or touch {}",
+        path.display()
+    );
+}
+
+#[then("the command confirms all value decisions are cleared")]
+fn confirms_all_cleared(world: &mut BehaviourWorld) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_eq!(run.exit_code, 0, "output: {}", run.output);
+    assert!(
+        run.output.contains("all stored value decisions"),
+        "expected the cleared-all confirmation, got: {}",
+        run.output
     );
 }

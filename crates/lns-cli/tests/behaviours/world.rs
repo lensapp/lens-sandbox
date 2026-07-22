@@ -8,6 +8,8 @@ use tokio::io::DuplexStream;
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
     pub result: Option<CliRun>,
+    /// Backend the fake service reports from `lns service status`.
+    pub status_backend: Option<lns_ipc::CredentialBackendKind>,
     pub argv: Vec<String>,
     pub cwd: Option<TempDir>,
     pub summary_output: String,

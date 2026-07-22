@@ -11,12 +11,14 @@ Feature: lns-service credential flow
   real value: either accept the one detected on the host by the
   provider's per-service detection strategy, type one in, or deny.
   Every decision is sticky — there is no once/always distinction.
-  Decisions and any typed values land in `~/.lns-credentials.json` (a
-  pluggable host-side store, JSON-file v1). They do NOT live in
-  `lns-policy.yaml`: the shareable policy file stays free of
-  per-machine credential state. Manual edits to
-  `~/.lns-credentials.json` are picked up live and double as the
-  revocation mechanism.
+  Decisions and any typed values land in a pluggable host-side store —
+  the OS keychain when one is reachable, else the plaintext
+  `~/.lns-credentials.json` (see credential_storage.feature). They do
+  NOT live in `lns-policy.yaml`: the shareable policy file stays free
+  of per-machine credential state. These scenarios exercise the file
+  backend, where manual edits to `~/.lns-credentials.json` are picked
+  up live and double as a revocation mechanism; `lns integration
+  revoke` is the backend-independent way to clear a decision.
 
   These scenarios illustrate the flow with an arbitrary `some-provider`
   registry entry; the behaviour is identical for every provider, so

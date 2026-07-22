@@ -21,8 +21,16 @@ pub enum BindOutcome {
     ServiceUnavailable,
 }
 
-/// Drives an oauth integration's device sign-in — or a credential integration's value-decision bind — through the running service, rendering progress to `out`.
-pub trait IntegrationSignIn {
+/// The result of clearing per-machine value decisions through the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    Cleared { existed: bool },
+    AllCleared,
+    ServiceUnavailable,
+}
+
+/// The background service as integration commands see it: interactive sign-in, value-decision bind, and revocation.
+pub trait IntegrationService {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
@@ -34,4 +42,8 @@ pub trait IntegrationSignIn {
         id: &'a str,
         out: &'a mut dyn Write,
     ) -> LocalBoxFuture<'a, anyhow::Result<BindOutcome>>;
+
+    fn revoke<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, anyhow::Result<RevokeOutcome>>;
+
+    fn revoke_all(&self) -> LocalBoxFuture<'_, anyhow::Result<RevokeOutcome>>;
 }

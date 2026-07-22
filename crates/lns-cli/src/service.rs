@@ -103,21 +103,31 @@ pub(super) async fn cmd_stop(client: &impl ServiceClient) -> Result<()> {
     }
 }
 
-pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
+pub async fn cmd_status(client: &impl ServiceClient, out: &mut dyn std::io::Write) -> Result<()> {
     let Some(StatusInfo {
         pid,
         uptime_secs,
         version,
+        credential_backend,
     }) = client.status().await
     else {
-        println!("Lens Sandbox is not running.");
+        writeln!(out, "Lens Sandbox is not running.")?;
         return Ok(());
     };
 
-    println!("Lens Sandbox is running.");
-    println!("  PID:     {pid}");
-    println!("  Uptime:  {uptime_secs}s");
-    println!("  Version: {version}");
+    writeln!(out, "Lens Sandbox is running.")?;
+    writeln!(out, "  PID:     {pid}")?;
+    writeln!(out, "  Uptime:  {uptime_secs}s")?;
+    writeln!(out, "  Version: {version}")?;
+    match credential_backend {
+        Some(lns_ipc::CredentialBackendKind::OsKeychain) => {
+            writeln!(out, "  Credentials: stored in the OS keychain")?;
+        }
+        Some(lns_ipc::CredentialBackendKind::PlaintextFile) => {
+            writeln!(out, "  Credentials: stored in a plaintext file")?;
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -438,11 +448,14 @@ mod tests {
         let client = FakeClient::default();
         *client.status_response.lock().unwrap() = Some(None);
 
-        cmd_status(&client)
+        let mut out = Vec::new();
+        cmd_status(&client, &mut out)
             .await
             .expect("cmd_status should succeed");
 
         assert_eq!(client.calls(), vec!["status"]);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("not running"), "{text}");
     }
 
     #[tokio::test]
@@ -452,13 +465,60 @@ mod tests {
             pid: 4242,
             uptime_secs: 17,
             version: "test-version".into(),
+            credential_backend: None,
         }));
 
-        cmd_status(&client)
+        let mut out = Vec::new();
+        cmd_status(&client, &mut out)
             .await
             .expect("cmd_status should succeed");
 
         assert_eq!(client.calls(), vec!["status"]);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("4242") && text.contains("test-version"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Credentials:"),
+            "an older service without the field must not render a backend line: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_status_names_the_os_keychain_backend() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 1,
+            uptime_secs: 1,
+            version: "test-version".into(),
+            credential_backend: Some(lns_ipc::CredentialBackendKind::OsKeychain),
+        }));
+
+        let mut out = Vec::new();
+        cmd_status(&client, &mut out)
+            .await
+            .expect("cmd_status should succeed");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("OS keychain"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn cmd_status_names_the_plaintext_file_backend() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 1,
+            uptime_secs: 1,
+            version: "test-version".into(),
+            credential_backend: Some(lns_ipc::CredentialBackendKind::PlaintextFile),
+        }));
+
+        let mut out = Vec::new();
+        cmd_status(&client, &mut out)
+            .await
+            .expect("cmd_status should succeed");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("plaintext file"), "{text}");
     }
 
     use crate::test_env::EnvScope;

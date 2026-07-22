@@ -21,6 +21,9 @@ pub(crate) fn start_service_with(world: &mut E2eWorld, extra: &[(&str, &str)]) {
         envs.push(("HOME", home.path().into()));
         envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
     }
+    if let Some(creds) = world.credentials_path() {
+        envs.push(("LNS_CREDENTIALS_PATH", creds.into()));
+    }
     envs.extend(extra.iter().map(|(k, v)| (*k, std::ffi::OsString::from(v))));
     let result = run_cli_with_env(["service", "start"], envs);
     assert!(
@@ -121,10 +124,13 @@ fn run_service_start(world: &mut E2eWorld) {
     let socket = world.service_socket.as_ref().unwrap().clone();
     let sock_str = socket.to_string_lossy().into_owned();
     let bin_str = service_bin.to_string_lossy().into_owned();
-    let envs = [
-        ("LNS_SOCKET_PATH", sock_str.as_str()),
-        ("LNS_SERVICE_BIN", bin_str.as_str()),
+    let mut envs: Vec<(&str, std::ffi::OsString)> = vec![
+        ("LNS_SOCKET_PATH", sock_str.as_str().into()),
+        ("LNS_SERVICE_BIN", bin_str.as_str().into()),
     ];
+    if let Some(creds) = world.credentials_path() {
+        envs.push(("LNS_CREDENTIALS_PATH", creds.into()));
+    }
     let result = run_cli_with_env(["service", "start"], envs);
     world.result = Some(result);
 }

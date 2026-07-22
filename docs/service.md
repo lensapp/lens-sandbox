@@ -16,7 +16,7 @@ it's meant to stay running so the sandbox is always ready.
 
 ```bash
 lns service start    # launch it and wait until it's ready
-lns service status   # report whether it's running (PID, uptime, version)
+lns service status   # report whether it's running (PID, uptime, version, credential storage)
 lns service stop     # ask it to shut down
 ```
 

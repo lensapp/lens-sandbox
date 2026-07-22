@@ -38,8 +38,14 @@ it up front and records it under `integrations:` in that directory's
 ## Value decisions
 
 A provider's *value decision* is per-machine — it's how the real secret (or the
-choice to deny) is bound on your machine. It's stored in `~/.lns-credentials.json`,
-separate from the shareable `lns-policy.yaml`, so secrets are never committed.
+choice to deny) is bound on your machine. It lives outside the shareable
+`lns-policy.yaml`, so secrets are never committed. When your OS offers a native
+keychain — the macOS Keychain, Windows Credential Manager, or a Linux Secret
+Service — the whole set of decisions is kept there as a single item, protected at
+rest. When no keychain is reachable (headless Linux, CI), the background service
+falls back to a plaintext `~/.lns-credentials.json` and says so with a warning;
+`lns service status` shows which storage is active. Setting `LNS_CREDENTIALS_PATH`
+always forces the file at that path.
 
 Decisions are made interactively, at either of two moments:
 
@@ -54,13 +60,17 @@ Decisions are made interactively, at either of two moments:
 Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then
 fail at the boundary). The decision is remembered for next time.
+To un-remember one, `lns integration revoke <id>` clears that decision — a running
+sandbox drops it immediately, and the next use prompts again. `lns integration
+revoke --all` clears every decision at once, which also repairs the store if it
+ever becomes unreadable (the service warns and starts empty in that case).
 
 An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
 than a pasted secret it's obtained by an interactive **sign-in**
 (`lns integration connect <id>`). A device-flow integration yields a self-renewing
 **token set**, refreshed automatically and re-prompted when the grant can no longer be
 refreshed; a pkce integration yields a **durable key** captured through your browser,
-with no refresh or expiry. Either way it lives in the same per-machine file and is
+with no refresh or expiry. Either way it lives in the same per-machine store and is
 never written to `lns-policy.yaml`.
 
 ## Injection kinds

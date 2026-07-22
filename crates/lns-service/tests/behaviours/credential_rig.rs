@@ -74,6 +74,23 @@ impl CredentialStore for FlakyCredentialStore {
     }
 }
 
+/// An in-memory stand-in for the OS keychain item so keychain-backend scenarios stay free of real keychain I/O.
+#[derive(Default)]
+pub struct TestKeychainBlob {
+    pub data: Mutex<Option<String>>,
+}
+
+impl lns_policy::keychain::KeychainBlob for TestKeychainBlob {
+    fn read(&self) -> std::io::Result<Option<String>> {
+        Ok(self.data.lock().unwrap().clone())
+    }
+
+    fn write(&self, blob: &str) -> std::io::Result<()> {
+        *self.data.lock().unwrap() = Some(blob.to_string());
+        Ok(())
+    }
+}
+
 pub struct CredentialRig {
     pub session: Arc<CredentialSession>,
     pub window_state: Arc<WindowState>,
@@ -84,11 +101,22 @@ pub struct CredentialRig {
     pub timeout: Duration,
     pub connected: Arc<Mutex<Vec<String>>>,
     pub opened: Arc<Mutex<Vec<String>>>,
+    /// Set on keychain-backed rigs; the session's store writes here instead of any file.
+    pub keychain_blob: Option<Arc<TestKeychainBlob>>,
     _tempdir: TempDir,
 }
 
 impl CredentialRig {
     pub fn new() -> Self {
+        Self::with_session_store(None)
+    }
+
+    /// A rig whose session persists through the keychain blob store; the tempdir file path stays available to assert nothing lands on disk.
+    pub fn keychain() -> Self {
+        Self::with_session_store(Some(Arc::new(TestKeychainBlob::default())))
+    }
+
+    fn with_session_store(blob: Option<Arc<TestKeychainBlob>>) -> Self {
         let dir = TempDir::new().expect("create tempdir");
         let credentials_path = dir.path().join("lns-credentials.json");
         let window_state = WindowState::new();
@@ -102,6 +130,12 @@ impl CredentialRig {
             Arc::new(move |id: &str| detector_values.lock().unwrap().contains_key(id)),
         ));
         let store = Arc::new(FlakyCredentialStore::new(credentials_path.clone()));
+        let session_store: Arc<dyn CredentialStore> = match &blob {
+            Some(b) => Arc::new(lns_policy::keychain::KeychainCredentialStore::new(
+                b.clone(),
+            )),
+            None => store.clone(),
+        };
         let (frame_tx, frame_rx) = mpsc::unbounded_channel();
         let frame_tx_for_emitter = frame_tx.clone();
         let host_values_for_emitter = host_values.clone();
@@ -109,7 +143,7 @@ impl CredentialRig {
         let session = Arc::new(CredentialSession::with_policy_emitter(
             CredentialStateFile::new(),
             notifier,
-            store.clone(),
+            session_store,
             frame_tx,
             timeout,
             Box::new(move |state| {
@@ -135,6 +169,7 @@ impl CredentialRig {
             timeout,
             connected: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
+            keychain_blob: blob,
             _tempdir: dir,
         }
     }
@@ -307,6 +342,7 @@ impl CredentialRig {
             timeout,
             connected,
             opened: Arc::new(Mutex::new(Vec::new())),
+            keychain_blob: None,
             _tempdir: dir,
         }
     }
@@ -507,6 +543,7 @@ impl CredentialRig {
             timeout: Duration::from_secs(30),
             connected,
             opened,
+            keychain_blob: None,
             _tempdir: shared.dir,
         }
     }
@@ -543,6 +580,7 @@ impl CredentialRig {
             timeout: Duration::from_secs(30),
             connected: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
+            keychain_blob: None,
             _tempdir: shared.dir,
         }
     }
