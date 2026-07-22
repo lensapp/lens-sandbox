@@ -1063,6 +1063,7 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .finish();
         tracing::subscriber::with_default(subscriber, f);
+        std::io::Write::flush(&mut buf.clone()).unwrap();
         let bytes = buf.0.lock().unwrap().clone();
         String::from_utf8_lossy(&bytes).into_owned()
     }
@@ -1111,6 +1112,7 @@ mod tests {
         let warning = captured_warnings(|| {
             state = load_credentials_or_warn(&FailingStore, None);
         });
+        assert!(FailingStore.save(&CredentialStateFile::new()).is_ok());
         assert!(state.is_empty());
         assert!(
             warning.contains("could not load stored credential state"),
