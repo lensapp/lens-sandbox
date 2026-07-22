@@ -12,7 +12,7 @@ use lns_service::credential_flow::store::{
     CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
 
-const FORCED_PATH: &str = "/tmp/lns-forced-creds.json";
+const FORCED_PATH: &str = "lns-forced-creds.json";
 
 #[derive(Debug)]
 pub struct EnvGuard {
