@@ -13,6 +13,10 @@ use crate::command::{RunCtx, RunFuture};
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::IntegrationArgs::from_arg_matches(matches)?;
+        // Connect is the only subcommand that drives the service (sign-in / bind).
+        if matches!(args.command, super::IntegrationCommand::Connect(_)) {
+            crate::service::require_running().await;
+        }
         let cwd = ctx.cwd()?;
         let catalog_path = lns_policy::integrations::default_integrations_path();
         let signin = RealIntegrationSignIn::new(crate::service::socket_path()?);

@@ -14,6 +14,7 @@ use crate::integration::LocalBoxFuture;
 pub fn run_login<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = LoginArgs::from_arg_matches(matches)?;
+        crate::service::require_running().await;
         let default_registry = configured_default_registry()?;
         let auth_path = default_registry_auth_path();
         let verifier = RealRegistryVerifier::new(crate::service::socket_path()?);
