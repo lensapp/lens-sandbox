@@ -122,9 +122,10 @@ pub fn format_summary(
 }
 
 fn image_line(args: &RunArgs) -> String {
-    match &args.image {
-        Some(image) => format!("{image} (resolving…)"),
-        None => "./lns.yaml (resolving…)".to_string(),
+    match (&args.image, &args.file) {
+        (Some(image), _) => format!("{image} (resolving…)"),
+        (None, Some(file)) => format!("{} (resolving…)", file.display()),
+        (None, None) => "./lns.yaml (resolving…)".to_string(),
     }
 }
 
@@ -596,6 +597,20 @@ mod tests {
             !s.contains("imageless"),
             "the imageless marker is retired: {s}"
         );
+    }
+
+    #[test]
+    fn a_file_selector_run_shows_the_selected_definition_as_the_image() {
+        let mut args = run_args(None);
+        args.file = Some(std::path::PathBuf::from("lns.dev.yaml"));
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("/x/lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(s.contains("lns.dev.yaml (resolving…)"), "got: {s}");
+        assert!(!s.contains("./lns.yaml"), "got: {s}");
     }
 
     #[test]
