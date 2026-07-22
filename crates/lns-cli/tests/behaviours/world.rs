@@ -93,6 +93,7 @@ pub struct SandboxRunRig {
     pub request_image: Option<String>,
     pub verify_sandbox: Option<bool>,
     pub definition: Option<String>,
+    pub project_dir: Option<std::path::PathBuf>,
     pub refusal: Option<String>,
 }
 

@@ -129,6 +129,7 @@ fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: 
     w.sandbox_run.request_image = Some(target.image());
     w.sandbox_run.verify_sandbox = Some(target.verify_sandbox());
     w.sandbox_run.definition = target.definition_json();
+    w.sandbox_run.project_dir = target.project_dir().map(Path::to_path_buf);
     if let Some(policy) = args.policy.as_deref() {
         w.summary_output = format_summary(
             &args,
