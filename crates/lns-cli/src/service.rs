@@ -72,6 +72,21 @@ fn require_running_check(alive: bool) -> Result<(), &'static str> {
     }
 }
 
+/// A decodable Status proves liveness by itself; ping only disambiguates a
+/// `None` status so a service that stopped between probes reads as stopped,
+/// never as protocol-incompatible.
+pub(super) async fn gate_running_service(client: &impl ServiceClient) -> Result<(), String> {
+    let status = client.status().await;
+    if status.is_none() {
+        require_running_check(client.ping().await).map_err(str::to_string)?;
+    }
+    handshake::enforce_for_command(handshake::classify(
+        handshake::CLI_PROTOCOL,
+        handshake::CLI_BUILD,
+        status.as_ref(),
+    ))
+}
+
 pub(super) async fn cmd_start(client: &impl ServiceClient) -> Result<()> {
     if client.ping().await {
         let status = client.status().await;
@@ -563,6 +578,51 @@ mod tests {
             .expect("cmd_status should succeed");
 
         assert_eq!(client.calls(), vec!["status", "ping"]);
+    }
+
+    #[tokio::test]
+    async fn gate_reports_not_running_when_the_service_died_between_probes() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(false);
+
+        let err = gate_running_service(&client)
+            .await
+            .expect_err("a dead service must not pass the gate");
+        assert!(err.contains("not running"), "{err}");
+        assert!(
+            !err.contains("incompatible"),
+            "a stopped service must never read as a protocol mismatch: {err}"
+        );
+        assert_eq!(client.calls(), vec!["status", "ping"]);
+    }
+
+    #[tokio::test]
+    async fn gate_treats_an_alive_but_unreadable_service_as_a_protocol_mismatch() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(None);
+        client.ping_responses.lock().unwrap().push_back(true);
+
+        let err = gate_running_service(&client)
+            .await
+            .expect_err("an undecodable status from a live service must abort");
+        assert!(err.contains("incompatible"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn gate_passes_a_matching_service_on_the_status_probe_alone() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(Some(matching_status()));
+
+        gate_running_service(&client)
+            .await
+            .expect("a matching pair passes");
+
+        assert_eq!(
+            client.calls(),
+            vec!["status"],
+            "a decodable Status proves liveness; no extra ping round trip"
+        );
     }
 
     #[test]

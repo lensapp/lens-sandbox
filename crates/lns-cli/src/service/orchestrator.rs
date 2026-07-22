@@ -19,7 +19,7 @@ use crate::cli::{ExecArgs, RunArgs};
 use crate::command::{RunCtx, RunFuture};
 use lns_ipc::{ExecImageArgs, RunImageArgs};
 
-use super::{client::ServiceClient, real, require_running_check};
+use super::{client::ServiceClient, real};
 use crate::run::summary::print_run_summary;
 
 const PUBLISHED_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -84,20 +84,10 @@ pub async fn require_running() {
             std::process::exit(1);
         }
     };
-    if let Err(msg) = gate_running_service(&client).await {
+    if let Err(msg) = super::gate_running_service(&client).await {
         crate::log::error!("{msg}");
         std::process::exit(1);
     }
-}
-
-async fn gate_running_service(client: &impl ServiceClient) -> Result<(), String> {
-    require_running_check(client.ping().await).map_err(str::to_string)?;
-    let status = client.status().await;
-    super::handshake::enforce_for_command(super::handshake::classify(
-        super::handshake::CLI_PROTOCOL,
-        super::handshake::CLI_BUILD,
-        status.as_ref(),
-    ))
 }
 fn real_client() -> Result<real::RealServiceClient> {
     Ok(real::RealServiceClient::new(
