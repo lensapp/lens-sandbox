@@ -177,9 +177,18 @@ pub struct SandboxAttachArgs {
 pub struct SandboxInspectArgs {
     #[arg(
         value_name = "TARGET",
-        help = "A running run's id/name (live state), a cached sandbox reference (its definition), or a path to a local definition (., lns.yaml, ./dir — rendered offline). Omit to render ./lns.yaml."
+        help = "A running run's id/name (live state), a cached sandbox reference (its definition), or a path to a local definition (., lns.yaml, ./dir, ./lns.dev.yaml — rendered offline). Omit to render ./lns.yaml."
     )]
     pub run: Option<String>,
+
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        conflicts_with = "run",
+        help = "Definition file to render instead of ./lns.yaml, offline. Cannot be combined with TARGET."
+    )]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -1174,7 +1183,10 @@ mod tests {
         for cmd in [
             SandboxCommand::Init,
             SandboxCommand::Validate(SandboxValidateArgs { file: None }),
-            SandboxCommand::Inspect(SandboxInspectArgs { run: None }),
+            SandboxCommand::Inspect(SandboxInspectArgs {
+                run: None,
+                file: None,
+            }),
         ] {
             let mut out = Vec::new();
             let mut stdout = Vec::new();
