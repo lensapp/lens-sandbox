@@ -9,6 +9,11 @@ mod login_agent;
 pub(crate) mod real;
 
 pub use client::ServiceClient;
+pub use login_agent::DisableOutcome;
+
+pub(crate) async fn disable_login_agent() -> DisableOutcome {
+    login_agent::disable().await
+}
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
