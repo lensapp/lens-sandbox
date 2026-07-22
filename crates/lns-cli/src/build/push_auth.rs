@@ -15,19 +15,49 @@ pub(crate) fn select_auth(
     }
 }
 
-/// Only a genuine credential rejection earns the "sign in" recipe; a DNS/connection/server failure surfaces verbatim so the user fixes connectivity, not authentication.
+/// A 401/403 from any push phase is a credential refusal — bearer registries hand `auth()` a reduced-scope token and only refuse at upload — so it earns the recipe; every other failure surfaces verbatim.
+fn is_auth_refusal(err: &oci_client::errors::OciDistributionError) -> bool {
+    use oci_client::errors::OciDistributionError::{
+        AuthenticationFailure, ServerError, UnauthorizedError,
+    };
+    matches!(
+        err,
+        AuthenticationFailure(_)
+            | UnauthorizedError { .. }
+            | ServerError {
+                code: 401 | 403,
+                ..
+            }
+    )
+}
+
+/// Map the pre-flight `auth()` failure: a refusal earns the recipe, anything else reads as an unreachable registry.
 pub(crate) fn auth_error(
     reference: &Reference,
     auth: &RegistryAuth,
     err: oci_client::errors::OciDistributionError,
 ) -> anyhow::Error {
-    use oci_client::errors::OciDistributionError::{AuthenticationFailure, UnauthorizedError};
-    match &err {
-        AuthenticationFailure(_) | UnauthorizedError { .. } => auth_refused(reference, auth, err),
-        _ => anyhow::Error::new(err).context(format!(
+    if is_auth_refusal(&err) {
+        auth_refused(reference, auth, err)
+    } else {
+        anyhow::Error::new(err).context(format!(
             "could not reach {} to authenticate the push",
             reference.registry()
-        )),
+        ))
+    }
+}
+
+/// Map an upload-phase (`push_blob` / `push_manifest_raw`) failure: a refusal earns the recipe, anything else surfaces verbatim under `context`.
+pub(crate) fn push_error(
+    reference: &Reference,
+    auth: &RegistryAuth,
+    err: oci_client::errors::OciDistributionError,
+    context: String,
+) -> anyhow::Error {
+    if is_auth_refusal(&err) {
+        auth_refused(reference, auth, err)
+    } else {
+        anyhow::Error::new(err).context(context)
     }
 }
 
@@ -203,6 +233,94 @@ mod tests {
         assert!(
             !text.contains("secret"),
             "the secret must never surface: {text}"
+        );
+    }
+
+    #[test]
+    fn a_push_scope_refusal_at_upload_earns_the_login_recipe() {
+        use oci_client::errors::OciDistributionError;
+        let auth = RegistryAuth::Basic("octocat".into(), "ghp_token".into());
+        let err = push_error(
+            &reference(),
+            &auth,
+            OciDistributionError::ServerError {
+                code: 403,
+                url: "https://ghcr.io/v2/acme/my-sandbox/blobs/uploads/".into(),
+                message: "denied".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("ghcr.io denied the push"), "{text}");
+        assert!(
+            text.contains("missing push scope"),
+            "a 403 at upload must reach the missing-push-scope recipe, not the raw blob-push context: {text}"
+        );
+        assert!(
+            !text.contains("pushing blob"),
+            "the upload-phase context must not mask the recipe for a refusal: {text}"
+        );
+    }
+
+    #[test]
+    fn a_401_at_upload_is_also_a_refusal() {
+        use oci_client::errors::OciDistributionError;
+        let err = push_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::ServerError {
+                code: 401,
+                url: "https://ghcr.io/v2/".into(),
+                message: "unauthorized".into(),
+            },
+            "pushing manifest to ghcr.io/acme/my-sandbox:1.0.0".into(),
+        );
+        assert!(format!("{err:#}").contains("no login is stored"), "{err:#}");
+    }
+
+    #[test]
+    fn a_non_auth_upload_failure_surfaces_verbatim_under_its_context() {
+        use oci_client::errors::OciDistributionError;
+        let err = push_error(
+            &reference(),
+            &RegistryAuth::Basic("u".into(), "p".into()),
+            OciDistributionError::ServerError {
+                code: 500,
+                url: "https://ghcr.io/v2/acme/my-sandbox/blobs/uploads/".into(),
+                message: "internal".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("pushing blob sha256:abc"),
+            "a 5xx keeps its push-phase context: {text}"
+        );
+        assert!(
+            !text.contains("denied the push"),
+            "a server error must not be miscast as a credential refusal: {text}"
+        );
+        assert!(
+            text.contains("code: 500"),
+            "the real server error must surface: {text}"
+        );
+    }
+
+    #[test]
+    fn a_preflight_server_403_is_classified_as_a_refusal() {
+        use oci_client::errors::OciDistributionError;
+        let err = auth_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::ServerError {
+                code: 403,
+                url: "https://ghcr.io/token".into(),
+                message: "denied".into(),
+            },
+        );
+        assert!(
+            format!("{err:#}").contains("no login is stored"),
+            "a 403 from the pre-flight auth must also reach the recipe: {err:#}"
         );
     }
 }

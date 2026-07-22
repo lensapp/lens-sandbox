@@ -10,7 +10,7 @@ use oci_client::{
     secrets::RegistryAuth,
 };
 
-use crate::build::push_auth::{auth_error, select_auth};
+use crate::build::push_auth::{auth_error, push_error, select_auth};
 
 /// The stored login for `reference`'s registry, or anonymous when none is recorded.
 fn registry_auth_for(reference: &Reference) -> RegistryAuth {
@@ -41,13 +41,27 @@ pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
         client
             .push_blob(&reference, blob.data.clone(), &blob.digest)
             .await
-            .with_context(|| format!("pushing blob {}", blob.digest))?;
+            .map_err(|e| {
+                push_error(
+                    &reference,
+                    &auth,
+                    e,
+                    format!("pushing blob {}", blob.digest),
+                )
+            })?;
     }
     let content_type = HeaderValue::from_str(&built.manifest_media_type)
         .context("building manifest content-type header")?;
     client
         .push_manifest_raw(&reference, built.manifest.clone(), content_type)
         .await
-        .with_context(|| format!("pushing manifest to {target}"))?;
+        .map_err(|e| {
+            push_error(
+                &reference,
+                &auth,
+                e,
+                format!("pushing manifest to {target}"),
+            )
+        })?;
     Ok(())
 }
