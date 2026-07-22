@@ -1,9 +1,28 @@
 use std::path::PathBuf;
 
-use cucumber::{given, then};
+use cucumber::{given, then, when};
 use lns_cli::run::declarative::{Defaults, resolve};
 
 use crate::world::BehaviourWorld;
+
+#[when(regex = r#"^the user runs "lns push(.*)"$"#)]
+async fn user_runs_lns_push(w: &mut BehaviourWorld, rest: String) {
+    super::sandbox_cli::drive_sandbox_command(w, &format!("push{rest}")).await;
+}
+
+#[then(regex = r#"^the pushed artifact carries the definition from "([^"]+)"$"#)]
+fn pushed_artifact_carries_variant(w: &mut BehaviourWorld, _name: String) -> Result<(), String> {
+    let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(doc).map_err(|e| format!("pushed doc is not json: {e}"))?;
+    if value["spec"]["image"] != "ghcr.io/team/dev-base:1" {
+        return Err(format!(
+            "expected the variant definition to publish, got image {}",
+            value["spec"]["image"]
+        ));
+    }
+    Ok(())
+}
 
 const VARIANT_YAML: &str = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n";
 const DEFAULT_YAML: &str = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: sandbox\nspec:\n  image: ghcr.io/team/base:1\n";

@@ -92,6 +92,13 @@ pub struct SandboxPushArgs {
         help = "Validate, pack, and build everything push would upload, print the digests, and upload nothing."
     )]
     pub dry_run: bool,
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Definition file to publish instead of ./lns.yaml; its directory roots the definition's relative filesets."
+    )]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -1192,6 +1199,7 @@ mod tests {
         let cmd = SandboxCommand::Push(SandboxPushArgs {
             reference: "ghcr.io/team/hermes:1.4.0".into(),
             dry_run: false,
+            file: None,
         });
         let mut out = Vec::new();
         let mut stdout = Vec::new();
