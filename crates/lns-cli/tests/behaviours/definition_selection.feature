@@ -17,14 +17,12 @@ Feature: selecting the sandbox definition file
     Then the exit code is 0
     And the service request roots the bind and fileset at "/other"
 
-  @todo
   Scenario: --file selects the definition for a reference-less run
     Given a sandbox definition file "lns.dev.yaml" in the current directory
     When the user runs "lns run --file lns.dev.yaml"
     Then the exit code is 0
     And the service request carries the definition from "lns.dev.yaml"
 
-  @todo
   Scenario: --file combined with a registry reference is refused
     Given a sandbox definition file "lns.dev.yaml" in the current directory
     When the user runs "lns run --file lns.dev.yaml ghcr.io/team/hermes:1.4.0"

@@ -15,14 +15,21 @@ pub enum RunTarget {
     },
 }
 
-/// Resolve the run reference: a path-shaped REF (`.`, `lns.yaml`, `./…`, `../…`, `/…`) names a local definition, an omitted REF runs the current directory's `lns.yaml`, and anything else is a registry coordinate.
-pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<RunTarget> {
-    let file = match reference {
-        Some(reference) if !is_definition_path(reference) => {
+/// Resolve the run reference: a path-shaped REF (`.`, `lns.yaml`, `./…`, `../…`, `/…`) or the `--file` selector names a local definition, an omitted REF runs the current directory's `lns.yaml`, and anything else is a registry coordinate.
+pub fn resolve<F: Fs>(
+    reference: Option<&str>,
+    file: Option<&Path>,
+    fs: &F,
+    cwd: &Path,
+) -> Result<RunTarget> {
+    let file = match (reference, file) {
+        (Some(_), Some(_)) => bail!("pass a sandbox reference or --file, not both"),
+        (Some(reference), None) if !is_definition_path(reference) => {
             return Ok(RunTarget::Reference(reference.to_string()));
         }
-        Some(reference) => definition_file(reference, cwd),
-        None => cwd.join(LNS_YAML),
+        (Some(reference), None) => definition_file(reference, cwd),
+        (None, Some(file)) => normalize(&cwd.join(file)),
+        (None, None) => cwd.join(LNS_YAML),
     };
     let project_dir = file
         .parent()
@@ -169,7 +176,7 @@ mod tests {
     #[test]
     fn a_reference_is_passed_through_for_the_service_to_classify() {
         let fs = MapFs::default();
-        let target = resolve(Some("ghcr.io/team/hermes:1.4.0"), &fs, cwd()).unwrap();
+        let target = resolve(Some("ghcr.io/team/hermes:1.4.0"), None, &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/hermes:1.4.0");
         assert!(
             target.verify_sandbox(),
@@ -180,7 +187,7 @@ mod tests {
     #[test]
     fn no_reference_resolves_the_local_definition() {
         let fs = fake("/work/lns.yaml", local_yaml());
-        let target = resolve(None, &fs, cwd()).unwrap();
+        let target = resolve(None, None, &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/base:1");
         assert!(
             !target.verify_sandbox(),
@@ -191,7 +198,7 @@ mod tests {
     #[test]
     fn a_local_definition_travels_as_canonical_json() {
         let fs = fake("/work/lns.yaml", local_yaml());
-        let target = resolve(None, &fs, cwd()).unwrap();
+        let target = resolve(None, None, &fs, cwd()).unwrap();
         let json = target
             .definition_json()
             .expect("a local run carries its definition");
@@ -204,7 +211,7 @@ mod tests {
     #[test]
     fn a_reference_carries_no_definition_and_no_project_dir() {
         let fs = MapFs::default();
-        let target = resolve(Some("alpine:3.20"), &fs, cwd()).unwrap();
+        let target = resolve(Some("alpine:3.20"), None, &fs, cwd()).unwrap();
         assert_eq!(target.definition_json(), None);
         assert_eq!(target.project_dir(), None);
     }
@@ -212,7 +219,7 @@ mod tests {
     #[test]
     fn no_reference_without_a_definition_names_lns_init() {
         let fs = MapFs::default();
-        let err = resolve(None, &fs, cwd()).unwrap_err();
+        let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("no lns.yaml"), "got: {err:#}");
         assert!(format!("{err:#}").contains("lns init"), "got: {err:#}");
     }
@@ -221,7 +228,7 @@ mod tests {
     fn dot_and_yaml_shaped_references_resolve_the_local_definition() {
         let fs = fake("/work/lns.yaml", local_yaml());
         for reference in [".", "lns.yaml", "./lns.yaml", "./"] {
-            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            let target = resolve(Some(reference), None, &fs, cwd()).unwrap();
             assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
             assert!(!target.verify_sandbox(), "ref {reference:?}");
             assert_eq!(target.project_dir(), Some(Path::new("/work")));
@@ -232,7 +239,7 @@ mod tests {
     fn a_relative_or_absolute_path_resolves_that_directorys_definition() {
         let fs = fake("/other/lns.yaml", local_yaml());
         for reference in ["../other", "../other/lns.yaml", "/other", "/other/lns.yaml"] {
-            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            let target = resolve(Some(reference), None, &fs, cwd()).unwrap();
             assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
             assert_eq!(
                 target.project_dir(),
@@ -251,7 +258,7 @@ mod tests {
             ),
             ("/other/skills/prompts.md", "p"),
         ]);
-        let target = resolve(Some("/other"), &fs, cwd()).unwrap();
+        let target = resolve(Some("/other"), None, &fs, cwd()).unwrap();
         let json = target.definition_json().expect("local definition");
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["spec"]["filesets"][0]["path"], "/other/skills");
@@ -268,7 +275,7 @@ mod tests {
             ("/other/app.yml", "/other"),
             ("../other/app.yml", "/other"),
         ] {
-            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            let target = resolve(Some(reference), None, &fs, cwd()).unwrap();
             assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
             assert_eq!(
                 target.project_dir(),
@@ -285,14 +292,56 @@ mod tests {
             ("/work/lns.yaml", local_yaml()),
             ("/work/lns.dev.yaml", variant),
         ]);
-        let target = resolve(Some("./lns.dev.yaml"), &fs, cwd()).unwrap();
+        let target = resolve(Some("./lns.dev.yaml"), None, &fs, cwd()).unwrap();
         assert_eq!(target.image(), "ghcr.io/team/dev:1");
+    }
+
+    #[test]
+    fn the_file_selector_resolves_the_named_definition() {
+        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", local_yaml()),
+            ("/work/lns.dev.yaml", variant),
+        ]);
+        let target = resolve(None, Some(Path::new("lns.dev.yaml")), &fs, cwd()).unwrap();
+        assert_eq!(target.image(), "ghcr.io/team/dev:1");
+        assert_eq!(target.project_dir(), Some(Path::new("/work")));
+    }
+
+    #[test]
+    fn the_file_selector_roots_the_project_at_the_files_directory() {
+        let fs = fake("/other/lns.dev.yaml", local_yaml());
+        let target = resolve(None, Some(Path::new("../other/lns.dev.yaml")), &fs, cwd()).unwrap();
+        assert_eq!(target.project_dir(), Some(Path::new("/other")));
+    }
+
+    #[test]
+    fn a_reference_and_the_file_selector_together_are_refused() {
+        let fs = fake("/work/lns.dev.yaml", local_yaml());
+        let err = resolve(
+            Some("ghcr.io/team/hermes:1"),
+            Some(Path::new("lns.dev.yaml")),
+            &fs,
+            cwd(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not both"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_missing_file_selector_errors_with_its_path() {
+        let fs = MapFs::default();
+        let err = resolve(None, Some(Path::new("lns.dev.yaml")), &fs, cwd()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no sandbox definition at /work/lns.dev.yaml"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
     fn a_missing_named_definition_file_errors_with_its_path() {
         let fs = MapFs::default();
-        let err = resolve(Some("./lns.dev.yaml"), &fs, cwd()).unwrap_err();
+        let err = resolve(Some("./lns.dev.yaml"), None, &fs, cwd()).unwrap_err();
         let text = format!("{err:#}");
         assert!(
             text.contains("no sandbox definition at /work/lns.dev.yaml"),
@@ -304,7 +353,7 @@ mod tests {
     #[test]
     fn a_path_shaped_reference_without_a_definition_names_its_directory() {
         let fs = MapFs::default();
-        let err = resolve(Some("../other"), &fs, cwd()).unwrap_err();
+        let err = resolve(Some("../other"), None, &fs, cwd()).unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("no lns.yaml in /other"), "got: {text}");
         assert!(text.contains("lns init"), "got: {text}");
@@ -313,7 +362,7 @@ mod tests {
     #[test]
     fn a_repository_name_ending_in_yaml_stays_a_registry_reference() {
         let fs = MapFs::default();
-        let target = resolve(Some("team/config.yaml"), &fs, cwd()).unwrap();
+        let target = resolve(Some("team/config.yaml"), None, &fs, cwd()).unwrap();
         assert!(target.verify_sandbox());
         assert_eq!(target.image(), "team/config.yaml");
     }
@@ -327,7 +376,7 @@ mod tests {
             ),
             ("/work/skills/prompts.md", "p"),
         ]);
-        let target = resolve(None, &fs, cwd()).unwrap();
+        let target = resolve(None, None, &fs, cwd()).unwrap();
         let json = target.definition_json().expect("local definition");
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["spec"]["filesets"][0]["path"], "/work/skills");
@@ -347,7 +396,7 @@ mod tests {
             "/work/lns.yaml",
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
         );
-        let err = resolve(None, &fs, cwd()).unwrap_err();
+        let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("./skills"), "got: {err:#}");
     }
 
@@ -357,7 +406,7 @@ mod tests {
             "/work/lns.yaml",
             "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
         );
-        let err = resolve(None, &fs, cwd()).unwrap_err();
+        let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(
             format!("{err:#}").contains("must carry an image"),
             "got: {err:#}"
