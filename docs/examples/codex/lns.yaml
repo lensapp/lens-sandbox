@@ -4,7 +4,7 @@ metadata:
   name: codex
 spec:
   image: docker.io/curlimages/curl:latest
-  command: sh -lc "export PATH=$HOME/.local/bin:$PATH; command -v codex >/dev/null || { mkdir -p $HOME/.local/bin; arch=$(uname -m); curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-$arch-unknown-linux-musl.tar.gz | tar -xzf - -C $HOME/.local/bin; mv $HOME/.local/bin/codex-$arch-unknown-linux-musl $HOME/.local/bin/codex; }; exec codex"
+  command: sh -lc "export PATH=$HOME/.local/bin:$PATH; mkdir -p $HOME/.codex $HOME/.local/bin; [ -f $HOME/.codex/config.toml ] || cp /opt/codex-seed/.codex/config.toml $HOME/.codex/config.toml; command -v codex >/dev/null || { arch=$(uname -m); curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-$arch-unknown-linux-musl.tar.gz | tar -xzf - -C $HOME/.local/bin; mv $HOME/.local/bin/codex-$arch-unknown-linux-musl $HOME/.local/bin/codex; }; exec codex"
   workdir: /workspace
   env:
     SHELL: "/bin/sh"
@@ -30,6 +30,9 @@ spec:
     - type: bind
       source: .
       target: /workspace
+    - type: volume
+      source: codex-home
+      target: /home/curl_user
   filesets:
     - path: ./config
-      mountPath: /home/sandbox
+      mountPath: /opt/codex-seed

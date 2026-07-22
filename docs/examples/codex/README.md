@@ -12,12 +12,19 @@ policy are the boundary — nothing leaves the sandbox except the hosts you allo
   the latest Codex CLI on first boot (Codex is a single static Rust binary —
   the musl build from its GitHub releases, no Node.js/npm needed), the network
   allowlist, and the declared port `1455` for the sign-in callback.
-- **`config/`** — seed state mounted at the workload's home (`/home/sandbox`):
+- **`config/`** — seed state, mounted at `/opt/codex-seed` and copied into
+  `~/.codex` on first boot (the workload user is the image's `curl_user`, so
+  the home is `/home/curl_user`):
   - `config/.codex/config.toml` — prefers ChatGPT sign-in over an API key,
-    pre-trusts `/workspace`, and runs Codex with `approval_policy = "never"` and
+    pre-trusts `/workspace` (skips the "Do you trust this directory?" prompt),
+    and runs Codex with `approval_policy = "never"` and
     `sandbox_mode = "danger-full-access"` — i.e. **Codex's own sandbox off**.
     Both are redundant here: the lns microVM is already the sandbox, so the
     agent should run freely inside it.
+- **`codex-home` named volume** — mounted over the workload home so the
+  sign-in (`~/.codex/auth.json`), the trust decision, and the downloaded
+  binary survive restarts: you sign in once, and later runs go straight to
+  the agent.
 
 ## How Sign in with ChatGPT works here
 
@@ -51,11 +58,16 @@ lns run
 ```
 
 The first boot downloads the latest `codex-<arch>-unknown-linux-musl` release
-binary from GitHub; the microVM is ephemeral, so each cold start re-downloads
-it (the `allowedRoutes` keep `github.com` and
+binary from GitHub (the `allowedRoutes` keep `github.com` and
 `release-assets.githubusercontent.com` — the release-download redirect target —
-open for that reason). On first run, Codex's onboarding offers **Sign in with
-ChatGPT** — pick it and open the printed URL on your host.
+open for that reason) and Codex's onboarding offers **Sign in with ChatGPT** —
+pick it and open the printed URL on your host. Both happen once: the binary
+and the login land in the `codex-home` volume, so a restart boots straight
+into the agent. To update Codex or sign out, reset the volume:
+
+```bash
+lns volume rm codex-home
+```
 
 ## Publish and run from a registry
 
@@ -69,12 +81,14 @@ pass `-P` (or `-p 1455:1455`) when you need to sign in, or use
 
 ## Notes
 
-- Sign in with ChatGPT stores its tokens at `~/.codex/auth.json` **inside the
-  guest**, and everything except `/workspace` is ephemeral — a cold start asks
-  you to sign in again. To keep the login across runs, attach a named volume
-  over the Codex home (`-v codex-home:/home/sandbox/.codex`); note it shadows
-  the seeded `config.toml`, so Codex re-asks its onboarding questions once and
-  then persists everything, credentials included, in the volume.
+- The ChatGPT tokens live in `~/.codex/auth.json` inside the `codex-home`
+  volume — on your machine, but guest-writable, unlike an integration
+  credential in `~/.lns-credentials.json`. The placeholder model can't carry
+  this login: Codex decodes the token claims and refreshes the token set
+  itself, so there is no env var or header for the boundary to inject. That's
+  also why the sandbox works only on this trust footing: the volume holds a
+  real credential, and `lns volume rm codex-home` is how you revoke it locally
+  (then sign out of the session at chatgpt.com).
 - Prefer keeping credentials out of the guest entirely? Bind the `openai`
   integration instead (declare `integrations: [openai]`): the workload sees an
   `OPENAI_API_KEY`-shaped placeholder and the real key is injected at the
