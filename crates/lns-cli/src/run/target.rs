@@ -29,6 +29,9 @@ pub fn resolve<F: Fs>(reference: Option<&str>, fs: &F, cwd: &Path) -> Result<Run
         .context("resolving the definition's directory")?
         .to_path_buf();
     if !fs.exists(&file) {
+        if file.file_name() != Some(LNS_YAML.as_ref()) {
+            bail!("no sandbox definition at {}", file.display());
+        }
         bail!(
             "no {LNS_YAML} in {}; run `lns init` there to create one",
             project_dir.display()
@@ -62,11 +65,18 @@ pub(crate) fn is_definition_path(reference: &str) -> bool {
 
 pub(crate) fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
     let path = normalize(&cwd.join(reference));
-    if path.file_name() == Some(LNS_YAML.as_ref()) {
+    if is_yaml_file_name(&path) {
         path
     } else {
         path.join(LNS_YAML)
     }
+}
+
+fn is_yaml_file_name(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(std::ffi::OsStr::to_str),
+        Some("yaml" | "yml")
+    )
 }
 
 // components() already normalizes interior `.` away, so only ParentDir needs lexical handling.
@@ -245,6 +255,50 @@ mod tests {
         let json = target.definition_json().expect("local definition");
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["spec"]["filesets"][0]["path"], "/other/skills");
+    }
+
+    #[test]
+    fn a_yaml_file_reference_resolves_that_files_definition() {
+        let fs = MapFs::with(&[
+            ("/work/lns.dev.yaml", local_yaml()),
+            ("/other/app.yml", local_yaml()),
+        ]);
+        for (reference, project) in [
+            ("./lns.dev.yaml", "/work"),
+            ("/other/app.yml", "/other"),
+            ("../other/app.yml", "/other"),
+        ] {
+            let target = resolve(Some(reference), &fs, cwd()).unwrap();
+            assert_eq!(target.image(), "ghcr.io/team/base:1", "ref {reference:?}");
+            assert_eq!(
+                target.project_dir(),
+                Some(Path::new(project)),
+                "ref {reference:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_yaml_file_reference_selects_the_variant_over_the_default() {
+        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", local_yaml()),
+            ("/work/lns.dev.yaml", variant),
+        ]);
+        let target = resolve(Some("./lns.dev.yaml"), &fs, cwd()).unwrap();
+        assert_eq!(target.image(), "ghcr.io/team/dev:1");
+    }
+
+    #[test]
+    fn a_missing_named_definition_file_errors_with_its_path() {
+        let fs = MapFs::default();
+        let err = resolve(Some("./lns.dev.yaml"), &fs, cwd()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no sandbox definition at /work/lns.dev.yaml"),
+            "got: {text}"
+        );
+        assert!(!text.contains("lns init"), "got: {text}");
     }
 
     #[test]
