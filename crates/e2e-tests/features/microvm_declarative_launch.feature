@@ -46,8 +46,10 @@ Feature: declarative workdir and mounts reach a real guest
   Scenario: a pulled published sandbox launches offline from the consumer project
     Given a local registry
     And the Lens Sandbox service is running
-    When the user pulls a published declarative sandbox and runs it with the registry offline from a consumer project
+    When the user pulls a published declarative sandbox and runs it with --yes with the registry offline from a consumer project
     Then the exit code is 0
+    And the output does not contain "mounts into the workload"
+    And the output does not contain "Continue?"
     And the output contains "wd=/workspace"
     And the output contains "consumer=visible"
     And the output contains "bind=readonly"
