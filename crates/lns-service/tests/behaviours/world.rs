@@ -65,6 +65,7 @@ pub struct BehaviourWorld {
     pub fileset_plan: Option<lns_service::artifact::assembly::ResolvedSandbox>,
     pub fileset_problems: Option<Vec<String>>,
     pub fileset_specs: Option<Vec<String>>,
+    pub fileset_contents: std::collections::HashMap<String, String>,
     /// The chown-manifest body the planned specs ship for lns-init, when any fileset is workload-owned.
     pub fileset_manifest: Option<String>,
 

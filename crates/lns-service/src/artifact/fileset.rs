@@ -7,7 +7,7 @@ use lns_artifact::sandbox::FilesetOwner;
 use oci_client::Reference;
 use oci_client::manifest::OciImageManifest;
 
-use crate::artifact::assembly::LocalFileset;
+use crate::artifact::assembly::{InlineFileset, LocalFileset};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
@@ -123,6 +123,22 @@ pub fn local_fileset_specs<D: SnapshotDir + ?Sized>(
         out.absorb(local.owner, &local.mount_path, specs);
     }
     Ok(())
+}
+
+pub fn inline_fileset_specs(inline_filesets: &[InlineFileset], out: &mut MaterializedFilesets) {
+    for inline in inline_filesets {
+        let root = inline.mount_path.trim_end_matches('/');
+        let specs = inline
+            .files
+            .iter()
+            .map(|(path, content)| RuntimeFileSpec {
+                guest_path: format!("{root}/{path}"),
+                mode: 0o644,
+                source: RuntimeSource::Bytes(content.as_bytes().to_vec()),
+            })
+            .collect();
+        out.absorb(inline.owner, &inline.mount_path, specs);
+    }
 }
 
 fn snapshot_into<D: SnapshotDir + ?Sized>(
