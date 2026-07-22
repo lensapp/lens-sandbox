@@ -20,8 +20,9 @@ spec:
         verdict: allow
       - match: api.openai.com
         verdict: allow
-  integrations:
-    - openai
+  credentials:
+    - name: openai
+      env: OPENAI_API_KEY
   volumes:
     - type: bind
       source: .

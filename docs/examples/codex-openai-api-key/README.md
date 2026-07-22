@@ -16,7 +16,7 @@ volume — every boot is a fresh microVM.
 
 - **`lns.yaml`** — the sandbox definition: a `curlimages/curl` base that
   fetches the latest Codex CLI on first boot (a single static Rust binary from
-  its GitHub releases), the network allowlist, and the `openai` integration.
+  its GitHub releases), the network allowlist, and an `openai` credential slot.
 - **`config/`** — seed state mounted at the workload home (`/home/curl_user`,
   the image's user):
   - `config/.codex/config.toml` — prefers API-key auth, pre-trusts
@@ -33,27 +33,29 @@ where the boundary injects your real key.
 ## Use it
 
 Copy `lns.yaml` and `config/` into the project you want the agent to work on
-(`.` is bound at `/workspace`), connect the integration once, and run:
+(`.` is bound at `/workspace`), then run:
 
 ```bash
 cd your-project      # now contains lns.yaml + config/
-lns integration connect openai   # bind your real API key (per-machine, ~/.lns-credentials.json)
 lns run
 ```
 
-Declaring `integrations: [openai]` in `lns.yaml` is disclosure, not a grant —
-the connect step (or accepting the approval card on first use) is what arms it
-and records it in this directory's `lns-policy.yaml`. Your key lives in
-`~/.lns-credentials.json` on your machine, never in the guest, the project, or
-a published artifact.
+No setup command: the `spec.credentials` slot seeds the placeholder at boot,
+and the first request that carries it to `api.openai.com` pauses on an
+approval card where you bind your real key — use the value detected on the
+host or paste one. The decision is per-machine, stored in
+`~/.lns-credentials.json`, and remembered for every later run; the key never
+lives in the guest, the project, or a published artifact. To bind it ahead of
+the first run instead (or to re-bind later), `lns integration connect openai`
+raises the same card up front.
 
 ## Publish and run from a registry
 
 This recipe is a normal sandbox artifact: `lns push` it once and `lns run` it
 by reference from any directory, exactly as walked through in the
 [Claude Code example](../claude-code/README.md#publish-and-run-from-a-registry).
-A consumer connects their own `openai` key — the artifact carries no
-credential, and a declared integration is never armed behind their back.
+The artifact carries no credential — a consumer's first run raises the same
+approval card, binding their own key on their machine.
 
 ## Notes
 
