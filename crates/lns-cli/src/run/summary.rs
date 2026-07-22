@@ -201,8 +201,9 @@ fn fileset_display(path: Option<&str>, reference: Option<&str>) -> String {
     }
     let reference = reference.unwrap_or_default();
     match reference.split_once("@sha256:") {
-        Some((repo, digest)) if digest.len() > 12 => {
-            format!("{repo}@sha256:{}…", &digest[..12])
+        Some((repo, digest)) if digest.chars().count() > 12 => {
+            let short: String = digest.chars().take(12).collect();
+            format!("{repo}@sha256:{short}…")
         }
         _ => reference.to_string(),
     }
@@ -344,6 +345,16 @@ mod tests {
         assert_eq!(
             fileset_source_display(&fileset_entry(None, Some("reg/skills@sha256:abc"))),
             "reg/skills@sha256:abc"
+        );
+    }
+
+    #[test]
+    fn fileset_display_shortens_a_multibyte_digest_by_chars_not_bytes() {
+        let reference = format!("reg/skills@sha256:{}{}", "a".repeat(11), "é".repeat(5));
+        assert_eq!(
+            fileset_source_display(&fileset_entry(None, Some(&reference))),
+            format!("reg/skills@sha256:{}é…", "a".repeat(11)),
+            "a crafted pulled fileset digest must truncate by chars, never panic on a byte boundary"
         );
     }
 
