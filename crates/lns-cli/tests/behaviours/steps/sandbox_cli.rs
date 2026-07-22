@@ -304,6 +304,10 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
 
 #[when(regex = r#"^the user runs sandbox command "([^"]+)"$"#)]
 async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
+    drive_sandbox_command(w, &cmd).await;
+}
+
+pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
     let args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
@@ -325,18 +329,16 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
             filesets: RefCell::new(Vec::new()),
         };
         let mut out: Vec<u8> = Vec::new();
-        let result = match author::load_definition_json(&fs, Path::new("/work")) {
-            Ok(doc) if push_args.dry_run => distribute::push_dry_run(
-                &fs,
-                Path::new("/work"),
-                &doc,
-                &push_args.reference,
-                &mut out,
-            ),
+        let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
+        let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
+        let result = match author::load_definition_json_at(&fs, &path) {
+            Ok(doc) if push_args.dry_run => {
+                distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
+            }
             Ok(doc) => {
                 distribute::push(
                     &fs,
-                    Path::new("/work"),
+                    &project_dir,
                     &producer,
                     &doc,
                     &push_args.reference,

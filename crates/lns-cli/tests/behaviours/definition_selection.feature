@@ -36,9 +36,9 @@ Feature: selecting the sandbox definition file
     And the output contains "valid"
     And the service received no request
 
-  @todo
   Scenario: push --file publishes the named definition
     Given a sandbox definition file "lns.dev.yaml" in the current directory
+    And the registry accepts the push
     When the user runs "lns push --file lns.dev.yaml ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the pushed artifact carries the definition from "lns.dev.yaml"
