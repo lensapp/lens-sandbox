@@ -288,6 +288,21 @@ fn no_service_side_effect(world: &mut E2eWorld) -> Result<(), String> {
     Ok(())
 }
 
+#[then("the output contains no build or protocol drift warning")]
+fn no_drift_warning(world: &mut E2eWorld) -> Result<(), String> {
+    let res = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}{}", res.stdout, res.stderr);
+    for needle in ["different build", "incompatible"] {
+        if combined.contains(needle) {
+            return Err(format!(
+                "a same-tree lns/lns-service pair must pass the handshake silently, \
+                 but the output mentions {needle:?}: {combined}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[then("the command reports that the service is running")]
 fn reports_service_running(world: &mut E2eWorld) -> Result<(), String> {
     let res = world.result.as_ref().ok_or("no CLI run captured")?;

@@ -79,3 +79,9 @@ Feature: Lens Sandbox tray-resident background service
     When two `lns service status` commands run concurrently from different terminals
     Then both observe consistent state from the same service instance
     And neither invocation corrupts or races the other
+
+  Scenario: A CLI and service built from the same tree pass the handshake silently
+    Given the Lens Sandbox service is running
+    When I run an `lns` command that requires the service
+    Then the command completes successfully
+    And the output contains no build or protocol drift warning
