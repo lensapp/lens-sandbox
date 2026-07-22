@@ -2,9 +2,8 @@ name: CI
 
 on:
   pull_request:
-    # labeled/unlabeled added so the label-policy gate re-runs when a label is
-    # fixed; the changes job short-circuits the heavy jobs on those events.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Label-only events must never re-report `CI / check` (they'd supersede a
+    # failing run with all-skipped green); the label gate lives in pr-labels.yml.
     branches: [main]
   push:
     branches: [main]
@@ -28,9 +27,9 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.gate.outputs.code }}
-      check-release-build: ${{ steps.gate.outputs['check-release-build'] }}
-      static-nft: ${{ steps.gate.outputs['static-nft'] }}
+      code: ${{ steps.filter.outputs.code }}
+      check-release-build: ${{ steps.filter.outputs['check-release-build'] }}
+      static-nft: ${{ steps.filter.outputs['static-nft'] }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -69,39 +68,6 @@ jobs:
               - 'scripts/static-nft.Dockerfile'
               - 'scripts/build-static-nft.sh'
               - 'scripts/verify-static-nft.sh'
-
-      # On a pure label add/remove the diff is unchanged, so the heavy jobs
-      # have nothing new to prove — force their gates off and let only the
-      # `labels` policy check run. Other events pass the filter outputs through.
-      - id: gate
-        env:
-          ACTION: ${{ github.event.action }}
-          CODE: ${{ steps.filter.outputs.code }}
-          CRB: ${{ steps.filter.outputs['check-release-build'] }}
-          SNFT: ${{ steps.filter.outputs['static-nft'] }}
-        run: |
-          if [ "$ACTION" = "labeled" ] || [ "$ACTION" = "unlabeled" ]; then
-            echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "check-release-build=false" >> "$GITHUB_OUTPUT"
-            echo "static-nft=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=$CODE" >> "$GITHUB_OUTPUT"
-            echo "check-release-build=$CRB" >> "$GITHUB_OUTPUT"
-            echo "static-nft=$SNFT" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Enforce the PR label policy (exactly one type label, nothing outside the
-  # sanctioned set). Always runs on PRs — independent of the code path filter —
-  # so unlabeled/mislabeled PRs are blocked even when only docs changed.
-  labels:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Enforce PR label policy
-        env:
-          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
-        run: echo "$PR_LABELS" | scripts/check-pr-labels.sh
 
   lint:
     runs-on: ubuntu-latest
@@ -371,24 +337,23 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, labels, lint, test, coverage, audit, check-release-build, verify-static-nft]
+    needs: [changes, lint, test, coverage, audit, check-release-build, verify-static-nft]
     if: always()
     steps:
       - name: Verify all gates passed
         run: |
           ok() {
             # Pass if success, or skipped (path-filtered jobs skip on
-            # docs-only / release-irrelevant PRs; labels skips on push: main).
+            # docs-only / release-irrelevant PRs).
             [ "$1" = "success" ] || [ "$1" = "skipped" ]
           }
-          if ! ok "${{ needs.labels.result }}" \
-            || ! ok "${{ needs.lint.result }}" \
+          if ! ok "${{ needs.lint.result }}" \
             || ! ok "${{ needs.test.result }}" \
             || ! ok "${{ needs.coverage.result }}" \
             || ! ok "${{ needs.audit.result }}" \
             || ! ok "${{ needs.check-release-build.result }}" \
             || ! ok "${{ needs.verify-static-nft.result }}"; then
-            echo "One or more gates failed: labels=${{ needs.labels.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }}"
+            echo "One or more gates failed: lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.
