@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use eframe::egui;
-use lns_policy::integrations::TokenFallback;
+use lns_policy::connectors::TokenFallback;
 use lns_service::approval_flow::session::PendingPrompt;
 use lns_service::approval_flow::window::{
     CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,

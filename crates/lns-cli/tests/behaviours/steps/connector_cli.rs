@@ -2,8 +2,8 @@ use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::integration::IntegrationArgs;
-use lns_cli::integration::{self, BindOutcome, IntegrationSignIn, LocalBoxFuture, SignInOutcome};
+use lns_cli::connector::ConnectorArgs;
+use lns_cli::connector::{self, BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
 use lns_policy::Policy;
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,7 +24,7 @@ struct FakeSignIn {
     outcome: SignInOutcome,
     pkce: bool,
 }
-impl IntegrationSignIn for FakeSignIn {
+impl ConnectorSignIn for FakeSignIn {
     fn sign_in<'a>(
         &'a self,
         id: &'a str,
@@ -67,9 +67,9 @@ impl IntegrationSignIn for FakeSignIn {
     }
 }
 
-async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
+async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
-    let catalog = dir.join(".lns-integrations.yaml");
+    let catalog = dir.join(".lns-connectors.yaml");
     let signin = FakeSignIn {
         outcome: world
             .signin_outcome
@@ -77,12 +77,12 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
             .unwrap_or(SignInOutcome::Completed),
         pkce: world.signin_is_pkce,
     };
-    let mut full = vec!["lns".to_string(), "integration".to_string()];
+    let mut full = vec!["lns".to_string(), "connector".to_string()];
     full.extend(tail.iter().map(|s| s.to_string()));
-    let run = match parse_args::<IntegrationArgs, _, _>(&full) {
+    let run = match parse_args::<ConnectorArgs, _, _>(&full) {
         Ok(args) => {
             let mut buf = Vec::<u8>::new();
-            match integration::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
+            match connector::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
                 Ok(exit_code) => CliRun {
                     exit_code,
                     output: String::from_utf8_lossy(&buf).into_owned(),
@@ -101,19 +101,19 @@ async fn run_integration(world: &mut BehaviourWorld, tail: &[&str]) {
     world.result = Some(run);
 }
 
-#[given(regex = r#"^a user catalog declares the "([^"]+)" oauth integration$"#)]
-fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
-    use lns_policy::integrations::{
-        AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+#[given(regex = r#"^a user catalog declares the "([^"]+)" oauth connector$"#)]
+fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::connectors::{
+        AuthKind, Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow,
     };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let dir = cwd(world);
     Catalog {
-        integrations: vec![Integration {
+        connectors: vec![Connector {
             id,
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
                 scheme: None,
@@ -142,24 +142,24 @@ fn given_user_oauth_integration(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .save_atomic(&dir.join(".lns-connectors.yaml"))
     .unwrap();
 }
 
-#[given(regex = r#"^a user catalog declares the "([^"]+)" pkce integration$"#)]
-fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
-    use lns_policy::integrations::{
-        AuthKind, Catalog, Integration, IntegrationRoute, OauthAuth, OauthFlow,
+#[given(regex = r#"^a user catalog declares the "([^"]+)" pkce connector$"#)]
+fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::connectors::{
+        AuthKind, Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow,
     };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     world.signin_is_pkce = true;
     let dir = cwd(world);
     Catalog {
-        integrations: vec![Integration {
+        connectors: vec![Connector {
             id,
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: "api.some-pkce.example".into(),
                 transport: None,
                 scheme: None,
@@ -188,22 +188,20 @@ fn given_user_pkce_integration(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .save_atomic(&dir.join(".lns-connectors.yaml"))
     .unwrap();
 }
 
 fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
-    use lns_policy::integrations::{
-        AuthKind, Catalog, CredentialAuth, Integration, IntegrationRoute,
-    };
+    use lns_policy::connectors::{AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let dir = cwd(world);
     Catalog {
-        integrations: vec![Integration {
+        connectors: vec![Connector {
             id: id.clone(),
             name: None,
             auth_kind: AuthKind::Credential,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: format!("api.{id}.example"),
                 transport: None,
                 scheme: None,
@@ -223,24 +221,24 @@ fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-integrations.yaml"))
+    .save_atomic(&dir.join(".lns-connectors.yaml"))
     .unwrap();
 }
 
-#[given(regex = r#"^a user catalog declares the "([^"]+)" credential integration$"#)]
-fn given_user_credential_integration(world: &mut BehaviourWorld, id: String) {
+#[given(regex = r#"^a user catalog declares the "([^"]+)" credential connector$"#)]
+fn given_user_credential_connector(world: &mut BehaviourWorld, id: String) {
     write_credential_catalog(world, id);
 }
 
-#[given(regex = r#"^the integration "([^"]+)" is in the catalog$"#)]
-fn given_integration_in_catalog(world: &mut BehaviourWorld, id: String) {
+#[given(regex = r#"^the connector "([^"]+)" is in the catalog$"#)]
+fn given_connector_in_catalog(world: &mut BehaviourWorld, id: String) {
     write_credential_catalog(world, id);
 }
 
-#[when(regex = r#"^the user runs integration command "([^"]+)"$"#)]
-async fn run_integration_command(world: &mut BehaviourWorld, command: String) {
+#[when(regex = r#"^the user runs connector command "([^"]+)"$"#)]
+async fn run_connector_command(world: &mut BehaviourWorld, command: String) {
     let parts: Vec<&str> = command.split_whitespace().collect();
-    run_integration(world, &parts).await;
+    run_connector(world, &parts).await;
 }
 
 #[then("the output describes binding a credential value")]
@@ -256,7 +254,7 @@ fn output_describes_binding(world: &mut BehaviourWorld) {
     );
 }
 
-#[then("the output does not claim to add the integration to a sandbox")]
+#[then("the output does not claim to add the connector to a sandbox")]
 fn output_claims_no_sandbox_effect(world: &mut BehaviourWorld) {
     let out = &world
         .result
@@ -290,14 +288,14 @@ fn service_unavailable(world: &mut BehaviourWorld) {
     world.signin_outcome = Some(SignInOutcome::ServiceUnavailable);
 }
 
-#[when(regex = r#"^the developer runs "lns integration connect (\S+)"$"#)]
+#[when(regex = r#"^the developer runs "lns connector connect (\S+)"$"#)]
 async fn run_connect(world: &mut BehaviourWorld, id: String) {
-    run_integration(world, &["connect", &id]).await;
+    run_connector(world, &["connect", &id]).await;
 }
 
-#[when(regex = r#"^the developer runs "lns integration list"$"#)]
+#[when(regex = r#"^the developer runs "lns connector list"$"#)]
 async fn run_list(world: &mut BehaviourWorld) {
-    run_integration(world, &["list"]).await;
+    run_connector(world, &["list"]).await;
 }
 
 #[then("a verification URL and user code are shown")]
@@ -317,13 +315,13 @@ fn shows_verification(world: &mut BehaviourWorld) {
     );
 }
 
-#[then(regex = r#"^"(\S+)" is recorded under integrations in lns-policy.yaml$"#)]
+#[then(regex = r#"^"(\S+)" is recorded under connectors in lns-policy.yaml$"#)]
 fn recorded(world: &mut BehaviourWorld, id: String) {
     let policy = Policy::load_or_default(&policy_file(world)).unwrap();
     assert!(
-        policy.integrations.contains(&id),
+        policy.connectors.contains(&id),
         "expected {id} recorded, got: {:?}",
-        policy.integrations
+        policy.connectors
     );
 }
 
@@ -386,9 +384,9 @@ fn fails_needs_service(world: &mut BehaviourWorld) {
 fn not_recorded(world: &mut BehaviourWorld, id: String) {
     let policy = Policy::load_or_default(&policy_file(world)).unwrap();
     assert!(
-        !policy.integrations.contains(&id),
+        !policy.connectors.contains(&id),
         "expected {id} absent, got: {:?}",
-        policy.integrations
+        policy.connectors
     );
 }
 

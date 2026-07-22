@@ -18,7 +18,7 @@ use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
-use lns_policy::integrations::TokenFallback;
+use lns_policy::connectors::TokenFallback;
 
 pub const WINDOW_WIDTH: f32 = 380.0;
 const WINDOW_HEIGHT: f32 = 300.0;

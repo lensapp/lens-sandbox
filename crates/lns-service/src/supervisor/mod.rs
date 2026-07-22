@@ -65,7 +65,7 @@ pub struct SupervisorSession {
     pub watcher: Option<crate::approval_flow::watcher::PolicyWatcher>,
     // Mirror of `watcher` for the credential state file.
     pub credential_watcher: Option<crate::credential_flow::watcher::CredentialWatcher>,
-    // Env vars of the run's custom providers + connected integrations, stripped from `-e` so a real secret can't bypass the placeholder.
+    // Env vars of the run's custom providers + connected connectors, stripped from `-e` so a real secret can't bypass the placeholder.
     pub managed_env_vars: Vec<String>,
 }
 

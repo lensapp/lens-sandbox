@@ -11,8 +11,8 @@ pub struct AuditArgs {
         help = "Sandbox to scope to: a run id or a unique run-id prefix. Omit for every sandbox."
     )]
     pub sandbox: Option<String>,
-    #[arg(long, help = "Only show events for this integration.")]
-    pub integration: Option<String>,
+    #[arg(long, help = "Only show events for this connector.")]
+    pub connector: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
     #[arg(long, help = "Emit one raw JSON event per line instead of the table.")]

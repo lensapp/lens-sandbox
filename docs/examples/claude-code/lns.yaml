@@ -29,7 +29,7 @@ spec:
         verdict: allow
       - match: downloads.claude.ai
         verdict: allow
-  integrations:
+  connectors:
     - claude-code-subscription
   volumes:
     - type: bind

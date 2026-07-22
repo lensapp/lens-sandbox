@@ -796,7 +796,7 @@ fn render_cached_inspect<W: std::io::Write>(
                     .unwrap_or_default();
                 writeln!(out, "fileset: {source} -> {}", fileset.mount_path)?;
             }
-            render_integrations(out, &view.integrations)?;
+            render_connectors(out, &view.connectors)?;
             for credential in &view.credentials {
                 let required = if credential.required {
                     " (required)"
@@ -831,9 +831,9 @@ fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
         .join(", ")
 }
 
-fn render_integrations<W: std::io::Write>(out: &mut W, integrations: &[String]) -> Result<()> {
-    for id in integrations {
-        writeln!(out, "integration: {id}")?;
+fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
+    for id in connectors {
+        writeln!(out, "connector: {id}")?;
     }
     Ok(())
 }
@@ -1533,7 +1533,7 @@ mod tests {
                     mounts: Vec::new(),
                     ports: Vec::new(),
                     filesets: Vec::new(),
-                    integrations: vec!["some-provider".into()],
+                    connectors: vec!["some-provider".into()],
                     env: Vec::new(),
                     credentials: Vec::new(),
                     policy_flags: Vec::new(),
@@ -1549,7 +1549,7 @@ mod tests {
             text.contains("image: docker.io/library/alpine"),
             "got: {text}"
         );
-        assert!(text.contains("integration: some-provider"), "got: {text}");
+        assert!(text.contains("connector: some-provider"), "got: {text}");
     }
 
     #[tokio::test]

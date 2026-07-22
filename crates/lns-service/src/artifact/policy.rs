@@ -81,7 +81,7 @@ fn allowed_by_every_ceiling(rule: &RouteRule, ceilings: &[&Policy]) -> bool {
         .all(|ceiling| ceiling.network.allowed_routes.contains(rule))
 }
 
-/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and only the user's overlay integrations are applied — an artifact-declared integration the user hasn't connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
+/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and only the user's overlay connectors are applied — an artifact-declared connector the user hasn't connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
 // Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
@@ -124,7 +124,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
             default_verdict,
             default_transport: overlay.network.default_transport,
         },
-        integrations: overlay.integrations.clone(),
+        connectors: overlay.connectors.clone(),
     }
 }
 
@@ -212,25 +212,25 @@ mod tests {
     }
 
     #[test]
-    fn merge_honors_a_deny_default_and_applies_only_overlay_integrations() {
+    fn merge_honors_a_deny_default_and_applies_only_overlay_connectors() {
         let mut overlay = Policy::default();
         overlay.network.default_verdict = Verdict::Deny;
-        overlay.connect("some-overlay-integration");
+        overlay.connect("some-overlay-connector");
         let mut baseline = Policy::default();
-        baseline.connect("some-artifact-integration");
+        baseline.connect("some-artifact-connector");
         let merged = merge_effective(Some(&baseline), &overlay);
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
         assert!(
             merged
-                .integrations
-                .contains(&"some-overlay-integration".to_string()),
-            "an integration the user connected in this directory is applied"
+                .connectors
+                .contains(&"some-overlay-connector".to_string()),
+            "a connector the user connected in this directory is applied"
         );
         assert!(
             !merged
-                .integrations
-                .contains(&"some-artifact-integration".to_string()),
-            "an artifact-declared integration is never force-armed by the merge; it stays connectable and is offered on first use"
+                .connectors
+                .contains(&"some-artifact-connector".to_string()),
+            "an artifact-declared connector is never force-armed by the merge; it stays connectable and is offered on first use"
         );
     }
 

@@ -1,13 +1,13 @@
 use lns_ipc::CredentialBindDecision;
-use lns_policy::integrations::{AuthKind, Integration};
+use lns_policy::connectors::{AuthKind, Connector};
 use lns_policy::providers::ProviderDef;
 
 use crate::credential_flow::providers::DefProvider;
 use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
 use crate::credential_flow::store::CredentialEntry;
 
-/// The connect-time value-decision card for a credential integration; an oauth id signs in instead, and a blockless entry has nothing to bind.
-pub fn bind_prompt(integ: &Integration) -> Option<CredentialPendingPrompt> {
+/// The connect-time value-decision card for a credential connector; an oauth id signs in instead, and a blockless entry has nothing to bind.
+pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
     if integ.auth_kind != AuthKind::Credential {
         return None;
     }
@@ -25,7 +25,7 @@ pub fn bind_prompt(integ: &Integration) -> Option<CredentialPendingPrompt> {
 }
 
 /// The provider the bind card detects a host value through — the same wiring a run would seed.
-pub fn bind_provider(integ: &Integration) -> Option<DefProvider> {
+pub fn bind_provider(integ: &Connector) -> Option<DefProvider> {
     let cred = integ.credential.as_ref()?;
     Some(DefProvider::new(ProviderDef {
         id: integ.id.clone(),
@@ -66,11 +66,11 @@ pub fn resolve_bind_decision(request: CredentialDecisionRequest) -> BindResoluti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::integrations::CredentialAuth;
+    use lns_policy::connectors::CredentialAuth;
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
-    fn credential_integration(id: &str, env: &str) -> Integration {
-        Integration {
+    fn credential_connector(id: &str, env: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Credential,
@@ -89,8 +89,8 @@ mod tests {
         }
     }
 
-    fn oauth_integration(id: &str) -> Integration {
-        Integration {
+    fn oauth_connector(id: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Oauth,
@@ -103,8 +103,8 @@ mod tests {
 
     #[test]
     fn bind_prompt_discloses_the_injection_target_before_any_value_is_entered() {
-        let prompt = bind_prompt(&credential_integration("some-provider", "SOME_TOKEN"))
-            .expect("a credential integration is bindable");
+        let prompt = bind_prompt(&credential_connector("some-provider", "SOME_TOKEN"))
+            .expect("a credential connector is bindable");
         assert_eq!(prompt.credential_id, "some-provider");
         assert_eq!(prompt.env_var.as_deref(), Some("SOME_TOKEN"));
         assert_eq!(
@@ -115,11 +115,11 @@ mod tests {
     }
 
     #[test]
-    fn bind_prompt_refuses_an_oauth_or_blockless_integration() {
-        assert_eq!(bind_prompt(&oauth_integration("some-oauth")), None);
-        let blockless = Integration {
+    fn bind_prompt_refuses_an_oauth_or_blockless_connector() {
+        assert_eq!(bind_prompt(&oauth_connector("some-oauth")), None);
+        let blockless = Connector {
             credential: None,
-            ..credential_integration("some-blockless", "SOME_TOKEN")
+            ..credential_connector("some-blockless", "SOME_TOKEN")
         };
         assert_eq!(bind_prompt(&blockless), None);
     }
@@ -127,11 +127,11 @@ mod tests {
     #[test]
     fn bind_provider_wires_the_catalog_env_and_placeholder_for_host_detection() {
         use crate::credential_flow::providers::Provider;
-        let provider = bind_provider(&credential_integration("some-provider", "SOME_TOKEN"))
-            .expect("a credential integration detects through its provider");
+        let provider = bind_provider(&credential_connector("some-provider", "SOME_TOKEN"))
+            .expect("a credential connector detects through its provider");
         assert_eq!(provider.id(), "some-provider");
         assert_eq!(provider.env_var(), "SOME_TOKEN");
-        assert!(bind_provider(&oauth_integration("some-oauth")).is_none());
+        assert!(bind_provider(&oauth_connector("some-oauth")).is_none());
     }
 
     #[test]

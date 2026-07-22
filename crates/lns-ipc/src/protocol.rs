@@ -62,10 +62,10 @@ pub enum Request {
         new_name: String,
     },
     PruneRuns,
-    BeginIntegrationSignIn {
+    BeginConnectorSignIn {
         id: String,
     },
-    BindIntegrationCredential {
+    BindConnectorCredential {
         id: String,
     },
     ListVolumes,
@@ -278,7 +278,7 @@ pub struct SandboxView {
     #[serde(default)]
     pub filesets: Vec<SandboxFileset>,
     #[serde(default)]
-    pub integrations: Vec<String>,
+    pub connectors: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
@@ -470,7 +470,7 @@ pub struct RunImageArgs {
     /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
     #[serde(default)]
     pub verify_sandbox: bool,
-    /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, integrations, and resources apply.
+    /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, connectors, and resources apply.
     #[serde(default)]
     pub definition: Option<String>,
 }
@@ -1149,8 +1149,8 @@ mod tests {
     }
 
     #[test]
-    fn begin_integration_sign_in_survives_a_request_round_trip() {
-        let req = Request::BeginIntegrationSignIn {
+    fn begin_connector_sign_in_survives_a_request_round_trip() {
+        let req = Request::BeginConnectorSignIn {
             id: "some-oauth".into(),
         };
         let frame = crate::encode_frame(&req).unwrap();
@@ -1159,8 +1159,8 @@ mod tests {
     }
 
     #[test]
-    fn bind_integration_credential_survives_a_request_round_trip() {
-        let req = Request::BindIntegrationCredential {
+    fn bind_connector_credential_survives_a_request_round_trip() {
+        let req = Request::BindConnectorCredential {
             id: "some-provider".into(),
         };
         let frame = crate::encode_frame(&req).unwrap();
@@ -1348,7 +1348,7 @@ mod tests {
                 )),
                 mount_path: "/root/.agent/skills".into(),
             }],
-            integrations: Vec::new(),
+            connectors: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
             credentials: vec![SandboxCredential {
                 name: "some-provider".into(),

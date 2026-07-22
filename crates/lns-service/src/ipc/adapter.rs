@@ -152,8 +152,8 @@ async fn handle_connection(
         Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
-        Request::BeginIntegrationSignIn { id } => handle_integration_sign_in(stream, id).await,
-        Request::BindIntegrationCredential { id } => handle_credential_bind(stream, id).await,
+        Request::BeginConnectorSignIn { id } => handle_connector_sign_in(stream, id).await,
+        Request::BindConnectorCredential { id } => handle_credential_bind(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
     }
 }
@@ -218,10 +218,10 @@ async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()
     crate::run_log::stream_to(&buffer, &mut stream, true, tail).await
 }
 
-/// Drives an integration's interactive sign-in host-side, streaming its progress frames to the client and closing with the terminal response.
-async fn handle_integration_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
+/// Drives a connector's interactive sign-in host-side, streaming its progress frames to the client and closing with the terminal response.
+async fn handle_connector_sign_in(mut stream: UnixStream, id: String) -> anyhow::Result<()> {
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
-    let sign_in = run_integration_sign_in(&id, progress_tx);
+    let sign_in = run_connector_sign_in(&id, progress_tx);
     tokio::pin!(sign_in);
     let terminal = loop {
         tokio::select! {
@@ -248,7 +248,7 @@ async fn handle_credential_bind(mut stream: UnixStream, id: String) -> anyhow::R
 
 const CREDENTIAL_BIND_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Drive a credential integration's value decision through the approval window card and persist the outcome — a value, host-detect, or an explicit deny — to the per-machine store.
+/// Drive a credential connector's value decision through the approval window card and persist the outcome — a value, host-detect, or an explicit deny — to the per-machine store.
 async fn run_credential_bind(id: &str) -> Response {
     use crate::credential_flow::bind::{
         BindResolution, bind_prompt, bind_provider, resolve_bind_decision,
@@ -257,19 +257,19 @@ async fn run_credential_bind(id: &str) -> Response {
         CredentialStore, JsonFileCredentialStore, default_credentials_path,
     };
 
-    let user = lns_policy::integrations::Catalog::load_or_default(
-        &lns_policy::integrations::default_integrations_path(),
+    let user = lns_policy::connectors::Catalog::load_or_default(
+        &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let catalog = lns_policy::connectors::effective_connectors(&user);
     let Some(integ) = catalog.iter().find(|i| i.id == id) else {
         return Response::CredentialBindFailed {
-            reason: format!("{id:?} is not in this machine's integration catalog"),
+            reason: format!("{id:?} is not in this machine's connector catalog"),
         };
     };
     let Some(prompt) = bind_prompt(integ) else {
         return Response::CredentialBindFailed {
-            reason: format!("{id:?} is not a credential integration"),
+            reason: format!("{id:?} is not a credential connector"),
         };
     };
     // Fail fast instead of holding the CLI on a card a headless service can never show.
@@ -331,25 +331,25 @@ async fn run_credential_bind(id: &str) -> Response {
     }
 }
 
-/// Drive an integration's oauth sign-in host-side — dispatching on its `flow`, emitting progress via `progress`, persisting the obtained credential — and return the terminal response. Shared by the connect verb and the run launch gate.
-pub(crate) async fn run_integration_sign_in(
+/// Drive a connector's oauth sign-in host-side — dispatching on its `flow`, emitting progress via `progress`, persisting the obtained credential — and return the terminal response. Shared by the connect verb and the run launch gate.
+pub(crate) async fn run_connector_sign_in(
     id: &str,
     progress: tokio::sync::mpsc::UnboundedSender<Response>,
 ) -> Response {
-    use lns_policy::integrations::OauthFlow;
+    use lns_policy::connectors::OauthFlow;
 
-    let user = lns_policy::integrations::Catalog::load_or_default(
-        &lns_policy::integrations::default_integrations_path(),
+    let user = lns_policy::connectors::Catalog::load_or_default(
+        &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::integrations::effective_integrations(&user);
+    let catalog = lns_policy::connectors::effective_connectors(&user);
     let Some(oauth) = catalog
         .iter()
         .find(|i| i.id == id)
         .and_then(|i| i.oauth.as_ref())
     else {
         return Response::OauthSignInFailed {
-            reason: format!("{id:?} is not an oauth integration"),
+            reason: format!("{id:?} is not an oauth connector"),
         };
     };
     match oauth.flow {

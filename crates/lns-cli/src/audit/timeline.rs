@@ -41,8 +41,8 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
 }
 
 fn matches_filter(row: &TimelineRow, args: &AuditArgs) -> bool {
-    if let Some(integration) = &args.integration
-        && row.integration.as_deref() != Some(integration.as_str())
+    if let Some(connector) = &args.connector
+        && row.connector.as_deref() != Some(connector.as_str())
     {
         return false;
     }
@@ -271,7 +271,7 @@ mod tests {
     fn args() -> AuditArgs {
         AuditArgs {
             sandbox: None,
-            integration: None,
+            connector: None,
             kind: None,
             json: false,
         }
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn the_integration_filter_keeps_only_matching_ledger_events() {
+    fn the_connector_filter_keeps_only_matching_ledger_events() {
         let fix = Fixture::new();
         fix.write_run(
             RUN,
@@ -463,7 +463,7 @@ mod tests {
             credential_use(RUN, "2026-06-29T15:00:00Z"),
         ]);
         let filtered = AuditArgs {
-            integration: Some("some-oauth".into()),
+            connector: Some("some-oauth".into()),
             ..args()
         };
         let rows = fix.collect(&filtered).unwrap();

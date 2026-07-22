@@ -3,9 +3,9 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 
-use lns_policy::integrations::OauthAuth;
+use lns_policy::connectors::OauthAuth;
 
-/// The slice of an integration's oauth block the device flow needs to talk to the provider.
+/// The slice of a connector's oauth block the device flow needs to talk to the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OauthConfig {
     pub client_id: String,
@@ -90,7 +90,7 @@ pub trait UserInfoFetcher: Send + Sync {
     fn fetch<'a>(&'a self, url: &'a str, access_token: &'a str) -> BoxFuture<'a, Result<Vec<u8>>>;
 }
 
-/// The slice of an integration's oauth block the PKCE authorization-code flow needs.
+/// The slice of a connector's oauth block the PKCE authorization-code flow needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkceConfig {
     pub authorization_endpoint: String,

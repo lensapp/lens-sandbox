@@ -206,7 +206,7 @@ pub fn entry_from_token(clock: &dyn Clock, token: &TokenSet) -> CredentialEntry 
     }
 }
 
-/// Resolves the signed-in account from the integration's userinfo endpoint; best-effort, leaving `account` unset when the catalog declares no endpoint or the lookup fails.
+/// Resolves the signed-in account from the connector's userinfo endpoint; best-effort, leaving `account` unset when the catalog declares no endpoint or the lookup fails.
 pub async fn resolve_account(
     fetcher: &dyn UserInfoFetcher,
     cfg: &OauthConfig,

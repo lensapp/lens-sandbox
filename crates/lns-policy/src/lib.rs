@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod connectors;
 pub mod credentials;
 mod env_subst;
 pub mod host_bind_decisions;
-pub mod integrations;
 pub mod providers;
 pub mod registry_auth;
 mod secure_file;
@@ -20,7 +20,7 @@ pub struct Policy {
     #[serde(default)]
     pub network: NetworkPolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations: Vec<String>,
+    pub connectors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,15 +158,15 @@ impl Policy {
 
     pub fn connect(&mut self, id: impl Into<String>) {
         let id = id.into();
-        if !self.integrations.contains(&id) {
-            self.integrations.push(id);
+        if !self.connectors.contains(&id) {
+            self.connectors.push(id);
         }
     }
 
     pub fn disconnect(&mut self, id: &str) -> bool {
-        let before = self.integrations.len();
-        self.integrations.retain(|i| i != id);
-        self.integrations.len() != before
+        let before = self.connectors.len();
+        self.connectors.retain(|i| i != id);
+        self.connectors.len() != before
     }
 }
 
@@ -529,7 +529,7 @@ network:
     }
 
     #[test]
-    fn legacy_network_only_yaml_parses_with_empty_integrations() {
+    fn legacy_network_only_yaml_parses_with_empty_connectors() {
         let yaml = "\
 network:
   allowedRoutes: []
@@ -537,25 +537,25 @@ network:
   defaultTransport: direct
 ";
         let p: Policy = serde_yaml::from_str(yaml).unwrap();
-        assert!(p.integrations.is_empty());
+        assert!(p.connectors.is_empty());
     }
 
     #[test]
-    fn default_policy_omits_the_integrations_key() {
+    fn default_policy_omits_the_connectors_key() {
         let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
         assert!(
-            !yaml.contains("integrations"),
-            "an empty integrations list must not clutter the shareable file:\n{yaml}"
+            !yaml.contains("connectors"),
+            "an empty connectors list must not clutter the shareable file:\n{yaml}"
         );
     }
 
     #[test]
-    fn policy_with_integrations_yaml_roundtrip_is_lossless() {
+    fn policy_with_connectors_yaml_roundtrip_is_lossless() {
         let mut p = Policy::default();
         p.connect("gitlab");
         p.connect("acme");
         let yaml = serde_yaml::to_string(&p).unwrap();
-        assert!(yaml.contains("integrations"), "got:\n{yaml}");
+        assert!(yaml.contains("connectors"), "got:\n{yaml}");
         let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(p, parsed);
     }
@@ -578,16 +578,16 @@ credentials:
 ";
         let p: Policy = serde_yaml::from_str(yaml).unwrap();
         assert!(
-            p.integrations.is_empty(),
+            p.connectors.is_empty(),
             "the now-unknown credentials section is ignored, not an error"
         );
     }
 
     #[test]
-    fn connect_adds_an_integration_id() {
+    fn connect_adds_an_connector_id() {
         let mut p = Policy::default();
         p.connect("github");
-        assert_eq!(p.integrations, ["github"]);
+        assert_eq!(p.connectors, ["github"]);
     }
 
     #[test]
@@ -595,16 +595,16 @@ credentials:
         let mut p = Policy::default();
         p.connect("github");
         p.connect("github");
-        assert_eq!(p.integrations, ["github"]);
+        assert_eq!(p.connectors, ["github"]);
     }
 
     #[test]
-    fn disconnect_removes_an_applied_integration_and_reports_true() {
+    fn disconnect_removes_an_applied_connector_and_reports_true() {
         let mut p = Policy::default();
         p.connect("github");
         p.connect("gitlab");
         assert!(p.disconnect("github"));
-        assert_eq!(p.integrations, ["gitlab"]);
+        assert_eq!(p.connectors, ["gitlab"]);
     }
 
     #[test]
@@ -612,6 +612,6 @@ credentials:
         let mut p = Policy::default();
         p.connect("gitlab");
         assert!(!p.disconnect("github"));
-        assert_eq!(p.integrations, ["gitlab"]);
+        assert_eq!(p.connectors, ["gitlab"]);
     }
 }

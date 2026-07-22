@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use lns_artifact::build::BuiltArtifact;
 
 use super::author::Fs;
-use crate::integration::LocalBoxFuture;
+use crate::connector::LocalBoxFuture;
 
 /// Builds a sandbox definition into an OCI artifact and uploads it, returning the pushed manifest digest; the real impl reuses the `lns login` credential, a fake drives the push scenarios offline.
 pub trait Producer {

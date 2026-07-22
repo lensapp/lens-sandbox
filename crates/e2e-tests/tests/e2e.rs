@@ -25,10 +25,10 @@ pub struct E2eWorld {
     pub pushed_ref: Option<String>,
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,
-    pub project_integrations: Vec<String>,
+    pub project_connectors: Vec<String>,
     pub project_command: Option<String>,
     pub project_env: Vec<(String, String)>,
-    /// Credential slots the project definition declares, as (integration id, env target, required).
+    /// Credential slots the project definition declares, as (connector id, env target, required).
     pub project_credentials: Vec<(String, String, bool)>,
     /// Ports the project definition declares, as (host, container).
     pub project_ports: Vec<(Option<u16>, u16)>,

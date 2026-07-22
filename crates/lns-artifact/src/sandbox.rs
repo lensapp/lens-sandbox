@@ -64,7 +64,7 @@ impl Volume {
     }
 }
 
-/// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the integration ids it needs.
+/// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the connector ids it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpec {
@@ -81,7 +81,7 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub policy: NetworkPolicy,
     #[serde(default)]
-    pub integrations: Vec<String>,
+    pub connectors: Vec<String>,
     #[serde(default)]
     pub credentials: Vec<CredentialSlot>,
     #[serde(default)]
@@ -180,14 +180,14 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             bail!("duplicate volume target {}", volume.target);
         }
     }
-    for integration in &doc.spec.integrations {
-        if !spec::is_valid_name(integration) {
-            bail!("invalid integration id {integration:?}");
+    for connector in &doc.spec.connectors {
+        if !spec::is_valid_name(connector) {
+            bail!("invalid connector id {connector:?}");
         }
     }
     for slot in &doc.spec.credentials {
         if !spec::is_valid_name(&slot.name) {
-            bail!("invalid credential integration id {:?}", slot.name);
+            bail!("invalid credential connector id {:?}", slot.name);
         }
         if slot.env.trim().is_empty() {
             bail!(
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","allowedRoutes":[{"match":"api.example.test","verdict":"allow"}]},"integrations":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","allowedRoutes":[{"match":"api.example.test","verdict":"allow"}]},"connectors":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
         assert_eq!(def.metadata.name, "hermes");
@@ -388,7 +388,7 @@ mod tests {
         );
         assert_eq!(def.spec.policy.default_verdict, Verdict::Deny);
         assert_eq!(def.spec.policy.allowed_routes.len(), 1);
-        assert_eq!(def.spec.integrations, vec!["some-provider".to_string()]);
+        assert_eq!(def.spec.connectors, vec!["some-provider".to_string()]);
         assert_eq!(def.spec.credentials[0].env, "SOME_TOKEN");
         assert_eq!(def.spec.volumes[0].source(), ".");
         assert!(def.spec.volumes[0].is_bind());
@@ -402,7 +402,7 @@ mod tests {
         let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
         assert_eq!(def.spec.policy.default_verdict, Verdict::Ask);
         assert_eq!(def.spec.policy.default_transport, Transport::Direct);
-        assert!(def.spec.integrations.is_empty());
+        assert!(def.spec.connectors.is_empty());
     }
 
     #[test]
@@ -810,22 +810,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_an_invalid_integration_id() {
-        let err = parse(&def_json(r#"{"image":"x:1","integrations":["Bad_Id"]}"#)).unwrap_err();
+    fn parse_rejects_an_invalid_connector_id() {
+        let err = parse(&def_json(r#"{"image":"x:1","connectors":["Bad_Id"]}"#)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("invalid integration id"),
+            format!("{err:#}").contains("invalid connector id"),
             "got: {err:#}"
         );
     }
 
     #[test]
-    fn parse_rejects_an_invalid_credential_slot_integration_id() {
+    fn parse_rejects_an_invalid_credential_slot_connector_id() {
         let err = parse(&def_json(
             r#"{"image":"x:1","credentials":[{"name":"Bad_Id","env":"SOME_TOKEN"}]}"#,
         ))
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("invalid credential integration id"),
+            format!("{err:#}").contains("invalid credential connector id"),
             "got: {err:#}"
         );
     }

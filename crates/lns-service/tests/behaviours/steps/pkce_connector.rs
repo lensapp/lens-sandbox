@@ -21,14 +21,14 @@ fn last_decision_kind(world: &mut BehaviourWorld) -> Option<CredentialDecisionKi
 }
 
 #[given(
-    regex = r#"^an unconnected "([^"]+)" oauth integration using the pkce flow whose sign-in will complete$"#
+    regex = r#"^an unconnected "([^"]+)" oauth connector using the pkce flow whose sign-in will complete$"#
 )]
 fn given_pkce_completes(world: &mut BehaviourWorld, id: String) {
     world.credential = Some(CredentialRig::pkce(&id, RigPkce::Completes));
     world.oauth_id = Some(id);
 }
 
-#[given(regex = r#"^an unconnected "([^"]+)" oauth integration using the pkce flow$"#)]
+#[given(regex = r#"^an unconnected "([^"]+)" oauth connector using the pkce flow$"#)]
 fn given_pkce_cancellable(world: &mut BehaviourWorld, id: String) {
     world.credential = Some(CredentialRig::pkce(&id, RigPkce::Cancelled));
     world.oauth_id = Some(id);
@@ -36,13 +36,13 @@ fn given_pkce_cancellable(world: &mut BehaviourWorld, id: String) {
     world.spawn_connect = true;
 }
 
-#[given(regex = r#"^an unconnected "([^"]+)" oauth integration whose callback never arrives$"#)]
+#[given(regex = r#"^an unconnected "([^"]+)" oauth connector whose callback never arrives$"#)]
 fn given_pkce_never_arrives(world: &mut BehaviourWorld, id: String) {
     world.credential = Some(CredentialRig::pkce(&id, RigPkce::NeverArrives));
     world.oauth_id = Some(id);
 }
 
-#[given(regex = r#"^an unconnected "([^"]+)" oauth integration whose code exchange will fail$"#)]
+#[given(regex = r#"^an unconnected "([^"]+)" oauth connector whose code exchange will fail$"#)]
 fn given_pkce_exchange_fails(world: &mut BehaviourWorld, id: String) {
     world.credential = Some(CredentialRig::pkce(&id, RigPkce::ExchangeFails));
     world.oauth_id = Some(id);
@@ -107,7 +107,7 @@ fn given_pkce_connected(world: &mut BehaviourWorld, id: String) {
 
 #[when(regex = r#"^a new run starts and a workload request carries the "([^"]+)" placeholder$"#)]
 fn when_new_run_carries_placeholder(world: &mut BehaviourWorld, id: String) {
-    // The pkce_connected rig injects this integration on api.some-pkce.example, so the request must target that host.
+    // The pkce_connected rig injects this connector on api.some-pkce.example, so the request must target that host.
     let pending = CredentialPending {
         id: prompt_id(&id),
         credential_id: id,

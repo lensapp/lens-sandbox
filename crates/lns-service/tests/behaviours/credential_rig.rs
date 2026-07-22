@@ -221,7 +221,7 @@ impl Clock for FixedClock {
 }
 
 impl CredentialRig {
-    /// A rig whose session is wired with one connectable oauth integration `id` and a device flow scripted to `outcome`.
+    /// A rig whose session is wired with one connectable oauth connector `id` and a device flow scripted to `outcome`.
     pub fn oauth(id: &str, outcome: RigSignIn) -> Self {
         let dir = TempDir::new().expect("create tempdir");
         let credentials_path = dir.path().join("lns-credentials.json");
@@ -432,7 +432,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
 }
 
 impl CredentialRig {
-    /// A rig whose session is wired with one connectable pkce integration `id` and a fake authorization-code flow + loopback listener scripted to `outcome`.
+    /// A rig whose session is wired with one connectable pkce connector `id` and a fake authorization-code flow + loopback listener scripted to `outcome`.
     pub fn pkce(id: &str, outcome: RigPkce) -> Self {
         let (exchange, callback, pkce_timeout): (anyhow::Result<String>, RigCallback, Duration) =
             match outcome {

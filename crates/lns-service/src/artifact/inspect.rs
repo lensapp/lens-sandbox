@@ -20,7 +20,7 @@ fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc
         .collect()
 }
 
-/// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared integrations, and any over-broad-policy flags.
+/// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared connectors, and any over-broad-policy flags.
 pub(crate) fn project_inspection(
     image_ref: &str,
     digest: String,
@@ -69,7 +69,7 @@ pub(crate) fn project_inspection(
                             mount_path: fileset.mount_path.clone(),
                         })
                         .collect(),
-                    integrations: def.spec.integrations,
+                    connectors: def.spec.connectors,
                     env: def
                         .spec
                         .env
@@ -214,7 +214,7 @@ mod tests {
                     ),
                     mount_path: "/root/.agent/skills".into(),
                 }],
-                integrations: vec![],
+                connectors: vec![],
                 env: vec![],
                 credentials: vec![],
                 policy_flags: vec![
@@ -240,7 +240,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
-                integrations: vec![],
+                connectors: vec![],
                 env: vec![],
                 credentials: vec![SandboxCredential {
                     name: "some-provider".into(),
@@ -268,7 +268,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
-                integrations: vec![],
+                connectors: vec![],
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
                 credentials: vec![],
                 policy_flags: vec![],

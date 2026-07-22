@@ -1,31 +1,31 @@
 use std::collections::{HashMap, HashSet};
 
-use lns_policy::integrations::{AuthKind, Integration, OauthAuth, OauthFlow};
+use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule, Verdict};
 
 use crate::credential_flow::providers::DefProvider;
 
-/// The wire providers, routes, and (for oauth entries) device-flow / pkce configs a run's applied integrations contribute.
+/// The wire providers, routes, and (for oauth entries) device-flow / pkce configs a run's applied connectors contribute.
 #[derive(Default)]
-pub struct AppliedIntegrations {
+pub struct AppliedConnectors {
     pub providers: Vec<DefProvider>,
     pub routes: Vec<RouteRule>,
     pub oauth_configs: HashMap<String, OauthAuth>,
     pub pkce_configs: HashMap<String, OauthAuth>,
 }
 
-/// Catalog integrations that aren't yet connected: seeded unarmed for detection, with their routes held ready to allow live on connect, and device-flow / pkce configs for a sign-in dance on connect.
+/// Catalog connectors that aren't yet connected: seeded unarmed for detection, with their routes held ready to allow live on connect, and device-flow / pkce configs for a sign-in dance on connect.
 #[derive(Default)]
-pub struct ConnectableIntegrations {
+pub struct ConnectableConnectors {
     pub providers: Vec<DefProvider>,
     pub routes: HashMap<String, Vec<RouteRule>>,
     pub oauth_configs: HashMap<String, OauthAuth>,
     pub pkce_configs: HashMap<String, OauthAuth>,
 }
 
-/// The env/placeholder/injection wiring an integration seeds, taken from whichever block its authKind carries.
-fn wire_provider_def(integ: &Integration) -> Option<ProviderDef> {
+/// The env/placeholder/injection wiring a connector seeds, taken from whichever block its authKind carries.
+fn wire_provider_def(integ: &Connector) -> Option<ProviderDef> {
     let (env_var, placeholder, injections) = match integ.auth_kind {
         AuthKind::Credential => {
             let c = integ.credential.as_ref()?;
@@ -44,27 +44,27 @@ fn wire_provider_def(integ: &Integration) -> Option<ProviderDef> {
     })
 }
 
-fn wire_provider(integ: &Integration) -> Option<DefProvider> {
+fn wire_provider(integ: &Connector) -> Option<DefProvider> {
     wire_provider_def(integ).map(DefProvider::new)
 }
 
 /// The oauth block usable for a device sign-in: the device flow with a client_id baked in (community builds ship none, so they fall back to the token paste).
-fn signin_oauth(integ: &Integration) -> Option<&OauthAuth> {
+fn signin_oauth(integ: &Connector) -> Option<&OauthAuth> {
     integ.oauth.as_ref().filter(|o| {
         o.flow == OauthFlow::Device && o.client_id.as_deref().is_some_and(|c| !c.is_empty())
     })
 }
 
 /// The oauth block usable for a pkce browser sign-in: the pkce flow with an authorization endpoint to redirect through.
-fn signin_pkce(integ: &Integration) -> Option<&OauthAuth> {
+fn signin_pkce(integ: &Connector) -> Option<&OauthAuth> {
     integ
         .oauth
         .as_ref()
         .filter(|o| o.flow == OauthFlow::Pkce && o.authorization_endpoint.is_some())
 }
 
-/// The allow-routes a set of connected integration ids contributes, re-derived from the catalog so boot and a watcher reload reconstruct the same live routes from an id-only policy.
-pub fn applied_integration_routes(ids: &[String], catalog: &[Integration]) -> Vec<RouteRule> {
+/// The allow-routes a set of connected connector ids contributes, re-derived from the catalog so boot and a watcher reload reconstruct the same live routes from an id-only policy.
+pub fn applied_connector_routes(ids: &[String], catalog: &[Connector]) -> Vec<RouteRule> {
     let applied: HashSet<&str> = ids.iter().map(String::as_str).collect();
     catalog
         .iter()
@@ -74,7 +74,7 @@ pub fn applied_integration_routes(ids: &[String], catalog: &[Integration]) -> Ve
 }
 
 /// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-policy.yaml` id which stays a tolerant skip.
-pub fn unknown_integration_ids(declared: &[String], catalog: &[Integration]) -> Vec<String> {
+pub fn unknown_connector_ids(declared: &[String], catalog: &[Connector]) -> Vec<String> {
     let known: HashSet<&str> = catalog.iter().map(|i| i.id.as_str()).collect();
     declared
         .iter()
@@ -83,29 +83,26 @@ pub fn unknown_integration_ids(declared: &[String], catalog: &[Integration]) -> 
         .collect()
 }
 
-/// The launch-refusal message for definition-declared ids missing from the machine catalog, pointing at `lns integration add`.
-pub fn unknown_integrations_refusal(unknown: &[String]) -> String {
+/// The launch-refusal message for definition-declared ids missing from the machine catalog, pointing at `lns connector add`.
+pub fn unknown_connectors_refusal(unknown: &[String]) -> String {
     let ids = unknown
         .iter()
         .map(|id| format!("\"{id}\""))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "the sandbox definition declares integration {ids} which this machine's catalog does not know; \
-         declare it with `lns integration add`, or remove it from spec.integrations"
+        "the sandbox definition declares connector {ids} which this machine's catalog does not know; \
+         declare it with `lns connector add`, or remove it from spec.connectors"
     )
 }
 
-/// Resolves the policy's applied integration ids against the effective catalog.
-pub fn resolve_applied_integrations(
-    policy: &Policy,
-    catalog: &[Integration],
-) -> AppliedIntegrations {
-    let applied: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
+/// Resolves the policy's applied connector ids against the effective catalog.
+pub fn resolve_applied_connectors(policy: &Policy, catalog: &[Connector]) -> AppliedConnectors {
+    let applied: HashSet<&str> = policy.connectors.iter().map(String::as_str).collect();
 
-    let mut out = AppliedIntegrations {
-        routes: applied_integration_routes(&policy.integrations, catalog),
-        ..AppliedIntegrations::default()
+    let mut out = AppliedConnectors {
+        routes: applied_connector_routes(&policy.connectors, catalog),
+        ..AppliedConnectors::default()
     };
     for integ in catalog {
         if !applied.contains(integ.id.as_str()) {
@@ -124,17 +121,16 @@ pub fn resolve_applied_integrations(
     out
 }
 
-/// A definition's credential slots resolve like declared integrations, with each slot's env name overriding the catalog default and winning over a same-id declared entry so the remap holds.
+/// A definition's credential slots resolve like declared connectors, with each slot's env name overriding the catalog default and winning over a same-id declared entry so the remap holds.
 pub fn resolve_applied_with_slots(
     policy: &Policy,
     slots: &[lns_artifact::spec::CredentialSlot],
-    catalog: &[Integration],
-) -> AppliedIntegrations {
+    catalog: &[Connector],
+) -> AppliedConnectors {
     let slot_ids: HashSet<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     let mut base = policy.clone();
-    base.integrations
-        .retain(|id| !slot_ids.contains(id.as_str()));
-    let mut out = resolve_applied_integrations(&base, catalog);
+    base.connectors.retain(|id| !slot_ids.contains(id.as_str()));
+    let mut out = resolve_applied_connectors(&base, catalog);
     let ceiling_denies = policy.network.default_verdict == Verdict::Deny;
     for slot in slots {
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
@@ -159,16 +155,16 @@ pub fn resolve_applied_with_slots(
     out
 }
 
-/// A slot's integration is already reachable through the definition, so it is never offered as a fresh connect.
+/// A slot's connector is already reachable through the definition, so it is never offered as a fresh connect.
 pub fn resolve_connectable_with_slots(
     policy: &Policy,
     slots: &[lns_artifact::spec::CredentialSlot],
     declared: &[String],
-    catalog: &[Integration],
-) -> ConnectableIntegrations {
+    catalog: &[Connector],
+) -> ConnectableConnectors {
     let mut owned = policy.clone();
     owned
-        .integrations
+        .connectors
         .extend(slots.iter().map(|s| s.name.clone()));
     resolve_connectable_with_declared(&owned, declared, catalog)
 }
@@ -179,8 +175,8 @@ fn domains_overlap(a: &str, b: &str) -> bool {
     host_matches_pattern(a, b) || host_matches_pattern(b, a)
 }
 
-/// Every domain an integration claims: its route patterns plus the domains its credential/oauth injections actually write a token onto (a custom catalog may inject on a domain it doesn't route).
-fn claimed_domains(integ: &Integration) -> impl Iterator<Item = &str> {
+/// Every domain a connector claims: its route patterns plus the domains its credential/oauth injections actually write a token onto (a custom catalog may inject on a domain it doesn't route).
+fn claimed_domains(integ: &Connector) -> impl Iterator<Item = &str> {
     integ
         .routes
         .iter()
@@ -199,28 +195,28 @@ fn claimed_domains(integ: &Integration) -> impl Iterator<Item = &str> {
         )
 }
 
-/// The catalog integrations a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied integration's domain.
-pub fn resolve_connectable_integrations(
+/// The catalog connectors a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied connector's domain.
+pub fn resolve_connectable_connectors(
     policy: &Policy,
-    catalog: &[Integration],
-) -> ConnectableIntegrations {
+    catalog: &[Connector],
+) -> ConnectableConnectors {
     resolve_connectable_with_declared(policy, &[], catalog)
 }
 
-/// Connectables minus any colliding with a domain already spoken for — by an applied credential (`policy.integrations`) or by an artifact-declared, offered-not-armed integration (`declared`) — so a colliding entry's machine-global stored value can never inject over the credential that owns that domain (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
+/// Connectables minus any colliding with a domain already spoken for — by an applied credential (`policy.connectors`) or by an artifact-declared, offered-not-armed connector (`declared`) — so a colliding entry's machine-global stored value can never inject over the credential that owns that domain (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
 fn resolve_connectable_with_declared(
     policy: &Policy,
     declared: &[String],
-    catalog: &[Integration],
-) -> ConnectableIntegrations {
-    let owned: HashSet<&str> = policy.integrations.iter().map(String::as_str).collect();
+    catalog: &[Connector],
+) -> ConnectableConnectors {
+    let owned: HashSet<&str> = policy.connectors.iter().map(String::as_str).collect();
     let protected: HashSet<&str> = owned
         .iter()
         .copied()
         .chain(declared.iter().map(String::as_str))
         .collect();
 
-    let mut out = ConnectableIntegrations::default();
+    let mut out = ConnectableConnectors::default();
     for integ in catalog {
         if owned.contains(integ.id.as_str()) {
             continue;
@@ -260,15 +256,15 @@ fn resolve_connectable_with_declared(
 mod tests {
     use super::*;
     use crate::credential_flow::providers::Provider;
-    use lns_policy::integrations::{CredentialAuth, IntegrationRoute, OauthAuth, OauthFlow};
+    use lns_policy::connectors::{ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
-    fn cred_integration(id: &str, env_var: &str, domain: &str) -> Integration {
-        Integration {
+    fn cred_connector(id: &str, env_var: &str, domain: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Credential,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
                 scheme: None,
@@ -291,15 +287,15 @@ mod tests {
 
     fn policy_applying(ids: &[&str]) -> Policy {
         Policy {
-            integrations: ids.iter().map(|s| s.to_string()).collect(),
+            connectors: ids.iter().map(|s| s.to_string()).collect(),
             ..Policy::default()
         }
     }
 
     #[test]
-    fn resolves_an_applied_credential_integration_into_a_provider_and_its_routes() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let out = resolve_applied_integrations(&policy_applying(&["gitlab"]), &catalog);
+    fn resolves_an_applied_credential_connector_into_a_provider_and_its_routes() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let out = resolve_applied_connectors(&policy_applying(&["gitlab"]), &catalog);
         assert_eq!(out.providers.len(), 1);
         assert_eq!(out.providers[0].id(), "gitlab");
         assert_eq!(out.providers[0].env_var(), "GITLAB_TOKEN");
@@ -309,8 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_integration_ids_reports_only_ids_the_catalog_lacks_in_order() {
-        let catalog = vec![cred_integration(
+    fn unknown_connector_ids_reports_only_ids_the_catalog_lacks_in_order() {
+        let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
@@ -321,49 +317,49 @@ mod tests {
             "other-unknown".to_string(),
         ];
         assert_eq!(
-            unknown_integration_ids(&declared, &catalog),
+            unknown_connector_ids(&declared, &catalog),
             vec!["some-unknown".to_string(), "other-unknown".to_string()]
         );
-        assert!(unknown_integration_ids(&["some-provider".to_string()], &catalog).is_empty());
+        assert!(unknown_connector_ids(&["some-provider".to_string()], &catalog).is_empty());
     }
 
     #[test]
-    fn unknown_integrations_refusal_names_each_id_and_lns_integration_add() {
-        let msg = unknown_integrations_refusal(&["some-unknown".to_string(), "other".to_string()]);
+    fn unknown_connectors_refusal_names_each_id_and_lns_connector_add() {
+        let msg = unknown_connectors_refusal(&["some-unknown".to_string(), "other".to_string()]);
         assert!(msg.contains("\"some-unknown\""), "got: {msg}");
         assert!(msg.contains("\"other\""), "got: {msg}");
-        assert!(msg.contains("`lns integration add`"), "got: {msg}");
+        assert!(msg.contains("`lns connector add`"), "got: {msg}");
     }
 
     #[test]
-    fn skips_a_catalog_integration_that_is_not_applied() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let out = resolve_applied_integrations(&policy_applying(&[]), &catalog);
+    fn skips_a_catalog_connector_that_is_not_applied() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let out = resolve_applied_connectors(&policy_applying(&[]), &catalog);
         assert!(out.providers.is_empty());
         assert!(out.routes.is_empty());
     }
 
     #[test]
-    fn applied_integration_routes_maps_connected_ids_to_their_catalog_routes() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let routes = applied_integration_routes(&["gitlab".to_string()], &catalog);
+    fn applied_connector_routes_maps_connected_ids_to_their_catalog_routes() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let routes = applied_connector_routes(&["gitlab".to_string()], &catalog);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].match_pattern, "gitlab.com");
         assert_eq!(routes[0].verdict, lns_policy::Verdict::Allow);
     }
 
     #[test]
-    fn applied_integration_routes_ignores_ids_absent_from_the_catalog() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        assert!(applied_integration_routes(&["nope".to_string()], &catalog).is_empty());
+    fn applied_connector_routes_ignores_ids_absent_from_the_catalog() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        assert!(applied_connector_routes(&["nope".to_string()], &catalog).is_empty());
     }
 
-    fn oauth_integration(id: &str, env_var: &str, domain: &str) -> Integration {
-        Integration {
+    fn oauth_connector(id: &str, env_var: &str, domain: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
                 scheme: None,
@@ -393,12 +389,12 @@ mod tests {
         }
     }
 
-    fn pkce_integration(id: &str, env_var: &str, domain: &str) -> Integration {
-        Integration {
+    fn pkce_connector(id: &str, env_var: &str, domain: &str) -> Connector {
+        Connector {
             id: id.into(),
             name: None,
             auth_kind: AuthKind::Oauth,
-            routes: vec![IntegrationRoute {
+            routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
                 scheme: None,
@@ -429,23 +425,23 @@ mod tests {
     }
 
     #[test]
-    fn an_applied_oauth_integration_contributes_a_provider_routes_and_its_oauth_config() {
-        let catalog = vec![oauth_integration(
+    fn an_applied_oauth_connector_contributes_a_provider_routes_and_its_oauth_config() {
+        let catalog = vec![oauth_connector(
             "somesaas",
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_integrations(&policy_applying(&["somesaas"]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(
             ids,
             ["somesaas"],
-            "an oauth integration seeds its placeholder like any provider"
+            "an oauth connector seeds its placeholder like any provider"
         );
         assert_eq!(
             out.routes.len(),
             1,
-            "an integration's routes apply regardless of auth kind"
+            "a connector's routes apply regardless of auth kind"
         );
         assert!(
             out.oauth_configs.contains_key("somesaas"),
@@ -456,30 +452,30 @@ mod tests {
     #[test]
     fn resolves_only_the_applied_subset_of_a_multi_entry_catalog() {
         let catalog = vec![
-            cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com"),
-            cred_integration("huggingface", "HF_TOKEN", "huggingface.co"),
+            cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com"),
+            cred_connector("huggingface", "HF_TOKEN", "huggingface.co"),
         ];
-        let out = resolve_applied_integrations(&policy_applying(&["huggingface"]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&["huggingface"]), &catalog);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(ids, ["huggingface"]);
     }
 
     #[test]
-    fn connectable_includes_an_unconnected_catalog_credential_integration() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+    fn connectable_includes_an_unconnected_catalog_credential_connector() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let c = resolve_connectable_connectors(&policy_applying(&[]), &catalog);
         assert_eq!(c.providers.len(), 1);
         assert_eq!(c.providers[0].id(), "gitlab");
         assert_eq!(c.routes.get("gitlab").map(|r| r.len()), Some(1));
     }
 
     #[test]
-    fn connectable_excludes_an_already_applied_integration() {
-        let catalog = vec![cred_integration("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let c = resolve_connectable_integrations(&policy_applying(&["gitlab"]), &catalog);
+    fn connectable_excludes_an_already_applied_connector() {
+        let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
+        let c = resolve_connectable_connectors(&policy_applying(&["gitlab"]), &catalog);
         assert!(
             c.providers.is_empty(),
-            "an applied integration is not connectable"
+            "an applied connector is not connectable"
         );
         assert!(c.routes.is_empty());
     }
@@ -487,13 +483,13 @@ mod tests {
     #[test]
     fn connectable_excludes_a_catalog_entry_that_collides_with_an_applied_domain() {
         let catalog = vec![
-            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
-            cred_integration("some-other", "OTHER_TOKEN", "api.example.test"),
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-other", "OTHER_TOKEN", "api.example.test"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert!(
             c.providers.is_empty(),
-            "a connectable that shares the applied integration's domain must be suppressed so its machine-global stored value can't inject over the declared credential"
+            "a connectable that shares the applied connector's domain must be suppressed so its machine-global stored value can't inject over the declared credential"
         );
         assert!(c.routes.is_empty());
     }
@@ -501,19 +497,19 @@ mod tests {
     #[test]
     fn connectable_excludes_an_entry_whose_wildcard_covers_an_applied_domain() {
         let catalog = vec![
-            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
-            cred_integration("some-wild", "WILD_TOKEN", "*.example.test"),
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-wild", "WILD_TOKEN", "*.example.test"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert!(
             c.providers.is_empty(),
-            "a connectable whose wildcard covers the applied integration's host must be suppressed, not just a byte-identical pattern"
+            "a connectable whose wildcard covers the applied connector's host must be suppressed, not just a byte-identical pattern"
         );
     }
 
     #[test]
     fn connectable_excludes_an_entry_colliding_with_an_applied_injection_domain() {
-        let mut applied = cred_integration(
+        let mut applied = cred_connector(
             "some-primary",
             "PRIMARY_TOKEN",
             "login.some-primary.example",
@@ -522,22 +518,22 @@ mod tests {
             "api.some-provider.example".into();
         let catalog = vec![
             applied,
-            cred_integration("some-other", "OTHER_TOKEN", "api.some-provider.example"),
+            cred_connector("some-other", "OTHER_TOKEN", "api.some-provider.example"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert!(
             c.providers.is_empty(),
-            "a connectable sharing the applied integration's injection domain must be suppressed even when that domain is not among its declared routes"
+            "a connectable sharing the applied connector's injection domain must be suppressed even when that domain is not among its declared routes"
         );
     }
 
     #[test]
     fn connectable_excludes_a_case_variant_of_an_applied_domain() {
         let catalog = vec![
-            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
-            cred_integration("some-upper", "UPPER_TOKEN", "API.Example.Test"),
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-upper", "UPPER_TOKEN", "API.Example.Test"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert!(
             c.providers.is_empty(),
             "host matching is case-insensitive, so a case-variant of the applied domain must be suppressed"
@@ -545,12 +541,12 @@ mod tests {
     }
 
     #[test]
-    fn connectable_on_a_distinct_wildcard_domain_survives_an_applied_integration() {
+    fn connectable_on_a_distinct_wildcard_domain_survives_an_applied_connector() {
         let catalog = vec![
-            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
-            cred_integration("some-wild", "WILD_TOKEN", "*.other.test"),
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-wild", "WILD_TOKEN", "*.other.test"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert_eq!(
             c.providers.len(),
             1,
@@ -560,32 +556,32 @@ mod tests {
     }
 
     #[test]
-    fn connectable_on_a_distinct_domain_survives_an_applied_integration() {
+    fn connectable_on_a_distinct_domain_survives_an_applied_connector() {
         let catalog = vec![
-            cred_integration("some-primary", "PRIMARY_TOKEN", "api.example.test"),
-            cred_integration("some-other", "OTHER_TOKEN", "api.other.test"),
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-other", "OTHER_TOKEN", "api.other.test"),
         ];
-        let c = resolve_connectable_integrations(&policy_applying(&["some-primary"]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&["some-primary"]), &catalog);
         assert_eq!(
             c.providers.len(),
             1,
-            "a connectable on its own domain is unaffected by an applied integration elsewhere"
+            "a connectable on its own domain is unaffected by an applied connector elsewhere"
         );
         assert_eq!(c.providers[0].id(), "some-other");
     }
 
     #[test]
-    fn connectable_includes_an_unconnected_oauth_integration_with_its_config() {
-        let catalog = vec![oauth_integration(
+    fn connectable_includes_an_unconnected_oauth_connector_with_its_config() {
+        let catalog = vec![oauth_connector(
             "somesaas",
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&[]), &catalog);
         assert_eq!(
             c.providers.len(),
             1,
-            "an unconnected oauth integration is offerable"
+            "an unconnected oauth connector is offerable"
         );
         assert_eq!(c.providers[0].id(), "somesaas");
         assert_eq!(c.routes.get("somesaas").map(|r| r.len()), Some(1));
@@ -596,19 +592,15 @@ mod tests {
     }
 
     #[test]
-    fn an_applied_pkce_integration_contributes_a_provider_routes_and_its_pkce_config() {
-        let catalog = vec![pkce_integration(
+    fn an_applied_pkce_connector_contributes_a_provider_routes_and_its_pkce_config() {
+        let catalog = vec![pkce_connector(
             "somepkce",
             "SOMEPKCE_TOKEN",
             "api.somepkce.com",
         )];
-        let out = resolve_applied_integrations(&policy_applying(&["somepkce"]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&["somepkce"]), &catalog);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
-        assert_eq!(
-            ids,
-            ["somepkce"],
-            "a pkce integration seeds its placeholder"
-        );
+        assert_eq!(ids, ["somepkce"], "a pkce connector seeds its placeholder");
         assert_eq!(out.routes.len(), 1, "its routes apply");
         assert!(
             out.pkce_configs.contains_key("somepkce"),
@@ -621,13 +613,13 @@ mod tests {
     }
 
     #[test]
-    fn an_applied_device_oauth_integration_is_not_wired_as_pkce() {
-        let catalog = vec![oauth_integration(
+    fn an_applied_device_oauth_connector_is_not_wired_as_pkce() {
+        let catalog = vec![oauth_connector(
             "somesaas",
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_integrations(&policy_applying(&["somesaas"]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
         assert!(out.oauth_configs.contains_key("somesaas"));
         assert!(
             out.pkce_configs.is_empty(),
@@ -636,13 +628,13 @@ mod tests {
     }
 
     #[test]
-    fn connectable_includes_an_unconnected_pkce_integration_with_its_config() {
-        let catalog = vec![pkce_integration(
+    fn connectable_includes_an_unconnected_pkce_connector_with_its_config() {
+        let catalog = vec![pkce_connector(
             "somepkce",
             "SOMEPKCE_TOKEN",
             "api.somepkce.com",
         )];
-        let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&[]), &catalog);
         assert_eq!(c.providers.len(), 1);
         assert_eq!(c.providers[0].id(), "somepkce");
         assert!(
@@ -652,21 +644,21 @@ mod tests {
         assert!(c.oauth_configs.is_empty());
     }
 
-    fn oauth_integration_without_client_id(id: &str, env_var: &str, domain: &str) -> Integration {
-        let mut i = oauth_integration(id, env_var, domain);
+    fn oauth_connector_without_client_id(id: &str, env_var: &str, domain: &str) -> Connector {
+        let mut i = oauth_connector(id, env_var, domain);
         i.oauth.as_mut().unwrap().client_id = None;
         i
     }
 
     #[test]
-    fn an_applied_oauth_integration_with_no_client_id_seeds_a_provider_but_withholds_the_device_flow()
-     {
-        let catalog = vec![oauth_integration_without_client_id(
+    fn an_applied_oauth_connector_with_no_client_id_seeds_a_provider_but_withholds_the_device_flow()
+    {
+        let catalog = vec![oauth_connector_without_client_id(
             "somesaas",
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_integrations(&policy_applying(&["somesaas"]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(
             ids,
@@ -690,7 +682,7 @@ mod tests {
 
     #[test]
     fn a_slot_seeds_its_provider_under_the_slot_env_name_with_the_catalog_placeholder() {
-        let catalog = vec![cred_integration(
+        let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
@@ -721,8 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_wins_over_a_same_id_declared_integration_so_the_remap_holds() {
-        let catalog = vec![cred_integration(
+    fn a_slot_wins_over_a_same_id_declared_connector_so_the_remap_holds() {
+        let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
@@ -741,10 +733,10 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_alongside_a_different_declared_integration_unions_without_loss() {
+    fn a_slot_alongside_a_different_declared_connector_unions_without_loss() {
         let catalog = vec![
-            cred_integration("some-provider", "SOME_TOKEN", "api.example.test"),
-            cred_integration("other-provider", "OTHER_TOKEN", "api.other.example"),
+            cred_connector("some-provider", "SOME_TOKEN", "api.example.test"),
+            cred_connector("other-provider", "OTHER_TOKEN", "api.other.example"),
         ];
         let out = resolve_applied_with_slots(
             &policy_applying(&["other-provider"]),
@@ -772,7 +764,7 @@ mod tests {
 
     #[test]
     fn an_oauth_slot_surfaces_its_sign_in_config_under_the_slot_env() {
-        let catalog = vec![oauth_integration(
+        let catalog = vec![oauth_connector(
             "some-oauth",
             "SOME_OAUTH_TOKEN",
             "api.some-oauth.example",
@@ -791,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_pkce_oauth_slot_surfaces_its_pkce_config() {
-        let catalog = vec![pkce_integration(
+        let catalog = vec![pkce_connector(
             "somepkce",
             "SOMEPKCE_TOKEN",
             "api.somepkce.com",
@@ -806,8 +798,8 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_named_integration_is_not_offered_as_a_fresh_connect() {
-        let catalog = vec![cred_integration(
+    fn a_slot_named_connector_is_not_offered_as_a_fresh_connect() {
+        let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
@@ -820,18 +812,18 @@ mod tests {
         );
         assert!(
             c.providers.is_empty(),
-            "a slot's integration is already reachable, never a fresh offer"
+            "a slot's connector is already reachable, never a fresh offer"
         );
     }
 
     #[test]
-    fn a_connectable_oauth_integration_with_no_client_id_is_offerable_without_a_device_flow() {
-        let catalog = vec![oauth_integration_without_client_id(
+    fn a_connectable_oauth_connector_with_no_client_id_is_offerable_without_a_device_flow() {
+        let catalog = vec![oauth_connector_without_client_id(
             "somesaas",
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let c = resolve_connectable_integrations(&policy_applying(&[]), &catalog);
+        let c = resolve_connectable_connectors(&policy_applying(&[]), &catalog);
         assert_eq!(
             c.providers.len(),
             1,

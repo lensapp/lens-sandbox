@@ -252,7 +252,7 @@ mod tests {
             display_name: "GitHub".into(),
             user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
-            token_fallback: Some(lns_policy::integrations::TokenFallback {
+            token_fallback: Some(lns_policy::connectors::TokenFallback {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(snap.sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
         assert_eq!(
             snap.sign_ins[0].token_fallback,
-            Some(lns_policy::integrations::TokenFallback {
+            Some(lns_policy::connectors::TokenFallback {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),

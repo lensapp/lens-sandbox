@@ -47,44 +47,38 @@ pub fn ledger_event(record: &LedgerRecord) -> Map<String, Value> {
     );
     let value = match &record.event {
         LedgerEvent::Connection {
-            integration,
+            connector,
             auth,
             account,
             scopes,
             expires,
         } => lns_ocsf::connection(
             &cx.ctx(),
-            integration,
+            connector,
             auth_word(*auth),
             account.as_deref(),
             scopes,
             expires.as_deref(),
         ),
         LedgerEvent::CredentialUse {
-            integration,
+            connector,
             auth,
             fp,
             dest,
-        } => lns_ocsf::credential_use(
-            &cx.ctx(),
-            integration,
-            auth_word(*auth),
-            fp.as_deref(),
-            dest,
-        ),
+        } => lns_ocsf::credential_use(&cx.ctx(), connector, auth_word(*auth), fp.as_deref(), dest),
         LedgerEvent::Approval {
             kind,
             target,
             decision,
             reason,
-            integration,
+            connector,
         } => lns_ocsf::approval(
             &cx.ctx(),
             approval_kind_word(*kind),
             target,
             decision_word(*decision),
             reason.as_deref(),
-            integration.as_deref(),
+            connector.as_deref(),
         ),
     };
     into_object(value)
@@ -106,14 +100,14 @@ pub fn sandbox_run_event(
     cx: &OcsfCtx,
     reference: &str,
     digest: &str,
-    integrations: &[String],
+    connectors: &[String],
     policy_hash: &str,
 ) -> Map<String, Value> {
     into_object(lns_ocsf::sandbox_run(
         &cx.ctx(),
         reference,
         digest,
-        integrations,
+        connectors,
         policy_hash,
     ))
 }
@@ -172,7 +166,7 @@ fn approval_kind_word(kind: ApprovalKind) -> &'static str {
     match kind {
         ApprovalKind::Network => "network",
         ApprovalKind::Credential => "credential",
-        ApprovalKind::Integration => "integration",
+        ApprovalKind::Connector => "connector",
     }
 }
 
@@ -222,7 +216,7 @@ mod tests {
     #[test]
     fn a_connection_record_becomes_an_authentication_event() {
         let ev = ledger_event(&record(LedgerEvent::Connection {
-            integration: "some-oauth".into(),
+            connector: "some-oauth".into(),
             auth: AuthKind::Oauth,
             account: Some("@user".into()),
             scopes: vec!["repo".into()],
@@ -242,7 +236,7 @@ mod tests {
     #[test]
     fn a_credential_record_carries_the_apikey_auth_word() {
         let ev = ledger_event(&record(LedgerEvent::CredentialUse {
-            integration: "some-provider".into(),
+            connector: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some("9c2f1a3d".into()),
             dest: vec!["api.some-provider.example".into()],
@@ -254,14 +248,14 @@ mod tests {
     #[test]
     fn an_approval_record_records_the_exact_decision_and_kind() {
         let ev = ledger_event(&record(LedgerEvent::Approval {
-            kind: ApprovalKind::Integration,
+            kind: ApprovalKind::Connector,
             target: "some-oauth".into(),
             decision: Decision::DenyAlways,
             reason: None,
-            integration: Some("some-oauth".into()),
+            connector: Some("some-oauth".into()),
         }));
         assert_eq!(ev["class_uid"], 2004);
-        assert_eq!(ev["unmapped"]["lns_approval_kind"], "integration");
+        assert_eq!(ev["unmapped"]["lns_approval_kind"], "connector");
         assert_eq!(ev["unmapped"]["lns_decision"], "deny_always");
         assert_eq!(ev["disposition_id"], 2, "deny blocks");
     }
@@ -271,14 +265,14 @@ mod tests {
         for (kind, word) in [
             (ApprovalKind::Network, "network"),
             (ApprovalKind::Credential, "credential"),
-            (ApprovalKind::Integration, "integration"),
+            (ApprovalKind::Connector, "connector"),
         ] {
             let ev = ledger_event(&record(LedgerEvent::Approval {
                 kind,
                 target: "t".into(),
                 decision: Decision::AllowOnce,
                 reason: None,
-                integration: None,
+                connector: None,
             }));
             assert_eq!(ev["unmapped"]["lns_approval_kind"], word);
         }

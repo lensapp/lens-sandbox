@@ -21,18 +21,18 @@ The workload behaves as though it holds the credential without the secret ever
 entering the sandbox. A request carrying a placeholder to a domain the provider
 isn't configured for is not rewritten — the placeholder goes nowhere useful.
 
-## Providers are integrations
+## Providers are connectors
 
-Every credential provider is an [integration](integrations.md): a named service that
+Every credential provider is a [connector](connectors.md): a named service that
 bundles its placeholder, environment variable, and per-domain injection with the
 routes it needs. `openai`, `anthropic`, `bedrock`, `linear`, `telegram`, `gitlab`,
-and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` integration
-(device sign-in) and `openrouter` as an `oauth` integration (pkce browser sign-in).
-Declare your own for an internal API with `lns integration add`
-(see [Integrations](integrations.md)). A sandbox definition that lists a provider
-under `spec.integrations` only *offers* it — the workload is prompted to connect
-it on first use, never armed automatically; `lns integration connect <id>` arms
-it up front and records it under `integrations:` in that directory's
+and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` connector
+(device sign-in) and `openrouter` as an `oauth` connector (pkce browser sign-in).
+Declare your own for an internal API with `lns connector add`
+(see [Connectors](connectors.md)). A sandbox definition that lists a provider
+under `spec.connectors` only *offers* it — the workload is prompted to connect
+it on first use, never armed automatically; `lns connector connect <id>` arms
+it up front and records it under `connectors:` in that directory's
 `lns-policy.yaml`.
 
 ## Value decisions
@@ -45,7 +45,7 @@ Decisions are made interactively, at either of two moments:
 
 - **Reactively** — the first request that carries a placeholder pauses for an
   approval, the same allow / deny / ask flow as [network policy](policy.md).
-- **Proactively** — `lns integration connect <id>` raises the same card in the
+- **Proactively** — `lns connector connect <id>` raises the same card in the
   approval window before any run, which is how you bind a credential a sandbox
   definition **requires**: a required slot (`spec.credentials` with
   `required: true`) with no decision on your machine refuses the launch and
@@ -55,17 +55,17 @@ Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then
 fail at the boundary). The decision is remembered for next time.
 
-An [`oauth` integration](integrations.md)'s value decision is different in kind: rather
+An [`oauth` connector](connectors.md)'s value decision is different in kind: rather
 than a pasted secret it's obtained by an interactive **sign-in**
-(`lns integration connect <id>`). A device-flow integration yields a self-renewing
+(`lns connector connect <id>`). A device-flow connector yields a self-renewing
 **token set**, refreshed automatically and re-prompted when the grant can no longer be
-refreshed; a pkce integration yields a **durable key** captured through your browser,
+refreshed; a pkce connector yields a **durable key** captured through your browser,
 with no refresh or expiry. Either way it lives in the same per-machine file and is
 never written to `lns-policy.yaml`.
 
 ## Injection kinds
 
-An integration's injection `kind` decides how the real value reaches the destination:
+A connector's injection `kind` decides how the real value reaches the destination:
 
 | Kind                   | Effect on the request                                                 |
 | ---------------------- | --------------------------------------------------------------------- |
@@ -75,7 +75,7 @@ An integration's injection `kind` decides how the real value reaches the destina
 | `basic_x_access_token` | HTTP Basic auth as `x-access-token:<value>`                           |
 | `api_key_header`       | A named header (the injection's `header:`, e.g. `x-api-key: <value>`) |
 
-`lns integration add --inject` accepts all five non-AWS kinds. `api_key_header`
+`lns connector add --inject` accepts all five non-AWS kinds. `api_key_header`
 requires the header name as a third segment
 (`--inject api_key_header:DOMAIN:HEADER`); the other four are headerless and use
 the two-segment form (`--inject KIND:DOMAIN`). `awsSigv4` is unsupported as a
@@ -83,7 +83,7 @@ static placeholder — it carries real STS material.
 
 ## See also
 
-- [Integrations](integrations.md) — declare, connect, and list the services whose
+- [Connectors](connectors.md) — declare, connect, and list the services whose
   credentials reach a workload.
 - [Policy and approvals](policy.md) — value decisions follow the same
   allow / deny / ask model as network rules.

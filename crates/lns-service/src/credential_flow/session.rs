@@ -13,14 +13,14 @@ use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, CredentialStore};
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
-use lns_policy::integrations::TokenFallback;
+use lns_policy::connectors::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
 /// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection.
 pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile) + Send + Sync>;
 
-/// Invoked when an un-connected catalog integration is accepted, to connect it live (allow its routes + persist `integrations:`).
+/// Invoked when an un-connected catalog connector is accepted, to connect it live (allow its routes + persist `connectors:`).
 pub type ConnectEmitter = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Opens a URL in the developer's browser; injected so the pkce flow drives the real opener in production and records it in tests.
@@ -37,9 +37,9 @@ pub struct CredentialPendingPrompt {
     pub id: String,
     pub credential_id: String,
     pub action: String,
-    /// Some(display name) when this is an oauth integration to connect via a browser sign-in, so the card offers "Connect to <name>" instead of a value field.
+    /// Some(display name) when this is an oauth connector to connect via a browser sign-in, so the card offers "Connect to <name>" instead of a value field.
     pub oauth_display_name: Option<String>,
-    /// Some when the integration declares a token fallback, so the consent card can also reveal "use a token instead".
+    /// Some when the connector declares a token fallback, so the consent card can also reveal "use a token instead".
     pub token_fallback: Option<TokenFallback>,
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
@@ -53,7 +53,7 @@ pub struct SignInPrompt {
     /// Some(code) for a device sign-in the user types; None for a pkce sign-in that redirects through the browser with no code to enter.
     pub user_code: Option<String>,
     pub verification_uri: String,
-    /// Some when the integration declares a token fallback, so the sign-in card can offer "use a token instead" to a user blocked from the browser dance.
+    /// Some when the connector declares a token fallback, so the sign-in card can offer "use a token instead" to a user blocked from the browser dance.
     pub token_fallback: Option<TokenFallback>,
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
@@ -189,7 +189,7 @@ impl CredentialSession {
         let _ = self.ledger.set(recorder);
     }
 
-    /// Wires the device-flow engine and per-integration oauth configs so an accepted oauth prompt can run an interactive sign-in.
+    /// Wires the device-flow engine and per-connector oauth configs so an accepted oauth prompt can run an interactive sign-in.
     pub fn with_oauth(
         mut self,
         oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
@@ -211,7 +211,7 @@ impl CredentialSession {
         self
     }
 
-    /// Wires the PKCE engine, per-integration pkce configs, the loopback callback listener, the browser opener, and the challenge generator so an accepted pkce prompt can run a browser-redirect sign-in.
+    /// Wires the PKCE engine, per-connector pkce configs, the loopback callback listener, the browser opener, and the challenge generator so an accepted pkce prompt can run a browser-redirect sign-in.
     pub fn with_pkce(
         mut self,
         pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
@@ -236,7 +236,7 @@ impl CredentialSession {
         self
     }
 
-    /// Per-id token fallbacks so a consent or sign-in card for an integration that declares one can offer "use a token instead".
+    /// Per-id token fallbacks so a consent or sign-in card for a connector that declares one can offer "use a token instead".
     pub fn with_token_fallbacks(mut self, token_fallbacks: HashMap<String, TokenFallback>) -> Self {
         self.token_fallbacks = token_fallbacks;
         self
@@ -249,7 +249,7 @@ impl CredentialSession {
             .unwrap_or_else(|| credential_id.to_string())
     }
 
-    /// True when the integration authenticates by an interactive sign-in — a device grant or a pkce browser redirect — rather than a pasted value.
+    /// True when the connector authenticates by an interactive sign-in — a device grant or a pkce browser redirect — rather than a pasted value.
     fn is_signin(&self, credential_id: &str) -> bool {
         self.oauth_configs.contains_key(credential_id)
             || self.pkce_configs.contains_key(credential_id)
@@ -266,7 +266,7 @@ impl CredentialSession {
         self
     }
 
-    /// Marks the catalog integrations that aren't connected yet: detecting one offers to connect, and accepting runs `connect` to allow its routes live.
+    /// Marks the catalog connectors that aren't connected yet: detecting one offers to connect, and accepting runs `connect` to allow its routes live.
     pub fn with_connect_emitter(
         mut self,
         connectable: HashSet<String>,
@@ -421,7 +421,7 @@ impl CredentialSession {
         DecisionOutcome::Resolved
     }
 
-    /// True when a held prompt belongs to an oauth integration, so its acceptance must drive a device sign-in rather than a static value decision.
+    /// True when a held prompt belongs to an oauth connector, so its acceptance must drive a device sign-in rather than a static value decision.
     pub fn is_oauth_prompt(&self, prompt_id: &str) -> bool {
         let pending = self.pending.lock().expect("pending mutex poisoned");
         pending
@@ -429,7 +429,7 @@ impl CredentialSession {
             .any(|(id, e)| e.prompt_id == prompt_id && self.is_signin(id))
     }
 
-    /// Drives a device sign-in for an accepted oauth prompt: on success connects the integration live and arms the token set, releasing held requests; denial, expiry, or error fails them closed without persisting (the next use re-prompts).
+    /// Drives a device sign-in for an accepted oauth prompt: on success connects the connector live and arms the token set, releasing held requests; denial, expiry, or error fails them closed without persisting (the next use re-prompts).
     pub async fn connect_oauth(&self, prompt_id: &str) -> DecisionOutcome {
         let Some((credential_id, request_ids)) = self.remove_pending(prompt_id) else {
             return DecisionOutcome::UnknownId;
@@ -456,12 +456,12 @@ impl CredentialSession {
         DecisionOutcome::Resolved
     }
 
-    /// Connects integration `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
-    pub async fn connect_integration_now(&self, id: &str) -> bool {
+    /// Connects connector `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
+    pub async fn connect_connector_now(&self, id: &str) -> bool {
         if self.is_signin(id) {
             let ok = self.run_signin_connect(id).await;
             if ok {
-                // The same connect arms the token, so any placeholder card already held for this integration is satisfied too — don't ask for it separately.
+                // The same connect arms the token, so any placeholder card already held for this connector is satisfied too — don't ask for it separately.
                 self.release_armed_holds(id);
             }
             return ok;
@@ -473,14 +473,14 @@ impl CredentialSession {
         false
     }
 
-    /// Connects integration `id` from a network offer using a pasted token instead of the interactive sign-in: arms the value in its slot, allows its routes (if connectable), and releases any placeholder card already held for it. Always reports connected.
-    pub fn connect_integration_with_token(&self, id: &str, value: String) -> bool {
+    /// Connects connector `id` from a network offer using a pasted token instead of the interactive sign-in: arms the value in its slot, allows its routes (if connectable), and releases any placeholder card already held for it. Always reports connected.
+    pub fn connect_connector_with_token(&self, id: &str, value: String) -> bool {
         self.arm_connected(id, CredentialEntry::Stored { value });
         self.release_armed_holds(id);
         true
     }
 
-    /// Allows and dismisses a held credential prompt for `credential_id` once another surface (a network offer) has armed the integration; a no-op when nothing is held for it.
+    /// Allows and dismisses a held credential prompt for `credential_id` once another surface (a network offer) has armed the connector; a no-op when nothing is held for it.
     fn release_armed_holds(&self, credential_id: &str) {
         let entry = self
             .pending
@@ -510,7 +510,7 @@ impl CredentialSession {
         self.run_oauth_connect(credential_id).await
     }
 
-    /// Runs the pkce browser-redirect sign-in and, on success, arms the obtained key as a durable credential and connects the integration live; returns whether a key was obtained. Cancel, timeout, or error yields false.
+    /// Runs the pkce browser-redirect sign-in and, on success, arms the obtained key as a durable credential and connects the connector live; returns whether a key was obtained. Cancel, timeout, or error yields false.
     async fn run_pkce_connect(
         &self,
         credential_id: &str,
@@ -572,7 +572,7 @@ impl CredentialSession {
         }
     }
 
-    /// Runs the device sign-in for an oauth integration and, on success, arms the token set and connects it live; returns whether a token was obtained. A missing config, denial, expiry, cancel, or error yields false.
+    /// Runs the device sign-in for an oauth connector and, on success, arms the token set and connects it live; returns whether a token was obtained. A missing config, denial, expiry, cancel, or error yields false.
     async fn run_oauth_connect(&self, credential_id: &str) -> bool {
         let (Some(cfg), Some(flow), Some(clock)) = (
             self.oauth_configs.get(credential_id),
@@ -647,7 +647,7 @@ impl CredentialSession {
         }
     }
 
-    /// Connects the integration live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token.
+    /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
@@ -706,7 +706,7 @@ impl CredentialSession {
             target: credential_id.to_string(),
             decision,
             reason: None,
-            integration: Some(credential_id.to_string()),
+            connector: Some(credential_id.to_string()),
         });
     }
 
@@ -728,7 +728,7 @@ impl CredentialSession {
             CredentialEntry::Stored { value } if !value.is_empty() => {
                 let (_, domains, _) = self.provider_disclosure(credential_id);
                 Some(LedgerEvent::CredentialUse {
-                    integration: credential_id.to_string(),
+                    connector: credential_id.to_string(),
                     auth: AuthKind::Apikey,
                     fp: Some(lns_ipc::fingerprint(value)),
                     dest: domains,
@@ -741,7 +741,7 @@ impl CredentialSession {
                 account,
                 ..
             } if !access_token.is_empty() => Some(LedgerEvent::Connection {
-                integration: credential_id.to_string(),
+                connector: credential_id.to_string(),
                 auth: AuthKind::Oauth,
                 account: account.clone(),
                 scopes: if scopes.is_empty() {
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::CredentialUse {
-                integration: "some-provider".into(),
+                connector: "some-provider".into(),
                 auth: AuthKind::Apikey,
                 fp: Some(lns_ipc::fingerprint("sk-secret")),
                 dest: vec![],
@@ -1031,7 +1031,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::Connection {
-                integration: "some-oauth".into(),
+                connector: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: None,
                 scopes: vec![],
@@ -1058,7 +1058,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::Connection {
-                integration: "some-oauth".into(),
+                connector: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: None,
                 scopes: vec![],
@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oauth_connection_carries_the_integrations_configured_scopes() {
+    fn an_oauth_connection_carries_the_connectors_configured_scopes() {
         let notifier = Arc::new(RecordingNotifier::default());
         let (tx, _rx) = mpsc::unbounded_channel();
         let configs = HashMap::from([(
@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::Connection {
-                integration: "some-oauth".into(),
+                connector: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: None,
                 scopes: vec!["repo".into(), "read:org".into()],
@@ -1143,7 +1143,7 @@ mod tests {
         assert_eq!(
             *recorder.events.lock().unwrap().first().expect("one event"),
             LedgerEvent::Connection {
-                integration: "some-oauth".into(),
+                connector: "some-oauth".into(),
                 auth: AuthKind::Oauth,
                 account: Some("@hchen".into()),
                 scopes: vec!["repo".into(), "read:org".into()],
@@ -1169,7 +1169,7 @@ mod tests {
                 target: "some-provider".into(),
                 decision: Decision::Allow,
                 reason: None,
-                integration: Some("some-provider".into()),
+                connector: Some("some-provider".into()),
             }
         );
     }
@@ -1188,7 +1188,7 @@ mod tests {
                 target: "some-provider".into(),
                 decision: Decision::Deny,
                 reason: None,
-                integration: Some("some-provider".into()),
+                connector: Some("some-provider".into()),
             }
         );
     }
@@ -1885,7 +1885,7 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),
-            "a consent card for an integration with a token fallback offers the pivot"
+            "a consent card for a connector with a token fallback offers the pivot"
         );
     }
 
@@ -1956,7 +1956,7 @@ mod tests {
         s.record_decision("c1", CredentialDecisionRequest::Deny);
         assert!(
             connected.lock().unwrap().is_empty(),
-            "denying must not connect the integration"
+            "denying must not connect the connector"
         );
         assert_eq!(
             store.saves.lock().unwrap()[0].get("gitlab"),
@@ -2151,7 +2151,7 @@ mod tests {
         assert_eq!(
             connected.lock().unwrap().as_slice(),
             &["some-oauth".to_string()],
-            "accepting an oauth prompt connects the integration live"
+            "accepting an oauth prompt connects the connector live"
         );
         assert_eq!(
             store
@@ -2202,7 +2202,7 @@ mod tests {
         assert_eq!(
             connected.lock().unwrap().as_slice(),
             &["some-oauth".to_string()],
-            "pivoting to a token still connects the integration live"
+            "pivoting to a token still connects the connector live"
         );
         assert_eq!(
             store
@@ -2215,7 +2215,7 @@ mod tests {
             Some(&CredentialEntry::Stored {
                 value: "some-pasted-token".into(),
             }),
-            "the pasted token is armed as a Stored value in the integration's slot"
+            "the pasted token is armed as a Stored value in the connector's slot"
         );
         let f1 = decision_frame(&mut rx);
         let f2 = decision_frame(&mut rx);
@@ -2230,7 +2230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sign_in_card_carries_the_integrations_declared_token_fallback() {
+    async fn the_sign_in_card_carries_the_connectors_declared_token_fallback() {
         let (s, n, _store, _rx, _connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
@@ -2244,7 +2244,7 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             }),
-            "a sign-in card for an integration with a token fallback offers the pivot"
+            "a sign-in card for a connector with a token fallback offers the pivot"
         );
     }
 
@@ -2306,7 +2306,7 @@ mod tests {
                 target: "some-oauth".into(),
                 decision: Decision::Allow,
                 reason: None,
-                integration: Some("some-oauth".into()),
+                connector: Some("some-oauth".into()),
             }
         );
     }
@@ -2326,7 +2326,7 @@ mod tests {
                 target: "some-oauth".into(),
                 decision: Decision::Deny,
                 reason: None,
-                integration: Some("some-oauth".into()),
+                connector: Some("some-oauth".into()),
             }
         );
     }
@@ -2466,13 +2466,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_integration_now_completes_an_oauth_sign_in_arms_and_connects() {
+    async fn connect_connector_now_completes_an_oauth_sign_in_arms_and_connects() {
         let (s, n, _store, _rx, connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
             )]));
 
-        let ok = s.connect_integration_now("some-oauth").await;
+        let ok = s.connect_connector_now("some-oauth").await;
 
         assert!(ok, "a completed sign-in reports connected");
         assert_eq!(
@@ -2498,11 +2498,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_integration_now_returns_false_when_the_oauth_sign_in_is_denied() {
+    async fn connect_connector_now_returns_false_when_the_oauth_sign_in_is_denied() {
         let (s, _n, store, _rx, connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Denied]));
 
-        let ok = s.connect_integration_now("some-oauth").await;
+        let ok = s.connect_connector_now("some-oauth").await;
 
         assert!(!ok);
         assert!(connected.lock().unwrap().is_empty());
@@ -2510,10 +2510,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_integration_now_connects_a_plain_credential_integration_without_a_sign_in() {
+    async fn connect_connector_now_connects_a_plain_credential_connector_without_a_sign_in() {
         let (s, n, _store, _rx, connected) = fixture_connectable(&["gitlab"]);
 
-        let ok = s.connect_integration_now("gitlab").await;
+        let ok = s.connect_connector_now("gitlab").await;
 
         assert!(ok);
         assert_eq!(
@@ -2527,14 +2527,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_integration_now_returns_false_for_an_unknown_id() {
+    async fn connect_connector_now_returns_false_for_an_unknown_id() {
         let (s, _n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
-        assert!(!s.connect_integration_now("nope").await);
+        assert!(!s.connect_connector_now("nope").await);
     }
 
     #[tokio::test]
-    async fn connect_integration_now_also_releases_a_held_credential_prompt_for_the_same_integration()
-     {
+    async fn connect_connector_now_also_releases_a_held_credential_prompt_for_the_same_connector() {
         let (s, n, _store, mut rx, _connected) =
             oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
                 oauth_token(3600),
@@ -2542,7 +2541,7 @@ mod tests {
         // A placeholder card for some-oauth is already held (the "use your GitHub access" prompt).
         s.submit_pending(pending("cred1", "some-oauth"), Instant::now());
 
-        let ok = s.connect_integration_now("some-oauth").await;
+        let ok = s.connect_connector_now("some-oauth").await;
 
         assert!(ok);
         let frame = decision_frame(&mut rx);
@@ -2550,7 +2549,7 @@ mod tests {
         assert_eq!(
             frame.decision,
             CredentialDecisionKind::Allow,
-            "arming the integration via a network offer also releases its held placeholder request"
+            "arming the connector via a network offer also releases its held placeholder request"
         );
         assert!(
             n.dismissed.lock().unwrap().contains(&"cred1".to_string()),
@@ -2559,18 +2558,18 @@ mod tests {
     }
 
     #[test]
-    fn connect_integration_with_token_arms_stored_connects_live_and_releases_held_requests() {
+    fn connect_connector_with_token_arms_stored_connects_live_and_releases_held_requests() {
         let (s, n, store, mut rx, connected) = fixture_connectable(&["gitlab"]);
         // A placeholder card for gitlab is already held.
         s.submit_pending(pending("cred1", "gitlab"), Instant::now());
 
-        let ok = s.connect_integration_with_token("gitlab", "glpat_pasted".into());
+        let ok = s.connect_connector_with_token("gitlab", "glpat_pasted".into());
 
-        assert!(ok, "a pasted token connects the integration");
+        assert!(ok, "a pasted token connects the connector");
         assert_eq!(
             connected.lock().unwrap().as_slice(),
             &["gitlab".to_string()],
-            "the integration's routes are allowed live"
+            "the connector's routes are allowed live"
         );
         assert_eq!(
             store.saves.lock().unwrap().last().unwrap().get("gitlab"),
@@ -2708,7 +2707,7 @@ mod tests {
         assert_eq!(
             connected.lock().unwrap().as_slice(),
             &["some-pkce".to_string()],
-            "a completed pkce sign-in connects the integration live"
+            "a completed pkce sign-in connects the connector live"
         );
         assert_eq!(
             store.saves.lock().unwrap().last().unwrap().get("some-pkce"),

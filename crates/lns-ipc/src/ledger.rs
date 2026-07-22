@@ -18,7 +18,7 @@ pub enum AuthKind {
 pub enum ApprovalKind {
     Network,
     Credential,
-    Integration,
+    Connector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,10 +51,10 @@ pub enum LedgerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        integration: Option<String>,
+        connector: Option<String>,
     },
     Connection {
-        integration: String,
+        connector: String,
         auth: AuthKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<String>,
@@ -64,7 +64,7 @@ pub enum LedgerEvent {
         expires: Option<String>,
     },
     CredentialUse {
-        integration: String,
+        connector: String,
         auth: AuthKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fp: Option<String>,
@@ -74,11 +74,11 @@ pub enum LedgerEvent {
 }
 
 impl LedgerEvent {
-    pub fn integration(&self) -> Option<&str> {
+    pub fn connector(&self) -> Option<&str> {
         match self {
-            LedgerEvent::Approval { integration, .. } => integration.as_deref(),
-            LedgerEvent::Connection { integration, .. }
-            | LedgerEvent::CredentialUse { integration, .. } => Some(integration),
+            LedgerEvent::Approval { connector, .. } => connector.as_deref(),
+            LedgerEvent::Connection { connector, .. }
+            | LedgerEvent::CredentialUse { connector, .. } => Some(connector),
         }
     }
 
@@ -125,35 +125,35 @@ mod tests {
             target: "api.foo.com:443".into(),
             decision: Decision::AllowAlways,
             reason: Some("policy-ambiguous".into()),
-            integration: None,
+            connector: None,
         });
         assert_eq!(back.event.name(), "approval");
-        assert_eq!(back.event.integration(), None);
+        assert_eq!(back.event.connector(), None);
     }
 
     #[test]
     fn connection_event_round_trips_with_oauth_detail() {
         let back = round_trip(LedgerEvent::Connection {
-            integration: "some-oauth".into(),
+            connector: "some-oauth".into(),
             auth: AuthKind::Oauth,
             account: Some("@hchen".into()),
             scopes: vec!["repo".into(), "read:org".into()],
             expires: Some("2026-07-29T00:00:00Z".into()),
         });
         assert_eq!(back.event.name(), "connection");
-        assert_eq!(back.event.integration(), Some("some-oauth"));
+        assert_eq!(back.event.connector(), Some("some-oauth"));
     }
 
     #[test]
     fn credential_use_event_round_trips_with_fingerprint() {
         let back = round_trip(LedgerEvent::CredentialUse {
-            integration: "some-provider".into(),
+            connector: "some-provider".into(),
             auth: AuthKind::Apikey,
             fp: Some("9c2f1a3d".into()),
             dest: vec!["api.some-provider.example".into()],
         });
         assert_eq!(back.event.name(), "credential_use");
-        assert_eq!(back.event.integration(), Some("some-provider"));
+        assert_eq!(back.event.connector(), Some("some-provider"));
     }
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
             run: "5e6f7a8b0000000000000000000000bb".into(),
             microvm: "calm-finch".into(),
             event: LedgerEvent::CredentialUse {
-                integration: "some-provider".into(),
+                connector: "some-provider".into(),
                 auth: AuthKind::Apikey,
                 fp: Some("9c2f1a3d".into()),
                 dest: vec!["api.some-provider.example".into()],

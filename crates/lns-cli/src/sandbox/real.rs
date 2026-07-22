@@ -147,7 +147,7 @@ impl super::distribute::Producer for RealProducer {
         &'a self,
         doc: &'a [u8],
         reference: &'a str,
-    ) -> crate::integration::LocalBoxFuture<'a, Result<String>> {
+    ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
             let built = lns_artifact::build::build_artifact(doc)?;
             crate::build::push::push_artifact(&built, reference).await?;
@@ -159,7 +159,7 @@ impl super::distribute::Producer for RealProducer {
         &'a self,
         built: &'a lns_artifact::build::BuiltArtifact,
         reference: &'a str,
-    ) -> crate::integration::LocalBoxFuture<'a, Result<()>> {
+    ) -> crate::connector::LocalBoxFuture<'a, Result<()>> {
         Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
     }
 }

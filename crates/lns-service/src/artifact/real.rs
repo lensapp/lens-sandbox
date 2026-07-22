@@ -110,23 +110,22 @@ impl crate::artifact::fileset::SnapshotDir for RealSnapshotDir {
     }
 }
 
-/// Refuse a launch whose definition declares an integration — under `spec.integrations` or as a credential slot — this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss.
-pub(crate) fn refuse_unknown_integrations(
+/// Refuse a launch whose definition declares a connector — under `spec.connectors` or as a credential slot — this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss.
+pub(crate) fn refuse_unknown_connectors(
     policy: Option<&lns_policy::Policy>,
     credentials: &[lns_artifact::spec::CredentialSlot],
 ) -> Result<()> {
-    let mut declared: Vec<String> = policy.map(|p| p.integrations.clone()).unwrap_or_default();
+    let mut declared: Vec<String> = policy.map(|p| p.connectors.clone()).unwrap_or_default();
     declared.extend(credentials.iter().map(|slot| slot.name.clone()));
     if declared.is_empty() {
         return Ok(());
     }
     let catalog = effective_machine_catalog();
-    let unknown =
-        crate::credential_flow::integrations::unknown_integration_ids(&declared, &catalog);
+    let unknown = crate::credential_flow::connectors::unknown_connector_ids(&declared, &catalog);
     if unknown.is_empty() {
         return Ok(());
     }
-    anyhow::bail!(crate::credential_flow::integrations::unknown_integrations_refusal(&unknown))
+    anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
 }
 
 /// Refuse a launch whose definition requires a credential slot this machine has not bound (or has denied) — before any microVM boots.
@@ -153,17 +152,17 @@ pub(crate) fn refuse_unbound_required_credentials(
     Ok(())
 }
 
-fn effective_machine_catalog() -> Vec<lns_policy::integrations::Integration> {
-    let user = lns_policy::integrations::Catalog::load_or_default(
-        &lns_policy::integrations::default_integrations_path(),
+fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
+    let user = lns_policy::connectors::Catalog::load_or_default(
+        &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_else(|e| {
         crate::log::warn!(
-            "unreadable user integration catalog ({e}); using the bundled catalog only"
+            "unreadable user connector catalog ({e}); using the bundled catalog only"
         );
-        lns_policy::integrations::Catalog::default()
+        lns_policy::connectors::Catalog::default()
     });
-    lns_policy::integrations::effective_integrations(&user)
+    lns_policy::connectors::effective_connectors(&user)
 }
 
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
@@ -245,7 +244,7 @@ async fn pull_fileset_layers_with<R: Registry>(
     Ok(blobs)
 }
 
-/// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective integrations and shipped-policy hash; a recording failure is logged, never fatal to the launch.
+/// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective connectors and shipped-policy hash; a recording failure is logged, never fatal to the launch.
 fn record_sandbox_run(
     run_id: &str,
     microvm: &str,
@@ -253,10 +252,10 @@ fn record_sandbox_run(
     digest: &str,
     resolved: &ResolvedSandbox,
 ) {
-    let integrations = resolved
+    let connectors = resolved
         .policy
         .as_ref()
-        .map(|p| p.integrations.clone())
+        .map(|p| p.connectors.clone())
         .unwrap_or_default();
     let policy_hash = resolved
         .policy
@@ -268,7 +267,7 @@ fn record_sandbox_run(
         microvm,
         image_ref,
         digest,
-        &integrations,
+        &connectors,
         &policy_hash,
         &crate::oauth::RealClock,
     ) {
@@ -276,7 +275,7 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the sandbox's shipped network policy and declared integrations at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared integrations are offered on first use, never armed automatically.
+/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared connectors are offered on first use, never armed automatically.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
@@ -292,11 +291,11 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
             crate::log::warn!("{summary}");
         }
     }
-    if !policy.integrations.is_empty() {
+    if !policy.connectors.is_empty() {
         crate::log::info!(
             "policy",
-            "this sandbox requests integrations ({}); each is offered on first use — accept its connect card to arm it — never armed automatically",
-            policy.integrations.join(", ")
+            "this sandbox requests connectors ({}); each is offered on first use — accept its connect card to arm it — never armed automatically",
+            policy.connectors.join(", ")
         );
     }
 }

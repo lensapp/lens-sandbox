@@ -2,7 +2,7 @@
 
 Lens Sandbox has one user-facing noun: the **sandbox**. A sandbox is defined by a
 `./lns.yaml` file that pins a base OCI image plus its command, environment, policy,
-and integrations. One directory is one sandbox. A sandbox is either **cached**
+and connectors. One directory is one sandbox. A sandbox is either **cached**
 (pulled or built, sitting in the local cache) or **running**.
 
 You drive it on two tiers:
@@ -40,7 +40,7 @@ spec:
   policy:
     defaultVerdict: ask
     allowedRoutes: []
-  integrations: []
+  connectors: []
   credentials: []
   volumes:
     - type: bind
@@ -63,8 +63,8 @@ The `spec` fields:
 | `workdir`      | Absolute guest working directory. It is created when missing.                 |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `policy`       | The network policy — `defaultVerdict` and `allowedRoutes` (see [Policy](policy.md)). |
-| `integrations` | Ids of the [integrations](integrations.md) the sandbox would like to use. Declaring is disclosure, not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
-| `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names an integration (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns integration connect` (see [Credentials](credentials.md#value-decisions)). |
+| `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring is disclosure, not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
+| `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names a connector (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns connector connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
@@ -660,7 +660,7 @@ primarily a live view of its output.
 and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
 the contents of its policy file when that file is readable on this machine. For a
 **cached** reference it prints the artifact's kind and definition — a plain `Image`,
-or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and integrations,
+or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
 flagging a permissive default policy.
 
 ### Listing resource use
@@ -694,7 +694,7 @@ or `lns pull` simply fetches or rebuilds it again.
 [`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
 plus a first-boot install, `spec.env`, a tight `policy` allowlist, the
-`claude-code-subscription` integration, a `.` bind at `/workspace`, and a
+`claude-code-subscription` connector, a `.` bind at `/workspace`, and a
 `config/` fileset that seeds the agent's home. Copy its `lns.yaml` and `config/`
 into your project and `lns run`.
 

@@ -25,9 +25,9 @@ make dev    # debug build of lns + lns-service, skips cross-builds
 make test   # cargo test --workspace --exclude e2e-tests (uninstrumented)
 ```
 
-### Testing OAuth integrations locally
+### Testing OAuth connectors locally
 
-The official OAuth app ids are baked into release binaries from CI and are deliberately absent from the source tree, so a local build ships an empty `clientId` and OAuth integrations fall back to a pasted personal access token — enough to exercise the connect/inject path without any setup.
+The official OAuth app ids are baked into release binaries from CI and are deliberately absent from the source tree, so a local build ships an empty `clientId` and OAuth connectors fall back to a pasted personal access token — enough to exercise the connect/inject path without any setup.
 
 To test the live browser device flow, register your own throwaway GitHub OAuth app and point the build-time var at it before building:
 

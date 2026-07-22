@@ -24,7 +24,7 @@ pub struct BehaviourWorld {
     /// Lazily-built credential-flow rig — see `BehaviourWorld::credential`.
     pub credential: Option<CredentialRig>,
 
-    /// The oauth integration id under test, set when an oauth sign-in scenario builds its rig.
+    /// The oauth connector id under test, set when an oauth sign-in scenario builds its rig.
     pub oauth_id: Option<String>,
 
     /// Set when a sign-in scenario needs the accept step to spawn the sign-in so a later step can cancel it mid-flight.
@@ -38,7 +38,7 @@ pub struct BehaviourWorld {
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
     pub resolved_workdir: Option<Option<String>>,
     pub user_env: Vec<String>,
-    /// Env vars a connected integration manages for the run; `-e` overrides of these are refused.
+    /// Env vars a connected connector manages for the run; `-e` overrides of these are refused.
     pub managed_vars: Vec<String>,
 
     pub forward_fake: Option<Arc<ForwardFake>>,
