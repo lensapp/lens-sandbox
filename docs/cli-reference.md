@@ -239,7 +239,7 @@ lns service start | stop | restart | status | enable | disable
 | `start`    | Start the background service and wait until it's ready.                 |
 | `stop`     | Stop the background service.                                            |
 | `restart`  | Stop it, then start the currently installed binary.                     |
-| `status`   | Show whether it's running (PID, uptime, version, build).                |
+| `status`   | Show whether it's running (PID, uptime, version, build, protocol).      |
 | `enable`   | Register a per-user login agent and start the service now and on every login. |
 | `disable`  | Stop the service and unregister the per-user login agent.               |
 
