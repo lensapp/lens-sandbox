@@ -35,7 +35,6 @@ Feature: declared filesets ship files inside the sandbox artifact
     Then the command fails naming ".env"
     And no run is started
 
-  @todo
   Scenario: a local run preserves and discloses an inline fileset without printing its content
     Given an lns.yaml declaring an inline fileset with ".claude/settings.json" at "/home/sandbox" owned by the workload
     And the inline file contains `{"marker":"do-not-print"}`
@@ -44,7 +43,6 @@ Feature: declared filesets ship files inside the sandbox artifact
     And the run summary discloses an inline fileset at "/home/sandbox" owned by the workload
     And the run summary does not contain "do-not-print"
 
-  @todo
   Scenario: a pulled sandbox discloses an inline fileset without printing its content
     Given a pulled sandbox whose view declares an inline fileset at "/home/sandbox" owned by root
     When the pulled sandbox run is prepared

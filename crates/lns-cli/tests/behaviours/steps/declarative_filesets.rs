@@ -60,7 +60,13 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
             .spec
             .filesets
             .iter()
-            .map(|fileset| (fileset_source_display(fileset), fileset.mount_path.clone()))
+            .map(|fileset| {
+                (
+                    fileset_source_display(fileset),
+                    fileset.mount_path.clone(),
+                    lns_cli::run::summary::fileset_owner_display(fileset.owner).to_string(),
+                )
+            })
             .collect();
     }
     if world.cwd.is_none() {
@@ -86,7 +92,34 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
         filesets: vec![lns_ipc::SandboxFileset {
             path: None,
             reference: Some(reference),
+            inline: false,
             mount_path: mount,
+            owner: lns_ipc::SandboxFilesetOwner::Workload,
+        }],
+        connectors: Vec::new(),
+        env: Vec::new(),
+        credentials: Vec::new(),
+        policy_flags: Vec::new(),
+    });
+}
+
+#[cucumber::given(
+    regex = r#"^a pulled sandbox whose view declares an inline fileset at \"([^\"]+)\" owned by root$"#
+)]
+fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
+    world.pulled_view = Some(lns_ipc::SandboxView {
+        reference: "registry.example.test/team/sandbox:1".into(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: vec![lns_ipc::SandboxFileset {
+            path: None,
+            reference: None,
+            inline: true,
+            mount_path: mount,
+            owner: lns_ipc::SandboxFilesetOwner::Root,
         }],
         connectors: Vec::new(),
         env: Vec::new(),
@@ -145,6 +178,55 @@ fn wire_definition_keeps_ref(world: &mut BehaviourWorld) -> Result<(), String> {
     } else {
         Err(format!("expected the declared ref verbatim in: {wire}"))
     }
+}
+
+#[then("the definition sent to the service carries the inline file unchanged")]
+fn wire_definition_keeps_inline(world: &mut BehaviourWorld) -> Result<(), String> {
+    let wire = world.wire_definition.as_ref().ok_or("no wire definition")?;
+    let value: serde_json::Value =
+        serde_json::from_str(wire).map_err(|error| format!("invalid wire json: {error}"))?;
+    let inline = &value["spec"]["filesets"][0]["inline"];
+    if inline[".claude/settings.json"] == serde_json::json!(r#"{"marker":"do-not-print"}"#) {
+        Ok(())
+    } else {
+        Err(format!("expected unchanged inline content, got {inline}"))
+    }
+}
+
+#[then(
+    regex = r#"^the run summary discloses an inline fileset at \"([^\"]+)\" owned by (?:the )?(workload|root)$"#
+)]
+fn summary_discloses_inline(
+    world: &mut BehaviourWorld,
+    mount: String,
+    owner: String,
+) -> Result<(), String> {
+    let expected = format!("Fileset:   inline -> {mount} (owner: {owner})");
+    if world.summary_output.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {expected:?} in:\n{}",
+            world.summary_output
+        ))
+    }
+}
+
+#[then(regex = r#"^the run summary does not contain \"([^\"]+)\"$"#)]
+fn summary_omits_content(world: &mut BehaviourWorld, content: String) -> Result<(), String> {
+    if world.summary_output.contains(&content) {
+        Err(format!(
+            "summary leaked {content:?}:\n{}",
+            world.summary_output
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then("the run summary does not contain the inline file content")]
+fn summary_omits_inline_content(world: &mut BehaviourWorld) -> Result<(), String> {
+    summary_omits_content(world, "do-not-print".to_string())
 }
 
 #[then(regex = r"^the run summary shows a Fileset line `([^`]+)`$")]

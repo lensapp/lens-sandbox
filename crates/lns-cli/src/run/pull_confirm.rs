@@ -8,7 +8,7 @@ pub struct PulledMounts<'a> {
     pub reference: &'a str,
     pub binds: &'a [lns_ipc::BindSpec],
     pub volumes: &'a [lns_ipc::VolumeMount],
-    pub filesets: &'a [(String, String)],
+    pub filesets: &'a [(String, String, String)],
 }
 
 impl PulledMounts<'_> {
@@ -92,10 +92,15 @@ fn disclosure(mounts: &PulledMounts) -> String {
         )
         .unwrap();
     }
-    for (source, mount_path) in mounts.filesets {
+    for (source, mount_path, owner) in mounts.filesets {
+        let mode = if owner == "workload" {
+            "read and write"
+        } else {
+            "read"
+        };
         writeln!(
             s,
-            "  Fileset:   {source} → {mount_path} — author-published files the workload will read"
+            "  Fileset:   {source} → {mount_path} — author-published files the workload can {mode} (owner: {owner})"
         )
         .unwrap();
     }
@@ -136,7 +141,7 @@ mod tests {
 
     fn mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
-        filesets: &'a [(String, String)],
+        filesets: &'a [(String, String, String)],
     ) -> PulledMounts<'a> {
         volume_mounts(binds, &[], filesets)
     }
@@ -144,7 +149,7 @@ mod tests {
     fn volume_mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
         volumes: &'a [lns_ipc::VolumeMount],
-        filesets: &'a [(String, String)],
+        filesets: &'a [(String, String, String)],
     ) -> PulledMounts<'a> {
         PulledMounts {
             reference: "ghcr.io/team/hermes:1",
@@ -250,16 +255,30 @@ mod tests {
     }
 
     #[test]
-    fn disclosure_names_each_fileset_with_its_mount_path() {
-        let filesets = [(
-            "reg/skills@sha256:abcabcabcabc…".to_string(),
-            "/root/.agent/skills".to_string(),
-        )];
+    fn disclosure_names_each_fileset_with_its_mount_path_and_access_mode() {
+        let filesets = [
+            (
+                "reg/skills@sha256:abcabcabcabc…".to_string(),
+                "/root/.agent/skills".to_string(),
+                "workload".to_string(),
+            ),
+            (
+                "inline".to_string(),
+                "/etc/agent".to_string(),
+                "root".to_string(),
+            ),
+        ];
         let (r, out) = confirm(&mounts(&[], &filesets), false, true, "yes\n");
         r.unwrap();
         assert!(
             out.contains(
-                "Fileset:   reg/skills@sha256:abcabcabcabc… → /root/.agent/skills — author-published files the workload will read"
+                "Fileset:   reg/skills@sha256:abcabcabcabc… → /root/.agent/skills — author-published files the workload can read and write (owner: workload)"
+            ),
+            "got: {out}"
+        );
+        assert!(
+            out.contains(
+                "Fileset:   inline → /etc/agent — author-published files the workload can read (owner: root)"
             ),
             "got: {out}"
         );
@@ -319,7 +338,11 @@ mod tests {
 
     #[test]
     fn no_terminal_fails_closed_and_points_at_the_yes_flag() {
-        let filesets = [("reg/skills@sha256:abc".to_string(), "/skills".to_string())];
+        let filesets = [(
+            "reg/skills@sha256:abc".to_string(),
+            "/skills".to_string(),
+            "workload".to_string(),
+        )];
         let (r, out) = confirm(&mounts(&[], &filesets), false, false, "");
         let err = r.unwrap_err().to_string();
         assert!(err.contains("--yes"), "must name the escape hatch: {err}");

@@ -301,7 +301,19 @@ pub struct SandboxFileset {
     pub path: Option<String>,
     #[serde(rename = "ref", default)]
     pub reference: Option<String>,
+    #[serde(default)]
+    pub inline: bool,
     pub mount_path: String,
+    #[serde(default)]
+    pub owner: SandboxFilesetOwner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxFilesetOwner {
+    #[default]
+    Workload,
+    Root,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1346,7 +1358,9 @@ mod tests {
                     "registry.example.test/team/skills@sha256:{}",
                     "a".repeat(64)
                 )),
+                inline: false,
                 mount_path: "/root/.agent/skills".into(),
+                owner: SandboxFilesetOwner::Workload,
             }],
             connectors: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],

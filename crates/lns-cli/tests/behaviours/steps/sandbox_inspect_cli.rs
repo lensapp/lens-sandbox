@@ -106,7 +106,9 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
                 "registry.example.test/team/skills@sha256:{}",
                 "a".repeat(64)
             )),
+            inline: false,
             mount_path: mount,
+            owner: lns_ipc::SandboxFilesetOwner::Workload,
         }],
         connectors: Vec::new(),
         env: Vec::new(),
