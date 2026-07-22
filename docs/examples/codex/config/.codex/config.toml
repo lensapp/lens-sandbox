@@ -1,0 +1,6 @@
+preferred_auth_method = "chatgpt"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/workspace"]
+trust_level = "trusted"
