@@ -250,6 +250,7 @@ pub async fn run_image(
         let mounts = crate::run::pull_confirm::PulledMounts {
             reference: &reference,
             binds: &bind_specs,
+            volumes: &volumes,
             filesets: &args.filesets,
         };
         let stdin = std::io::stdin();

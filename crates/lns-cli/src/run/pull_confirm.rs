@@ -3,16 +3,17 @@ use std::io::{BufRead, Write};
 
 use anyhow::{Result, bail};
 
-/// What a pulled-by-reference sandbox will mount into the workload: host binds it declared (resolved against this machine) and author-published filesets.
+/// What a pulled-by-reference sandbox will mount into the workload: host binds it declared (resolved against this machine), named volumes from this machine's shared volume store, and author-published filesets.
 pub struct PulledMounts<'a> {
     pub reference: &'a str,
     pub binds: &'a [lns_ipc::BindSpec],
+    pub volumes: &'a [lns_ipc::VolumeMount],
     pub filesets: &'a [(String, String)],
 }
 
 impl PulledMounts<'_> {
     fn is_empty(&self) -> bool {
-        self.binds.is_empty() && self.filesets.is_empty()
+        self.binds.is_empty() && self.volumes.is_empty() && self.filesets.is_empty()
     }
 }
 
@@ -61,6 +62,19 @@ fn disclosure(mounts: &PulledMounts) -> String {
         )
         .unwrap();
     }
+    for volume in mounts.volumes {
+        let mode = if volume.read_only {
+            "read"
+        } else {
+            "read and write"
+        };
+        writeln!(
+            s,
+            "  Volume:    {} → {} — the workload can {mode} this machine's persistent volume",
+            volume.name, volume.target
+        )
+        .unwrap();
+    }
     for (source, mount_path) in mounts.filesets {
         writeln!(
             s,
@@ -95,13 +109,30 @@ mod tests {
         (r, String::from_utf8(out).unwrap())
     }
 
+    fn volume(name: &str, read_only: bool) -> lns_ipc::VolumeMount {
+        lns_ipc::VolumeMount {
+            name: name.into(),
+            target: "/data".into(),
+            read_only,
+        }
+    }
+
     fn mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
+        filesets: &'a [(String, String)],
+    ) -> PulledMounts<'a> {
+        volume_mounts(binds, &[], filesets)
+    }
+
+    fn volume_mounts<'a>(
+        binds: &'a [lns_ipc::BindSpec],
+        volumes: &'a [lns_ipc::VolumeMount],
         filesets: &'a [(String, String)],
     ) -> PulledMounts<'a> {
         PulledMounts {
             reference: "ghcr.io/team/hermes:1",
             binds,
+            volumes,
             filesets,
         }
     }
@@ -155,6 +186,37 @@ mod tests {
                 "Fileset:   reg/skills@sha256:abcabcabcabc… → /root/.agent/skills — author-published files the workload will read"
             ),
             "got: {out}"
+        );
+    }
+
+    #[test]
+    fn disclosure_names_each_named_volume_with_its_mode() {
+        let volumes = [volume("home", false), volume("cfg", true)];
+        let (r, out) = confirm(&volume_mounts(&[], &volumes, &[]), false, true, "y\n");
+        r.unwrap();
+        assert!(
+            out.contains(
+                "Volume:    home → /data — the workload can read and write this machine's persistent volume"
+            ),
+            "got: {out}"
+        );
+        assert!(
+            out.contains(
+                "Volume:    cfg → /data — the workload can read this machine's persistent volume"
+            ),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn a_named_volume_alone_is_enough_to_prompt() {
+        let volumes = [volume("home", false)];
+        let err = confirm(&volume_mounts(&[], &volumes, &[]), false, true, "\n")
+            .0
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("declined"),
+            "an author-named volume must not attach without consent: {err}"
         );
     }
 
