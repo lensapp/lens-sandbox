@@ -674,7 +674,7 @@ async fn mirror_microvm_image(host: &str, seq: usize) -> String {
 }
 
 #[when(
-    "the user pulls a published declarative sandbox and runs it with the registry offline from a consumer project"
+    "the user pulls a published declarative sandbox and runs it with --yes with the registry offline from a consumer project"
 )]
 async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     let host = world
@@ -729,7 +729,12 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
         .set_online(false);
 
     let command = "/bin/sh -c 'echo wd=$(/.lens/guest-tools/bin/busybox pwd); if [ -f consumer-marker ]; then echo consumer=visible; fi; if echo blocked > consumer-marker 2>/dev/null; then echo bind=writable; else echo bind=readonly; fi; echo volume=mounted > /data/marker; read v < /data/marker; echo $v'";
-    let mut args = vec!["run".to_string(), reference, "--".to_string()];
+    let mut args = vec![
+        "run".to_string(),
+        "--yes".to_string(),
+        reference,
+        "--".to_string(),
+    ];
     args.extend(split_args(command));
     let result =
         run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);

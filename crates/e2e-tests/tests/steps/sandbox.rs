@@ -48,6 +48,7 @@ fn imageless_definition_at(world: &mut E2eWorld, rel: String) {
 
 #[when(regex = r#"^I run "([^"]*)" in the project directory$"#)]
 fn run_in_project_dir(world: &mut E2eWorld, cmd_line: String) {
+    let cmd_line = substitute_pushed_ref(world, &cmd_line);
     let project = project_dir(world);
     let mut envs: Vec<(String, std::ffi::OsString)> = Vec::new();
     if let Some(home) = &world.home {
