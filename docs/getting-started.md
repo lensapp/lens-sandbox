@@ -190,6 +190,30 @@ refused connection or a failed DNS lookup — never a silent success.
 
 If no one answers, the request times out and is denied.
 
+## Uninstall
+
+To remove Lens Sandbox, run:
+
+```bash
+lns uninstall
+```
+
+This stops any running sandboxes, stops the background service, removes the login
+auto-start entry, and deletes the installed `lns` and `lns-service` binaries. It
+asks for confirmation first; pass `-y`/`--yes` to skip the prompt. Your local data
+— cached images, named volumes, the audit trail, config, and stored credentials —
+is left in place so a reinstall picks up where you left off.
+
+To delete that data too, add `--purge`:
+
+```bash
+lns uninstall --purge
+```
+
+`--purge` keeps only files you authored yourself, such as your
+`~/.lns-connectors.yaml` catalog and each project's `lns-policy.yaml`, and prints
+what it left behind.
+
 ## Where to go next
 
 - Author, run, distribute, and manage a sandbox; tune resources, mount volumes,

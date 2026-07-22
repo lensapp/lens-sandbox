@@ -64,6 +64,7 @@ pub fn registry() -> Vec<CommandSpec> {
         crate::audit::SPEC,
         crate::service::SPEC,
         crate::update::SPEC,
+        crate::uninstall::SPEC,
         crate::policy::SPEC,
         crate::connector::SPEC,
         crate::config::SPEC,
@@ -331,13 +332,14 @@ mod tests {
     }
 
     #[test]
-    fn only_update_opts_out_of_the_update_check_announce() {
+    fn only_update_and_uninstall_opt_out_of_the_update_check_announce() {
         for spec in registry() {
             let opts_in = spec.announces_update_check;
-            if spec.name == "update" {
+            if matches!(spec.name, "update" | "uninstall") {
                 assert!(
                     !opts_in,
-                    "update must skip the announce so it does not nag mid-upgrade"
+                    "{} must skip the announce so it does not nag while changing the install",
+                    spec.name
                 );
             } else {
                 assert!(opts_in, "{} should announce available updates", spec.name);

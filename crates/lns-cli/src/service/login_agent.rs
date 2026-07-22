@@ -29,8 +29,8 @@ pub(super) enum EnableOutcome {
     Degraded(String),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum DisableOutcome {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisableOutcome {
     Unregistered,
     WasNotRegistered,
 }

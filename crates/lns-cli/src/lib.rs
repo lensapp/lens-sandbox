@@ -14,6 +14,7 @@ pub mod sandbox;
 pub mod service;
 #[cfg(test)]
 mod test_env;
+pub mod uninstall;
 pub mod update;
 pub mod update_check;
 pub mod volume;
