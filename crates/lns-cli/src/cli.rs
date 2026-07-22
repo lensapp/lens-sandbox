@@ -216,7 +216,7 @@ pub struct RunArgs {
     #[arg(
         long = "yes",
         default_value_t = false,
-        help = "Accept without prompting the host binds and filesets a pulled sandbox mounts into the workload. Required for non-interactive runs of a pulled sandbox that declares them."
+        help = "Accept without prompting the host binds, named volumes, and filesets a pulled sandbox mounts into the workload. Required for non-interactive runs of a pulled sandbox that declares them."
     )]
     pub assume_yes: bool,
 
