@@ -38,8 +38,12 @@ pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
     let args = crate::config::apply_run_defaults(args, defaults);
     let cwd = std::env::current_dir().context("reading current directory")?;
     // Target resolution is offline; a missing or invalid definition fails fast, before the service gate.
-    let target =
-        crate::run::target::resolve(args.image.as_deref(), &crate::sandbox::real::RealFs, &cwd)?;
+    let target = crate::run::target::resolve(
+        args.image.as_deref(),
+        args.file.as_deref(),
+        &crate::sandbox::real::RealFs,
+        &cwd,
+    )?;
     require_running().await;
     run_image(args, target, cwd, debug).await
 }

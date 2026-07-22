@@ -38,6 +38,15 @@ pub struct RunArgs {
     pub image: Option<String>,
 
     #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        conflicts_with = "image",
+        help = "Definition file to run instead of ./lns.yaml (e.g. lns.dev.yaml); its directory roots the definition's relative binds and filesets. Cannot be combined with REF."
+    )]
+    pub file: Option<PathBuf>,
+
+    #[arg(
         long,
         help = "Name the run, addressable in place of its id by every `lns sandbox` verb. Auto-generated (adjective_noun) when omitted; must not be all digits."
     )]

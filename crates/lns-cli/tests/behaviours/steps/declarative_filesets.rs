@@ -47,7 +47,7 @@ fn resolve_local(world: &BehaviourWorld) -> anyhow::Result<RunTarget> {
     let fs = StepFs {
         files: RefCell::new(world.author_files.clone()),
     };
-    resolve(None, &fs, Path::new("/work"))
+    resolve(None, None, &fs, Path::new("/work"))
 }
 
 #[when("the local sandbox run is prepared")]

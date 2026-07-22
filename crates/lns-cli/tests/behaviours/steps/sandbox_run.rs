@@ -110,7 +110,7 @@ fn drive_run(w: &mut BehaviourWorld, argv: &[String]) {
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
     };
-    match resolve(args.image.as_deref(), &fs, cwd) {
+    match resolve(args.image.as_deref(), args.file.as_deref(), &fs, cwd) {
         Err(e) => {
             w.result = Some(CliRun {
                 exit_code: 1,
