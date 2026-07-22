@@ -29,7 +29,6 @@ Feature: selecting the sandbox definition file
     Then the exit code is 2
     And the output contains "cannot be used with"
 
-  @todo
   Scenario: validate --file validates the named definition
     Given a sandbox definition file "lns.dev.yaml" in the current directory
     When the user runs sandbox command "validate --file lns.dev.yaml"
