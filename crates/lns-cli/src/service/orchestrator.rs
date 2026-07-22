@@ -245,6 +245,23 @@ pub async fn run_image(
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
+    if published.is_some() {
+        let reference = target.image();
+        let mounts = crate::run::pull_confirm::PulledMounts {
+            reference: &reference,
+            binds: &bind_specs,
+            filesets: &args.filesets,
+        };
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        crate::run::pull_confirm::confirm_pulled_mounts(
+            &mounts,
+            args.assume_yes,
+            interactive,
+            &mut input,
+            &mut std::io::stderr(),
+        )?;
+    }
     let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);

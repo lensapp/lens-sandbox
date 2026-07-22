@@ -290,6 +290,7 @@ mod tests {
             declared_unpublished: Vec::new(),
             filesets: Vec::new(),
             mounts: Vec::new(),
+            assume_yes: false,
             quiet: false,
             cmd: Vec::new(),
         }

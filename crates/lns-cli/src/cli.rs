@@ -214,6 +214,13 @@ pub struct RunArgs {
     pub mounts: Vec<lns_ipc::MountSpec>,
 
     #[arg(
+        long = "yes",
+        default_value_t = false,
+        help = "Accept without prompting the host binds and filesets a pulled sandbox mounts into the workload. Required for non-interactive runs of a pulled sandbox that declares them."
+    )]
+    pub assume_yes: bool,
+
+    #[arg(
         short = 'q',
         long = "quiet",
         default_value_t = false,
