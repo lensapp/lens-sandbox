@@ -98,15 +98,18 @@ lns run [OPTIONS] [REF] [-- COMMAND...]
 
 `REF` is a sandbox reference: a **registry coordinate** (`ghcr.io/team/hermes:1.4.0`)
 or a **path to a local definition**. Omit it to run the `./lns.yaml` in the current
-directory; `.`, `lns.yaml`, and `./lns.yaml` mean the same thing, and a relative or
-absolute path runs another directory's definition (its relative binds and filesets
-root at that directory, compose-style, while the policy still comes from where you
-run):
+directory; `.`, `lns.yaml`, and `./lns.yaml` mean the same thing, a relative or
+absolute path runs another directory's definition, and a path-shaped `.yaml`/`.yml`
+file names the definition itself. Either way the definition's relative binds and
+filesets root at its own directory, compose-style, while the policy still comes
+from where you run:
 
 ```bash
 lns run                                  # run ./lns.yaml in this directory
 lns run .                                # same
 lns run ../other-project                 # run that directory's lns.yaml
+lns run ./docs/examples/claude-code      # same, no cd needed
+lns run ./lns.dev.yaml                   # run a definition file by name
 lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
@@ -136,6 +139,25 @@ lns run ghcr.io/acme/agent:latest
 
 The sandbox artifact and its base image are pulled and cached by the service, then
 its entrypoint starts inside the microVM.
+
+### Selecting a definition file
+
+`./lns.yaml` is the sandbox — one directory is one sandbox, and every verb
+defaults to it. When a project keeps a variant of its sandbox alongside the
+default (say `lns.dev.yaml` with looser resources), select it explicitly with
+`-f`/`--file` — the same escape hatch as `docker build -f`:
+
+```bash
+lns run -f lns.dev.yaml                  # run the variant
+lns sandbox validate -f lns.dev.yaml     # validate it, offline
+lns push -f lns.dev.yaml ghcr.io/acme/agent-dev:1.0.0
+lns inspect -f lns.dev.yaml              # render it, offline
+```
+
+The selected file's directory roots its relative binds and filesets, exactly as
+a path-shaped `REF` does, and the policy still comes from where you run. On
+`lns run` the selector is exclusive with `REF`; `lns run ./lns.dev.yaml` is the
+equivalent path spelling.
 
 ### Pinning a published sandbox by digest
 

@@ -50,10 +50,12 @@ lns run [OPTIONS] [REF] [-- COMMAND...]
 ```
 
 `REF` is a **registry coordinate** (`ghcr.io/team/hermes:1.4.0`) or a **path to a
-local definition** — `.`, `lns.yaml`, `./lns.yaml`, or a relative/absolute path to
-a directory holding one; omit it to run the `./lns.yaml` in the current directory.
-A path-named definition's relative binds and filesets root at its own directory,
-compose-style; the policy still comes from where you run. A
+local definition** — `.`, `lns.yaml`, `./lns.yaml`, a relative/absolute path to
+a directory holding one, or a path-shaped `.yaml`/`.yml` file naming the
+definition itself (`./lns.dev.yaml`); omit it to run the `./lns.yaml` in the
+current directory, or select another file with `-f`/`--file` (exclusive with
+`REF`). A path-named definition's relative binds and filesets root at its own
+directory, compose-style; the policy still comes from where you run. A
 `COMMAND` after the reference overrides the sandbox base image's default command
 (`lns run ghcr.io/acme/agent:1 echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
 separator is still accepted. A command with no `REF` (`lns run -- echo hi`) runs
@@ -63,6 +65,7 @@ the `./lns.yaml` definition with its command overridden.
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
 | `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
+| `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory roots the definition's relative binds and filesets. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
@@ -128,8 +131,8 @@ interchangeable everywhere a run is addressed.
 | Subcommand | Shortcut       | Meaning |
 | ---------- | -------------- | ------- |
 | `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
-| `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing. |
+| `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. `-f`/`--file` validates another definition file instead. |
+| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing. `-f`/`--file` publishes another definition file instead. |
 | `pull`     | `lns pull`     | Fetch a published sandbox and its base image into the local cache. |
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
@@ -139,7 +142,7 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | With no target or a path-shaped one (`.`, `lns.yaml`, `./dir`): render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), integrations, and any over-broad-policy flag; or a plain `Image`. |
+| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), integrations, and any over-broad-policy flag; or a plain `Image`. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
 | `prune`    | —              | Remove every cached sandbox not held by a running one, reclaiming disk. Requires `-f`/`--force` — there is no interactive prompt. |
 
