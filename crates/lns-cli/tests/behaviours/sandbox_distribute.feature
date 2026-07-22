@@ -67,7 +67,6 @@ Feature: distributing a sandbox
     And the output contains ".env"
     And nothing is pushed
 
-  @todo
   Scenario: push carries inline files in the sandbox artifact without a companion fileset artifact
     Given a valid lns.yaml in the current directory declaring an inline fileset at "/home/sandbox"
     And the registry accepts the push

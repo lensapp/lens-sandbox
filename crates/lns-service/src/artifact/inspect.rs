@@ -66,7 +66,16 @@ pub(crate) fn project_inspection(
                         .map(|fileset| lns_ipc::SandboxFileset {
                             path: fileset.path.clone(),
                             reference: fileset.reference.clone(),
+                            inline: fileset.inline.is_some(),
                             mount_path: fileset.mount_path.clone(),
+                            owner: match fileset.owner {
+                                lns_artifact::sandbox::FilesetOwner::Workload => {
+                                    lns_ipc::SandboxFilesetOwner::Workload
+                                }
+                                lns_artifact::sandbox::FilesetOwner::Root => {
+                                    lns_ipc::SandboxFilesetOwner::Root
+                                }
+                            },
                         })
                         .collect(),
                     connectors: def.spec.connectors,
@@ -171,7 +180,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"}],"policy":{"defaultVerdict":"allow"}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"defaultVerdict":"allow"}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -206,14 +215,25 @@ mod tests {
                         container: 3000,
                     },
                 ],
-                filesets: vec![SandboxFileset {
-                    path: None,
-                    reference: Some(
-                        "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .into()
-                    ),
-                    mount_path: "/root/.agent/skills".into(),
-                }],
+                filesets: vec![
+                    SandboxFileset {
+                        path: None,
+                        reference: Some(
+                            "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                .into()
+                        ),
+                        inline: false,
+                        mount_path: "/root/.agent/skills".into(),
+                        owner: lns_ipc::SandboxFilesetOwner::Workload,
+                    },
+                    SandboxFileset {
+                        path: None,
+                        reference: None,
+                        inline: true,
+                        mount_path: "/etc/agent".into(),
+                        owner: lns_ipc::SandboxFilesetOwner::Root,
+                    },
+                ],
                 connectors: vec![],
                 env: vec![],
                 credentials: vec![],

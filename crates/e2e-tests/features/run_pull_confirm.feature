@@ -26,6 +26,6 @@ Feature: running a pulled sandbox asks before mounting into the workload
     And I run "run <pushed-ref>" in the project directory
     Then the exit code is non-zero
     And the output contains "mounts into the workload:"
-    And the output contains "author-published files the workload will read"
+    And the output contains "author-published files the workload can read and write"
     And the output contains "no terminal to confirm"
     And the output does not contain "started run"

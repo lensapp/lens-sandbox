@@ -128,7 +128,7 @@ fn resolve_host_binds(
 struct PublishedTarget {
     image: String,
     defaults: crate::run::declarative::Defaults,
-    filesets: Vec<(String, String)>,
+    filesets: Vec<(String, String, String)>,
 }
 
 fn published_target(
@@ -238,6 +238,7 @@ pub async fn run_image(
                 (
                     crate::run::summary::fileset_source_display(fileset),
                     fileset.mount_path.clone(),
+                    crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
                 )
             })
             .collect(),
@@ -1093,7 +1094,9 @@ mod tests {
                         "registry.example.test/team/skills@sha256:{}",
                         "b".repeat(64)
                     )),
+                    inline: false,
                     mount_path: "/root/.agent/skills".into(),
+                    owner: lns_ipc::SandboxFilesetOwner::Workload,
                 }],
                 connectors: Vec::new(),
                 env: Vec::new(),
@@ -1115,7 +1118,8 @@ mod tests {
                     "registry.example.test/team/skills@sha256:{}…",
                     "b".repeat(12)
                 ),
-                "/root/.agent/skills".to_string()
+                "/root/.agent/skills".to_string(),
+                "workload".to_string()
             )]
         );
     }

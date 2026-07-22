@@ -789,12 +789,13 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
             for fileset in &view.filesets {
-                let source = fileset
-                    .path
-                    .as_deref()
-                    .or(fileset.reference.as_deref())
-                    .unwrap_or_default();
-                writeln!(out, "fileset: {source} -> {}", fileset.mount_path)?;
+                let source = crate::run::summary::fileset_view_source_display(fileset);
+                let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
+                writeln!(
+                    out,
+                    "fileset: {source} -> {} (owner: {owner})",
+                    fileset.mount_path
+                )?;
             }
             render_connectors(out, &view.connectors)?;
             for credential in &view.credentials {
@@ -803,11 +804,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 } else {
                     ""
                 };
-                writeln!(
-                    out,
-                    "credential: {} -> {}{required}",
-                    credential.name, credential.env
-                )?;
+                let name = &credential.name;
+                let env = &credential.env;
+                writeln!(out, "credential: {name} -> {env}{required}")?;
             }
             render_policy_flags(out, &view.policy_flags)?;
         }

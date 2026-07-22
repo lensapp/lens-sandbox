@@ -25,6 +25,18 @@ fn valid_lns_yaml_with_fileset(w: &mut BehaviourWorld, path: String, mount: Stri
     );
 }
 
+#[given(
+    regex = r#"^a valid lns\.yaml in the current directory declaring an inline fileset at \"([^\"]+)\"$"#
+)]
+fn valid_lns_yaml_with_inline_fileset(w: &mut BehaviourWorld, mount: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - inline:\n        settings.json: do-not-print\n      mountPath: {mount}\n"
+        ),
+    );
+}
+
 #[then("a FileSet artifact is pushed alongside the sandbox")]
 fn fileset_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
     if w.pushed_filesets
@@ -37,6 +49,35 @@ fn fileset_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
             "expected a digest-addressed fileset push, saw {:?}",
             w.pushed_filesets
         ))
+    }
+}
+
+#[then("only the sandbox artifact is pushed")]
+fn only_sandbox_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
+    if w.pushed_filesets.is_empty() && w.pushed_doc.is_some() {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected only a sandbox artifact, saw filesets {:?} and sandbox={}",
+            w.pushed_filesets,
+            w.pushed_doc.is_some()
+        ))
+    }
+}
+
+#[then("the published sandbox config carries the inline content unchanged")]
+fn published_config_keeps_inline(w: &mut BehaviourWorld) -> Result<(), String> {
+    let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(doc).map_err(|error| format!("invalid pushed json: {error}"))?;
+    let entry = &value["spec"]["filesets"][0];
+    if entry["inline"]["settings.json"] == "do-not-print"
+        && entry.get("path").is_none()
+        && entry.get("ref").is_none()
+    {
+        Ok(())
+    } else {
+        Err(format!("expected unchanged inline entry, got {entry}"))
     }
 }
 

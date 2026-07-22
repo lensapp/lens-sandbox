@@ -80,8 +80,8 @@ pub fn format_summary(
     for bind in &binds {
         writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
-    for (source, mount) in &args.filesets {
-        writeln!(s, "  Fileset:   {source} -> {mount}").unwrap();
+    for (source, mount, owner) in &args.filesets {
+        writeln!(s, "  Fileset:   {source} -> {mount} (owner: {owner})").unwrap();
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -178,27 +178,57 @@ fn flags_line(args: &RunArgs) -> String {
     }
 }
 
-/// The summary names a fileset by what the author wrote: the path verbatim, or the ref with its digest shortened to the usual 12 characters.
+/// The summary shows a path verbatim, shortens a ref digest to 12 characters, and names embedded files as inline.
 pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
-    fileset_display(fileset.path.as_deref(), fileset.reference.as_deref())
+    fileset_display(
+        fileset.path.as_deref(),
+        fileset.reference.as_deref(),
+        fileset.inline.is_some(),
+    )
+}
+
+pub fn fileset_owner_display(owner: lns_artifact::sandbox::FilesetOwner) -> &'static str {
+    match owner {
+        lns_artifact::sandbox::FilesetOwner::Workload => "workload",
+        lns_artifact::sandbox::FilesetOwner::Root => "root",
+    }
+}
+
+pub fn fileset_view_source_display(fileset: &lns_ipc::SandboxFileset) -> String {
+    fileset_display(
+        fileset.path.as_deref(),
+        fileset.reference.as_deref(),
+        fileset.inline,
+    )
+}
+
+pub fn fileset_view_owner_display(owner: lns_ipc::SandboxFilesetOwner) -> &'static str {
+    match owner {
+        lns_ipc::SandboxFilesetOwner::Workload => "workload",
+        lns_ipc::SandboxFilesetOwner::Root => "root",
+    }
 }
 
 /// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
-pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, String)> {
+pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, String, String)> {
     view.filesets
         .iter()
         .map(|fileset| {
             (
-                fileset_display(fileset.path.as_deref(), fileset.reference.as_deref()),
+                fileset_view_source_display(fileset),
                 fileset.mount_path.clone(),
+                fileset_view_owner_display(fileset.owner).to_string(),
             )
         })
         .collect()
 }
 
-fn fileset_display(path: Option<&str>, reference: Option<&str>) -> String {
+fn fileset_display(path: Option<&str>, reference: Option<&str>, inline: bool) -> String {
     if let Some(path) = path {
         return path.to_string();
+    }
+    if inline {
+        return "inline".to_string();
     }
     let reference = reference.unwrap_or_default();
     match reference.split_once("@sha256:") {
@@ -349,6 +379,57 @@ mod tests {
         assert_eq!(
             fileset_source_display(&fileset_entry(None, Some("reg/skills@sha256:abc"))),
             "reg/skills@sha256:abc"
+        );
+    }
+
+    #[test]
+    fn fileset_display_discloses_inline_source_and_owners_without_content() {
+        let mut fileset = fileset_entry(None, None);
+        fileset.inline = Some(std::collections::BTreeMap::from([(
+            "settings.json".to_string(),
+            "do-not-print".to_string(),
+        )]));
+
+        assert_eq!(fileset_source_display(&fileset), "inline");
+        assert_eq!(
+            fileset_owner_display(lns_artifact::sandbox::FilesetOwner::Workload),
+            "workload"
+        );
+        assert_eq!(
+            fileset_owner_display(lns_artifact::sandbox::FilesetOwner::Root),
+            "root"
+        );
+    }
+
+    #[test]
+    fn pulled_fileset_summaries_disclose_inline_source_and_root_owner() {
+        let view = lns_ipc::SandboxView {
+            reference: "registry.example.test/team/sandbox:latest".into(),
+            digest: "sha256:abc".into(),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: vec![lns_ipc::SandboxFileset {
+                path: None,
+                reference: None,
+                inline: true,
+                mount_path: "/etc/agent".into(),
+                owner: lns_ipc::SandboxFilesetOwner::Root,
+            }],
+            connectors: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            policy_flags: Vec::new(),
+        };
+
+        assert_eq!(
+            fileset_summaries_from_view(&view),
+            vec![(
+                "inline".to_string(),
+                "/etc/agent".to_string(),
+                "root".to_string()
+            )]
         );
     }
 

@@ -218,12 +218,13 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         )?;
     }
     for fileset in &def.spec.filesets {
-        let source = fileset
-            .path
-            .as_deref()
-            .or(fileset.reference.as_deref())
-            .unwrap_or_default();
-        writeln!(out, "  fileset:      {source} -> {}", fileset.mount_path)?;
+        let source = crate::run::summary::fileset_source_display(fileset);
+        let owner = crate::run::summary::fileset_owner_display(fileset.owner);
+        writeln!(
+            out,
+            "  fileset:      {source} -> {} (owner: {owner})",
+            fileset.mount_path
+        )?;
     }
     writeln!(
         out,
@@ -240,11 +241,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         } else {
             ""
         };
-        writeln!(
-            out,
-            "  credential: {} -> {}{required}",
-            credential.name, credential.env
-        )?;
+        let name = &credential.name;
+        let env = &credential.env;
+        writeln!(out, "  credential: {name} -> {env}{required}")?;
     }
     Ok(())
 }
@@ -468,7 +467,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_path_and_ref_filesets() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n  credentials:\n    - name: some-provider\n      env: SOME_TOKEN\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &mut out).unwrap();
@@ -481,6 +480,10 @@ mod tests {
             text.contains(
                 "fileset:      registry.example.test/team/settings@sha256:abc -> /root/.agent/settings"
             ),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("credential: some-provider -> SOME_TOKEN"),
             "got: {text}"
         );
     }
