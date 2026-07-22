@@ -388,6 +388,10 @@ fn production_spec() -> Result<AgentSpec, String> {
 
 pub(super) use real::{disable, enable, restart};
 
+pub(super) fn agent_path() -> Option<PathBuf> {
+    production_spec().ok().map(|spec| spec.agent_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

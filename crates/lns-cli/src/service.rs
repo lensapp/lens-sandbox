@@ -141,8 +141,7 @@ async fn restart_with_outcome(
     match outcome {
         login_agent::RestartOutcome::Relaunched => {
             if client.wait_for_ready(START_TIMEOUT).await {
-                println!("Lens Sandbox restarted.");
-                Ok(())
+                report_relaunched(client, login_agent::agent_path().as_deref()).await
             } else {
                 anyhow::bail!(
                     "lns-service did not become ready within {}s after restart",
@@ -158,6 +157,25 @@ async fn restart_with_outcome(
             restart_via_socket(client).await
         }
     }
+}
+
+/// A relaunched login agent re-runs whatever binary its agent file froze at
+/// enable time, so a Pong alone can't prove the mismatch was reconciled.
+async fn report_relaunched(
+    client: &impl ServiceClient,
+    agent_path: Option<&std::path::Path>,
+) -> Result<()> {
+    let status = client.status().await;
+    let compat = handshake::classify(
+        handshake::CLI_PROTOCOL,
+        handshake::CLI_BUILD,
+        status.as_ref(),
+    );
+    match handshake::relaunched_warning(&compat, agent_path) {
+        None => println!("Lens Sandbox restarted."),
+        Some(warning) => crate::log::warn!("{warning}"),
+    }
+    Ok(())
 }
 
 async fn restart_via_socket(client: &impl ServiceClient) -> Result<()> {
@@ -897,15 +915,45 @@ exit 0
     }
 
     #[tokio::test]
-    async fn restart_with_outcome_relaunched_waits_for_ready() {
+    async fn restart_with_outcome_relaunched_verifies_the_running_build_after_ready() {
         let client = FakeClient::default();
         *client.wait_for_ready_response.lock().unwrap() = Some(true);
+        *client.status_response.lock().unwrap() = Some(Some(matching_status()));
 
         restart_with_outcome(&client, login_agent::RestartOutcome::Relaunched)
             .await
             .expect("a relaunched managed service that becomes ready succeeds");
 
-        assert_eq!(client.calls(), vec!["wait_for_ready"]);
+        assert_eq!(client.calls(), vec!["wait_for_ready", "status"]);
+    }
+
+    #[test]
+    fn restart_with_outcome_relaunched_warns_when_the_agent_relaunched_a_stale_binary() {
+        let client = FakeClient::default();
+        *client.wait_for_ready_response.lock().unwrap() = Some(true);
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 1,
+            uptime_secs: 1,
+            version: "0.0.0".into(),
+            protocol: lns_ipc::IPC_PROTOCOL_VERSION,
+            build: "a-stale-build".into(),
+        }));
+
+        let events = capture_warn(|| {
+            futures_block_on(restart_with_outcome(
+                &client,
+                login_agent::RestartOutcome::Relaunched,
+            ))
+            .expect("a hollow relaunch warns instead of failing");
+        });
+
+        assert_eq!(client.calls(), vec!["wait_for_ready", "status"]);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("a-stale-build") && e.contains("lns service enable")),
+            "expected a stale-binary warning with the repoint remedy: {events:?}"
+        );
     }
 
     #[tokio::test]

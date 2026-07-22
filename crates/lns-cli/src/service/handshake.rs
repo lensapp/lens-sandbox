@@ -73,6 +73,36 @@ pub(crate) fn already_running_warning(compat: &Compat) -> Option<String> {
     }
 }
 
+/// For `lns service restart` after the login agent relaunched: `None` means the
+/// relaunch reconciled the pair; `Some(warning)` means the agent relaunched a
+/// stale binary and the mismatch is still in place.
+pub(crate) fn relaunched_warning(
+    compat: &Compat,
+    agent_path: Option<&std::path::Path>,
+) -> Option<String> {
+    let still = match compat {
+        Compat::Match => return None,
+        Compat::BuildDrift { running } => {
+            format!("still a different build ({running}) than this lns ({CLI_BUILD})")
+        }
+        Compat::ProtocolMismatch { cli, running } => {
+            let running = running.map_or_else(
+                || "an older, unreadable version".to_string(),
+                |p| format!("protocol {p}"),
+            );
+            format!("still speaking an incompatible IPC version ({running}; this lns speaks {cli})")
+        }
+    };
+    let agent = agent_path.map_or_else(
+        || "the login agent".to_string(),
+        |p| format!("the login agent at {}", p.display()),
+    );
+    Some(format!(
+        "Lens Sandbox restarted, but the running service is {still}; \
+         {agent} points at a stale binary — run `lns service enable` to repoint it."
+    ))
+}
+
 /// Gate for the substantive-command path: `Err` aborts the command; a build-only
 /// drift logs one warning and proceeds; a matching pair is silent.
 pub(crate) fn enforce_for_command(compat: Compat) -> Result<(), String> {
@@ -180,6 +210,50 @@ mod tests {
         let msg = protocol_mismatch_message(7, None);
         assert!(msg.contains("unreadable"), "{msg}");
         assert!(msg.contains(REMEDY), "{msg}");
+    }
+
+    #[test]
+    fn relaunched_warning_is_none_when_the_relaunch_reconciled_the_pair() {
+        assert!(relaunched_warning(&Compat::Match, None).is_none());
+    }
+
+    #[test]
+    fn relaunched_warning_names_the_stale_build_the_agent_path_and_the_repoint_remedy() {
+        let w = relaunched_warning(
+            &Compat::BuildDrift {
+                running: "0ldbuild".into(),
+            },
+            Some(std::path::Path::new("/Users/alice/Library/LaunchAgents/run.lns.service.plist")),
+        )
+        .expect("a persisting drift after relaunch must warn");
+        assert!(w.contains("0ldbuild"), "{w}");
+        assert!(w.contains("run.lns.service.plist"), "{w}");
+        assert!(w.contains("lns service enable"), "{w}");
+        assert!(!w.contains("restarted."), "must not read as success: {w}");
+    }
+
+    #[test]
+    fn relaunched_warning_covers_protocol_mismatch_and_an_unresolvable_agent_path() {
+        let known = relaunched_warning(
+            &Compat::ProtocolMismatch {
+                cli: 7,
+                running: Some(2),
+            },
+            None,
+        )
+        .expect("a persisting mismatch after relaunch must warn");
+        assert!(known.contains("protocol 2"), "{known}");
+        assert!(known.contains("the login agent points"), "{known}");
+
+        let unknown = relaunched_warning(
+            &Compat::ProtocolMismatch {
+                cli: 7,
+                running: None,
+            },
+            None,
+        )
+        .expect("mismatch must warn");
+        assert!(unknown.contains("unreadable"), "{unknown}");
     }
 
     #[test]
