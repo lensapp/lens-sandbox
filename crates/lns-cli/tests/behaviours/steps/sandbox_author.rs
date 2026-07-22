@@ -95,6 +95,78 @@ fn lns_yaml_with_conflicting_fileset(w: &mut BehaviourWorld) {
     );
 }
 
+fn inline_fileset_yaml(path: &str, mount: &str, owner: Option<&str>, content: &str) -> String {
+    let owner = owner
+        .map(|value| format!("      owner: {value}\n"))
+        .unwrap_or_default();
+    fileset_yaml(&format!(
+        "    - inline:\n        {path}: |-\n          {content}\n      mountPath: {mount}\n{owner}"
+    ))
+}
+
+#[given(
+    regex = r#"^an lns\.yaml declaring an inline fileset with \"([^\"]+)\" at \"([^\"]+)\" owned by the workload$"#
+)]
+fn lns_yaml_with_workload_inline_fileset(w: &mut BehaviourWorld, path: String, mount: String) {
+    seed(
+        w,
+        &inline_fileset_yaml(&path, &mount, Some("workload"), "INLINE_CONTENT"),
+    );
+}
+
+#[given(regex = r#"^the inline file contains `([^`]*)`$"#)]
+fn inline_file_contains(w: &mut BehaviourWorld, content: String) {
+    let yaml = w
+        .author_files
+        .get_mut(&yaml_key())
+        .expect("inline definition");
+    *yaml = yaml.replace("INLINE_CONTENT", &content);
+}
+
+#[given("an lns.yaml declaring a fileset entry with inline content and path")]
+fn lns_yaml_with_inline_and_path(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        &fileset_yaml(
+            "    - path: ./skills\n      inline:\n        settings.json: '{}'\n      mountPath: /home/sandbox\n",
+        ),
+    );
+}
+
+#[given(
+    regex = r#"^an lns\.yaml declaring an inline fileset with path \"([^\"]+)\" at \"([^\"]+)\"$"#
+)]
+fn lns_yaml_with_inline_path(w: &mut BehaviourWorld, path: String, mount: String) {
+    seed(w, &inline_fileset_yaml(&path, &mount, None, "x"));
+}
+
+#[given(regex = r#"^an lns\.yaml declaring an inline fileset with \"([^\"]+)\" at \"([^\"]+)\"$"#)]
+fn lns_yaml_with_inline_file(w: &mut BehaviourWorld, path: String, mount: String) {
+    seed(w, &inline_fileset_yaml(&path, &mount, None, "x"));
+}
+
+#[given(regex = r#"^an lns\.yaml declaring two inline files at \"([^\"]+)\"$"#)]
+fn lns_yaml_with_two_inline_files(w: &mut BehaviourWorld, mount: String) {
+    seed(
+        w,
+        &fileset_yaml(&format!(
+            "    - inline:\n        accepted.json: EXACT_CONTENT\n        oversized.json: OVERSIZED_CONTENT\n      mountPath: {mount}\n"
+        )),
+    );
+}
+
+#[given("one inline file is exactly 131072 bytes")]
+fn inline_file_at_limit(w: &mut BehaviourWorld) {
+    let yaml = w.author_files.get_mut(&yaml_key()).expect("definition");
+    *yaml = yaml.replace("EXACT_CONTENT", &"a".repeat(128 * 1024));
+}
+
+#[given("the other inline file is 131073 bytes")]
+fn inline_file_over_limit(w: &mut BehaviourWorld) {
+    let yaml = w.author_files.get_mut(&yaml_key()).expect("definition");
+    *yaml = yaml.replace("OVERSIZED_CONTENT", &"b".repeat(128 * 1024 + 1));
+}
+
 #[given(regex = r#"^an lns\.yaml declaring two filesets mounted at "([^"]+)"$"#)]
 fn lns_yaml_with_duplicate_filesets(w: &mut BehaviourWorld, mount: String) {
     seed(

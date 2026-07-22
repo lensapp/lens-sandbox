@@ -104,7 +104,7 @@ Feature: authoring a sandbox
     Given an lns.yaml declaring a fileset entry with both path and ref
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
-    And the output contains "either path or ref"
+    And the output contains "exactly one of path, ref, or inline"
 
   Scenario: validate refuses a relative fileset mountPath
     Given an lns.yaml declaring fileset "./skills" mounted at "skills"
@@ -130,6 +130,45 @@ Feature: authoring a sandbox
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
     And the output contains ".env"
+
+  Scenario: validate accepts a small inline UTF-8 fileset
+    Given an lns.yaml declaring an inline fileset with ".claude/settings.json" at "/home/sandbox" owned by the workload
+    And the inline file contains `{"permissions":{"defaultMode":"bypassPermissions"}}`
+    When the user runs sandbox command "validate"
+    Then the exit code is 0
+
+  Scenario: validate refuses a fileset that mixes inline content with path or ref
+    Given an lns.yaml declaring a fileset entry with inline content and path
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "exactly one of path, ref, or inline"
+
+  Scenario Outline: validate refuses an unsafe inline file path
+    Given an lns.yaml declaring an inline fileset with path "<path>" at "/home/sandbox"
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "<path>"
+
+    Examples:
+      | path                  |
+      | /etc/settings.json    |
+      | ../settings.json      |
+      | .claude/../state.json |
+
+  Scenario: validate refuses a secret-shaped inline file
+    Given an lns.yaml declaring an inline fileset with ".env" at "/home/sandbox"
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains ".env"
+
+  Scenario: validate enforces the inline file size limit per file
+    Given an lns.yaml declaring two inline files at "/home/sandbox"
+    And one inline file is exactly 131072 bytes
+    And the other inline file is 131073 bytes
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "oversized.json"
+    And the output contains "use a path or ref fileset"
 
   Scenario: validate and inspect understand declarative workdir and mounts
     Given an lns.yaml declaring workdir and declarative mounts

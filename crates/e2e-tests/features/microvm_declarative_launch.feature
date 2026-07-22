@@ -43,6 +43,21 @@ Feature: declarative workdir and mounts reach a real guest
     And the output contains "owner=0"
     And the output contains "denied=yes"
 
+  Scenario: a declared inline fileset is materialized with exact content and workload ownership
+    Given the Lens Sandbox service is running
+    And the project declares inline file ".claude/settings.json" with content `{"inline":true}` mounted at "/home/sandbox"
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox cat /home/sandbox/.claude/settings.json; /.lens/guest-tools/bin/busybox stat -c owner=%u /home/sandbox/.claude/settings.json'"
+    Then the exit code is 0
+    And the output contains `{"inline":true}`
+    And the output contains "owner=65534"
+
+  Scenario: a root-owned inline fileset cannot be rewritten by the workload
+    Given the Lens Sandbox service is running
+    And the project declares root-owned inline file "mcp.json" mounted at "/etc/agent"
+    When the user runs a microVM command "/bin/sh -c 'echo tamper > /etc/agent/mcp.json 2>/dev/null || echo denied=yes'"
+    Then the exit code is 0
+    And the output contains "denied=yes"
+
   Scenario: a pulled published sandbox launches offline from the consumer project
     Given a local registry
     And the Lens Sandbox service is running
