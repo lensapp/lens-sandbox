@@ -29,8 +29,10 @@ spec:
         verdict: allow
       - match: downloads.claude.ai
         verdict: allow
-  connectors:
-    - claude-code-subscription
+  credentials:
+    - name: claude-code-subscription
+      env: CLAUDE_CODE_OAUTH_TOKEN
+      required: true
   volumes:
     - type: bind
       source: .

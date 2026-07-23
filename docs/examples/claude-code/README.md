@@ -8,8 +8,8 @@ hosts you allow.
 ## Files
 
 - **`lns.yaml`** — the sandbox definition: a `node:lts-alpine` base that installs
-  Claude Code on first boot, the network allowlist, and the
-  `claude-code-subscription` connector, and inline seed state mounted at the
+  Claude Code on first boot, the network allowlist, the required
+  `claude-code-subscription` credential, and inline seed state mounted at the
   workload's home (`/home/sandbox`). The inline `.claude.json` skips onboarding
   and pre-accepts the `/workspace` trust dialog. The inline
   `.claude/settings.json` runs Claude in `bypassPermissions` and turns **off
@@ -30,8 +30,19 @@ The first boot runs `npm install -g @anthropic-ai/claude-code`; the microVM is
 ephemeral, so each cold start reinstalls it (the `allowedRoutes` keep
 `registry.npmjs.org` open for that reason).
 
-On first run, an approval card asks for your Claude subscription token and shows
-how to mint it.
+The definition requires the `claude-code-subscription` credential, so on a
+machine with no bound value the first run refuses to boot and tells you how to
+bind one:
+
+```bash
+lns connector connect claude-code-subscription
+```
+
+An approval card opens: mint a long-lived subscription token with
+`claude setup-token`, then paste it (or accept the detected host value if
+`CLAUDE_CODE_OAUTH_TOKEN` is already set on your machine). The real token never
+enters the guest — the workload sees a placeholder and the boundary splices the
+value into requests to `api.anthropic.com`. Then `lns run` again.
 
 ## Publish and run from a registry
 
