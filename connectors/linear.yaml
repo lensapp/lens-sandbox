@@ -1,0 +1,10 @@
+id: linear
+authKind: credential
+routes:
+  - match: api.linear.app
+credential:
+  envVar: LINEAR_API_KEY
+  placeholder: lin_api_LNSPLACEHOLDER0000000000000000000
+  injections:
+    - kind: bearer_header
+      domain: api.linear.app

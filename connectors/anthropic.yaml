@@ -1,0 +1,13 @@
+id: anthropic
+authKind: credential
+routes:
+  - match: api.anthropic.com
+credential:
+  envVar: ANTHROPIC_API_KEY
+  placeholder: sk-ant-LNSPLACEHOLDER00000000000000000000000000000000000000000000000000000000000000000000000000
+  injections:
+    - kind: api_key_header
+      domain: api.anthropic.com
+      header: x-api-key
+    - kind: bearer_header
+      domain: api.anthropic.com

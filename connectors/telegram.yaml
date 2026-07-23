@@ -1,0 +1,10 @@
+id: telegram
+authKind: credential
+routes:
+  - match: api.telegram.org
+credential:
+  envVar: TELEGRAM_BOT_TOKEN
+  placeholder: "0000000000:LNSPLACEHOLDER000000000000000000000"
+  injections:
+    - kind: uri_placeholder
+      domain: api.telegram.org

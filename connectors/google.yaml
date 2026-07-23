@@ -1,0 +1,21 @@
+id: google
+name: Google
+authKind: oauth
+routes:
+  - match: www.googleapis.com
+oauth:
+  scopes:
+    - openid
+    - email
+    - profile
+  deviceAuthorizationEndpoint: https://oauth2.googleapis.com/device/code
+  tokenEndpoint: https://oauth2.googleapis.com/token
+  userinfoEndpoint: https://openidconnect.googleapis.com/v1/userinfo
+  accountField: email
+  envVar: GOOGLE_OAUTH_ACCESS_TOKEN
+  placeholder: ya29.LNSPLACEHOLDER000000000000000000000000
+  injections:
+    - kind: bearer_header
+      domain: www.googleapis.com
+tokenFallback:
+  help: https://developers.google.com/oauthplayground

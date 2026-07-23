@@ -1,0 +1,10 @@
+id: openai
+authKind: credential
+routes:
+  - match: api.openai.com
+credential:
+  envVar: OPENAI_API_KEY
+  placeholder: sk-LNSPLACEHOLDER0000000000000000000000000000000000
+  injections:
+    - kind: bearer_header
+      domain: api.openai.com

@@ -1,0 +1,23 @@
+id: github
+name: GitHub
+authKind: oauth
+routes:
+  - match: api.github.com
+  - match: github.com
+oauth:
+  scopes:
+    - repo
+    - read:org
+  deviceAuthorizationEndpoint: https://github.com/login/device/code
+  tokenEndpoint: https://github.com/login/oauth/access_token
+  userinfoEndpoint: https://api.github.com/user
+  accountField: login
+  envVar: GH_TOKEN
+  placeholder: gho_LNSPLACEHOLDER0000000000000000000000
+  injections:
+    - kind: token_header
+      domain: api.github.com
+    - kind: basic_x_access_token
+      domain: github.com
+tokenFallback:
+  help: https://github.com/settings/personal-access-tokens/new

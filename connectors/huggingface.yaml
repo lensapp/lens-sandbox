@@ -1,0 +1,11 @@
+id: huggingface
+authKind: credential
+routes:
+  - match: huggingface.co
+  - match: "*.huggingface.co"
+credential:
+  envVar: HF_TOKEN
+  placeholder: hf_LNSPLACEHOLDER0000000000000000000
+  injections:
+    - kind: bearer_header
+      domain: huggingface.co

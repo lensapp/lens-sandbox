@@ -750,6 +750,51 @@ mod tests {
         assert_eq!(short_digest("weird"), "weird");
     }
 
+    #[test]
+    fn published_connector_files_mirror_the_bundled_catalog_and_publish() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
+        let strip_build_injected_oauth_credentials = |mut c: Connector| {
+            if let Some(oauth) = c.oauth.as_mut() {
+                oauth.client_id = None;
+                oauth.client_secret = None;
+            }
+            c
+        };
+        let mut file_ids: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let connector: Connector = serde_yaml::from_str(&text)
+                .unwrap_or_else(|e| panic!("{stem}.yaml is not a valid connector: {e}"));
+            assert_eq!(connector.id, stem, "{stem}.yaml id must match its filename");
+            lns_artifact::build::build_connector(&connector)
+                .unwrap_or_else(|e| panic!("{stem}.yaml is not publishable: {e:#}"));
+            let bundled = bundled_connectors()
+                .iter()
+                .find(|b| b.id == stem)
+                .unwrap_or_else(|| panic!("{stem}.yaml has no matching bundled connector"))
+                .clone();
+            assert_eq!(
+                strip_build_injected_oauth_credentials(connector),
+                strip_build_injected_oauth_credentials(bundled),
+                "{stem}.yaml has drifted from the bundled definition"
+            );
+            file_ids.push(stem);
+        }
+        file_ids.sort();
+        let mut bundled_ids: Vec<String> =
+            bundled_connectors().iter().map(|b| b.id.clone()).collect();
+        bundled_ids.sort();
+        assert_eq!(
+            file_ids, bundled_ids,
+            "every bundled connector needs a publishable file in connectors/, and vice versa"
+        );
+    }
+
     #[tokio::test]
     async fn pull_reports_a_newly_pulled_connector() {
         let puller = FakePuller::pulling(PullReport::Pulled {
