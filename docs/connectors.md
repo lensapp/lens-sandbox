@@ -65,6 +65,24 @@ A definition carrying an `oauth.clientSecret` is refused: a registry artifact wo
 embed the secret in the clear. Confidential clients keep their secret out of the
 published definition.
 
+### Pulling a connector
+
+Pull a published connector into your local catalog:
+
+```bash
+lns connector pull registry.lns.run/connectors/acme:0.1.0
+```
+
+It then appears in `lns connector list` tagged `(pulled …)` alongside the bundled and
+user-declared connectors, and connects and injects exactly like them. A pulled
+definition can never shadow a bundled or user connector of the same id — the local
+catalog always wins, so a registry can't redefine a connector you already have.
+
+Re-pulling a connector you've already connected is gated: if its definition changed
+in a way that affects where your credential flows, the pull is refused with a summary
+of what changed, and you re-run with `--yes` to accept and re-decide its access.
+Remove a pulled connector with `lns connector remove <id>`.
+
 ## Reaching a workload
 
 A connector reaches a project's workloads in any of three ways:

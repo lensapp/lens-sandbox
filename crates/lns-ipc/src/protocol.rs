@@ -87,6 +87,9 @@ pub enum Request {
         #[serde(default)]
         confirm_replace: bool,
     },
+    RemoveConnector {
+        id: String,
+    },
     ListImages,
     RemoveImage {
         image: String,
@@ -211,6 +214,9 @@ pub enum Response {
     ConnectorReplaceNeedsConfirm {
         id: String,
         changes: Vec<String>,
+    },
+    ConnectorRemoved {
+        id: String,
     },
     ImageList {
         images: Vec<ImageInfo>,

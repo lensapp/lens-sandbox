@@ -191,6 +191,10 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         } => crate::connector_store::connector_pull_response(
             crate::connector_store::real::pull(reference, *confirm_replace).await,
         ),
+        Request::RemoveConnector { id } => crate::connector_store::connector_remove_response(
+            crate::connector_store::real::remove(id).await,
+            id,
+        ),
         Request::ListImages => image_response(
             crate::image_store::list()
                 .await
@@ -1931,6 +1935,33 @@ mod tests {
         assert!(
             message.contains("invalid connector reference"),
             "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_remove_connector_reports_an_absent_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let _guard = crate::test_env::EnvVarGuard::set(
+            "LNS_PULLED_CONNECTORS_PATH",
+            dir.path().join("pulled.yaml"),
+        );
+        let resp = as_json(
+            handle_request(
+                &Request::RemoveConnector {
+                    id: "absent-connector".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("no pulled connector"),
+            "got: {resp}"
         );
     }
 

@@ -90,6 +90,19 @@ pub(crate) async fn pull_connector_with<M: ManifestSource>(
     })
 }
 
+/// Map a remove result to the wire response: removed → `ConnectorRemoved`, absent → an error naming the id.
+pub fn connector_remove_response(result: Result<bool>, id: &str) -> Response {
+    match result {
+        Ok(true) => Response::ConnectorRemoved { id: id.to_string() },
+        Ok(false) => Response::Error {
+            message: format!("no pulled connector {id:?} to remove"),
+        },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
 /// Map a pull result to the wire response the CLI renders.
 pub fn connector_pull_response(result: Result<PullConnectorOutcome>) -> Response {
     match result {
@@ -579,6 +592,23 @@ mod tests {
             format!("{err:#}").contains("no `credential:` block"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn connector_remove_response_maps_present_absent_and_error() {
+        assert!(matches!(
+            connector_remove_response(Ok(true), "some-provider"),
+            Response::ConnectorRemoved { .. }
+        ));
+        let absent = connector_remove_response(Ok(false), "some-provider");
+        assert!(
+            matches!(&absent, Response::Error { message } if message.contains("no pulled connector")),
+            "an absent id must be an error naming it, got {absent:?}"
+        );
+        assert!(matches!(
+            connector_remove_response(Err(anyhow::anyhow!("boom")), "x"),
+            Response::Error { .. }
+        ));
     }
 
     #[test]

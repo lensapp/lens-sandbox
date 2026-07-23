@@ -31,7 +31,9 @@ pub enum ConnectorCommand {
     Add(ConnectorAddArgs),
     #[command(about = "List the bundled and user-declared connectors.")]
     List,
-    #[command(about = "Remove a user-declared connector; bundled ones cannot be removed.")]
+    #[command(
+        about = "Remove a user-declared or registry-pulled connector; bundled ones cannot be removed."
+    )]
     Remove(ConnectorRemoveArgs),
     #[command(
         about = "Bind a connector's per-machine value decision (oauth connectors sign in); records the id in this directory's policy."
@@ -43,6 +45,8 @@ pub enum ConnectorCommand {
         about = "Build a connector definition file and upload it to a registry as a connector artifact."
     )]
     Publish(ConnectorPublishArgs),
+    #[command(about = "Pull a connector from a registry into your local catalog.")]
+    Pull(ConnectorPullArgs),
 }
 
 #[derive(clap::Args)]
@@ -72,7 +76,7 @@ pub struct ConnectorAddArgs {
 
 #[derive(clap::Args)]
 pub struct ConnectorRemoveArgs {
-    #[arg(help = "User-declared connector id to remove.")]
+    #[arg(help = "User-declared or registry-pulled connector id to remove.")]
     pub id: String,
 }
 
@@ -124,6 +128,45 @@ pub trait ConnectorPublisher {
         built: &'a lns_artifact::build::BuiltArtifact,
         reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<()>>;
+}
+
+#[derive(clap::Args)]
+pub struct ConnectorPullArgs {
+    #[arg(
+        help = "Registry reference to pull from, e.g. registry.lns.run/connectors/some-provider:0.1.0."
+    )]
+    pub reference: String,
+    #[arg(
+        long = "yes",
+        short = 'y',
+        help = "Confirm replacing an already-connected connector whose definition changed."
+    )]
+    pub yes: bool,
+}
+
+/// What a pull did: it landed (possibly replacing a prior entry), or it needs confirmation to replace an already-consented connector whose definition changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullReport {
+    Pulled {
+        id: String,
+        config_digest: String,
+        replaced: bool,
+    },
+    NeedsConfirm {
+        id: String,
+        changes: Vec<String>,
+    },
+}
+
+/// Drives the background service's connector pull/remove over IPC; the real impl talks to the service, a fake drives the CLI scenarios offline.
+pub trait ConnectorPuller {
+    fn pull<'a>(
+        &'a self,
+        reference: &'a str,
+        confirm_replace: bool,
+    ) -> LocalBoxFuture<'a, Result<PullReport>>;
+
+    fn remove<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, Result<()>>;
 }
 
 fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
@@ -190,21 +233,76 @@ pub const SPEC: CommandSpec = CommandSpec {
     owns_terminal: false,
 };
 
+#[allow(clippy::too_many_arguments)] // one injected port per side effect: catalog/pulled files, sign-in, publish, pull
 pub async fn run(
     cmd: &ConnectorCommand,
     cwd: &Path,
     catalog_path: &Path,
+    pulled_path: &Path,
     signin: &dyn ConnectorSignIn,
     publisher: &dyn ConnectorPublisher,
+    puller: &dyn ConnectorPuller,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
         ConnectorCommand::Add(args) => add(args, catalog_path, writer),
-        ConnectorCommand::List => list(catalog_path, writer),
-        ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
-        ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
+        ConnectorCommand::List => list(catalog_path, pulled_path, writer),
+        ConnectorCommand::Remove(args) => remove(args, catalog_path, puller, writer).await,
+        ConnectorCommand::Connect(args) => {
+            connect(args, cwd, catalog_path, pulled_path, signin, writer).await
+        }
         ConnectorCommand::Disconnect(args) => disconnect(args, cwd, writer),
         ConnectorCommand::Publish(args) => publish(args, cwd, publisher, writer).await,
+        ConnectorCommand::Pull(args) => pull(args, puller, writer).await,
+    }
+}
+
+/// `lns connector pull <ref>`: pull a connector into the local catalog via the service, refusing to replace an already-connected connector whose definition changed until the user re-runs with `--yes`.
+pub async fn pull(
+    args: &ConnectorPullArgs,
+    puller: &dyn ConnectorPuller,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    match puller.pull(&args.reference, args.yes).await? {
+        PullReport::Pulled {
+            id,
+            config_digest,
+            replaced,
+        } => {
+            let verb = if replaced { "Updated" } else { "Pulled" };
+            writeln!(
+                writer,
+                "{verb} connector {id:?} ({})",
+                short_digest(&config_digest)
+            )?;
+            writeln!(
+                writer,
+                "Connect it to a project with `lns connector connect {id}`."
+            )?;
+            Ok(0)
+        }
+        PullReport::NeedsConfirm { id, changes } => {
+            writeln!(
+                writer,
+                "Refusing to replace connector {id:?}: its definition changed since you connected it:"
+            )?;
+            for change in &changes {
+                writeln!(writer, "  - {change}")?;
+            }
+            writeln!(
+                writer,
+                "Re-run with --yes to replace it and re-decide its access."
+            )?;
+            Ok(1)
+        }
+    }
+}
+
+/// The `sha256:` prefix plus the first 12 hex chars — enough to recognize a digest without the full 64.
+fn short_digest(digest: &str) -> String {
+    match digest.strip_prefix("sha256:") {
+        Some(hex) => format!("sha256:{}", &hex[..hex.len().min(12)]),
+        None => digest.to_string(),
     }
 }
 
@@ -308,14 +406,16 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     writeln!(writer, "Declared connector {:?} in your catalog", args.id)?;
     writeln!(
         writer,
-        "Connect it to a project with `lns connect {}`.",
+        "Connect it to a project with `lns connector connect {}`.",
         args.id
     )?;
     Ok(0)
 }
 
-fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn list(catalog_path: &Path, pulled_path: &Path, writer: &mut impl Write) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
+    let pulled = pulled::PulledCatalog::load_or_default(pulled_path)
+        .with_context(|| format!("loading {}", pulled_path.display()))?;
     for i in bundled_connectors() {
         writeln!(writer, "{}  (bundled)  {}", i.id, kind_word(i.auth_kind))?;
     }
@@ -326,23 +426,45 @@ fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
         }
         writeln!(writer, "{}  (user)  {}", i.id, kind_word(i.auth_kind))?;
     }
+    for entry in &pulled.connectors {
+        let id = &entry.definition.id;
+        // A pulled id shadowed by a bundled or user connector is inert (network never shadows), so don't list it as live.
+        if is_bundled(id) || user.connectors.iter().any(|u| &u.id == id) {
+            continue;
+        }
+        writeln!(
+            writer,
+            "{}  (pulled {})  {}",
+            id,
+            short_digest(&entry.config_digest),
+            kind_word(entry.definition.auth_kind)
+        )?;
+    }
     Ok(0)
 }
 
-fn remove(args: &ConnectorRemoveArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+async fn remove(
+    args: &ConnectorRemoveArgs,
+    catalog_path: &Path,
+    puller: &dyn ConnectorPuller,
+    writer: &mut impl Write,
+) -> Result<i32> {
     if is_bundled(&args.id) {
         bail!("{:?} is a bundled connector and cannot be removed", args.id);
     }
     let mut catalog = load_catalog(catalog_path)?;
     let before = catalog.connectors.len();
     catalog.connectors.retain(|i| i.id != args.id);
-    if catalog.connectors.len() == before {
-        bail!("no connector {:?} in your catalog to remove", args.id);
+    if catalog.connectors.len() != before {
+        catalog
+            .save_atomic(catalog_path)
+            .with_context(|| format!("writing {}", catalog_path.display()))?;
+        writeln!(writer, "Removed user connector {:?}", args.id)?;
+        return Ok(0);
     }
-    catalog
-        .save_atomic(catalog_path)
-        .with_context(|| format!("writing {}", catalog_path.display()))?;
-    writeln!(writer, "Removed connector {:?}", args.id)?;
+    // Not user-declared: the pulled catalog is service-owned, so removal goes through the service, which reports an absent id as an error.
+    puller.remove(&args.id).await?;
+    writeln!(writer, "Removed pulled connector {:?}", args.id)?;
     Ok(0)
 }
 
@@ -350,11 +472,14 @@ pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
+    pulled_path: &Path,
     signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    let effective = effective_connectors(&user, &pulled::PulledCatalog::default());
+    let pulled = pulled::PulledCatalog::load_or_default(pulled_path)
+        .with_context(|| format!("loading {}", pulled_path.display()))?;
+    let effective = effective_connectors(&user, &pulled);
     let Some(integ) = effective.iter().find(|i| i.id == args.id) else {
         bail!("unknown connector {:?}; see `lns connector list`", args.id);
     };
@@ -530,8 +655,213 @@ mod tests {
         dir.join(".lns-connectors.yaml")
     }
 
+    fn pulled_at(dir: &Path) -> std::path::PathBuf {
+        dir.join(".lns-pulled-connectors.yaml")
+    }
+
     fn load(path: &Path) -> Catalog {
         Catalog::load_or_default(path).unwrap()
+    }
+
+    struct FakePuller {
+        pull: Result<PullReport, String>,
+        remove: Result<(), String>,
+        removed: std::cell::RefCell<Vec<String>>,
+    }
+    impl FakePuller {
+        fn new() -> Self {
+            Self {
+                pull: Ok(PullReport::Pulled {
+                    id: "some-provider".into(),
+                    config_digest: format!("sha256:{}", "a".repeat(64)),
+                    replaced: false,
+                }),
+                remove: Ok(()),
+                removed: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        fn pulling(report: PullReport) -> Self {
+            Self {
+                pull: Ok(report),
+                ..Self::new()
+            }
+        }
+        fn pull_failing(message: &str) -> Self {
+            Self {
+                pull: Err(message.into()),
+                ..Self::new()
+            }
+        }
+        fn remove_failing(message: &str) -> Self {
+            Self {
+                remove: Err(message.into()),
+                ..Self::new()
+            }
+        }
+    }
+    impl ConnectorPuller for FakePuller {
+        fn pull<'a>(
+            &'a self,
+            _reference: &'a str,
+            _confirm_replace: bool,
+        ) -> LocalBoxFuture<'a, Result<PullReport>> {
+            let outcome = self.pull.clone().map_err(|m| anyhow::anyhow!(m));
+            Box::pin(async move { outcome })
+        }
+        fn remove<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, Result<()>> {
+            self.removed.borrow_mut().push(id.to_string());
+            let outcome = self.remove.clone().map_err(|m| anyhow::anyhow!(m));
+            Box::pin(async move { outcome })
+        }
+    }
+
+    fn pull_args(yes: bool) -> ConnectorPullArgs {
+        ConnectorPullArgs {
+            reference: "registry.lns.run/connectors/some-provider:0.1.0".into(),
+            yes,
+        }
+    }
+
+    fn write_pulled(dir: &Path, id: &str) {
+        use lns_policy::pulled::{PulledCatalog, PulledConnector};
+        let definition: Connector = serde_yaml::from_str(&format!(
+            "id: {id}\nauthKind: credential\ncredential:\n  envVar: SOME_TOKEN\n  placeholder: {id}-LNSPLACEHOLDER0000\n"
+        ))
+        .unwrap();
+        PulledCatalog {
+            connectors: vec![PulledConnector {
+                source: format!("registry.lns.run/connectors/{id}:0.1.0"),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+                pulled_at: "2026-07-23T10:00:00Z".into(),
+                definition,
+            }],
+        }
+        .save_atomic(&pulled_at(dir))
+        .unwrap();
+    }
+
+    #[test]
+    fn short_digest_truncates_sha256_and_passes_other_forms_through() {
+        assert_eq!(
+            short_digest(&format!("sha256:{}", "a".repeat(64))),
+            "sha256:aaaaaaaaaaaa"
+        );
+        assert_eq!(short_digest("weird"), "weird");
+    }
+
+    #[tokio::test]
+    async fn pull_reports_a_newly_pulled_connector() {
+        let puller = FakePuller::pulling(PullReport::Pulled {
+            id: "some-provider".into(),
+            config_digest: format!("sha256:{}", "a".repeat(64)),
+            replaced: false,
+        });
+        let mut out = Vec::new();
+        let code = pull(&pull_args(false), &puller, &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Pulled connector \"some-provider\""),
+            "{text}"
+        );
+        assert!(text.contains("sha256:aaaaaaaaaaaa"), "{text}");
+        assert!(
+            text.contains("lns connector connect some-provider"),
+            "the follow-up hint must name the real subcommand, not `lns connect`: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_reports_an_updated_connector_when_it_replaced_one() {
+        let puller = FakePuller::pulling(PullReport::Pulled {
+            id: "some-provider".into(),
+            config_digest: format!("sha256:{}", "c".repeat(64)),
+            replaced: true,
+        });
+        let mut out = Vec::new();
+        pull(&pull_args(true), &puller, &mut out).await.unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("Updated connector")
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_needing_confirmation_discloses_the_diff_and_exits_nonzero() {
+        let puller = FakePuller::pulling(PullReport::NeedsConfirm {
+            id: "some-provider".into(),
+            changes: vec!["injection domains [\"a\"] → [\"b\"]".into()],
+        });
+        let mut out = Vec::new();
+        let code = pull(&pull_args(false), &puller, &mut out).await.unwrap();
+        assert_eq!(code, 1, "an unconfirmed replacement must not succeed");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Refusing to replace"), "{text}");
+        assert!(text.contains("injection domains"), "{text}");
+        assert!(text.contains("--yes"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn pull_surfaces_a_service_error() {
+        let err = pull(
+            &pull_args(false),
+            &FakePuller::pull_failing("the registry is unreachable"),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unreachable"), "got: {err:#}");
+    }
+
+    #[test]
+    fn list_shows_a_pulled_connector_with_origin_and_short_digest() {
+        let dir = TempDir::new().unwrap();
+        write_pulled(dir.path(), "some-pulled");
+        let mut out = Vec::new();
+        list(&catalog_at(dir.path()), &pulled_at(dir.path()), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("some-pulled  (pulled sha256:bbbbbbbbbbbb)  credential"),
+            "a pulled connector must be listed with its origin and short digest: {text}"
+        );
+    }
+
+    #[test]
+    fn list_skips_a_pulled_entry_shadowed_by_a_bundled_id() {
+        let dir = TempDir::new().unwrap();
+        write_pulled(dir.path(), &bundled_connectors()[0].id);
+        let mut out = Vec::new();
+        list(&catalog_at(dir.path()), &pulled_at(dir.path()), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("(pulled "),
+            "a pulled id shadowed by a bundled connector is inert and must not be listed: {text}"
+        );
+    }
+
+    #[test]
+    fn list_skips_a_pulled_entry_shadowed_by_a_user_id() {
+        let dir = TempDir::new().unwrap();
+        add(
+            &add_args("some-shared"),
+            &catalog_at(dir.path()),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        write_pulled(dir.path(), "some-shared");
+        let mut out = Vec::new();
+        list(&catalog_at(dir.path()), &pulled_at(dir.path()), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("some-shared  (user)"),
+            "the user connector wins: {text}"
+        );
+        assert!(
+            !text.contains("some-shared  (pulled"),
+            "a pulled id shadowed by a user connector is inert and must not be listed: {text}"
+        );
     }
 
     fn write_user_catalog(path: &Path, connectors: Vec<Connector>) {
@@ -645,7 +975,7 @@ mod tests {
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&path, &pulled_at(dir.path()), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("gitlab  (bundled)  credential"), "{text}");
         assert!(text.contains("acme  (user)  credential"), "{text}");
@@ -657,7 +987,7 @@ mod tests {
         let path = catalog_at(dir.path());
         write_user_catalog(&path, vec![oauth_connector("somesaas")]);
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&path, &pulled_at(dir.path()), &mut out).unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -687,7 +1017,7 @@ mod tests {
             }],
         );
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&path, &pulled_at(dir.path()), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("gitlab  (bundled)"), "{text}");
         assert!(
@@ -701,48 +1031,75 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         std::fs::write(&path, "connectors: not-a-list\n").unwrap();
-        let err = list(&path, &mut Vec::new()).unwrap_err();
+        let err = list(&path, &pulled_at(dir.path()), &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("loading"));
     }
 
-    #[test]
-    fn remove_deletes_a_user_connector() {
+    #[tokio::test]
+    async fn remove_deletes_a_user_connector() {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
+        let mut out = Vec::new();
         remove(
             &ConnectorRemoveArgs { id: "acme".into() },
             &path,
-            &mut Vec::new(),
+            &FakePuller::new(),
+            &mut out,
         )
+        .await
         .unwrap();
         assert!(load(&path).connectors.is_empty());
+        assert!(String::from_utf8(out).unwrap().contains("user connector"));
     }
 
-    #[test]
-    fn remove_rejects_a_bundled_id() {
+    #[tokio::test]
+    async fn remove_rejects_a_bundled_id() {
         let dir = TempDir::new().unwrap();
         let err = remove(
             &ConnectorRemoveArgs {
                 id: "gitlab".into(),
             },
             &catalog_at(dir.path()),
+            &FakePuller::new(),
             &mut Vec::new(),
         )
+        .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("bundled"));
     }
 
-    #[test]
-    fn remove_errors_on_an_unknown_user_id() {
+    #[tokio::test]
+    async fn remove_of_a_non_user_id_delegates_to_the_service_and_surfaces_its_error() {
         let dir = TempDir::new().unwrap();
         let err = remove(
             &ConnectorRemoveArgs { id: "ghost".into() },
             &catalog_at(dir.path()),
+            &FakePuller::remove_failing("no pulled connector \"ghost\" to remove"),
             &mut Vec::new(),
         )
+        .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("ghost"));
+    }
+
+    #[tokio::test]
+    async fn remove_of_a_pulled_id_goes_through_the_service() {
+        let dir = TempDir::new().unwrap();
+        let puller = FakePuller::new();
+        let mut out = Vec::new();
+        remove(
+            &ConnectorRemoveArgs {
+                id: "some-pulled".into(),
+            },
+            &catalog_at(dir.path()),
+            &puller,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(puller.removed.borrow().as_slice(), ["some-pulled"]);
+        assert!(String::from_utf8(out).unwrap().contains("pulled connector"));
     }
 
     struct FakeSignIn {
@@ -807,6 +1164,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &mut out,
         )
@@ -826,6 +1184,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -846,6 +1205,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -871,6 +1231,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &pulled_at(dir.path()),
             &FakeSignIn::returning(SignInOutcome::Failed("access_denied".into())),
             &mut Vec::new(),
         )
@@ -895,6 +1256,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::HostDetect,
             )),
@@ -924,6 +1286,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::Denied,
             )),
@@ -945,6 +1308,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::binding(BindOutcome::Failed("the value decision timed out".into())),
             &mut Vec::new(),
         )
@@ -968,6 +1332,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::binding(BindOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -991,6 +1356,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &pulled_at(dir.path()),
             &FakeSignIn::returning(SignInOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -1013,6 +1379,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1242,13 +1609,34 @@ oauth:
             &ConnectorCommand::Publish(publish_args(false)),
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &publisher,
+            &FakePuller::new(),
             &mut Vec::new(),
         )
         .await
         .unwrap();
         assert_eq!(publisher.pushed.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_pull() {
+        let dir = TempDir::new().unwrap();
+        let mut out = Vec::new();
+        run(
+            &ConnectorCommand::Pull(pull_args(false)),
+            dir.path(),
+            &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
+            &FakeSignIn::completed(),
+            &FakePublisher::ok(),
+            &FakePuller::new(),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("Pulled connector"));
     }
 
     #[tokio::test]
@@ -1259,8 +1647,10 @@ oauth:
             &ConnectorCommand::List,
             dir.path(),
             &catalog_at(dir.path()),
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &FakePublisher::ok(),
+            &FakePuller::new(),
             &mut out,
         )
         .await
@@ -1280,8 +1670,10 @@ oauth:
             &ConnectorCommand::Add(add_args("acme")),
             dir.path(),
             &path,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &FakePublisher::ok(),
+            &FakePuller::new(),
             &mut Vec::new(),
         )
         .await
@@ -1291,8 +1683,10 @@ oauth:
             &ConnectorCommand::Remove(ConnectorRemoveArgs { id: "acme".into() }),
             dir.path(),
             &path,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &FakePublisher::ok(),
+            &FakePuller::new(),
             &mut Vec::new(),
         )
         .await
@@ -1311,8 +1705,10 @@ oauth:
             }),
             dir.path(),
             &path,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &FakePublisher::ok(),
+            &FakePuller::new(),
             &mut Vec::new(),
         )
         .await
@@ -1330,8 +1726,10 @@ oauth:
             }),
             dir.path(),
             &path,
+            &pulled_at(dir.path()),
             &FakeSignIn::completed(),
             &FakePublisher::ok(),
+            &FakePuller::new(),
             &mut Vec::new(),
         )
         .await

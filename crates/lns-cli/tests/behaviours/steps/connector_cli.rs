@@ -4,7 +4,8 @@ use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::ConnectorArgs;
 use lns_cli::connector::{
-    self, BindOutcome, ConnectorPublisher, ConnectorSignIn, LocalBoxFuture, SignInOutcome,
+    self, BindOutcome, ConnectorPublisher, ConnectorPuller, ConnectorSignIn, LocalBoxFuture,
+    PullReport, SignInOutcome,
 };
 use lns_policy::Policy;
 use std::io::Write;
@@ -81,9 +82,32 @@ impl ConnectorPublisher for FakePublisher {
     }
 }
 
+/// Stands in for the background service's pull: the pull scenarios assert on the command's output, so the fake reports a fresh pull and accepts removals.
+struct FakePuller;
+impl ConnectorPuller for FakePuller {
+    fn pull<'a>(
+        &'a self,
+        _reference: &'a str,
+        _confirm_replace: bool,
+    ) -> LocalBoxFuture<'a, anyhow::Result<PullReport>> {
+        Box::pin(async move {
+            Ok(PullReport::Pulled {
+                id: "some-provider".into(),
+                config_digest: format!("sha256:{}", "a".repeat(64)),
+                replaced: false,
+            })
+        })
+    }
+
+    fn remove<'a>(&'a self, _id: &'a str) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
 async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
     let catalog = dir.join(".lns-connectors.yaml");
+    let pulled = dir.join(".lns-pulled-connectors.yaml");
     let signin = FakeSignIn {
         outcome: world
             .signin_outcome
@@ -92,12 +116,23 @@ async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
         pkce: world.signin_is_pkce,
     };
     let publisher = FakePublisher;
+    let puller = FakePuller;
     let mut full = vec!["lns".to_string(), "connector".to_string()];
     full.extend(tail.iter().map(|s| s.to_string()));
     let run = match parse_args::<ConnectorArgs, _, _>(&full) {
         Ok(args) => {
             let mut buf = Vec::<u8>::new();
-            match connector::run(&args.command, &dir, &catalog, &signin, &publisher, &mut buf).await
+            match connector::run(
+                &args.command,
+                &dir,
+                &catalog,
+                &pulled,
+                &signin,
+                &publisher,
+                &puller,
+                &mut buf,
+            )
+            .await
             {
                 Ok(exit_code) => CliRun {
                     exit_code,

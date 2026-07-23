@@ -9,8 +9,8 @@ use tokio::net::UnixStream;
 
 use lns_artifact::build::BuiltArtifact;
 
-use super::ConnectorPublisher;
 use super::sign_in::{BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
+use super::{ConnectorPublisher, ConnectorPuller, PullReport};
 use crate::command::{RunCtx, RunFuture};
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -18,15 +18,20 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         let args = super::ConnectorArgs::from_arg_matches(matches)?;
         let cwd = ctx.cwd()?;
         let catalog_path = lns_policy::connectors::default_connectors_path();
-        let signin = RealConnectorSignIn::new(crate::service::socket_path()?);
+        let pulled_path = lns_policy::pulled::default_pulled_connectors_path();
+        let socket = crate::service::socket_path()?;
+        let signin = RealConnectorSignIn::new(socket.clone());
         let publisher = RealConnectorPublisher;
+        let puller = RealConnectorPuller::new(socket);
         let mut out = ctx.out;
         crate::connector::run(
             &args.command,
             &cwd,
             &catalog_path,
+            &pulled_path,
             &signin,
             &publisher,
+            &puller,
             &mut out,
         )
         .await
@@ -42,6 +47,77 @@ impl ConnectorPublisher for RealConnectorPublisher {
         reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<()>> {
         Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
+    }
+}
+
+pub struct RealConnectorPuller {
+    socket: PathBuf,
+}
+
+impl RealConnectorPuller {
+    pub fn new(socket: PathBuf) -> Self {
+        Self { socket }
+    }
+
+    async fn request(&self, request: Request) -> Result<Response> {
+        let mut stream = UnixStream::connect(&self.socket).await.with_context(|| {
+            "the background service must be running to pull connectors; start it with `lns service start`".to_string()
+        })?;
+        let frame = encode_frame(&request).context("encoding connector request")?;
+        stream
+            .write_all(&frame)
+            .await
+            .context("writing connector request")?;
+        let bytes = read_frame_bytes_async(&mut stream)
+            .await
+            .context("reading connector response")?;
+        decode_frame::<Response, _>(&mut &bytes[..]).context("decoding connector response")
+    }
+}
+
+impl ConnectorPuller for RealConnectorPuller {
+    fn pull<'a>(
+        &'a self,
+        reference: &'a str,
+        confirm_replace: bool,
+    ) -> LocalBoxFuture<'a, Result<PullReport>> {
+        Box::pin(async move {
+            match self
+                .request(Request::PullConnector {
+                    reference: reference.to_string(),
+                    confirm_replace,
+                })
+                .await?
+            {
+                Response::ConnectorPulled {
+                    id,
+                    config_digest,
+                    replaced,
+                } => Ok(PullReport::Pulled {
+                    id,
+                    config_digest,
+                    replaced,
+                }),
+                Response::ConnectorReplaceNeedsConfirm { id, changes } => {
+                    Ok(PullReport::NeedsConfirm { id, changes })
+                }
+                Response::Error { message } => bail!("{message}"),
+                other => bail!("unexpected response during connector pull: {other:?}"),
+            }
+        })
+    }
+
+    fn remove<'a>(&'a self, id: &'a str) -> LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            match self
+                .request(Request::RemoveConnector { id: id.to_string() })
+                .await?
+            {
+                Response::ConnectorRemoved { .. } => Ok(()),
+                Response::Error { message } => bail!("{message}"),
+                other => bail!("unexpected response during connector remove: {other:?}"),
+            }
+        })
     }
 }
 

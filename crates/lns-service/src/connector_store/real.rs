@@ -40,6 +40,17 @@ pub async fn pull(reference: &str, confirm_replace: bool) -> Result<PullConnecto
     Ok(outcome)
 }
 
+/// Drop a registry-pulled connector from the service-owned catalog (serialized here, not written from the CLI), reporting whether one was present.
+pub async fn remove(id: &str) -> Result<bool> {
+    let path = default_pulled_connectors_path();
+    let mut pulled = PulledCatalog::load_or_default(&path)?;
+    if !pulled.remove(id) {
+        return Ok(false);
+    }
+    pulled.save_atomic(&path)?;
+    Ok(true)
+}
+
 fn load_credentials() -> CredentialStateFile {
     use crate::credential_flow::store::{
         CredentialStore, JsonFileCredentialStore, default_credentials_path,
