@@ -6,6 +6,7 @@ pub mod browser;
 pub mod build_cache;
 pub mod cache;
 pub mod composefs;
+pub mod connector_store;
 pub mod content_store;
 pub mod cpio;
 pub mod credential_flow;

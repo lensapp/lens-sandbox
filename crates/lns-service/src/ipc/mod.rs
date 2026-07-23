@@ -185,6 +185,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 .await
                 .map(|image| Response::ImagePulled { image }),
         ),
+        Request::PullConnector {
+            reference,
+            confirm_replace,
+        } => crate::connector_store::connector_pull_response(
+            crate::connector_store::real::pull(reference, *confirm_replace).await,
+        ),
         Request::ListImages => image_response(
             crate::image_store::list()
                 .await
@@ -1904,6 +1910,26 @@ mod tests {
         let message = resp["message"].as_str().expect("an error message");
         assert!(
             message.contains("invalid image reference"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_pull_connector_of_an_invalid_reference_surfaces_the_parse_error() {
+        let resp = as_json(
+            handle_request(
+                &Request::PullConnector {
+                    reference: "###".into(),
+                    confirm_replace: false,
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        let message = resp["message"].as_str().expect("an error message");
+        assert!(
+            message.contains("invalid connector reference"),
             "got: {message}"
         );
     }

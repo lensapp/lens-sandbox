@@ -82,6 +82,11 @@ pub enum Request {
     PullImage {
         image: String,
     },
+    PullConnector {
+        reference: String,
+        #[serde(default)]
+        confirm_replace: bool,
+    },
     ListImages,
     RemoveImage {
         image: String,
@@ -197,6 +202,15 @@ pub enum Response {
     },
     ImagePulled {
         image: ImageInfo,
+    },
+    ConnectorPulled {
+        id: String,
+        config_digest: String,
+        replaced: bool,
+    },
+    ConnectorReplaceNeedsConfirm {
+        id: String,
+        changes: Vec<String>,
     },
     ImageList {
         images: Vec<ImageInfo>,
