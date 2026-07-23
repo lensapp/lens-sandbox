@@ -5,7 +5,7 @@ use lns_policy::connectors::{
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
-    BootGate, SlotPlan, boot_gate, gate_required_slots, plan_declared_connectors, sign_in_gate_ids,
+    SlotGatePlan, ValuePrompt, gate_required_slots, plan_required_slots,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
@@ -13,6 +13,7 @@ use lns_service::credential_flow::connectors::{
     resolve_applied_with_slots, resolve_connectable_with_slots, unknown_connector_ids,
     unknown_connectors_refusal,
 };
+use lns_service::credential_flow::launch_gate::{ValueCardDeps, gate_value_prompts};
 use lns_service::credential_flow::providers::Provider;
 
 use crate::world::BehaviourWorld;
@@ -82,20 +83,54 @@ fn launch(
         rig.error = Some(unknown_connectors_refusal(&unknown));
         return;
     }
-    if let Err(failure) = gate_required_slots(&resolved.credentials, &rig.catalog, &rig.store) {
-        rig.error = Some(failure.as_message());
-        return;
+    let plans = plan_required_slots(&resolved.credentials, &rig.catalog, &rig.store);
+    match rig.window.clone() {
+        None => {
+            if let Err(failure) =
+                gate_required_slots(&resolved.credentials, &rig.catalog, &rig.store)
+            {
+                rig.error = Some(failure.as_message());
+                return;
+            }
+        }
+        Some(window) => {
+            if let Some(failure) = plans.iter().find_map(|plan| match plan {
+                SlotGatePlan::Refused(failure) => Some(failure.clone()),
+                _ => None,
+            }) {
+                rig.error = Some(failure.as_message());
+                return;
+            }
+            let prompts: Vec<ValuePrompt> = plans
+                .iter()
+                .filter_map(|plan| match plan {
+                    SlotGatePlan::NeedsValue(prompt) => Some(prompt.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !prompts.is_empty() {
+                let store = crate::declared_rig::SharedStore::seeded(rig.store.clone());
+                rig.gate_store = Some(store.clone());
+                rig.value_gate = Some(tokio::spawn(async move {
+                    let deps = ValueCardDeps {
+                        window: &window,
+                        store: &*store,
+                        wait: std::time::Duration::from_secs(5),
+                        host_value_available: &|_| false,
+                        announce: &|_| {},
+                        repaint: &|| {},
+                    };
+                    gate_value_prompts(&prompts, &deps).await
+                }));
+                return;
+            }
+        }
     }
-    let plans = plan_declared_connectors(
-        &sign_in_gate_ids(&resolved.credentials),
-        &rig.catalog,
-        &rig.store,
-    );
-    if boot_gate(&plans) == BootGate::AwaitConnect {
-        rig.pending = plans.into_iter().find_map(|plan| match plan {
-            SlotPlan::Connect(prompt) => Some(prompt),
-            SlotPlan::Armed { .. } => None,
-        });
+    if let Some(prompt) = plans.into_iter().find_map(|plan| match plan {
+        SlotGatePlan::NeedsSignIn(prompt) => Some(prompt),
+        _ => None,
+    }) {
+        rig.pending = Some(prompt);
         return;
     }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
@@ -545,5 +580,228 @@ fn connector_is_not_offered(w: &mut BehaviourWorld, id: String) -> Result<(), St
         ))
     } else {
         Ok(())
+    }
+}
+
+#[given("the approval window is available on this machine")]
+fn window_available(w: &mut BehaviourWorld) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.window = Some(lns_service::approval_flow::window::WindowState::new());
+}
+
+#[given("no approval window is available on this machine")]
+fn window_absent(w: &mut BehaviourWorld) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    assert!(
+        rig.window.is_none(),
+        "the rig unexpectedly holds an approval window"
+    );
+}
+
+#[given(
+    regex = r#"^the machine catalog has a credential connector "([^"]+)" managing "([^"]+)" minted by "([^"]+)"$"#
+)]
+fn catalog_has_connector_with_mint(w: &mut BehaviourWorld, id: String, env: String, cmd: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    let mut connector = credential_connector(&id, &env, None);
+    connector.token_fallback = Some(lns_policy::connectors::TokenFallback {
+        help: None,
+        command: Some(cmd),
+    });
+    rig.catalog.push(connector);
+}
+
+#[given(
+    regex = r#"^the sandbox definition requires the credential slot for "([^"]+)" injected as "([^"]+)" twice$"#
+)]
+fn definition_requires_slot_twice(w: &mut BehaviourWorld, name: String, env: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    let slot = format!(r#"{{"name":"{name}","env":"{env}","required":true}}"#);
+    rig.definition = Some(format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{slot},{slot}]}}}}"#
+    ));
+}
+
+async fn pending_value_card(
+    w: &BehaviourWorld,
+) -> Result<lns_service::approval_flow::window::CredentialCardPrompt, String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if let Some(err) = &rig.error {
+        return Err(format!("the launch failed instead of carding: {err}"));
+    }
+    let window = rig
+        .window
+        .as_ref()
+        .ok_or("the scenario declared no approval window")?
+        .clone();
+    for _ in 0..1000 {
+        if let Some(card) = window.snapshot().pending_credentials.first() {
+            return Ok(card.clone());
+        }
+        tokio::task::yield_now().await;
+    }
+    Err("no value card became visible".to_string())
+}
+
+#[then(regex = r#"^a value card for "([^"]+)" is shown before the workload starts$"#)]
+async fn value_card_shown(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let card = pending_value_card(w).await?;
+    if card.credential_id != id {
+        return Err(format!(
+            "the pending value card is for {}, not {id}",
+            card.credential_id
+        ));
+    }
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.running_policy.is_some() {
+        return Err("the workload started while the value was undecided".to_string());
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the value card discloses the injection target "([^"]+)"$"#)]
+async fn value_card_discloses_env(w: &mut BehaviourWorld, env: String) -> Result<(), String> {
+    let card = pending_value_card(w).await?;
+    if card.env_var.as_deref() == Some(env.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the value card discloses {:?}, not {env}",
+            card.env_var
+        ))
+    }
+}
+
+#[then(regex = r#"^the value card shows how to mint the value with "([^"]+)"$"#)]
+async fn value_card_shows_mint(w: &mut BehaviourWorld, cmd: String) -> Result<(), String> {
+    let card = pending_value_card(w).await?;
+    let minted_by = card.token_fallback.as_ref().and_then(|t| t.command.clone());
+    if minted_by.as_deref() == Some(cmd.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the value card offers {minted_by:?} as the mint command, not {cmd}"
+        ))
+    }
+}
+
+#[then("the workload does not start until the value is decided")]
+async fn workload_waits_for_value(w: &mut BehaviourWorld) -> Result<(), String> {
+    pending_value_card(w).await?;
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig.running_policy.is_some() {
+        return Err("the workload started while the value was undecided".to_string());
+    }
+    if rig.value_gate.is_none() {
+        return Err("no launch gate is holding the boot".to_string());
+    }
+    Ok(())
+}
+
+#[then("only one value card is pending")]
+async fn only_one_value_card(w: &mut BehaviourWorld) -> Result<(), String> {
+    let _ = pending_value_card(w).await?;
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    let window = rig.window.as_ref().ok_or("no approval window")?;
+    let cards = window.snapshot().pending_credentials;
+    if cards.len() == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected one coalesced value card, got {}: {cards:?}",
+            cards.len()
+        ))
+    }
+}
+
+async fn decide_pending_value_card(
+    w: &mut BehaviourWorld,
+    request: lns_service::credential_flow::session::CredentialDecisionRequest,
+) -> Result<(), String> {
+    let card = pending_value_card(w).await?;
+    let (window, gate) = {
+        let rig = w.declared.as_mut().ok_or("no launch happened")?;
+        let window = rig.window.clone().ok_or("no approval window")?;
+        let gate = rig.value_gate.take().ok_or("no launch gate is running")?;
+        (window, gate)
+    };
+    window.decide_credential(&card.id, request);
+    let outcome = gate
+        .await
+        .map_err(|e| format!("the gate task panicked: {e}"))?;
+    let rig = w.declared.as_mut().ok_or("no launch happened")?;
+    match outcome {
+        Ok(()) => {
+            rig.store = rig
+                .gate_store
+                .as_ref()
+                .ok_or("the gate ran without a store")?
+                .state();
+            relaunch(w);
+            Ok(())
+        }
+        Err(reason) => {
+            rig.error = Some(reason);
+            Ok(())
+        }
+    }
+}
+
+#[when(regex = r#"^the developer saves value "([^"]+)" on the pre-boot value card$"#)]
+async fn save_value_on_card(w: &mut BehaviourWorld, value: String) -> Result<(), String> {
+    use lns_policy::credentials::CredentialEntry;
+    use lns_service::credential_flow::session::CredentialDecisionRequest;
+    decide_pending_value_card(
+        w,
+        CredentialDecisionRequest::Allow(CredentialEntry::Stored { value }),
+    )
+    .await
+}
+
+#[when("the developer declines the pre-boot value card")]
+async fn decline_value_card(w: &mut BehaviourWorld) -> Result<(), String> {
+    use lns_service::credential_flow::session::CredentialDecisionRequest;
+    decide_pending_value_card(w, CredentialDecisionRequest::Deny).await
+}
+
+#[then("the launch is aborted")]
+fn launch_aborted(w: &mut BehaviourWorld) -> Result<(), String> {
+    let error = w
+        .declared
+        .as_ref()
+        .and_then(|r| r.error.as_ref())
+        .ok_or("no launch error was recorded")?;
+    if error.contains("launch aborted") {
+        Ok(())
+    } else {
+        Err(format!("expected an aborted launch, got: {error}"))
+    }
+}
+
+#[then(regex = r#"^the per-machine credential store keeps no entry for "([^"]+)"$"#)]
+fn store_keeps_no_entry(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    let gate_state = rig.gate_store.as_ref().map(|s| s.state());
+    let has_entry =
+        rig.store.contains_key(&id) || gate_state.is_some_and(|state| state.contains_key(&id));
+    if has_entry {
+        Err(format!(
+            "a launch-origin decline must not persist any entry for {id}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then(regex = r#"^the per-machine credential store now binds "([^"]+)"$"#)]
+fn store_now_binds(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if lns_policy::credentials::has_armed_entry(&rig.store, &id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the store to bind {id}, got {:?}",
+            rig.store.get(&id)
+        ))
     }
 }

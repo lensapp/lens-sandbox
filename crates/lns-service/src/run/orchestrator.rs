@@ -90,7 +90,8 @@ async fn orchestrate(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,
         )?;
-        crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
+        crate::artifact::real::gate_required_value_slots(&plan.workload.credentials, &frame_tx)
+            .await?;
         gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
     let launch = sandbox_plan
@@ -443,16 +444,14 @@ async fn gate_declared_sign_ins(
     frame_tx: &Sender<WireFrame>,
 ) -> Result<()> {
     use crate::artifact::credential_boot::{
-        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_connectors, resolve_connect,
-        sign_in_gate_ids,
+        ConnectChoice, SlotGatePlan, plan_required_slots, resolve_connect,
     };
     use crate::credential_flow::store::{
         CredentialStore, JsonFileCredentialStore, default_credentials_path,
     };
     use lns_ipc::Response;
 
-    let declared = sign_in_gate_ids(credentials);
-    if declared.is_empty() {
+    if credentials.iter().all(|slot| !slot.required) {
         return Ok(());
     }
     let user = lns_policy::connectors::Catalog::load_or_default(
@@ -463,12 +462,8 @@ async fn gate_declared_sign_ins(
     let state = JsonFileCredentialStore::new(default_credentials_path())
         .load()
         .unwrap_or_default();
-    let plans = plan_declared_connectors(&declared, &catalog, &state);
-    if boot_gate(&plans) == BootGate::StartWorkload {
-        return Ok(());
-    }
-    for plan in plans {
-        let SlotPlan::Connect(prompt) = plan else {
+    for plan in plan_required_slots(credentials, &catalog, &state) {
+        let SlotGatePlan::NeedsSignIn(prompt) = plan else {
             continue;
         };
         let id = prompt.connector.clone();

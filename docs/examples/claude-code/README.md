@@ -30,19 +30,16 @@ The first boot runs `npm install -g @anthropic-ai/claude-code`; the microVM is
 ephemeral, so each cold start reinstalls it (the `allowedRoutes` keep
 `registry.npmjs.org` open for that reason).
 
-The definition requires the `claude-code-subscription` credential, so on a
-machine with no bound value the first run refuses to boot and tells you how to
-bind one:
+The definition requires the `claude-code-subscription` credential. On a machine
+with no bound value, the first run raises an approval card before the workload
+starts: mint a long-lived subscription token with `claude setup-token`, then
+paste it (or accept the detected host value if `CLAUDE_CODE_OAUTH_TOKEN` is
+already set on your machine). Saving it boots the sandbox; declining aborts the
+launch. The real token never enters the guest — the workload sees a placeholder
+and the boundary splices the value into requests to `api.anthropic.com`.
 
-```bash
-lns connector connect claude-code-subscription
-```
-
-An approval card opens: mint a long-lived subscription token with
-`claude setup-token`, then paste it (or accept the detected host value if
-`CLAUDE_CODE_OAUTH_TOKEN` is already set on your machine). The real token never
-enters the guest — the workload sees a placeholder and the boundary splices the
-value into requests to `api.anthropic.com`. Then `lns run` again.
+Headless (no approval window available), the run refuses instead and tells you
+to bind the value first with `lns connector connect claude-code-subscription`.
 
 ## Publish and run from a registry
 

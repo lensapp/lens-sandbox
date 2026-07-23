@@ -3,6 +3,7 @@
 pub mod bind;
 pub mod connectors;
 pub mod detection;
+pub mod launch_gate;
 pub mod notification;
 pub mod providers;
 pub mod registry;

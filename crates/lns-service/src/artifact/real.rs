@@ -128,28 +128,88 @@ pub(crate) fn refuse_unknown_connectors(
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
 }
 
-/// Refuse a launch whose definition requires a credential slot this machine has not bound (or has denied) — before any microVM boots.
-pub(crate) fn refuse_unbound_required_credentials(
+const LAUNCH_VALUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Gate a definition's required credential slots before any microVM boots: with the approval window present each unbound slot raises its value card; headless — or machine-denied — falls back to the fail-fast refusal.
+pub(crate) async fn gate_required_value_slots(
     credentials: &[lns_artifact::spec::CredentialSlot],
+    frame_tx: &tokio::sync::mpsc::Sender<lns_ipc::WireFrame>,
 ) -> Result<()> {
+    use crate::artifact::credential_boot::{
+        SlotGatePlan, ValuePrompt, gate_required_slots, plan_required_slots,
+    };
+    use crate::credential_flow::launch_gate::{ValueCardDeps, gate_value_prompts};
+    use crate::credential_flow::store::{
+        CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    };
+
     if credentials.iter().all(|slot| !slot.required) {
         return Ok(());
     }
     let catalog = effective_machine_catalog();
-    let state = {
-        use crate::credential_flow::store::{
-            CredentialStore, JsonFileCredentialStore, default_credentials_path,
-        };
-        JsonFileCredentialStore::new(default_credentials_path())
-            .load()
-            .unwrap_or_default()
+    let store = JsonFileCredentialStore::new(default_credentials_path());
+    let state = store.load().unwrap_or_default();
+    let window = crate::tray::display_present()
+        .then(crate::approval_flow::window::get)
+        .flatten();
+    let Some(window) = window else {
+        if let Err(failure) = gate_required_slots(credentials, &catalog, &state) {
+            anyhow::bail!(failure.as_message());
+        }
+        return Ok(());
     };
-    if let Err(failure) =
-        crate::artifact::credential_boot::gate_required_slots(credentials, &catalog, &state)
-    {
-        anyhow::bail!(failure.as_message());
+    let mut prompts = Vec::new();
+    for plan in plan_required_slots(credentials, &catalog, &state) {
+        match plan {
+            SlotGatePlan::Refused(failure) => anyhow::bail!(failure.as_message()),
+            SlotGatePlan::NeedsValue(prompt) => prompts.push(prompt),
+            SlotGatePlan::Armed { .. } | SlotGatePlan::NeedsSignIn(_) => {}
+        }
     }
-    Ok(())
+    if prompts.is_empty() {
+        return Ok(());
+    }
+    let announce_tx = frame_tx.clone();
+    let deps = ValueCardDeps {
+        window: &window,
+        store: &store,
+        wait: LAUNCH_VALUE_TIMEOUT,
+        host_value_available: &|prompt: &ValuePrompt| host_value_available(&catalog, prompt),
+        announce: &move |msg: &str| {
+            let _ = announce_tx.try_send(lns_ipc::WireFrame::Json(lns_ipc::Response::RunLog {
+                level: lns_ipc::LogLevel::Info,
+                verb: None,
+                message: msg.to_string(),
+            }));
+        },
+        repaint: &|| {
+            if let Some(ctx) = crate::approval_flow::window::ctx() {
+                ctx.request_repaint();
+            }
+        },
+    };
+    gate_value_prompts(&prompts, &deps)
+        .await
+        .map_err(|reason| anyhow::anyhow!(reason))
+}
+
+fn host_value_available(
+    catalog: &[lns_policy::connectors::Connector],
+    prompt: &crate::artifact::credential_boot::ValuePrompt,
+) -> bool {
+    use crate::credential_flow::providers::{DefProvider, Provider};
+    catalog
+        .iter()
+        .find(|integ| integ.id == prompt.connector)
+        .and_then(|integ| integ.credential.as_ref())
+        .map(|cred| lns_policy::providers::ProviderDef {
+            id: prompt.connector.clone(),
+            env_var: prompt.env.clone(),
+            placeholder: cred.placeholder.clone(),
+            injections: cred.injections.clone(),
+        })
+        .and_then(|def| DefProvider::new(def).detector().detect())
+        .is_some()
 }
 
 fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
