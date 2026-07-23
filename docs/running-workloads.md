@@ -395,7 +395,8 @@ spec:
 - **`inline`** maps safe relative file paths to UTF-8 text. It is useful for
   small settings such as `mcp.json` or agent configuration when the definition
   should stay self-contained. Each file is limited to 128 KiB after YAML
-  parsing. Inline files remain in the published sandbox config, so `lns push`
+  parsing, an inline fileset totals at most 1 MiB across at most 256 files.
+  Inline files remain in the published sandbox config, so `lns push`
   does not create a companion FileSet artifact for them. Inspect and run output
   disclose the inline source, mount path, and owner, never the file contents.
 - Each entry sets exactly one of `path`/`ref`/`inline`. `inline` must contain at
