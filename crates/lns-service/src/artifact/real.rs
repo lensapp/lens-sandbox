@@ -162,7 +162,14 @@ fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
         );
         lns_policy::connectors::Catalog::default()
     });
-    lns_policy::connectors::effective_connectors(&user)
+    let pulled = lns_policy::pulled::PulledCatalog::load_or_default(
+        &lns_policy::pulled::default_pulled_connectors_path(),
+    )
+    .unwrap_or_else(|e| {
+        crate::log::warn!("unreadable pulled connector catalog ({e}); ignoring pulled connectors");
+        lns_policy::pulled::PulledCatalog::default()
+    });
+    lns_policy::connectors::effective_connectors(&user, &pulled)
 }
 
 /// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.

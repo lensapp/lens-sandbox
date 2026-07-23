@@ -261,7 +261,11 @@ async fn run_credential_bind(id: &str) -> Response {
         &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::connectors::effective_connectors(&user);
+    let pulled = lns_policy::pulled::PulledCatalog::load_or_default(
+        &lns_policy::pulled::default_pulled_connectors_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::connectors::effective_connectors(&user, &pulled);
     let Some(integ) = catalog.iter().find(|i| i.id == id) else {
         return Response::CredentialBindFailed {
             reason: format!("{id:?} is not in this machine's connector catalog"),
@@ -342,7 +346,11 @@ pub(crate) async fn run_connector_sign_in(
         &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::connectors::effective_connectors(&user);
+    let pulled = lns_policy::pulled::PulledCatalog::load_or_default(
+        &lns_policy::pulled::default_pulled_connectors_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::connectors::effective_connectors(&user, &pulled);
     let Some(oauth) = catalog
         .iter()
         .find(|i| i.id == id)

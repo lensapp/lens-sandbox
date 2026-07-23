@@ -9,6 +9,7 @@ pub mod credentials;
 mod env_subst;
 pub mod host_bind_decisions;
 pub mod providers;
+pub mod pulled;
 pub mod registry_auth;
 mod secure_file;
 #[cfg(test)]

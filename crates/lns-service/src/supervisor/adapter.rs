@@ -235,6 +235,18 @@ fn load_user_catalog_or_warn(path: &Path) -> lns_policy::connectors::Catalog {
     }
 }
 
+/// Defaults to an empty pulled catalog and warns on load error, so a malformed `~/.lns-pulled-connectors.yaml` doesn't break a run — bundled and user connectors still apply.
+fn load_pulled_catalog_or_warn(path: &Path) -> lns_policy::pulled::PulledCatalog {
+    match lns_policy::pulled::PulledCatalog::load_or_default(path) {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            let path_str = path.display();
+            log::warn!("could not load {path_str} ({e}); ignoring registry-pulled connectors");
+            lns_policy::pulled::PulledCatalog::default()
+        }
+    }
+}
+
 /// The env vars seeded as placeholders for this run's connected and connectable connectors; stripped from `-e` so a real secret can't bypass the placeholder.
 fn collect_managed_env_vars(providers: &[DefProvider]) -> Vec<String> {
     providers.iter().map(|p| p.env_var().to_string()).collect()
@@ -484,10 +496,12 @@ pub(super) async fn start(
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
     let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
-    // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
+    // Applied connectors resolve against the effective catalog (bundled ∪ user ∪ pulled) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
-    let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
+    let pulled_catalog =
+        load_pulled_catalog_or_warn(&lns_policy::pulled::default_pulled_connectors_path());
+    let catalog = lns_policy::connectors::effective_connectors(&user_catalog, &pulled_catalog);
     let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog connectors are seeded unarmed so their use offers a live connect.
     let declared_connectors = sandbox_policy
@@ -1021,6 +1035,53 @@ mod tests {
         assert!(
             catalog.connectors.is_empty(),
             "a malformed user catalog must surface as empty so the run still gets the bundled set"
+        );
+    }
+
+    #[test]
+    fn load_pulled_catalog_or_warn_reads_an_existing_pulled_catalog() {
+        use lns_policy::connectors::{AuthKind, Connector, CredentialAuth};
+        use lns_policy::pulled::{PulledCatalog, PulledConnector};
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join(".lns-pulled-connectors.yaml");
+        PulledCatalog {
+            connectors: vec![PulledConnector {
+                source: "registry.lns.run/connectors/some-pulled:0.1.0".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+                pulled_at: "2026-07-23T10:00:00Z".into(),
+                definition: Connector {
+                    id: "some-pulled".into(),
+                    name: None,
+                    auth_kind: AuthKind::Credential,
+                    routes: Vec::new(),
+                    credential: Some(CredentialAuth {
+                        env_var: "SOME_TOKEN".into(),
+                        placeholder: "some-pulled-LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    }),
+                    oauth: None,
+                    token_fallback: None,
+                },
+            }],
+        }
+        .save_atomic(&path)
+        .unwrap();
+        let catalog = load_pulled_catalog_or_warn(&path);
+        assert_eq!(catalog.connectors.len(), 1);
+        assert_eq!(catalog.connectors[0].definition.id, "some-pulled");
+    }
+
+    #[test]
+    fn load_pulled_catalog_or_warn_defaults_to_empty_and_warns_on_load_error() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join(".lns-pulled-connectors.yaml");
+        std::fs::write(&path, "connectors: not-a-list\n").unwrap();
+        let catalog = load_pulled_catalog_or_warn(&path);
+        assert!(
+            catalog.connectors.is_empty(),
+            "a malformed pulled catalog must surface as empty so the run still gets bundled + user"
         );
     }
 

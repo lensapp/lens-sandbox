@@ -8,6 +8,7 @@ use lns_policy::connectors::{
     effective_connectors,
 };
 use lns_policy::providers::is_self_identifying;
+use lns_policy::pulled;
 
 use crate::command::{CommandSpec, subcommand};
 use crate::run::summary::policy_path;
@@ -353,7 +354,7 @@ pub async fn connect(
     writer: &mut impl Write,
 ) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    let effective = effective_connectors(&user);
+    let effective = effective_connectors(&user, &pulled::PulledCatalog::default());
     let Some(integ) = effective.iter().find(|i| i.id == args.id) else {
         bail!("unknown connector {:?}; see `lns connector list`", args.id);
     };

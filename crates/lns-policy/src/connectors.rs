@@ -172,7 +172,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         for i in &self.connectors {
             i.validate()?;
         }
@@ -254,17 +254,23 @@ pub fn default_connectors_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".lns-connectors.yaml"))
 }
 
-/// The effective catalog is the bundled set extended with user entries whose id isn't already shipped — a bundled id can never be shadowed.
-pub fn effective_connectors(user: &Catalog) -> Vec<Connector> {
+/// Layers the sources by precedence bundled > user > pulled, so a lower-precedence source can never shadow a higher one — a network-pulled definition can never redefine a bundled or user connector.
+pub fn effective_connectors(
+    user: &Catalog,
+    pulled: &crate::pulled::PulledCatalog,
+) -> Vec<Connector> {
     let mut out: Vec<Connector> = bundled_connectors().to_vec();
-    let bundled_ids: HashSet<&str> = out.iter().map(|i| i.id.as_str()).collect();
-    let extra: Vec<Connector> = user
-        .connectors
-        .iter()
-        .filter(|i| !bundled_ids.contains(i.id.as_str()))
-        .cloned()
-        .collect();
-    out.extend(extra);
+    let mut ids: HashSet<String> = out.iter().map(|i| i.id.clone()).collect();
+    for connector in &user.connectors {
+        if ids.insert(connector.id.clone()) {
+            out.push(connector.clone());
+        }
+    }
+    for entry in &pulled.connectors {
+        if ids.insert(entry.definition.id.clone()) {
+            out.push(entry.definition.clone());
+        }
+    }
     out
 }
 
@@ -1242,9 +1248,22 @@ mod tests {
         assert!(!err.to_string().is_empty());
     }
 
+    fn pulled_entry(definition: Connector) -> crate::pulled::PulledConnector {
+        crate::pulled::PulledConnector {
+            source: format!("registry.lns.run/connectors/{}:0.1.0", definition.id),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            config_digest: format!("sha256:{}", "b".repeat(64)),
+            pulled_at: "2026-07-23T10:00:00Z".into(),
+            definition,
+        }
+    }
+
     #[test]
-    fn effective_connectors_is_bundled_only_for_an_empty_user_catalog() {
-        let eff = effective_connectors(&Catalog::default());
+    fn effective_connectors_is_bundled_only_for_empty_user_and_pulled_catalogs() {
+        let eff = effective_connectors(
+            &Catalog::default(),
+            &crate::pulled::PulledCatalog::default(),
+        );
         assert_eq!(eff.len(), bundled_connectors().len());
     }
 
@@ -1253,7 +1272,7 @@ mod tests {
         let user = Catalog {
             connectors: vec![sample_connector()],
         };
-        let eff = effective_connectors(&user);
+        let eff = effective_connectors(&user, &crate::pulled::PulledCatalog::default());
         assert_eq!(eff.len(), bundled_connectors().len() + 1);
         assert!(eff.iter().any(|i| i.id == "acme"));
     }
@@ -1266,7 +1285,7 @@ mod tests {
         let user = Catalog {
             connectors: vec![shadow],
         };
-        let eff = effective_connectors(&user);
+        let eff = effective_connectors(&user, &crate::pulled::PulledCatalog::default());
         assert_eq!(
             eff.len(),
             bundled_connectors().len(),
@@ -1277,6 +1296,56 @@ mod tests {
             gitlab.credential.as_ref().unwrap().env_var,
             "EVIL",
             "the bundled gitlab definition must win over a user shadow"
+        );
+    }
+
+    #[test]
+    fn effective_connectors_appends_a_pulled_only_connector() {
+        let mut pulled_def = sample_connector();
+        pulled_def.id = "some-pulled".into();
+        let pulled = crate::pulled::PulledCatalog {
+            connectors: vec![pulled_entry(pulled_def)],
+        };
+        let eff = effective_connectors(&Catalog::default(), &pulled);
+        assert_eq!(eff.len(), bundled_connectors().len() + 1);
+        assert!(eff.iter().any(|i| i.id == "some-pulled"));
+    }
+
+    #[test]
+    fn effective_connectors_never_lets_a_pulled_entry_shadow_a_bundled_or_user_id() {
+        let bundled_id = bundled_connectors()[0].id.clone();
+        let mut pulled_over_bundled = sample_connector();
+        pulled_over_bundled.id = bundled_id.clone();
+        pulled_over_bundled.credential = Some(credential("EVIL", "lns-evil", "api.example.test"));
+        let mut pulled_over_user = sample_connector();
+        pulled_over_user.id = "acme".into();
+        pulled_over_user.credential = Some(credential("ALSO_EVIL", "lns-evil2", "api.acme.corp"));
+        let user = Catalog {
+            connectors: vec![sample_connector()],
+        };
+        let pulled = crate::pulled::PulledCatalog {
+            connectors: vec![
+                pulled_entry(pulled_over_bundled),
+                pulled_entry(pulled_over_user),
+            ],
+        };
+        let eff = effective_connectors(&user, &pulled);
+        assert_eq!(
+            eff.len(),
+            bundled_connectors().len() + 1,
+            "a network-pulled id colliding with a bundled or user id must be dropped, never added"
+        );
+        let bundled = eff.iter().find(|i| i.id == bundled_id).unwrap();
+        assert_ne!(
+            bundled.credential.as_ref().map(|c| c.env_var.as_str()),
+            Some("EVIL"),
+            "a pulled definition must never redefine a bundled connector"
+        );
+        let acme = eff.iter().find(|i| i.id == "acme").unwrap();
+        assert_ne!(
+            acme.credential.as_ref().unwrap().env_var,
+            "ALSO_EVIL",
+            "a pulled definition must never redefine a user-declared connector"
         );
     }
 

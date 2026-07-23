@@ -459,7 +459,11 @@ async fn gate_declared_sign_ins(
         &lns_policy::connectors::default_connectors_path(),
     )
     .unwrap_or_default();
-    let catalog = lns_policy::connectors::effective_connectors(&user);
+    let pulled = lns_policy::pulled::PulledCatalog::load_or_default(
+        &lns_policy::pulled::default_pulled_connectors_path(),
+    )
+    .unwrap_or_default();
+    let catalog = lns_policy::connectors::effective_connectors(&user, &pulled);
     let state = JsonFileCredentialStore::new(default_credentials_path())
         .load()
         .unwrap_or_default();
