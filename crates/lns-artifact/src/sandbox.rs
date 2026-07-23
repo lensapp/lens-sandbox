@@ -317,6 +317,11 @@ fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
 }
 
 fn validate_inline_path(path: &str) -> Result<()> {
+    if path.len() > 4096 {
+        bail!(
+            "inline file path {path:?} exceeds the 4096-byte limit; use a shorter path"
+        );
+    }
     let segments: Vec<&str> = path.split('/').collect();
     if path.is_empty()
         || path.starts_with('/')
