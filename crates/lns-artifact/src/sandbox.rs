@@ -8,6 +8,8 @@ use crate::spec::{self, CredentialSlot, Metadata, Port, Resources};
 pub const API_VERSION: &str = "lns.run/v1";
 pub const KIND: &str = "Sandbox";
 pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
+pub const MAX_INLINE_TOTAL_BYTES: usize = 1024 * 1024;
+pub const MAX_INLINE_FILES: usize = 256;
 
 const EXACT_SECRET_NAMES: &[&str] = &[
     ".npmrc",
@@ -290,6 +292,13 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
 }
 
 fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
+    if inline.len() > MAX_INLINE_FILES {
+        bail!(
+            "inline fileset has {} files, more than the {MAX_INLINE_FILES}-file limit; use a path or ref fileset",
+            inline.len()
+        );
+    }
+    let mut total_bytes: usize = 0;
     for (path, content) in inline {
         validate_inline_path(path)?;
         if content.len() > MAX_INLINE_FILE_BYTES {
@@ -297,6 +306,12 @@ fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
                 "inline file {path:?} exceeds the {MAX_INLINE_FILE_BYTES}-byte limit; use a path or ref fileset"
             );
         }
+        total_bytes += content.len();
+    }
+    if total_bytes > MAX_INLINE_TOTAL_BYTES {
+        bail!(
+            "inline fileset totals {total_bytes} bytes, more than the {MAX_INLINE_TOTAL_BYTES}-byte limit; use a path or ref fileset"
+        );
     }
     Ok(())
 }
@@ -802,6 +817,57 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("settings.json"), "got: {message}");
         assert!(message.contains("131072-byte limit"), "got: {message}");
+        assert!(message.contains("path or ref fileset"), "got: {message}");
+    }
+
+    #[test]
+    fn parse_enforces_the_inline_total_bytes_cap_across_files() {
+        let chunk = "a".repeat(128 * 1024);
+        let at_cap: serde_json::Map<String, serde_json::Value> = (0..8)
+            .map(|i| (format!("f{i}.txt"), chunk.clone().into()))
+            .collect();
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{"inline": at_cap, "mountPath": "/s"}]
+        });
+        parse(&def_json(&spec.to_string())).unwrap();
+
+        let over_cap: serde_json::Map<String, serde_json::Value> = (0..8)
+            .map(|i| (format!("f{i}.txt"), chunk.clone().into()))
+            .chain([("f8.txt".to_string(), "x".into())])
+            .collect();
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{"inline": over_cap, "mountPath": "/s"}]
+        });
+        let err = parse(&def_json(&spec.to_string())).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("1048576-byte limit"), "got: {message}");
+        assert!(message.contains("path or ref fileset"), "got: {message}");
+    }
+
+    #[test]
+    fn parse_enforces_the_inline_file_count_cap() {
+        let at_cap: serde_json::Map<String, serde_json::Value> = (0..256)
+            .map(|i| (format!("f{i}.txt"), "x".into()))
+            .collect();
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{"inline": at_cap, "mountPath": "/s"}]
+        });
+        parse(&def_json(&spec.to_string())).unwrap();
+
+        let over_cap: serde_json::Map<String, serde_json::Value> = (0..257)
+            .map(|i| (format!("f{i}.txt"), "x".into()))
+            .collect();
+        let spec = serde_json::json!({
+            "image": "x:1",
+            "filesets": [{"inline": over_cap, "mountPath": "/s"}]
+        });
+        let err = parse(&def_json(&spec.to_string())).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("257 files"), "got: {message}");
+        assert!(message.contains("256-file limit"), "got: {message}");
         assert!(message.contains("path or ref fileset"), "got: {message}");
     }
 
