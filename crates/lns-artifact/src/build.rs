@@ -1,5 +1,7 @@
 use crate::spec;
 use anyhow::{Context, Result, bail};
+use lns_policy::connectors::Connector;
+use lns_policy::providers::is_self_identifying;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -157,6 +159,50 @@ pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Res
     })
 }
 
+/// Build a connector definition into a config-only OCI artifact, taking `id` as `metadata.name`; refuses a definition carrying `oauth.clientSecret`, which a registry artifact would embed in the clear.
+pub fn build_connector(connector: &Connector) -> Result<BuiltArtifact> {
+    if connector
+        .oauth
+        .as_ref()
+        .is_some_and(|oauth| oauth.client_secret.is_some())
+    {
+        bail!(
+            "refusing to publish connector {:?}: it carries oauth.clientSecret, which a registry artifact would embed in the clear",
+            connector.id
+        );
+    }
+    for placeholder in [
+        connector
+            .credential
+            .as_ref()
+            .map(|c| c.placeholder.as_str()),
+        connector.oauth.as_ref().map(|o| o.placeholder.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !is_self_identifying(placeholder) {
+            bail!(
+                "refusing to publish connector {:?}: placeholder {placeholder:?} is not self-identifying (must contain \"placeholder\" or \"lns\"), so a real credential could be embedded in the registry artifact",
+                connector.id
+            );
+        }
+    }
+    connector.validate().map_err(|e| anyhow::anyhow!(e))?;
+    let mut spec_value = serde_json::to_value(connector).context("serialising connector")?;
+    if let Some(obj) = spec_value.as_object_mut() {
+        obj.remove("id");
+    }
+    let envelope = json!({
+        "apiVersion": spec::API_VERSION,
+        "kind": spec::Kind::Connector.as_str(),
+        "metadata": {"name": &connector.id},
+        "spec": spec_value,
+    });
+    let envelope_bytes = serde_json::to_vec(&envelope).context("serialising connector envelope")?;
+    build_artifact(&envelope_bytes)
+}
+
 fn validate_fileset_entries(
     entries: &[FileEntry],
     max_bytes: u64,
@@ -213,6 +259,124 @@ mod tests {
             "a".repeat(64)
         )
         .into_bytes()
+    }
+
+    fn credential_connector() -> Connector {
+        serde_json::from_value(json!({
+            "id": "some-provider",
+            "authKind": "credential",
+            "routes": [{"match": "api.some-provider.example"}],
+            "credential": {
+                "envVar": "SOME_TOKEN",
+                "placeholder": "lns-placeholder",
+                "injections": [{"kind": "bearer_header", "domain": "api.some-provider.example"}]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn build_connector_produces_a_config_only_connector_artifact_that_round_trips() {
+        let connector = credential_connector();
+        let built = build_connector(&connector).unwrap();
+        assert_eq!(
+            built.artifact_type,
+            "application/vnd.lens.connector.v1+json"
+        );
+
+        let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
+        assert_eq!(manifest["layers"][0]["mediaType"], EMPTY_MEDIA_TYPE);
+
+        let config = built
+            .blobs
+            .iter()
+            .find(|b| b.media_type == spec::Kind::Connector.config_media_type())
+            .unwrap();
+        let round_trip = spec::parse_connector(&config.data).unwrap();
+        assert_eq!(
+            round_trip, connector,
+            "the id must survive as metadata.name and the spec must round-trip"
+        );
+    }
+
+    #[test]
+    fn build_connector_refuses_an_embedded_client_secret() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-oauth",
+            "authKind": "oauth",
+            "oauth": {
+                "clientId": "some-client",
+                "clientSecret": "some-secret",
+                "deviceAuthorizationEndpoint": "https://api.some-oauth.example/device",
+                "tokenEndpoint": "https://api.some-oauth.example/token",
+                "envVar": "SOME_OAUTH_TOKEN",
+                "placeholder": "lns-placeholder"
+            }
+        }))
+        .unwrap();
+        let err = build_connector(&connector).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("clientSecret"),
+            "publishing a secret-bearing connector would embed the secret in the registry: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_connector_refuses_an_invalid_connector() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-oauth",
+            "authKind": "oauth"
+        }))
+        .unwrap();
+        let err = build_connector(&connector).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no `oauth:` block"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_connector_builds_a_valid_oauth_connector() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-oauth",
+            "authKind": "oauth",
+            "routes": [{"match": "api.some-oauth.example"}],
+            "oauth": {
+                "clientId": "some-client",
+                "deviceAuthorizationEndpoint": "https://api.some-oauth.example/device",
+                "tokenEndpoint": "https://api.some-oauth.example/token",
+                "envVar": "SOME_OAUTH_TOKEN",
+                "placeholder": "lns-placeholder",
+                "injections": [{"kind": "bearer_header", "domain": "api.some-oauth.example"}]
+            }
+        }))
+        .unwrap();
+        let built = build_connector(&connector).unwrap();
+        let config = built
+            .blobs
+            .iter()
+            .find(|b| b.media_type == spec::Kind::Connector.config_media_type())
+            .unwrap();
+        assert_eq!(spec::parse_connector(&config.data).unwrap(), connector);
+    }
+
+    #[test]
+    fn build_connector_refuses_a_non_self_identifying_placeholder() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-provider",
+            "authKind": "credential",
+            "credential": {
+                "envVar": "SOME_TOKEN",
+                "placeholder": "ghx-realtokenlookingvalue",
+                "injections": []
+            }
+        }))
+        .unwrap();
+        let err = build_connector(&connector).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("self-identifying"),
+            "a real-token placeholder would be embedded in the registry artifact and must be refused: {err:#}"
+        );
     }
 
     #[test]

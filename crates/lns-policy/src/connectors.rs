@@ -18,7 +18,7 @@ pub enum AuthKind {
 
 /// A route a connector needs reachable. Verdict is implicitly `allow`; `transport` defaults to direct. Materializes into a full [`RouteRule`] at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectorRoute {
     #[serde(rename = "match")]
     pub match_pattern: String,
@@ -48,7 +48,7 @@ impl ConnectorRoute {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialAuth {
     pub env_var: String,
     pub placeholder: String,
@@ -73,7 +73,7 @@ impl OauthFlow {
 
 /// Interactive sign-in configuration for an `oauth` connector: `flow` selects device (RFC 8628) or pkce, alongside the same env/placeholder/injection wiring a credential carries; `clientId` is optional (community builds ship none and fall back to a pasted token), with `deviceAuthorizationEndpoint` required for device and `authorizationEndpoint` for pkce; `clientSecret` is set only for confidential device clients (e.g. Google) that require it in the token exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OauthAuth {
     #[serde(default, skip_serializing_if = "OauthFlow::is_device")]
     pub flow: OauthFlow,
@@ -100,7 +100,7 @@ pub struct OauthAuth {
 
 /// An offer-time fallback letting the user paste a token into the connector's existing credential slot when the primary auth (e.g. an oauth device flow) is blocked; `help` is an optional URL for creating one and `command` an optional host CLI that mints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TokenFallback {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
@@ -109,7 +109,7 @@ pub struct TokenFallback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Connector {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1160,6 +1160,23 @@ mod tests {
             err.to_string()
                 .contains("upstream transport isn't supported in the local sandbox"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_an_unknown_field_in_a_connector_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".lns-connectors.yaml");
+        std::fs::write(
+            &path,
+            "connectors:\n  - id: some-provider\n    authKind: credential\n    credential:\n      envVar: SOME_TOKEN\n      placeholder: lns-placeholder\n      surprise: true\n",
+        )
+        .unwrap();
+        let err = Catalog::load_or_default(&path).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "a user catalog carrying an unrecognized field must fail closed, not silently drop it"
         );
     }
 

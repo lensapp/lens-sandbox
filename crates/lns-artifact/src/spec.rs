@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
+use lns_policy::connectors::Connector;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const API_VERSION: &str = "lens.dev/v1alpha1";
@@ -14,15 +16,17 @@ pub enum Class {
 pub enum Kind {
     Sandbox,
     FileSet,
+    Connector,
 }
 
-const ALL_KINDS: [Kind; 2] = [Kind::Sandbox, Kind::FileSet];
+const ALL_KINDS: [Kind; 3] = [Kind::Sandbox, Kind::FileSet, Kind::Connector];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Sandbox => "Sandbox",
             Kind::FileSet => "FileSet",
+            Kind::Connector => "Connector",
         }
     }
 
@@ -30,6 +34,7 @@ impl Kind {
         match self {
             Kind::Sandbox => "sandbox",
             Kind::FileSet => "fileset",
+            Kind::Connector => "connector",
         }
     }
 
@@ -233,6 +238,22 @@ pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
     })
 }
 
+/// Read a connector definition from its envelope, taking `metadata.name` as the connector id — the single source of truth, so the spec must not carry its own `id`.
+pub fn parse_connector(config_json: &[u8]) -> Result<Connector> {
+    let doc = parse_doc(config_json, Kind::Connector)?;
+    let mut spec = doc.spec;
+    let obj = spec
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("connector spec must be a JSON object"))?;
+    if obj.contains_key("id") {
+        bail!("connector spec must not carry an id; the id is metadata.name");
+    }
+    obj.insert("id".to_string(), Value::String(doc.metadata.name));
+    let connector: Connector = serde_json::from_value(spec).context("parsing connector spec")?;
+    connector.validate().map_err(|e| anyhow::anyhow!(e))?;
+    Ok(connector)
+}
+
 #[derive(Deserialize)]
 struct KindOnly {
     #[serde(default)]
@@ -253,6 +274,9 @@ pub fn validate_any(config_json: &[u8]) -> Result<()> {
         }
         Kind::FileSet => {
             parse_fileset(config_json)?;
+        }
+        Kind::Connector => {
+            parse_connector(config_json)?;
         }
     }
     Ok(())
@@ -307,6 +331,17 @@ mod tests {
         assert_eq!(
             Kind::Sandbox.config_media_type(),
             "application/vnd.lens.sandbox.config.v1+json"
+        );
+        assert_eq!(Kind::Connector.family(), "connector");
+        assert_eq!(Kind::Connector.as_str(), "Connector");
+        assert_eq!(Kind::Connector.class(), Class::Runtime);
+        assert_eq!(
+            Kind::Connector.artifact_type(),
+            "application/vnd.lens.connector.v1+json"
+        );
+        assert_eq!(
+            Kind::Connector.config_media_type(),
+            "application/vnd.lens.connector.config.v1+json"
         );
         for kind in ALL_KINDS {
             let _ = kind.as_str();
@@ -501,6 +536,81 @@ mod tests {
         );
     }
 
+    fn connector_envelope(spec: &str) -> Vec<u8> {
+        format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Connector","metadata":{{"name":"some-provider"}},"spec":{spec}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn parse_connector_reads_the_envelope_and_takes_the_id_from_metadata() {
+        let doc = connector_envelope(
+            r#"{"authKind":"credential","routes":[{"match":"api.some-provider.example"}],"credential":{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}}"#,
+        );
+        let connector = parse_connector(&doc).unwrap();
+        assert_eq!(connector.id, "some-provider");
+        assert_eq!(connector.credential.unwrap().env_var, "SOME_TOKEN");
+    }
+
+    #[test]
+    fn parse_connector_rejects_a_spec_that_carries_its_own_id() {
+        let doc = connector_envelope(
+            r#"{"id":"other","authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"}}"#,
+        );
+        let err = parse_connector(&doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not carry an id"),
+            "the id is metadata.name, so a spec-level id is a second source of truth: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_connector_runs_the_connector_validation() {
+        let doc = connector_envelope(r#"{"authKind":"credential"}"#);
+        let err = parse_connector(&doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no `credential:` block"),
+            "a credential connector missing its block must be refused: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_connector_rejects_an_unknown_field_at_every_level() {
+        let specs = [
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"},"surprise":true}"#,
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns","surprise":true}}"#,
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns","injections":[{"kind":"bearer_header","domain":"api.some-provider.example","surprise":true}]}}"#,
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"},"routes":[{"match":"api.some-provider.example","surprise":true}]}"#,
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"},"tokenFallback":{"help":"https://x.example","surprise":true}}"#,
+            r#"{"authKind":"oauth","oauth":{"tokenEndpoint":"https://x.example/token","deviceAuthorizationEndpoint":"https://x.example/device","envVar":"SOME_OAUTH_TOKEN","placeholder":"lns","surprise":true}}"#,
+        ];
+        for spec in specs {
+            let err = parse_connector(&connector_envelope(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unknown field"),
+                "a remote connector definition must fail closed on an unrecognized field anywhere in the schema; spec {spec} gave: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_connector_rejects_a_non_object_spec() {
+        let doc = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Connector","metadata":{"name":"some-provider"},"spec":"nope"}"#;
+        let err = parse_connector(doc).unwrap_err();
+        assert!(format!("{err:#}").contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn parse_connector_rejects_a_mount() {
+        let doc = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Connector","metadata":{"name":"some-provider"},"mount":{"path":"/x"},"spec":{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"}}}"#;
+        let err = parse_connector(doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not carry a mount"),
+            "a connector is a config-only runtime-layer artifact: {err:#}"
+        );
+    }
+
     #[test]
     fn from_kind_str_round_trips_and_rejects_unknown() {
         for kind in ALL_KINDS {
@@ -517,6 +627,10 @@ mod tests {
         );
         validate_any(sandbox.as_bytes()).unwrap();
         validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills"},"spec":{}}"#).unwrap();
+        validate_any(&connector_envelope(
+            r#"{"authKind":"credential","credential":{"envVar":"SOME_TOKEN","placeholder":"lns"}}"#,
+        ))
+        .unwrap();
     }
 
     #[test]
