@@ -316,8 +316,11 @@ pub async fn publish(
     let path = cwd.join(&args.file);
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let connector: Connector = serde_yaml::from_str(&text)
+    let mut connector: Connector = serde_yaml::from_str(&text)
         .with_context(|| format!("parsing a connector from {}", path.display()))?;
+    if let Some(client_id) = connector.oauth.as_mut().and_then(|o| o.client_id.as_mut()) {
+        *client_id = resolve_env_ref(client_id, &|name| std::env::var(name).ok());
+    }
     let built = lns_artifact::build::build_connector(&connector)?;
     let bytes: usize = built.blobs.iter().map(|blob| blob.data.len()).sum();
     if args.dry_run {
@@ -336,6 +339,15 @@ pub async fn publish(
         args.reference, built.manifest_digest
     )?;
     Ok(0)
+}
+
+/// Resolves a whole-value `${NAME}` env reference (the shape the bundled catalog uses for oauth client ids) against `lookup`, leaving a literal or an unset reference untouched so `build_connector` can refuse the latter.
+fn resolve_env_ref(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .and_then(lookup)
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
@@ -751,6 +763,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_env_ref_substitutes_a_set_reference_and_leaves_literals_and_unset_refs() {
+        assert_eq!(
+            resolve_env_ref("${SOME_VAR}", &|name| (name == "SOME_VAR")
+                .then(|| "resolved-value".to_string())),
+            "resolved-value"
+        );
+        assert_eq!(
+            resolve_env_ref("${SOME_VAR}", &|_| None),
+            "${SOME_VAR}",
+            "an unset reference is left verbatim so build_connector can refuse it"
+        );
+        assert_eq!(
+            resolve_env_ref("Iv1.literal-client-id", &|_| Some("unused".to_string())),
+            "Iv1.literal-client-id",
+            "a literal must never be treated as a reference"
+        );
+    }
+
+    #[test]
     fn published_connector_files_mirror_the_bundled_catalog_and_publish() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
         let strip_build_injected_oauth_credentials = |mut c: Connector| {
@@ -771,7 +802,15 @@ mod tests {
             let connector: Connector = serde_yaml::from_str(&text)
                 .unwrap_or_else(|e| panic!("{stem}.yaml is not a valid connector: {e}"));
             assert_eq!(connector.id, stem, "{stem}.yaml id must match its filename");
-            lns_artifact::build::build_connector(&connector)
+            let mut publishable = connector.clone();
+            if let Some(client_id) = publishable
+                .oauth
+                .as_mut()
+                .and_then(|o| o.client_id.as_mut())
+            {
+                *client_id = resolve_env_ref(client_id, &|name| Some(format!("test-{name}")));
+            }
+            lns_artifact::build::build_connector(&publishable)
                 .unwrap_or_else(|e| panic!("{stem}.yaml is not publishable: {e:#}"));
             let bundled = bundled_connectors()
                 .iter()
@@ -1592,6 +1631,38 @@ oauth:
         assert!(
             publisher.pushed.borrow().is_empty(),
             "a refused connector must not be uploaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_refuses_an_oauth_connector_whose_client_id_env_reference_is_unset() {
+        let dir = TempDir::new().unwrap();
+        write_connector(
+            dir.path(),
+            "\
+id: some-oauth
+authKind: oauth
+oauth:
+  clientId: ${LNS_OAUTH_CLIENT_ID_UNSET_9c3f}
+  deviceAuthorizationEndpoint: https://api.some-oauth.example/device
+  tokenEndpoint: https://api.some-oauth.example/token
+  envVar: SOME_OAUTH_TOKEN
+  placeholder: lns-placeholder
+",
+        );
+        let publisher = FakePublisher::ok();
+        let err = publish(
+            &publish_args(false),
+            dir.path(),
+            &publisher,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unresolved"), "got: {err:#}");
+        assert!(
+            publisher.pushed.borrow().is_empty(),
+            "an unresolved client id must not be uploaded"
         );
     }
 

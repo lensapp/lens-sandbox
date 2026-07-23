@@ -5,6 +5,7 @@ routes:
   - match: api.github.com
   - match: github.com
 oauth:
+  clientId: "${LNS_OAUTH_CLIENT_ID_GITHUB}"
   scopes:
     - repo
     - read:org

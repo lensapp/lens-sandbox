@@ -65,6 +65,12 @@ A definition carrying an `oauth.clientSecret` is refused: a registry artifact wo
 embed the secret in the clear. Confidential clients keep their secret out of the
 published definition.
 
+An `oauth.clientId` written as a `${VAR}` reference is resolved from the publisher's
+environment at publish time, so the artifact carries the literal **public** client id
+while the definition file keeps the reference. If the variable is unset the publish
+fails rather than shipping an unresolved reference; drop the `clientId` line to publish
+a token-paste connector instead.
+
 ### Pulling a connector
 
 Pull a published connector into your local catalog:

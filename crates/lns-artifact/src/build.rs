@@ -159,7 +159,7 @@ pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Res
     })
 }
 
-/// Build a connector definition into a config-only OCI artifact, taking `id` as `metadata.name`; refuses a definition carrying `oauth.clientSecret`, which a registry artifact would embed in the clear.
+/// Build a connector definition into a config-only OCI artifact, taking `id` as `metadata.name`; refuses anything a public registry artifact must not carry — an `oauth.clientSecret`, or an empty or unresolved `oauth.clientId`.
 pub fn build_connector(connector: &Connector) -> Result<BuiltArtifact> {
     if connector
         .oauth
@@ -168,6 +168,17 @@ pub fn build_connector(connector: &Connector) -> Result<BuiltArtifact> {
     {
         bail!(
             "refusing to publish connector {:?}: it carries oauth.clientSecret, which a registry artifact would embed in the clear",
+            connector.id
+        );
+    }
+    if let Some(client_id) = connector
+        .oauth
+        .as_ref()
+        .and_then(|oauth| oauth.client_id.as_deref())
+        && (client_id.is_empty() || client_id.contains("${"))
+    {
+        bail!(
+            "refusing to publish connector {:?}: oauth.clientId {client_id:?} is empty or still an unresolved ${{...}} reference; set the LNS_OAUTH_CLIENT_ID_* variable when publishing, or drop the clientId line to publish a token-paste connector",
             connector.id
         );
     }
@@ -318,6 +329,48 @@ mod tests {
         assert!(
             format!("{err:#}").contains("clientSecret"),
             "publishing a secret-bearing connector would embed the secret in the registry: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_connector_refuses_an_unresolved_client_id_env_reference() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-oauth",
+            "authKind": "oauth",
+            "oauth": {
+                "clientId": "${LNS_OAUTH_CLIENT_ID_SOME}",
+                "deviceAuthorizationEndpoint": "https://api.some-oauth.example/device",
+                "tokenEndpoint": "https://api.some-oauth.example/token",
+                "envVar": "SOME_OAUTH_TOKEN",
+                "placeholder": "lns-placeholder"
+            }
+        }))
+        .unwrap();
+        let err = build_connector(&connector).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unresolved"),
+            "an unresolved ${{...}} client id would be pushed verbatim and fail every puller's sign-in: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_connector_refuses_an_empty_client_id() {
+        let connector: Connector = serde_json::from_value(json!({
+            "id": "some-oauth",
+            "authKind": "oauth",
+            "oauth": {
+                "clientId": "",
+                "deviceAuthorizationEndpoint": "https://api.some-oauth.example/device",
+                "tokenEndpoint": "https://api.some-oauth.example/token",
+                "envVar": "SOME_OAUTH_TOKEN",
+                "placeholder": "lns-placeholder"
+            }
+        }))
+        .unwrap();
+        let err = build_connector(&connector).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("empty"),
+            "a set-but-empty client id env var must fail loudly, not silently publish clientId \"\": {err:#}"
         );
     }
 
