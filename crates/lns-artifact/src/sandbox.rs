@@ -10,6 +10,7 @@ pub const KIND: &str = "Sandbox";
 pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
 pub const MAX_INLINE_TOTAL_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_FILES: usize = 256;
+pub const MAX_INLINE_PATH_BYTES: usize = 4096;
 
 const EXACT_SECRET_NAMES: &[&str] = &[
     ".npmrc",
@@ -317,9 +318,9 @@ fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
 }
 
 fn validate_inline_path(path: &str) -> Result<()> {
-    if path.len() > 4096 {
+    if path.len() > MAX_INLINE_PATH_BYTES {
         bail!(
-            "inline file path {path:?} exceeds the 4096-byte limit; use a shorter path"
+            "inline file path exceeds the {MAX_INLINE_PATH_BYTES}-byte limit; use a shorter path"
         );
     }
     let segments: Vec<&str> = path.split('/').collect();
@@ -796,6 +797,19 @@ mod tests {
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(format!("{err:#}").contains(path), "{path}: got {err:#}");
         }
+    }
+
+    #[test]
+    fn parse_enforces_the_inline_path_length_cap() {
+        let long_path = "a/".repeat(MAX_INLINE_PATH_BYTES / 2) + "f";
+        let spec = format!(
+            r#"{{"image":"x:1","filesets":[{{"inline":{{"{long_path}":"x"}},"mountPath":"/s"}}]}}"#
+        );
+        let err = parse(&def_json(&spec)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("4096-byte limit"),
+            "got {err:#}"
+        );
     }
 
     #[test]
