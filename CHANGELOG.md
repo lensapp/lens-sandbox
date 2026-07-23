@@ -1,5 +1,96 @@
 # Changelog
 
+## [0.16.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.15.0...lns-v0.16.0) (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* the connector CLI command, the `connectors:` policy/ manifest key, the `~/.lns-connectors.yaml` catalog path, and the `LNS_CONNECTORS_PATH` env var replace their `integration`-named predecessors. Rename an existing `~/.lns-integrations.yaml` by hand and update any `integrations:` keys in tracked `lns-policy.yaml` files.
+
+### Features
+
+* add `lns uninstall` to stop sandboxes and remove the install ([a6d0ed7](https://github.com/lensapp/lens-sandbox/commit/a6d0ed7aa14b5104504c7b4b278954879f7c3fe0))
+* add inline fileset authoring schema ([30591fe](https://github.com/lensapp/lens-sandbox/commit/30591fe72de7b49b4b3f3bf522ad90de9580ca61))
+* **artifact:** introduce lns-artifact, the kind: Sandbox schema ([85c1a55](https://github.com/lensapp/lens-sandbox/commit/85c1a557b62652b817145c60eebc207a826c1102))
+* **cli:** collapse the surface to one noun, the sandbox ([1fb0711](https://github.com/lensapp/lens-sandbox/commit/1fb0711709a5c75f2bebb31baf0f6b5e27cf3949))
+* confirm a pulled sandbox's host binds and filesets before the run starts ([bc8e19e](https://github.com/lensapp/lens-sandbox/commit/bc8e19e95efda94fb43688be1dc863bef932afb6))
+* disclose and confirm a pulled sandbox's named volumes alongside binds and filesets ([21a3e18](https://github.com/lensapp/lens-sandbox/commit/21a3e18eac6e6ff869e52d7ef80a37d9ff561b1c))
+* disclose and publish inline filesets ([afb15ad](https://github.com/lensapp/lens-sandbox/commit/afb15ad54d556adc05a8c003a325fe49cdc52a38))
+* **filesets:** cap inline filesets at 1 MiB total and 256 files ([45a44dd](https://github.com/lensapp/lens-sandbox/commit/45a44ddbe47d57ed324157360d9287ae76989dce))
+* inspect a definition file by yaml path or -f/--file, offline ([773752e](https://github.com/lensapp/lens-sandbox/commit/773752eeb5e0065f4797879d8a38a27a7f12b820))
+* **ipc,policy,ocsf:** shared groundwork for the sandbox surface ([ca90bde](https://github.com/lensapp/lens-sandbox/commit/ca90bdec27199255952d759d548301ddcf6857a7))
+* materialize inline filesets ([0d42db6](https://github.com/lensapp/lens-sandbox/commit/0d42db66be410573c31806a3504d40090201127e))
+* point the credential card at the token-mint command ([3ad7996](https://github.com/lensapp/lens-sandbox/commit/3ad7996d6260c223552a53859d592ee174ad4986))
+* **policy:** bundle the claude-code-subscription credential integration ([b3cadf6](https://github.com/lensapp/lens-sandbox/commit/b3cadf646f49a8621e4adf111492ffda2982ad42))
+* publish a definition file selected with -f/--file ([271d1b1](https://github.com/lensapp/lens-sandbox/commit/271d1b17c2155b6ed14c5954c6256fdfcc15cab7))
+* run a definition file named by a path-shaped yaml reference ([d7d4b5e](https://github.com/lensapp/lens-sandbox/commit/d7d4b5e9d9bd2fed26234d6e195253df533a527b))
+* **sandbox:** filesets transfer to the workload user by default ([c2ab6c0](https://github.com/lensapp/lens-sandbox/commit/c2ab6c0270fe06c9252e6a7e3fe953255ac723f2))
+* select the run definition with -f/--file, exclusive with REF ([7fec5ca](https://github.com/lensapp/lens-sandbox/commit/7fec5ca04a4313e20d1e9f3988cbac569f6cccee))
+* **service:** ingest, plan, and run sandbox artifacts ([d90f55f](https://github.com/lensapp/lens-sandbox/commit/d90f55f1f01f32adb24b820b465edacd48fbad22))
+* show env in lns inspect for a cached sandbox reference ([e717d30](https://github.com/lensapp/lens-sandbox/commit/e717d30d07221a6c1e01b0ead6b47bac7ca6cb46))
+* show env in lns inspect for a local definition ([fa455e0](https://github.com/lensapp/lens-sandbox/commit/fa455e039002bfd425dc773264cd7fce34d58e39))
+* validate a definition file selected with -f/--file ([ac1d6c2](https://github.com/lensapp/lens-sandbox/commit/ac1d6c2eaea5ce49a357401d92eba7da9ae1b122))
+
+
+### Bug Fixes
+
+* accept keyed --mount syntax for run.volume defaults ([7ba1017](https://github.com/lensapp/lens-sandbox/commit/7ba1017601673330332532e8398e7fcd97b62333))
+* **artifact:** enforce registry artifact boundaries ([ae2223d](https://github.com/lensapp/lens-sandbox/commit/ae2223d5a5f2e2c6f9d346fce5f181993c9216cd))
+* **artifact:** reject unknown definition fields ([9f20df5](https://github.com/lensapp/lens-sandbox/commit/9f20df55754d814c00d04f56f2c6e0a36b14f1bf))
+* auto-remove --rm runs on workload exit, not CLI stream drain ([af45339](https://github.com/lensapp/lens-sandbox/commit/af453390bf2bc587b171cb4e9b6b91a303d0a581))
+* **build:** unlink bin/ artifacts before copying so macOS's cached vnode signature doesn't SIGKILL the next exec ([0758179](https://github.com/lensapp/lens-sandbox/commit/07581795a4687e837ea36c2d6dc2efa949d32ed1))
+* cap buffered blob pulls and fail a run on an index-write error ([c081dd9](https://github.com/lensapp/lens-sandbox/commit/c081dd98247eb29e1ebfc3f678aa96a24f78e659))
+* cap path string lenth ([9bf2987](https://github.com/lensapp/lens-sandbox/commit/9bf298771596d701e5f3ab53357527be19d22e21))
+* clamp a pulled artifact's allow rules under a user's deny-by-default policy ([66dab12](https://github.com/lensapp/lens-sandbox/commit/66dab12ec39330966d31dca2f56412771b88da02))
+* confirm only pulled sandbox mounts ([a8cc806](https://github.com/lensapp/lens-sandbox/commit/a8cc8060b18d5b1967235a4ebb629a201e6586f5))
+* **credentials:** seed workload env only for declared integrations ([78a3301](https://github.com/lensapp/lens-sandbox/commit/78a330146aa16c146b48364f0890f59539087fa6))
+* **credentials:** suppress a connectable whose domain an applied integration owns ([9e72450](https://github.com/lensapp/lens-sandbox/commit/9e724508174ad20467a3bb25efb083b99f2e3e3d))
+* **dashboard:** stop text corrupting after long uptime by replaying texture deltas eframe drops on hidden-window passes ([3489ef8](https://github.com/lensapp/lens-sandbox/commit/3489ef870ee20ab6a50947a55bbfedbe3c24a7f1))
+* derive default transport variant ([adfa949](https://github.com/lensapp/lens-sandbox/commit/adfa94963047c66de615ee7e758482b352fd4234))
+* disclose only the artifact-declared mounts that survive a -v override ([7a29a85](https://github.com/lensapp/lens-sandbox/commit/7a29a85b312247028190ccb83e77aae88a30c055))
+* distinguish a push connectivity failure from an auth refusal ([111ab5b](https://github.com/lensapp/lens-sandbox/commit/111ab5bf8295bd86f9870006a9ea36679aa6260a))
+* drop unused --pull flag, symmetric exec command parsing, document compat flags ([f1f4624](https://github.com/lensapp/lens-sandbox/commit/f1f4624d5dd3d4de4909d264edfbdb96c4da0cdd))
+* fail a sandbox run when its base-image retention record can't be written ([3fca4f6](https://github.com/lensapp/lens-sandbox/commit/3fca4f63cdc5fa3e45f5d71b268156a32ec21c5d))
+* format path-length bail and pin the inline path cap with a test ([50521c6](https://github.com/lensapp/lens-sandbox/commit/50521c670080b2a0556380d2b401b2d1d3c9d816))
+* gate published filesets with the strict digest-pin validator ([e501d2b](https://github.com/lensapp/lens-sandbox/commit/e501d2b573da918f80149d96def06d27a28a51ef))
+* harden fileset artifact boundaries ([1898bfd](https://github.com/lensapp/lens-sandbox/commit/1898bfd798d17db7dfc5b60f176a7b1ea5da1efb))
+* harden sandbox artifact inspection ([f1602c3](https://github.com/lensapp/lens-sandbox/commit/f1602c30a92b1b951d9277ca3f2a68de8cc2ee95))
+* **init:** seed the sandbox user ahead of an image alias for the same uid ([d5c2268](https://github.com/lensapp/lens-sandbox/commit/d5c22686c0f6184c080b30d0c8e4834f4503c2d2))
+* keep artifact-declared credentials within the user's network boundary ([4ae62bc](https://github.com/lensapp/lens-sandbox/commit/4ae62bc32f9b587aedff9aa181a6dbe0353e0759))
+* keep image ENTRYPOINT when a command overrides CMD ([67db1b2](https://github.com/lensapp/lens-sandbox/commit/67db1b2e503a7fc7b20edac0250750b10f3afc8f))
+* keep workload command verbatim and address run-flag review feedback ([09eea8b](https://github.com/lensapp/lens-sandbox/commit/09eea8b7da84ad0e29f7c978c5b332b579196ff3))
+* match a by-reference sandbox run to its digest-keyed retention record ([c525364](https://github.com/lensapp/lens-sandbox/commit/c52536495dddaff54e5ca341d450aab2d3869fc3))
+* name the selected definition in the run banner and drop the lns-init hint for missing variants ([a71b99f](https://github.com/lensapp/lens-sandbox/commit/a71b99fa0ee0a3da9a9590b1e9c075c18180ffff))
+* never registry-qualify a path-shaped lns run target ([c14483e](https://github.com/lensapp/lens-sandbox/commit/c14483e60de8824cc0a7cb5913e661c5f4567a7d))
+* offer artifact-declared integrations reactively instead of arming them ([219ac29](https://github.com/lensapp/lens-sandbox/commit/219ac29c797dd3465db911ccf83cecae1f499a53))
+* only fall back to the cached artifact when a run is genuinely unknown ([ce19162](https://github.com/lensapp/lens-sandbox/commit/ce19162b4b7700d8363223b307bc9d694ce57f2d))
+* preserve fileset file modes through push and pull ([a8c3060](https://github.com/lensapp/lens-sandbox/commit/a8c30608ef2965e5dc2a204a56ac6294730446a1))
+* preserve sandbox policy and cache boundaries ([c81eeac](https://github.com/lensapp/lens-sandbox/commit/c81eeac5e31288dc0a175cb5c0fd05a42897188d))
+* record a run's base image so rm/prune can't delete it ([f3265c1](https://github.com/lensapp/lens-sandbox/commit/f3265c100cc122b54dfdfc355072f48d5d78e5c7))
+* refuse a runtime -v mount that shadows the /.lens namespace ([06022ea](https://github.com/lensapp/lens-sandbox/commit/06022ea6add7c0de519ec191ef39496f4cd07178))
+* refuse a volume that mounts over the /.lens runtime namespace ([8d93b7e](https://github.com/lensapp/lens-sandbox/commit/8d93b7e0318a5a8009f50e000f31db875b14687b))
+* reject a malformed fileset digest at push time ([22fea5e](https://github.com/lensapp/lens-sandbox/commit/22fea5ea83217bdde6d34802d4b791f8dcd418d4))
+* reject a non-positive declared layer size before fetching layers ([64f30fe](https://github.com/lensapp/lens-sandbox/commit/64f30febb5a2b8a39a6e16b82b675a04d0225a01))
+* reject control-char fileset paths and strip setuid on fileset pull ([a49ada6](https://github.com/lensapp/lens-sandbox/commit/a49ada6b9268c225bf30aa2f0ee7646ecfe77597))
+* reject malformed env keys and non-positive resource requests ([abd0495](https://github.com/lensapp/lens-sandbox/commit/abd0495e61f1c2977e90da78621786dd6caa89ff))
+* remove upstream transport from local policy surface ([cd06580](https://github.com/lensapp/lens-sandbox/commit/cd06580878a056efa714573d1ab3e9138401b448))
+* report effective sandbox launch configuration ([c9abbe9](https://github.com/lensapp/lens-sandbox/commit/c9abbe912b5fb9d45aca19d8599f97281a922e31))
+* resolve CI failures ([c45d833](https://github.com/lensapp/lens-sandbox/commit/c45d833814d4ec4651bf6872776a1852b99c47a6))
+* restore missing tempdir setup in policy unit test ([ef53665](https://github.com/lensapp/lens-sandbox/commit/ef5366579330ea5afa804a16f391b3b0f729604a))
+* route a push-scope refusal at upload through the sign-in recipe ([736f34b](https://github.com/lensapp/lens-sandbox/commit/736f34b9e7551dce6dc5bed16b78e86bfae8614c))
+* skip a value-consuming global's value in sandbox-nested normalization ([6c83517](https://github.com/lensapp/lens-sandbox/commit/6c835172367db2195ba9ad9b56f2f8d1e8de0d6d))
+* suppress a connectable that collides on an applied injection domain ([af8f23a](https://github.com/lensapp/lens-sandbox/commit/af8f23a8f4bc9e19bb05e412146e50bfdb55faa3))
+* suppress connectables that overlap an applied integration's domain by wildcard or case ([1287fec](https://github.com/lensapp/lens-sandbox/commit/1287fec8ddbafeea646910e43691f7fc27ebb983))
+* treat "no active run with id" as a run miss too in rm/inspect fallthrough ([52ce598](https://github.com/lensapp/lens-sandbox/commit/52ce5982effa936b4a19cb1ea70c1f56829c6db2))
+* truncate a pulled fileset's digest by chars so a crafted ref can't panic the run summary ([eb34988](https://github.com/lensapp/lens-sandbox/commit/eb3498839c1725ac8f25e86a9317311a08dc2d30))
+* validate a credential slot's env-var name like spec.env keys ([0b45a5a](https://github.com/lensapp/lens-sandbox/commit/0b45a5a55fe0cfbeb9129cb55e93cd976c6bc8c4))
+* widen the shipped-policy warning to whole-TLD wildcards and moderate CIDRs ([b238d5c](https://github.com/lensapp/lens-sandbox/commit/b238d5cdcd082b82f17019c365daad51a2734abb))
+
+
+### Code Refactoring
+
+* rename the "integration" concept to "connector" ([4ec00f2](https://github.com/lensapp/lens-sandbox/commit/4ec00f2136de9af0ee338aa420f9f89f0ab35d6e))
+
 ## [0.15.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.14.0...lns-v0.15.0) (2026-07-02)
 
 
