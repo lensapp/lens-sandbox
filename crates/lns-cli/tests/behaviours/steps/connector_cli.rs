@@ -3,7 +3,9 @@ use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::ConnectorArgs;
-use lns_cli::connector::{self, BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
+use lns_cli::connector::{
+    self, BindOutcome, ConnectorPublisher, ConnectorSignIn, LocalBoxFuture, SignInOutcome,
+};
 use lns_policy::Policy;
 use std::io::Write;
 use std::path::PathBuf;
@@ -67,6 +69,18 @@ impl ConnectorSignIn for FakeSignIn {
     }
 }
 
+/// Stands in for the registry: the publish scenarios assert on the command's output, so the fake just accepts the upload.
+struct FakePublisher;
+impl ConnectorPublisher for FakePublisher {
+    fn push<'a>(
+        &'a self,
+        _built: &'a lns_artifact::build::BuiltArtifact,
+        _reference: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
 async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
     let catalog = dir.join(".lns-connectors.yaml");
@@ -77,12 +91,14 @@ async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
             .unwrap_or(SignInOutcome::Completed),
         pkce: world.signin_is_pkce,
     };
+    let publisher = FakePublisher;
     let mut full = vec!["lns".to_string(), "connector".to_string()];
     full.extend(tail.iter().map(|s| s.to_string()));
     let run = match parse_args::<ConnectorArgs, _, _>(&full) {
         Ok(args) => {
             let mut buf = Vec::<u8>::new();
-            match connector::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
+            match connector::run(&args.command, &dir, &catalog, &signin, &publisher, &mut buf).await
+            {
                 Ok(exit_code) => CliRun {
                     exit_code,
                     output: String::from_utf8_lossy(&buf).into_owned(),
@@ -233,6 +249,49 @@ fn given_user_credential_connector(world: &mut BehaviourWorld, id: String) {
 #[given(regex = r#"^the connector "([^"]+)" is in the catalog$"#)]
 fn given_connector_in_catalog(world: &mut BehaviourWorld, id: String) {
     write_credential_catalog(world, id);
+}
+
+#[given(regex = r#"^a connector definition file "([^"]+)" declares a credential connector$"#)]
+fn given_credential_connector_file(world: &mut BehaviourWorld, file: String) {
+    let dir = cwd(world);
+    std::fs::write(
+        dir.join(file),
+        "\
+id: some-provider
+authKind: credential
+routes:
+  - match: api.some-provider.example
+credential:
+  envVar: SOME_TOKEN
+  placeholder: some-provider-LNSPLACEHOLDER0000
+  injections:
+    - kind: bearer_header
+      domain: api.some-provider.example
+",
+    )
+    .unwrap();
+}
+
+#[given(
+    regex = r#"^a connector definition file "([^"]+)" declares an oauth connector carrying a client secret$"#
+)]
+fn given_oauth_connector_file_with_secret(world: &mut BehaviourWorld, file: String) {
+    let dir = cwd(world);
+    std::fs::write(
+        dir.join(file),
+        "\
+id: some-oauth
+authKind: oauth
+oauth:
+  clientId: some-client
+  clientSecret: some-secret
+  deviceAuthorizationEndpoint: https://api.some-oauth.example/device
+  tokenEndpoint: https://api.some-oauth.example/token
+  envVar: SOME_OAUTH_TOKEN
+  placeholder: some-oauth-LNSPLACEHOLDER0000
+",
+    )
+    .unwrap();
 }
 
 #[when(regex = r#"^the user runs connector command "([^"]+)"$"#)]

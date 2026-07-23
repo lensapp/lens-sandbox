@@ -48,6 +48,23 @@ Remove a user connector (bundled ones can't be removed):
 lns connector remove acme
 ```
 
+### Publishing a connector
+
+Share a connector by publishing it to an OCI registry as a connector artifact.
+Author the definition as a YAML file (the same shape as a catalog entry) and push it:
+
+```bash
+lns connector publish registry.lns.run/connectors/acme:0.1.0 -f acme.yaml
+```
+
+Add `--dry-run` to build and validate the artifact without uploading. Publishing is
+**inert on its own** — an artifact is only reachable once its id is added to the
+discovery index, so you can push and test one privately before anyone else sees it.
+
+A definition carrying an `oauth.clientSecret` is refused: a registry artifact would
+embed the secret in the clear. Confidential clients keep their secret out of the
+published definition.
+
 ## Reaching a workload
 
 A connector reaches a project's workloads in any of three ways:

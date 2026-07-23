@@ -38,6 +38,10 @@ pub enum ConnectorCommand {
     Connect(ConnectArgs),
     #[command(about = "Disconnect a connector from this directory's policy.")]
     Disconnect(DisconnectArgs),
+    #[command(
+        about = "Build a connector definition file and upload it to a registry as a connector artifact."
+    )]
+    Publish(ConnectorPublishArgs),
 }
 
 #[derive(clap::Args)]
@@ -91,6 +95,34 @@ pub struct DisconnectArgs {
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct ConnectorPublishArgs {
+    #[arg(
+        help = "Registry reference to publish to, e.g. registry.lns.run/connectors/some-provider:0.1.0."
+    )]
+    pub reference: String,
+    #[arg(
+        short = 'f',
+        long = "file",
+        help = "Connector definition file (YAML) to publish."
+    )]
+    pub file: PathBuf,
+    #[arg(
+        long,
+        help = "Build and validate without uploading; prints the digest that would publish."
+    )]
+    pub dry_run: bool,
+}
+
+/// Uploads a built connector artifact to a registry; the real impl reuses the `lns login` credential, a fake drives the publish scenarios offline.
+pub trait ConnectorPublisher {
+    fn push<'a>(
+        &'a self,
+        built: &'a lns_artifact::build::BuiltArtifact,
+        reference: &'a str,
+    ) -> LocalBoxFuture<'a, Result<()>>;
 }
 
 fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
@@ -162,6 +194,7 @@ pub async fn run(
     cwd: &Path,
     catalog_path: &Path,
     signin: &dyn ConnectorSignIn,
+    publisher: &dyn ConnectorPublisher,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
@@ -170,7 +203,40 @@ pub async fn run(
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
         ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
         ConnectorCommand::Disconnect(args) => disconnect(args, cwd, writer),
+        ConnectorCommand::Publish(args) => publish(args, cwd, publisher, writer).await,
     }
+}
+
+/// `lns connector publish <ref> -f <file>`: build the connector definition into a connector artifact and upload it. Publishing is inert — an artifact is only reachable once its id is added to the discovery index.
+pub async fn publish(
+    args: &ConnectorPublishArgs,
+    cwd: &Path,
+    publisher: &dyn ConnectorPublisher,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let path = cwd.join(&args.file);
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let connector: Connector = serde_yaml::from_str(&text)
+        .with_context(|| format!("parsing a connector from {}", path.display()))?;
+    let built = lns_artifact::build::build_connector(&connector)?;
+    let bytes: usize = built.blobs.iter().map(|blob| blob.data.len()).sum();
+    if args.dry_run {
+        writeln!(
+            writer,
+            "would push {}@{} ({bytes} bytes)",
+            args.reference, built.manifest_digest
+        )?;
+        writeln!(writer, "dry run — built and validated; nothing uploaded")?;
+        return Ok(0);
+    }
+    publisher.push(&built, &args.reference).await?;
+    writeln!(
+        writer,
+        "built and pushed {}@{}",
+        args.reference, built.manifest_digest
+    )?;
+    Ok(0)
 }
 
 /// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
@@ -979,6 +1045,211 @@ mod tests {
         assert!(format!("{err:#}").contains("not connected"));
     }
 
+    #[derive(Default)]
+    struct FakePublisher {
+        pushed: std::cell::RefCell<Vec<String>>,
+        fail: Option<String>,
+    }
+    impl FakePublisher {
+        fn ok() -> Self {
+            Self::default()
+        }
+        fn failing(message: &str) -> Self {
+            Self {
+                fail: Some(message.to_string()),
+                ..Default::default()
+            }
+        }
+    }
+    impl ConnectorPublisher for FakePublisher {
+        fn push<'a>(
+            &'a self,
+            built: &'a lns_artifact::build::BuiltArtifact,
+            reference: &'a str,
+        ) -> LocalBoxFuture<'a, Result<()>> {
+            self.pushed
+                .borrow_mut()
+                .push(format!("{reference} {}", built.artifact_type));
+            let fail = self.fail.clone();
+            Box::pin(async move {
+                match fail {
+                    Some(message) => Err(anyhow::anyhow!(message)),
+                    None => Ok(()),
+                }
+            })
+        }
+    }
+
+    const CREDENTIAL_CONNECTOR_YAML: &str = "\
+id: some-provider
+authKind: credential
+routes:
+  - match: api.some-provider.example
+credential:
+  envVar: SOME_TOKEN
+  placeholder: lns-placeholder
+  injections:
+    - kind: bearer_header
+      domain: api.some-provider.example
+";
+
+    fn write_connector(dir: &Path, body: &str) {
+        std::fs::write(dir.join("connector.yaml"), body).unwrap();
+    }
+
+    fn publish_args(dry_run: bool) -> ConnectorPublishArgs {
+        ConnectorPublishArgs {
+            reference: "registry.lns.run/connectors/some-provider:0.1.0".into(),
+            file: "connector.yaml".into(),
+            dry_run,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_builds_a_connector_artifact_and_uploads_it() {
+        let dir = TempDir::new().unwrap();
+        write_connector(dir.path(), CREDENTIAL_CONNECTOR_YAML);
+        let publisher = FakePublisher::ok();
+        let mut out = Vec::new();
+        let code = publish(&publish_args(false), dir.path(), &publisher, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(
+                "built and pushed registry.lns.run/connectors/some-provider:0.1.0@sha256:"
+            ),
+            "got: {text}"
+        );
+        let pushed = publisher.pushed.borrow();
+        assert_eq!(pushed.len(), 1);
+        assert!(
+            pushed[0].contains("application/vnd.lens.connector.v1+json"),
+            "a connector artifact type must be uploaded: {}",
+            pushed[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_dry_run_builds_without_uploading() {
+        let dir = TempDir::new().unwrap();
+        write_connector(dir.path(), CREDENTIAL_CONNECTOR_YAML);
+        let publisher = FakePublisher::ok();
+        let mut out = Vec::new();
+        publish(&publish_args(true), dir.path(), &publisher, &mut out)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("would push"), "got: {text}");
+        assert!(text.contains("nothing uploaded"), "got: {text}");
+        assert!(
+            publisher.pushed.borrow().is_empty(),
+            "a dry run must not upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_refuses_a_connector_carrying_an_embedded_client_secret() {
+        let dir = TempDir::new().unwrap();
+        write_connector(
+            dir.path(),
+            "\
+id: some-oauth
+authKind: oauth
+oauth:
+  clientId: some-client
+  clientSecret: some-secret
+  deviceAuthorizationEndpoint: https://api.some-oauth.example/device
+  tokenEndpoint: https://api.some-oauth.example/token
+  envVar: SOME_OAUTH_TOKEN
+  placeholder: lns-placeholder
+",
+        );
+        let publisher = FakePublisher::ok();
+        let err = publish(
+            &publish_args(false),
+            dir.path(),
+            &publisher,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("clientSecret"), "got: {err:#}");
+        assert!(
+            publisher.pushed.borrow().is_empty(),
+            "a refused connector must not be uploaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_an_unknown_field_in_the_definition() {
+        let dir = TempDir::new().unwrap();
+        write_connector(
+            dir.path(),
+            "id: some-provider\nauthKind: credential\nsurprise: true\n",
+        );
+        let err = publish(
+            &publish_args(false),
+            dir.path(),
+            &FakePublisher::ok(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parsing a connector"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_reports_a_missing_definition_file() {
+        let dir = TempDir::new().unwrap();
+        let err = publish(
+            &publish_args(false),
+            dir.path(),
+            &FakePublisher::ok(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("reading"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn publish_surfaces_a_publisher_failure() {
+        let dir = TempDir::new().unwrap();
+        write_connector(dir.path(), CREDENTIAL_CONNECTOR_YAML);
+        let err = publish(
+            &publish_args(false),
+            dir.path(),
+            &FakePublisher::failing("credential for registry.lns.run lacks push scope"),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("push scope"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_publish() {
+        let dir = TempDir::new().unwrap();
+        write_connector(dir.path(), CREDENTIAL_CONNECTOR_YAML);
+        let publisher = FakePublisher::ok();
+        run(
+            &ConnectorCommand::Publish(publish_args(false)),
+            dir.path(),
+            &catalog_at(dir.path()),
+            &FakeSignIn::completed(),
+            &publisher,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(publisher.pushed.borrow().len(), 1);
+    }
+
     #[tokio::test]
     async fn run_dispatches_list() {
         let dir = TempDir::new().unwrap();
@@ -988,6 +1259,7 @@ mod tests {
             dir.path(),
             &catalog_at(dir.path()),
             &FakeSignIn::completed(),
+            &FakePublisher::ok(),
             &mut out,
         )
         .await
@@ -1008,6 +1280,7 @@ mod tests {
             dir.path(),
             &path,
             &FakeSignIn::completed(),
+            &FakePublisher::ok(),
             &mut Vec::new(),
         )
         .await
@@ -1018,6 +1291,7 @@ mod tests {
             dir.path(),
             &path,
             &FakeSignIn::completed(),
+            &FakePublisher::ok(),
             &mut Vec::new(),
         )
         .await
@@ -1037,6 +1311,7 @@ mod tests {
             dir.path(),
             &path,
             &FakeSignIn::completed(),
+            &FakePublisher::ok(),
             &mut Vec::new(),
         )
         .await
@@ -1055,6 +1330,7 @@ mod tests {
             dir.path(),
             &path,
             &FakeSignIn::completed(),
+            &FakePublisher::ok(),
             &mut Vec::new(),
         )
         .await

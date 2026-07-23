@@ -7,6 +7,9 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_as
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
+use lns_artifact::build::BuiltArtifact;
+
+use super::ConnectorPublisher;
 use super::sign_in::{BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
 use crate::command::{RunCtx, RunFuture};
 
@@ -16,9 +19,30 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         let cwd = ctx.cwd()?;
         let catalog_path = lns_policy::connectors::default_connectors_path();
         let signin = RealConnectorSignIn::new(crate::service::socket_path()?);
+        let publisher = RealConnectorPublisher;
         let mut out = ctx.out;
-        crate::connector::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
+        crate::connector::run(
+            &args.command,
+            &cwd,
+            &catalog_path,
+            &signin,
+            &publisher,
+            &mut out,
+        )
+        .await
     })
+}
+
+pub struct RealConnectorPublisher;
+
+impl ConnectorPublisher for RealConnectorPublisher {
+    fn push<'a>(
+        &'a self,
+        built: &'a BuiltArtifact,
+        reference: &'a str,
+    ) -> LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
+    }
 }
 
 pub struct RealConnectorSignIn {
