@@ -506,22 +506,13 @@ pub(super) async fn start(
         &catalog,
     );
     policy.network.allowed_routes.extend(applied.routes);
-    let connectable_ids: HashSet<String> = connectable
-        .providers
-        .iter()
-        .map(|p| p.id().to_string())
-        .collect();
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
-    // Only the boot-consented ids (overlay-connected + credential slots) may arm a machine-stored value; a connect grants more live.
-    let armed_ids: HashSet<String> = applied
-        .providers
-        .iter()
-        .map(|p| p.id().to_string())
-        .collect();
-    let mut custom = applied.providers;
-    custom.extend(connectable.providers);
-    let custom_providers = Arc::new(custom);
+    let run =
+        crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
+    let connectable_ids = run.connectable_ids;
+    let armed_ids = run.armed;
+    let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
     let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;

@@ -10,8 +10,8 @@ use lns_service::artifact::credential_boot::{
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::connectors::{
-    resolve_applied_with_slots, resolve_connectable_with_slots, unknown_connector_ids,
-    unknown_connectors_refusal,
+    resolve_applied_with_slots, resolve_connectable_with_slots, run_providers,
+    unknown_connector_ids, unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
@@ -116,10 +116,11 @@ fn launch(
         &declared_connectors,
         &rig.catalog,
     );
-    rig.providers = applied
+    let run = run_providers(applied.providers, connectable.providers);
+    rig.providers = run
         .providers
         .iter()
-        .chain(connectable.providers.iter().filter(|p| p.seeds_env()))
+        .filter(|p| p.seeds_env())
         .map(|p| {
             (
                 p.id().to_string(),
@@ -128,19 +129,8 @@ fn launch(
             )
         })
         .collect();
-    rig.offered = connectable
-        .providers
-        .iter()
-        .map(|p| p.id().to_string())
-        .collect();
-    let armed_ids: std::collections::HashSet<String> = applied
-        .providers
-        .iter()
-        .map(|p| p.id().to_string())
-        .collect();
-    let mut run_providers = applied.providers;
-    run_providers.extend(connectable.providers);
-    rig.wire = expand_credentials_with_custom(&rig.store, &run_providers, &armed_ids, &|_| None);
+    rig.offered = run.connectable_ids.iter().cloned().collect();
+    rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &run.armed, &|_| None);
     rig.running_policy = Some(policy);
 }
 
