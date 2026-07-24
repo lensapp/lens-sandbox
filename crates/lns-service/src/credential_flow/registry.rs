@@ -380,9 +380,9 @@ mod tests {
         let custom = vec![DefProvider::new(acme_def())];
         let mut state = CredentialStateFile::new();
         state.insert("acme".into(), CredentialEntry::Deny);
-        let creds = expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &|_| {
-            Some("leaked".into())
-        });
+        let never_consulted = |_: &str| Some("leaked".to_string());
+        let creds =
+            expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &never_consulted);
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert!(matches!(
             &acme.injections[0],
