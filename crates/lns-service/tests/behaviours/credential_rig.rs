@@ -106,25 +106,31 @@ impl CredentialRig {
         let frame_tx_for_emitter = frame_tx.clone();
         let host_values_for_emitter = host_values.clone();
         let timeout = Duration::from_secs(30);
-        let session = Arc::new(CredentialSession::with_policy_emitter(
-            CredentialStateFile::new(),
-            notifier,
-            store.clone(),
-            frame_tx,
-            timeout,
-            Box::new(move |state| {
-                let values = host_values_for_emitter.lock().unwrap().clone();
-                // Production registry expansion (built-ins ∪ the illustrative fixture) with the host-detect source pointed at the in-memory map instead of process env.
-                let credentials =
-                    expand_credentials_with_custom(state, &fixture_providers(), &|id: &str| {
-                        values.get(id).cloned()
-                    });
-                let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
-                    network: None,
-                    credentials: Some(credentials),
-                }));
-            }),
-        ));
+        let session = Arc::new(
+            CredentialSession::with_policy_emitter(
+                CredentialStateFile::new(),
+                notifier,
+                store.clone(),
+                frame_tx,
+                timeout,
+                Box::new(move |state, armed| {
+                    let values = host_values_for_emitter.lock().unwrap().clone();
+                    // Production registry expansion (built-ins ∪ the illustrative fixture) with the host-detect source pointed at the in-memory map instead of process env.
+                    let credentials = expand_credentials_with_custom(
+                        state,
+                        &fixture_providers(),
+                        armed,
+                        &|id: &str| values.get(id).cloned(),
+                    );
+                    let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
+                        network: None,
+                        credentials: Some(credentials),
+                    }));
+                }),
+            )
+            // The fixture models a connector this run consented to (connected in the directory), so its value decisions arm at the boundary.
+            .with_armed_ids(HashSet::from([FIXTURE_ID.to_string()])),
+        );
         Self {
             session,
             window_state,
@@ -272,9 +278,9 @@ impl CredentialRig {
                 store.clone(),
                 frame_tx,
                 timeout,
-                Box::new(move |state| {
+                Box::new(move |state, armed| {
                     let values = host_values_for_emitter.lock().unwrap().clone();
-                    let credentials = expand_credentials_with_custom(state, &[], &|id: &str| {
+                    let credentials = expand_credentials_with_custom(state, &[], armed, &|id| {
                         values.get(id).cloned()
                     });
                     let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
@@ -408,10 +414,10 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
         store.clone(),
         frame_tx,
         timeout,
-        Box::new(move |state| {
+        Box::new(move |state, armed| {
             let values = host_values_for_emitter.lock().unwrap().clone();
             let credentials =
-                expand_credentials_with_custom(state, &[], &|id: &str| values.get(id).cloned());
+                expand_credentials_with_custom(state, &[], armed, &|id| values.get(id).cloned());
             let _ = frame_tx_for_emitter.send(HostFrame::Policy(PolicyMessage {
                 network: None,
                 credentials: Some(credentials),
@@ -532,7 +538,11 @@ impl CredentialRig {
                 header: None,
             }],
         });
-        let session = Arc::new(session.with_custom_providers(Arc::new(vec![provider])));
+        let session = Arc::new(
+            session
+                .with_custom_providers(Arc::new(vec![provider]))
+                .with_armed_ids(HashSet::from([id.to_string()])),
+        );
         Self {
             session,
             window_state: shared.window_state,

@@ -131,7 +131,11 @@ pub(super) fn initial_policy_frame(policy: &Policy, credentials: Vec<Credential>
 }
 
 pub(super) fn current_credentials(session: &CredentialSession) -> Vec<Credential> {
-    expand_credentials_for_wire_with_custom(&session.current_state(), session.custom_providers())
+    expand_credentials_for_wire_with_custom(
+        &session.current_state(),
+        session.custom_providers(),
+        &session.armed_ids(),
+    )
 }
 
 pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
