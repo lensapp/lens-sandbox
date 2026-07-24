@@ -4,7 +4,7 @@ use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule, Verdict};
 
-use crate::credential_flow::providers::DefProvider;
+use crate::credential_flow::providers::{DefProvider, Provider};
 
 /// The wire providers, routes, and (for oauth entries) device-flow / pkce configs a run's applied connectors contribute.
 #[derive(Default)]
@@ -167,6 +167,26 @@ pub fn resolve_connectable_with_slots(
         .connectors
         .extend(slots.iter().map(|s| s.name.clone()));
     resolve_connectable_with_declared(&owned, declared, catalog)
+}
+
+/// A run's wire provider set and the consent boundary derived from it, composed in exactly one place so the Layer 2 rig and production cannot drift apart on who may arm a machine-stored value.
+pub struct RunProviders {
+    pub providers: Vec<DefProvider>,
+    /// The ids consented at boot — only the applied (overlay-connected + slot) providers; a connectable id, declared or not, joins live on connect.
+    pub armed: HashSet<String>,
+    pub connectable_ids: HashSet<String>,
+}
+
+pub fn run_providers(applied: Vec<DefProvider>, connectable: Vec<DefProvider>) -> RunProviders {
+    let armed = applied.iter().map(|p| p.id().to_string()).collect();
+    let connectable_ids = connectable.iter().map(|p| p.id().to_string()).collect();
+    let mut providers = applied;
+    providers.extend(connectable);
+    RunProviders {
+        providers,
+        armed,
+        connectable_ids,
+    }
 }
 
 /// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
@@ -468,6 +488,42 @@ mod tests {
         assert_eq!(c.providers.len(), 1);
         assert_eq!(c.providers[0].id(), "gitlab");
         assert_eq!(c.routes.get("gitlab").map(|r| r.len()), Some(1));
+    }
+
+    #[test]
+    fn run_providers_arms_only_the_applied_ids() {
+        let applied = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &[cred_connector(
+                "some-provider",
+                "SOME_TOKEN",
+                "api.example.test",
+            )],
+        );
+        let connectable = resolve_connectable_connectors(
+            &policy_applying(&[]),
+            &[cred_connector(
+                "other-provider",
+                "OTHER_TOKEN",
+                "api.other.test",
+            )],
+        );
+        let run = run_providers(applied.providers, connectable.providers);
+        assert_eq!(
+            run.armed,
+            std::collections::HashSet::from(["some-provider".to_string()]),
+            "only an applied id may arm a machine-stored value; widening this at boot reopens the declared-connector exploit"
+        );
+        assert_eq!(
+            run.connectable_ids,
+            std::collections::HashSet::from(["other-provider".to_string()])
+        );
+        let ids: Vec<&str> = run.providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            ["some-provider", "other-provider"],
+            "the wire set is applied ∪ connectable, applied first"
+        );
     }
 
     #[test]
