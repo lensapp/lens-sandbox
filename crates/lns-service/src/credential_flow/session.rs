@@ -496,6 +496,10 @@ impl CredentialSession {
         if self.connectable.contains(id) {
             self.grant_armed(id);
             (self.connect)(id);
+            // The connect armed a value already bound on this machine, so a held value card asks an answered question; without a value the card stays — that decision is still owed.
+            if self.has_armed_value(id) {
+                self.release_armed_holds(id);
+            }
             return true;
         }
         false
@@ -2939,6 +2943,83 @@ mod tests {
             notifier.presented.lock().unwrap().len(),
             1,
             "a machine-stored value for a connector this run never consented to is a fresh consent, not a propagation race — it must prompt"
+        );
+    }
+
+    fn unconsented_session_with(
+        entries: Vec<(&str, CredentialEntry)>,
+    ) -> (
+        CredentialSession,
+        Arc<RecordingNotifier>,
+        mpsc::UnboundedReceiver<HostFrame>,
+    ) {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut state = CredentialStateFile::new();
+        for (id, entry) in entries {
+            state.insert(id.into(), entry);
+        }
+        let session = CredentialSession::new(state, notifier.clone(), store, tx, TEST_TIMEOUT)
+            .with_custom_providers(Arc::new(vec![some_provider()]))
+            .with_connect_emitter(
+                HashSet::from(["some-provider".to_string()]),
+                Box::new(|_| {}),
+            );
+        (session, notifier, rx)
+    }
+
+    #[tokio::test]
+    async fn a_network_offer_connect_releases_a_held_request_once_the_stored_value_arms() {
+        let (session, notifier, mut rx) = unconsented_session_with(vec![(
+            "some-provider",
+            CredentialEntry::Stored {
+                value: "some-real".into(),
+            },
+        )]);
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "the unconsented hold prompts first"
+        );
+        assert!(session.connect_connector_now("some-provider").await);
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Allow,
+            "the connect armed the stored value, so the held request must release without a second card"
+        );
+        assert_eq!(
+            notifier.dismissed.lock().unwrap().as_slice(),
+            &["c1".to_string()],
+            "the value card asks a question the connect already answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_network_offer_connect_without_a_value_keeps_the_held_value_decision() {
+        let (session, notifier, mut rx) = unconsented_session_with(Vec::new());
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        assert!(session.connect_connector_now("some-provider").await);
+        assert!(
+            rx.try_recv().is_err(),
+            "no value is armed yet, so nothing may release"
+        );
+        assert!(
+            notifier.dismissed.lock().unwrap().is_empty(),
+            "the value decision is still owed; the card stays"
         );
     }
 
