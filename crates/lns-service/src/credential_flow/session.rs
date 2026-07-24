@@ -3112,7 +3112,7 @@ mod tests {
         assert_armed_before_connect(&log.lock().unwrap());
     }
 
-    fn wire_injections(session: &CredentialSession, id: &str) -> Vec<String> {
+    fn wire_injections(session: &CredentialSession, id: &str) -> Vec<CredentialInjection> {
         crate::credential_flow::registry::expand_credentials_for_wire_with_custom(
             &session.current_state(),
             session.custom_providers(),
@@ -3122,12 +3122,6 @@ mod tests {
         .find(|c| c.id == id)
         .expect("provider on the wire")
         .injections
-        .iter()
-        .map(|inj| match inj {
-            CredentialInjection::Header { value, .. } => value.clone(),
-            CredentialInjection::UriPlaceholder { value, .. } => value.clone(),
-        })
-        .collect()
     }
 
     #[test]
@@ -3148,7 +3142,10 @@ mod tests {
         assert!(
             wire_injections(&session, "some-provider")
                 .iter()
-                .any(|v| v.contains("some-real")),
+                .any(|i| matches!(
+                    i,
+                    CredentialInjection::Header { value, .. } if value.contains("some-real")
+                )),
             "while connected, the stored value arms"
         );
         // `lns connector disconnect` drops the id from lns-policy.yaml; the reload reconciles with the remaining connectors.
@@ -3156,7 +3153,10 @@ mod tests {
         assert!(
             wire_injections(&session, "some-provider")
                 .iter()
-                .all(|v| v.is_empty()),
+                .all(|i| matches!(
+                    i,
+                    CredentialInjection::Header { value, .. } if value.is_empty()
+                )),
             "after disconnect the stored value must not keep arming, even though a route may still permit the destination"
         );
     }
