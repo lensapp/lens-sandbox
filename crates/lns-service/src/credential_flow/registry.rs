@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::approval_flow::protocol::Credential;
 use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::store::{CredentialEntry, CredentialStateFile};
@@ -10,18 +12,20 @@ pub fn detect_for_with(id: &str, custom: &[DefProvider]) -> Option<String> {
         .and_then(|p| p.detector().detect())
 }
 
-/// Every provider becomes one `Credential` even when unarmed so the MITM can detect every known placeholder in outbound requests; host detection resolves against the run's providers.
+/// Every provider becomes one `Credential` even when unarmed so the MITM can detect every known placeholder in outbound requests; a machine-stored value arms only for ids in `armed` — the connectors consented for this run — so a declared or connectable connector stays unarmed until connected.
 pub fn expand_credentials_for_wire_with_custom(
     state: &CredentialStateFile,
     custom: &[DefProvider],
+    armed: &HashSet<String>,
 ) -> Vec<Credential> {
-    expand_credentials_with_custom(state, custom, &|id| detect_for_with(id, custom))
+    expand_credentials_with_custom(state, custom, armed, &|id| detect_for_with(id, custom))
 }
 
 /// Takes the host-detection source injected so Layer-2 tests can drive resolution from an in-memory map without touching process env.
 pub fn expand_credentials_with_custom(
     state: &CredentialStateFile,
     custom: &[DefProvider],
+    armed: &HashSet<String>,
     detect_host: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Credential> {
     custom
@@ -31,7 +35,11 @@ pub fn expand_credentials_with_custom(
             id: p.id().to_string(),
             env_var: p.seeds_env().then(|| p.env_var().to_string()),
             placeholder: Some(p.placeholder().to_string()),
-            injections: match resolve(p, state, detect_host) {
+            injections: match armed
+                .contains(p.id())
+                .then(|| resolve(p, state, detect_host))
+                .flatten()
+            {
                 Some(v) => p.injections(&v),
                 None => p.unarmed_injections(),
             },
@@ -59,13 +67,65 @@ mod tests {
     use crate::test_env::EnvVarGuard;
     use std::collections::HashSet;
 
+    /// Models a run where every provider is consented (applied at boot), the common case for these expansion tests.
+    fn armed_all(custom: &[DefProvider]) -> HashSet<String> {
+        custom.iter().map(|p| p.id().to_string()).collect()
+    }
+
+    #[test]
+    fn a_stored_value_stays_unarmed_for_an_id_outside_the_armed_set() {
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "acme".into(),
+            CredentialEntry::Stored {
+                value: "acme_real".into(),
+            },
+        );
+        let custom = vec![DefProvider::new(acme_def())];
+        let creds = expand_credentials_with_custom(&state, &custom, &HashSet::new(), &|_| None);
+        let acme = creds.iter().find(|c| c.id == "acme").unwrap();
+        assert!(
+            matches!(
+                &acme.injections[0],
+                CredentialInjection::Header { value, .. } if value.is_empty()
+            ),
+            "a machine-stored value must not arm a connector this run has no consent for"
+        );
+        assert!(
+            acme.placeholder.is_some(),
+            "the placeholder stays declared so the request is intercepted and offered"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_host_detect_value_stays_unarmed_for_an_id_outside_the_armed_set() {
+        let _g = EnvVarGuard::set("ACME_API_KEY", "acme_real");
+        let mut state = CredentialStateFile::new();
+        state.insert("acme".into(), CredentialEntry::HostDetect);
+        let custom = vec![DefProvider::new(acme_def())];
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom, &HashSet::new());
+        let acme = creds.iter().find(|c| c.id == "acme").unwrap();
+        assert!(
+            matches!(
+                &acme.injections[0],
+                CredentialInjection::Header { value, .. } if value.is_empty()
+            ),
+            "a host-detected value must not arm without this run's consent"
+        );
+    }
+
     #[test]
     fn expand_credentials_for_wire_emits_every_provider_with_placeholder_and_env_var() {
         let custom = vec![
             DefProvider::new(acme_def()),
             DefProvider::new(token_and_basic_def()),
         ];
-        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let creds = expand_credentials_for_wire_with_custom(
+            &CredentialStateFile::new(),
+            &custom,
+            &armed_all(&custom),
+        );
         let ids: HashSet<_> = creds.iter().map(|c| c.id.as_str()).collect();
         for id in ["acme", "some-provider"] {
             assert!(ids.contains(id), "missing {id} in expanded credentials");
@@ -84,7 +144,11 @@ mod tests {
     #[test]
     fn a_detect_only_provider_carries_its_placeholder_and_injections_but_no_env_var() {
         let custom = vec![DefProvider::new(acme_def()).detect_only()];
-        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let creds = expand_credentials_for_wire_with_custom(
+            &CredentialStateFile::new(),
+            &custom,
+            &armed_all(&custom),
+        );
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert_eq!(
             acme.env_var, None,
@@ -103,7 +167,11 @@ mod tests {
     #[test]
     fn expand_for_wire_declares_each_domain_of_a_multi_injection_provider_unarmed() {
         let custom = vec![DefProvider::new(token_and_basic_def())];
-        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let creds = expand_credentials_for_wire_with_custom(
+            &CredentialStateFile::new(),
+            &custom,
+            &armed_all(&custom),
+        );
         let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
         assert_eq!(p.injections.len(), 2);
         assert!(p.injections.iter().all(|i| matches!(
@@ -128,7 +196,7 @@ mod tests {
             },
         );
         let custom = vec![DefProvider::new(token_and_basic_def())];
-        let creds = expand_credentials_for_wire_with_custom(&state, &custom);
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom, &armed_all(&custom));
         let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
         assert_eq!(p.injections.len(), 2);
         let basic = format!(
@@ -154,7 +222,7 @@ mod tests {
         let mut state = CredentialStateFile::new();
         state.insert("some-provider".into(), CredentialEntry::HostDetect);
         let custom = vec![DefProvider::new(token_and_basic_def())];
-        let creds = expand_credentials_for_wire_with_custom(&state, &custom);
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom, &armed_all(&custom));
         let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
         assert_eq!(
             p.injections.len(),
@@ -178,7 +246,7 @@ mod tests {
         let mut state = CredentialStateFile::new();
         state.insert("acme".into(), CredentialEntry::Deny);
         let custom = vec![DefProvider::new(acme_def())];
-        let creds = expand_credentials_for_wire_with_custom(&state, &custom);
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom, &armed_all(&custom));
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert_eq!(acme.injections.len(), 1);
         assert!(
@@ -196,7 +264,7 @@ mod tests {
         let custom = vec![DefProvider::new(acme_def())];
         let mut state = CredentialStateFile::new();
         state.insert("acme".into(), CredentialEntry::HostDetect);
-        let creds = expand_credentials_with_custom(&state, &custom, &|id| {
+        let creds = expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &|id| {
             (id == "acme").then(|| "acme-injected".to_string())
         });
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
@@ -246,7 +314,11 @@ mod tests {
     #[test]
     fn expand_for_wire_with_custom_emits_an_unarmed_custom_provider() {
         let custom = vec![DefProvider::new(acme_def())];
-        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let creds = expand_credentials_for_wire_with_custom(
+            &CredentialStateFile::new(),
+            &custom,
+            &armed_all(&custom),
+        );
         let acme = creds
             .iter()
             .find(|c| c.id == "acme")
@@ -273,7 +345,7 @@ mod tests {
                 expires_at: 0,
             },
         );
-        let creds = expand_credentials_with_custom(&state, &custom, &|_| None);
+        let creds = expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &|_| None);
         let p = creds.iter().find(|c| c.id == "some-provider").unwrap();
         assert!(
             p.injections.iter().any(|i| matches!(
@@ -295,7 +367,7 @@ mod tests {
                 value: "acme_real".into(),
             },
         );
-        let creds = expand_credentials_with_custom(&state, &custom, &|_| None);
+        let creds = expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &|_| None);
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert!(matches!(
             &acme.injections[0],
@@ -308,7 +380,9 @@ mod tests {
         let custom = vec![DefProvider::new(acme_def())];
         let mut state = CredentialStateFile::new();
         state.insert("acme".into(), CredentialEntry::Deny);
-        let creds = expand_credentials_with_custom(&state, &custom, &|_| Some("leaked".into()));
+        let creds = expand_credentials_with_custom(&state, &custom, &armed_all(&custom), &|_| {
+            Some("leaked".into())
+        });
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert!(matches!(
             &acme.injections[0],
@@ -341,7 +415,7 @@ mod tests {
         let custom = vec![DefProvider::new(acme_def())];
         let mut state = CredentialStateFile::new();
         state.insert("acme".into(), CredentialEntry::HostDetect);
-        let creds = expand_credentials_for_wire_with_custom(&state, &custom);
+        let creds = expand_credentials_for_wire_with_custom(&state, &custom, &armed_all(&custom));
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert!(matches!(
             &acme.injections[0],
@@ -366,7 +440,11 @@ mod tests {
             },
         ];
         let custom = vec![DefProvider::new(def)];
-        let creds = expand_credentials_for_wire_with_custom(&CredentialStateFile::new(), &custom);
+        let creds = expand_credentials_for_wire_with_custom(
+            &CredentialStateFile::new(),
+            &custom,
+            &armed_all(&custom),
+        );
         let acme = creds.iter().find(|c| c.id == "acme").unwrap();
         assert_eq!(acme.injections.len(), 2);
     }

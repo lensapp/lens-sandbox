@@ -248,7 +248,11 @@ fn make_credentials_provider(
     Box::new(move || {
         weak.upgrade()
             .map(|cs| {
-                expand_credentials_for_wire_with_custom(&cs.current_state(), cs.custom_providers())
+                expand_credentials_for_wire_with_custom(
+                    &cs.current_state(),
+                    cs.custom_providers(),
+                    &cs.armed_ids(),
+                )
             })
             .unwrap_or_default()
     })
@@ -273,9 +277,9 @@ fn make_policy_emitter(
     sink: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
 ) -> crate::credential_flow::session::PolicyEmitter {
-    Box::new(move |state| {
+    Box::new(move |state, armed| {
         let network = session.current_policy().network;
-        let credentials = expand_credentials_for_wire_with_custom(state, &custom_providers);
+        let credentials = expand_credentials_for_wire_with_custom(state, &custom_providers, armed);
         let _ = sink.send(HostFrame::Policy(PolicyMessage {
             network: Some(network),
             credentials: Some(credentials),
@@ -379,6 +383,7 @@ async fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
+    armed_ids: HashSet<String>,
     connectable_ids: HashSet<String>,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth: OauthWiring,
@@ -422,6 +427,7 @@ async fn start_credential_subsystem(
             policy_emitter,
         )
         .with_custom_providers(custom_providers)
+        .with_armed_ids(armed_ids)
         .with_bundled_ids(
             lns_policy::connectors::bundled_connectors()
                 .iter()
@@ -507,6 +513,12 @@ pub(super) async fn start(
         .collect();
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
+    // Only the boot-consented ids (overlay-connected + credential slots) may arm a machine-stored value; a connect grants more live.
+    let armed_ids: HashSet<String> = applied
+        .providers
+        .iter()
+        .map(|p| p.id().to_string())
+        .collect();
     let mut custom = applied.providers;
     custom.extend(connectable.providers);
     let custom_providers = Arc::new(custom);
@@ -568,6 +580,7 @@ pub(super) async fn start(
         session.clone(),
         credential_frame_tx,
         custom_providers,
+        armed_ids,
         connectable_ids,
         connectable_routes,
         OauthWiring {
@@ -1048,7 +1061,7 @@ mod tests {
                 value: "acme-token".into(),
             },
         );
-        emitter(&state);
+        emitter(&state, &HashSet::from(["acme".to_string()]));
 
         let frame = sink_rx
             .try_recv()
@@ -1352,7 +1365,7 @@ mod tests {
         while session_rx.try_recv().is_ok() {}
         let (sink, mut sink_rx) = mpsc::unbounded_channel::<HostFrame>();
         let emitter = make_policy_emitter(session, sink, acme_custom());
-        emitter(&CredentialStateFile::new());
+        emitter(&CredentialStateFile::new(), &HashSet::new());
         let frame = sink_rx
             .try_recv()
             .expect("emitter must push a Policy frame");

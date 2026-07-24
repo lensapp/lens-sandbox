@@ -56,6 +56,26 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     When the sandbox is launched
     Then the boundary injection for "some-provider" is armed with the stored value
 
+  Scenario: A declared connector's machine-stored value stays unarmed until connected
+    Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the sandbox definition declares connector "some-provider" and allows the "api.some-provider.example" route
+    And the directory's lns-policy.yaml connects no connectors
+    And the per-machine credential store has a stored value for "some-provider"
+    When the sandbox is launched
+    Then the workload's environment contains the "SOME_TOKEN" placeholder
+    And the running policy allows the "api.some-provider.example" route
+    And the boundary injection for "some-provider" stays unarmed
+    And "some-provider" is offered for a reactive connect
+
+  Scenario: An undeclared catalog connector's machine-stored value stays unarmed
+    Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the machine catalog has a credential connector "other-provider" managing "OTHER_TOKEN" with a route to "api.other.example"
+    And the sandbox definition declares connector "some-provider"
+    And the directory's lns-policy.yaml connects no connectors
+    And the per-machine credential store has a stored value for "other-provider"
+    When the sandbox is launched
+    Then the boundary injection for "other-provider" stays unarmed
+
   Scenario: A declared connector does not open a route past a local deny-by-default
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"

@@ -133,9 +133,14 @@ fn launch(
         .iter()
         .map(|p| p.id().to_string())
         .collect();
+    let armed_ids: std::collections::HashSet<String> = applied
+        .providers
+        .iter()
+        .map(|p| p.id().to_string())
+        .collect();
     let mut run_providers = applied.providers;
     run_providers.extend(connectable.providers);
-    rig.wire = expand_credentials_with_custom(&rig.store, &run_providers, &|_| None);
+    rig.wire = expand_credentials_with_custom(&rig.store, &run_providers, &armed_ids, &|_| None);
     rig.running_policy = Some(policy);
 }
 
@@ -164,6 +169,16 @@ fn definition_declares_one(w: &mut BehaviourWorld, id: String) {
 fn published_declares_one(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(definition_declaring(&[&id]));
+}
+
+#[given(
+    regex = r#"^the sandbox definition declares connector "([^"]+)" and allows the "([^"]+)" route$"#
+)]
+fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, host: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.definition = Some(format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"defaultVerdict":"ask","allowedRoutes":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
+    ));
 }
 
 #[given("the directory's lns-policy.yaml connects no connectors")]

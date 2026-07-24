@@ -17,8 +17,8 @@ use lns_policy::connectors::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
-/// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection.
-pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile) + Send + Sync>;
+/// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection; receives the run's armed ids because a stored value may only arm for a consented connector.
+pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile, &HashSet<String>) + Send + Sync>;
 
 /// Invoked when an un-connected catalog connector is accepted, to connect it live (allow its routes + persist `connectors:`).
 pub type ConnectEmitter = Box<dyn Fn(&str) + Send + Sync>;
@@ -122,6 +122,7 @@ pub struct CredentialSession {
     custom_providers: Arc<Vec<DefProvider>>,
     bundled_ids: HashSet<String>,
     connectable: HashSet<String>,
+    armed: Mutex<HashSet<String>>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -146,7 +147,7 @@ impl CredentialSession {
         sink: FrameSink,
         timeout: Duration,
     ) -> Self {
-        Self::with_policy_emitter(state, notifier, store, sink, timeout, Box::new(|_| {}))
+        Self::with_policy_emitter(state, notifier, store, sink, timeout, Box::new(|_, _| {}))
     }
 
     pub fn with_policy_emitter(
@@ -168,6 +169,7 @@ impl CredentialSession {
             custom_providers: Arc::new(Vec::new()),
             bundled_ids: HashSet::new(),
             connectable: HashSet::new(),
+            armed: Mutex::new(HashSet::new()),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -264,6 +266,30 @@ impl CredentialSession {
     pub fn with_bundled_ids(mut self, bundled_ids: HashSet<String>) -> Self {
         self.bundled_ids = bundled_ids;
         self
+    }
+
+    /// The ids consented for this run at launch — the overlay's connected connectors and the definition's credential slots; only these may arm a machine-stored value, and a live connect grants more.
+    pub fn with_armed_ids(mut self, armed: HashSet<String>) -> Self {
+        self.armed = Mutex::new(armed);
+        self
+    }
+
+    pub fn armed_ids(&self) -> HashSet<String> {
+        self.armed.lock().expect("armed mutex poisoned").clone()
+    }
+
+    fn grant_armed(&self, credential_id: &str) {
+        self.armed
+            .lock()
+            .expect("armed mutex poisoned")
+            .insert(credential_id.to_string());
+    }
+
+    fn is_armed_id(&self, credential_id: &str) -> bool {
+        self.armed
+            .lock()
+            .expect("armed mutex poisoned")
+            .contains(credential_id)
     }
 
     /// Marks the catalog connectors that aren't connected yet: detecting one offers to connect, and accepting runs `connect` to allow its routes live.
@@ -364,9 +390,9 @@ impl CredentialSession {
             .unwrap_or((None, Vec::new(), false))
     }
 
-    /// True when `credential_id` already holds a usable value and injects into the host named in `action`, so a gate for it is a propagation race the host can safely allow rather than re-prompt. A request to a host the credential does not inject into (a real leak attempt) returns false and still prompts.
+    /// True when `credential_id` is consented for this run, already holds a usable value, and injects into the host named in `action`, so a gate for it is a propagation race the host can safely allow rather than re-prompt. An unconsented id (a declared or connectable connector with a machine-stored value) still prompts, and so does a host the credential does not inject into (a real leak attempt).
     fn is_armed_for_request(&self, credential_id: &str, action: &str) -> bool {
-        if !self.has_armed_value(credential_id) {
+        if !self.is_armed_id(credential_id) || !self.has_armed_value(credential_id) {
             return false;
         }
         request_host(action).is_some_and(|host| self.injects_for_host(credential_id, host))
@@ -411,6 +437,7 @@ impl CredentialSession {
             && self.connectable.contains(&credential_id);
         if let Some(entry) = persistent_entry(request) {
             if connect_now {
+                self.grant_armed(&credential_id);
                 (self.connect)(&credential_id);
             }
             self.apply_persistent_entry(credential_id, entry);
@@ -467,6 +494,7 @@ impl CredentialSession {
             return ok;
         }
         if self.connectable.contains(id) {
+            self.grant_armed(id);
             (self.connect)(id);
             return true;
         }
@@ -649,6 +677,7 @@ impl CredentialSession {
 
     /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
+        self.grant_armed(credential_id);
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
         }
@@ -694,7 +723,7 @@ impl CredentialSession {
             ));
         }
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
-        (self.policy_emitter)(&snapshot);
+        (self.policy_emitter)(&snapshot, &self.armed_ids());
     }
 
     fn record_credential_approval(&self, credential_id: &str, decision: Decision) {
@@ -798,7 +827,7 @@ impl CredentialSession {
     /// Also emits a fresh Policy frame so the MITM picks up the new arming/revocation (S10).
     pub fn apply_external_state(&self, new_state: CredentialStateFile) {
         *self.state.lock().expect("state mutex poisoned") = new_state.clone();
-        (self.policy_emitter)(&new_state);
+        (self.policy_emitter)(&new_state, &self.armed_ids());
     }
 
     /// Sends no decision frames because on WS drop the MITM is gone with the workload (S13).
@@ -1688,7 +1717,7 @@ mod tests {
             store,
             tx,
             Duration::from_secs(30),
-            Box::new(move |state| {
+            Box::new(move |state, _armed| {
                 captured_clone.snapshots.lock().unwrap().push(state.clone());
             }),
         );
@@ -1718,7 +1747,7 @@ mod tests {
             store,
             tx,
             Duration::from_secs(30),
-            Box::new(move |_state| {
+            Box::new(move |_state, _armed| {
                 use crate::approval_flow::protocol::PolicyMessage;
                 let _ = tx_for_emitter.send(HostFrame::Policy(PolicyMessage::default()));
             }),
@@ -1755,7 +1784,7 @@ mod tests {
             store,
             tx,
             Duration::from_secs(30),
-            Box::new(move |state| {
+            Box::new(move |state, _armed| {
                 captured_clone.snapshots.lock().unwrap().push(state.clone());
             }),
         );
@@ -1789,7 +1818,7 @@ mod tests {
             store,
             tx,
             Duration::from_secs(30),
-            Box::new(move |state| {
+            Box::new(move |state, _armed| {
                 captured_clone.snapshots.lock().unwrap().push(state.clone());
             }),
         );
@@ -2773,11 +2802,14 @@ mod tests {
         let store = Arc::new(CapturingStore::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = CredentialStateFile::new();
+        let armed: HashSet<String> = entries.iter().map(|(id, _)| id.to_string()).collect();
         for (id, entry) in entries {
             state.insert(id.into(), entry);
         }
+        // Every entry id is consented: these sessions model connectors the run connected, so their values arm.
         let session = CredentialSession::new(state, notifier.clone(), store, tx, TEST_TIMEOUT)
-            .with_custom_providers(Arc::new(custom));
+            .with_custom_providers(Arc::new(custom))
+            .with_armed_ids(armed);
         (session, notifier, rx)
     }
 
@@ -2845,6 +2877,68 @@ mod tests {
         assert_eq!(
             decision_frame(&mut rx).decision,
             CredentialDecisionKind::Allow
+        );
+    }
+
+    #[test]
+    fn a_live_connect_grants_arming_so_the_next_policy_emit_arms_the_value() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let emitted: Arc<StdMutex<Vec<HashSet<String>>>> = Arc::new(StdMutex::new(Vec::new()));
+        let emitted_clone = emitted.clone();
+        let session = CredentialSession::with_policy_emitter(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            TEST_TIMEOUT,
+            Box::new(move |_state, armed| {
+                emitted_clone.lock().unwrap().push(armed.clone());
+            }),
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(|_| {}),
+        );
+        assert!(
+            !session.armed_ids().contains("some-provider"),
+            "a connectable id must start unconsented"
+        );
+        session.connect_connector_with_token("some-provider", "some-real".into());
+        let armed = emitted.lock().unwrap();
+        assert!(
+            armed.last().is_some_and(|a| a.contains("some-provider")),
+            "the connect must grant arming before the policy emit, or the accepted credential stays dead until relaunch: {armed:?}"
+        );
+    }
+
+    #[test]
+    fn submit_pending_still_prompts_an_unconsented_id_despite_a_machine_stored_value() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "some-provider".into(),
+            CredentialEntry::Stored {
+                value: "some-real".into(),
+            },
+        );
+        let session = CredentialSession::new(state, notifier.clone(), store, tx, TEST_TIMEOUT)
+            .with_custom_providers(Arc::new(vec![some_provider()]));
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "a machine-stored value for a connector this run never consented to is a fresh consent, not a propagation race — it must prompt"
         );
     }
 
