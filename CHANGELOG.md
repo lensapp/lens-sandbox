@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.16.0...lns-v0.17.0) (2026-07-24)
+
+
+### Features
+
+* seed a declared connector's placeholder env at launch ([b48a7ad](https://github.com/lensapp/lens-sandbox/commit/b48a7ad7c7b6514a783ed1ba12696ab156ee7722))
+
+
+### Bug Fixes
+
+* arm machine-stored values only for connectors the run consented to ([8f7550a](https://github.com/lensapp/lens-sandbox/commit/8f7550a6b066706f13d48905a215b61e545557d2))
+* arm the credential before a connect releases network holds ([0e448b5](https://github.com/lensapp/lens-sandbox/commit/0e448b52567d3231b0870fbcec7ba03b77503958))
+* install the armed reconciler before the policy watcher can fire ([3984566](https://github.com/lensapp/lens-sandbox/commit/3984566d55f262a340069222c67d8ef3b4cc7051))
+* revoke a disconnected connector's arming on policy reload ([fd75451](https://github.com/lensapp/lens-sandbox/commit/fd75451c943011514927355f5dcfacf9a1f30fa7))
+* settle cross-subsystem holds when connector consent lands ([c120fd7](https://github.com/lensapp/lens-sandbox/commit/c120fd76608629a59a01b2f45a6283ebff5929cf))
+
 ## [0.16.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.15.0...lns-v0.16.0) (2026-07-23)
 
 
