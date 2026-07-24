@@ -14,6 +14,7 @@ use lns_service::credential_flow::connectors::{
     unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
+use lns_service::credential_flow::registry::expand_credentials_with_custom;
 
 use crate::world::BehaviourWorld;
 
@@ -132,6 +133,9 @@ fn launch(
         .iter()
         .map(|p| p.id().to_string())
         .collect();
+    let mut run_providers = applied.providers;
+    run_providers.extend(connectable.providers);
+    rig.wire = expand_credentials_with_custom(&rig.store, &run_providers, &|_| None);
     rig.running_policy = Some(policy);
 }
 
@@ -236,6 +240,60 @@ fn relaunch(w: &mut BehaviourWorld) {
 fn catalog_has_oauth(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.catalog.push(oauth_connector(&id));
+}
+
+fn wire_injection_values(w: &BehaviourWorld, id: &str) -> Result<Vec<String>, String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if let Some(err) = &rig.error {
+        return Err(format!("the launch failed: {err}"));
+    }
+    let credential = rig
+        .wire
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("{id} is not on the wire at all"))?;
+    Ok(credential
+        .injections
+        .iter()
+        .map(|inj| match inj {
+            lns_service::approval_flow::protocol::CredentialInjection::Header { value, .. } => {
+                value.clone()
+            }
+            lns_service::approval_flow::protocol::CredentialInjection::UriPlaceholder {
+                value,
+                ..
+            } => value.clone(),
+        })
+        .collect())
+}
+
+#[then(regex = r#"^the boundary injection for "([^"]+)" is armed with the stored value$"#)]
+fn boundary_injection_armed(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let values = wire_injection_values(w, &id)?;
+    if values.iter().any(|v| v.contains("some-secret")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "no injection for {id} carries the stored value; injections: {values:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the boundary injection for "([^"]+)" stays unarmed$"#)]
+fn boundary_injection_unarmed(w: &mut BehaviourWorld, id: String) -> Result<(), String> {
+    let values = wire_injection_values(w, &id)?;
+    if values.is_empty() {
+        return Err(format!(
+            "{id} declares no injections, so nothing pins its (un)arming"
+        ));
+    }
+    if values.iter().all(|v| v.is_empty()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "an injection for {id} left with a value despite no per-directory consent: {values:?}"
+        ))
+    }
 }
 
 #[given(regex = r#"^the per-machine credential store has no grant for "([^"]+)"$"#)]
