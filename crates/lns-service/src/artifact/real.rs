@@ -276,7 +276,7 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared connectors are offered on first use, never armed automatically.
+/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared connectors seed placeholders but are offered on first use, never armed automatically.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
@@ -295,7 +295,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     if !policy.connectors.is_empty() {
         crate::log::info!(
             "policy",
-            "this sandbox requests connectors ({}); each is offered on first use — accept its connect card to arm it — never armed automatically",
+            "this sandbox requests connectors ({}); each seeds a placeholder env var and is offered on first use — accept its connect card to arm it — never armed automatically",
             policy.connectors.join(", ")
         );
     }

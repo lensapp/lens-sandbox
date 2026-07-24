@@ -15,7 +15,7 @@ pub struct AppliedConnectors {
     pub pkce_configs: HashMap<String, OauthAuth>,
 }
 
-/// Catalog connectors that aren't yet connected: seeded unarmed for detection, with their routes held ready to allow live on connect, and device-flow / pkce configs for a sign-in dance on connect.
+/// Catalog connectors that aren't yet connected, with their routes held ready to allow live on connect, and device-flow / pkce configs for a sign-in dance on connect; a definition-declared entry seeds its placeholder env so the workload attempts its first request, while the rest stay detect-only.
 #[derive(Default)]
 pub struct ConnectableConnectors {
     pub providers: Vec<DefProvider>,
@@ -236,7 +236,8 @@ fn resolve_connectable_with_declared(
             continue;
         }
         if let Some(p) = wire_provider(integ) {
-            out.providers.push(p);
+            let seeds = declared.iter().any(|id| id == &integ.id);
+            out.providers.push(if seeds { p } else { p.detect_only() });
             out.routes.insert(
                 integ.id.clone(),
                 integ.routes.iter().map(|r| r.to_route_rule()).collect(),
@@ -467,6 +468,45 @@ mod tests {
         assert_eq!(c.providers.len(), 1);
         assert_eq!(c.providers[0].id(), "gitlab");
         assert_eq!(c.routes.get("gitlab").map(|r| r.len()), Some(1));
+    }
+
+    #[test]
+    fn an_undeclared_connectable_is_detect_only_so_it_seeds_no_phantom_placeholder() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let c = resolve_connectable_connectors(&policy_applying(&[]), &catalog);
+        assert!(
+            !c.providers[0].seeds_env(),
+            "an undeclared connectable must not pollute the workload env"
+        );
+    }
+
+    #[test]
+    fn a_declared_connectable_seeds_its_placeholder_env_while_staying_offerable() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let c = resolve_connectable_with_slots(
+            &policy_applying(&[]),
+            &[],
+            &["some-provider".to_string()],
+            &catalog,
+        );
+        assert_eq!(c.providers.len(), 1, "a declared id stays offerable");
+        assert!(
+            c.providers[0].seeds_env(),
+            "a declared id seeds its placeholder so the workload attempts the request that triggers the connect offer"
+        );
+        assert_eq!(
+            c.routes.get("some-provider").map(|r| r.len()),
+            Some(1),
+            "its routes stay held for the connect, never pre-armed"
+        );
     }
 
     #[test]
