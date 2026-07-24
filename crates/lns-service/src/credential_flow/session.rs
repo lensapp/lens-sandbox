@@ -14,7 +14,9 @@ use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, Creden
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
-use lns_policy::grants::{GrantRecord, GrantStore, WorkloadIdentity};
+use lns_policy::grants::{
+    GrantRecord, GrantStore, GrantVerdict, WorkloadGrantFile, WorkloadIdentity,
+};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -128,6 +130,7 @@ pub struct CredentialSession {
     grant_project: String,
     grant_workload: WorkloadIdentity,
     grant_store: Option<Arc<dyn GrantStore>>,
+    grant_state: Mutex<WorkloadGrantFile>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -179,6 +182,7 @@ impl CredentialSession {
             grant_project: String::new(),
             grant_workload: WorkloadIdentity::Adhoc,
             grant_store: None,
+            grant_state: Mutex::new(WorkloadGrantFile::default()),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -289,13 +293,14 @@ impl CredentialSession {
         self
     }
 
-    /// Binds this run's grant context so an accepted credential decision is remembered per (project, workload, connector) in the machine-local sidecar; without it, a decision arms only for this run and the next run re-offers.
+    /// Binds this run's grant context so an accepted or declined credential decision is remembered per (project, workload, connector) in the machine-local sidecar; run-local grant state is seeded from the sidecar so a prior deny suppresses the offer, and without a binding a decision is not remembered at all.
     pub fn with_grants(
         mut self,
         project: String,
         workload: WorkloadIdentity,
         store: Arc<dyn GrantStore>,
     ) -> Self {
+        self.grant_state = Mutex::new(store.load().unwrap_or_default());
         self.grant_project = project;
         self.grant_workload = workload;
         self.grant_store = Some(store);
@@ -321,27 +326,44 @@ impl CredentialSession {
             .insert(credential_id.to_string());
     }
 
-    /// Persists an allow grant for `credential_id` in the machine-local sidecar so a later run of the same workload skips the offer; a no-op without a bound grant context or a provider that discloses no injection to pin the grant to.
-    fn remember_grant_allow(&self, credential_id: &str) {
+    /// True when this workload holds a standing deny grant for the connector, so a held request fails without re-prompting for the rest of this run and future runs.
+    fn workload_denied(&self, credential_id: &str) -> bool {
+        self.grant_state
+            .lock()
+            .expect("grant state mutex poisoned")
+            .lookup(&self.grant_project, &self.grant_workload, credential_id)
+            .is_some_and(|g| g.verdict == GrantVerdict::Deny)
+    }
+
+    /// Remembers this run's accept/decline for `credential_id` per (project, workload, connector) in the machine-local sidecar so a later run skips the offer; a no-op without a bound grant context, and an allow (unlike a deny, a standing "no") is skipped when the provider discloses no injection to pin it to.
+    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
         let Some(store) = &self.grant_store else {
             return;
         };
-        let (Some(env_var), domains, _) = self.provider_disclosure(credential_id) else {
-            return;
+        let (env_var, domains) = match self.provider_disclosure(credential_id) {
+            (Some(env_var), domains, _) => (env_var, domains),
+            _ if verdict == GrantVerdict::Deny => (String::new(), Vec::new()),
+            _ => return,
         };
-        let record = GrantRecord::allow(
-            self.grant_project.clone(),
-            &self.grant_workload,
-            credential_id,
+        let record = GrantRecord {
+            project: self.grant_project.clone(),
+            workload: self.grant_workload.key(),
+            connector: credential_id.to_string(),
+            verdict,
             env_var,
-            domains,
-        );
+            injection_domains: domains,
+        };
+        // Run-local memory holds the decision so mid-run deny suppression survives even if the sidecar can't be persisted.
+        self.grant_state
+            .lock()
+            .expect("grant state mutex poisoned")
+            .upsert(record.clone());
         if let Err(e) = store.update(&mut |file| {
             file.upsert(record.clone());
             true
         }) {
             self.notifier.inform(&format!(
-                "credential consent applied but its grant was not persisted; the next run will ask again: {e}"
+                "credential decision applied but its grant was not persisted; the next run will ask again: {e}"
             ));
         }
     }
@@ -424,13 +446,14 @@ impl CredentialSession {
     }
 
     fn is_denied(&self, credential_id: &str) -> bool {
-        matches!(
-            self.state
-                .lock()
-                .expect("state mutex poisoned")
-                .get(credential_id),
-            Some(CredentialEntry::Deny)
-        )
+        self.workload_denied(credential_id)
+            || matches!(
+                self.state
+                    .lock()
+                    .expect("state mutex poisoned")
+                    .get(credential_id),
+                Some(CredentialEntry::Deny)
+            )
     }
 
     fn provider_disclosure(&self, credential_id: &str) -> (Option<String>, Vec<String>, bool) {
@@ -507,19 +530,22 @@ impl CredentialSession {
             }
             CredentialDecisionRequest::Timeout => {}
         }
-        let is_allow = matches!(request, CredentialDecisionRequest::Allow(_));
-        let connect_now = is_allow && self.connectable.contains(&credential_id);
-        if let Some(entry) = persistent_entry(request) {
-            // Answering the first-use card Allow is this run's consent, so arm the id whether or not it was connectable; a value never arms without a card being answered.
-            if is_allow {
+        match request {
+            CredentialDecisionRequest::Allow(entry) => {
+                // Answering the first-use card Allow is this run's consent, so arm the id whether or not it was connectable; a value never arms without a card being answered.
                 self.grant_armed(&credential_id);
-                self.remember_grant_allow(&credential_id);
+                self.remember_grant(&credential_id, GrantVerdict::Allow);
+                // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
+                self.apply_persistent_entry(credential_id.clone(), entry);
+                if self.connectable.contains(&credential_id) {
+                    (self.connect)(&credential_id);
+                }
             }
-            // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
-            self.apply_persistent_entry(credential_id.clone(), entry);
-            if connect_now {
-                (self.connect)(&credential_id);
+            // A declined card is remembered per-workload in the grant sidecar, not as a machine-wide credential Deny that would block the connector for every project.
+            CredentialDecisionRequest::Deny => {
+                self.remember_grant(&credential_id, GrantVerdict::Deny);
             }
+            CredentialDecisionRequest::Timeout => {}
         }
         for request_id in &request_ids {
             self.send_decision_frame(request_id, kind);
@@ -574,7 +600,7 @@ impl CredentialSession {
         }
         if self.connectable.contains(id) {
             self.grant_armed(id);
-            self.remember_grant_allow(id);
+            self.remember_grant(id, GrantVerdict::Allow);
             (self.connect)(id);
             // The connect armed a value the wire expansion resolves (stored, oauth, or a host-detect that the host supplies), so a held value card asks an answered question; with nothing resolvable the card stays — that decision is still owed.
             if self.has_resolvable_value(id) {
@@ -762,7 +788,7 @@ impl CredentialSession {
     /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token. The value is applied and emitted before the connect, because the connect releases network holds and the released request must not reach the placeholder gate before the armed injection is in hand.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         self.grant_armed(credential_id);
-        self.remember_grant_allow(credential_id);
+        self.remember_grant(credential_id, GrantVerdict::Allow);
         self.apply_persistent_entry(credential_id.to_string(), entry);
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
@@ -934,14 +960,6 @@ fn decision_kind_of(request: &CredentialDecisionRequest) -> CredentialDecisionKi
         CredentialDecisionRequest::Allow(_) => CredentialDecisionKind::Allow,
         CredentialDecisionRequest::Deny => CredentialDecisionKind::Deny,
         CredentialDecisionRequest::Timeout => CredentialDecisionKind::Timeout,
-    }
-}
-
-fn persistent_entry(request: CredentialDecisionRequest) -> Option<CredentialEntry> {
-    match request {
-        CredentialDecisionRequest::Allow(entry) => Some(entry),
-        CredentialDecisionRequest::Deny => Some(CredentialEntry::Deny),
-        CredentialDecisionRequest::Timeout => None,
     }
 }
 
@@ -1694,21 +1712,134 @@ mod tests {
     }
 
     #[test]
-    fn deny_persists_deny_rule_and_emits_deny_decision_frame() {
-        let (s, _n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "linear"), Instant::now());
+    fn a_card_deny_persists_a_per_workload_deny_and_emits_a_deny_frame() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants("proj".into(), workload.clone(), store.clone());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
 
-        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
 
-        let saves = store.saves.lock().unwrap();
-        assert_eq!(saves[0].get("linear"), Some(&CredentialEntry::Deny));
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("a declined card persists a per-workload deny grant");
+        assert_eq!(grant.verdict, GrantVerdict::Deny);
         assert_eq!(
             decision_frame(&mut rx).decision,
             CredentialDecisionKind::Deny
         );
+        assert!(
+            !matches!(
+                session.current_state().get("some-provider"),
+                Some(CredentialEntry::Deny)
+            ),
+            "a declined card is per-workload, never a machine-wide credential Deny that would block the connector for every project"
+        );
+    }
+
+    #[test]
+    fn a_card_deny_for_an_undisclosed_id_persists_a_standing_deny() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Adhoc;
+        let session = grants_session(store.clone(), workload.clone(), vec![]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("a deny is a standing no, recorded even with no injection to pin it to");
+        assert_eq!(grant.verdict, GrantVerdict::Deny);
+        assert!(grant.env_var.is_empty());
+    }
+
+    #[test]
+    fn a_prior_workload_deny_suppresses_the_offer_without_re_prompting() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants("proj".into(), workload, store);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
         assert_eq!(
-            s.current_state().get("linear"),
-            Some(&CredentialEntry::Deny)
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny,
+            "a standing per-workload deny fails the request at the boundary"
+        );
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "no card is shown for a connector this workload already declined"
+        );
+    }
+
+    #[test]
+    fn a_mid_run_deny_suppresses_the_offer_even_when_the_sidecar_write_failed() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Adhoc,
+            Arc::new(FailingGrantStore),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        let cards_after_first_decline = notifier.presented.lock().unwrap().len();
+        // The re-request in the same run must be suppressed from run-local memory even though the sidecar write failed.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            cards_after_first_decline,
+            "the re-request is suppressed without a fresh card even though the deny could not be persisted"
+        );
+        let mut c2_denied = false;
+        while let Ok(frame) = rx.try_recv() {
+            if let HostFrame::CredentialDecision(d) = frame
+                && d.id == "c2"
+            {
+                c2_denied = d.decision == CredentialDecisionKind::Deny;
+            }
+        }
+        assert!(
+            c2_denied,
+            "the re-request is failed at the boundary from the run-local deny memory"
         );
     }
 
@@ -2089,7 +2220,12 @@ mod tests {
             }),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
-        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
 
         let snaps = captured.snapshots.lock().unwrap();
         assert_eq!(
@@ -2101,8 +2237,27 @@ mod tests {
 
     #[test]
     fn timeout_does_not_invoke_policy_emitter() {
-        // The emitter's only call site is reached when `persistent_entry` is `Some`, so asserting the `None` mapping pins this without dead closure-instrumentation code (S12).
-        assert_eq!(persistent_entry(CredentialDecisionRequest::Timeout), None);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let captured = Arc::new(CapturingEmitter::default());
+        let captured_clone = captured.clone();
+        let session = CredentialSession::with_policy_emitter(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            Duration::from_secs(30),
+            Box::new(move |state, _armed| {
+                captured_clone.snapshots.lock().unwrap().push(state.clone());
+            }),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Timeout);
+        assert!(
+            captured.snapshots.lock().unwrap().is_empty(),
+            "a timed-out prompt writes nothing and must not touch the wire"
+        );
     }
 
     #[test]
@@ -2129,21 +2284,6 @@ mod tests {
         let snaps = captured.snapshots.lock().unwrap();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].get("openai"), Some(&CredentialEntry::Deny));
-    }
-
-    #[test]
-    fn persistent_entry_drops_timeout_and_preserves_allow_and_deny() {
-        assert_eq!(
-            persistent_entry(CredentialDecisionRequest::Allow(
-                CredentialEntry::HostDetect
-            )),
-            Some(CredentialEntry::HostDetect)
-        );
-        assert_eq!(
-            persistent_entry(CredentialDecisionRequest::Deny),
-            Some(CredentialEntry::Deny)
-        );
-        assert_eq!(persistent_entry(CredentialDecisionRequest::Timeout), None);
     }
 
     type ConnectableFixture = (
@@ -2280,16 +2420,12 @@ mod tests {
 
     #[test]
     fn deny_for_a_connectable_id_does_not_connect() {
-        let (s, _n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        let (s, _n, _store, _rx, connected) = fixture_connectable(&["gitlab"]);
         s.submit_pending(pending("c1", "gitlab"), Instant::now());
         s.record_decision("c1", CredentialDecisionRequest::Deny);
         assert!(
             connected.lock().unwrap().is_empty(),
             "denying must not connect the connector"
-        );
-        assert_eq!(
-            store.saves.lock().unwrap()[0].get("gitlab"),
-            Some(&CredentialEntry::Deny)
         );
     }
 

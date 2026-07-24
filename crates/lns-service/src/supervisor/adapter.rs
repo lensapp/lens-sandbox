@@ -1892,7 +1892,6 @@ mod tests {
     async fn credential_delivery_loop_denying_an_oauth_prompt_fails_it_closed_without_a_sign_in() {
         use crate::approval_flow::protocol::{CredentialDecisionKind, CredentialPending};
         use crate::credential_flow::session::CredentialDecisionRequest;
-        use crate::credential_flow::store::CredentialEntry;
         use std::collections::HashMap;
         let (store, _dir) = tempfile_credential_store();
         Box::leak(Box::new(_dir));
@@ -1936,11 +1935,6 @@ mod tests {
         .unwrap();
         drop(tx);
         credential_delivery_loop(Arc::downgrade(&session), rx).await;
-        assert_eq!(
-            session.current_state().get("acme"),
-            Some(&CredentialEntry::Deny),
-            "denying an oauth prompt persists a deny rather than driving a device sign-in"
-        );
         let mut denied = false;
         while let Ok(frame) = frame_rx.try_recv() {
             if let HostFrame::CredentialDecision(d) = frame {

@@ -468,6 +468,21 @@ fn then_card_says_fresh_needed(world: &mut BehaviourWorld) -> Result<(), String>
     Ok(())
 }
 
+#[then(regex = r#"^the workload grant sidecar records a deny for "([^"]+)"$"#)]
+fn then_grant_sidecar_records_deny(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    let rig = world.credential();
+    if rig.workload_deny_recorded(&credential_id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "no per-workload deny grant recorded for {credential_id}"
+        ))
+    }
+}
+
 #[then(regex = r#"^"~/.lns-credentials.json" gains an entry for "([^"]+)" with kind "([^"]+)"$"#)]
 fn then_credentials_file_has_entry(
     world: &mut BehaviourWorld,
@@ -616,11 +631,6 @@ fn then_future_request_failed(world: &mut BehaviourWorld) -> Result<(), String> 
         .ok_or("expected a Deny decision for the future request, got none")?;
     if d.decision != CredentialDecisionKind::Deny {
         return Err(format!("expected Deny decision, got {:?}", d.decision));
-    }
-    if rig.session.current_state().get(credential_id) != Some(&CredentialEntry::Deny) {
-        return Err(format!(
-            "expected the Deny rule for {credential_id} to persist"
-        ));
     }
     Ok(())
 }
