@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
+use lns_policy::grants::{GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity};
 use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
 use lns_service::approval_flow::window::WindowState;
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
@@ -84,6 +85,9 @@ pub struct CredentialRig {
     pub timeout: Duration,
     pub connected: Arc<Mutex<Vec<String>>>,
     pub opened: Arc<Mutex<Vec<String>>>,
+    grant_store: Arc<dyn GrantStore>,
+    grant_project: String,
+    grant_workload: WorkloadIdentity,
     _tempdir: TempDir,
 }
 
@@ -91,6 +95,7 @@ impl CredentialRig {
     pub fn new() -> Self {
         let dir = TempDir::new().expect("create tempdir");
         let credentials_path = dir.path().join("lns-credentials.json");
+        let (grant_store, grant_project, grant_workload) = rig_grant_context(&dir);
         let window_state = WindowState::new();
         let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let detector_values = host_values.clone();
@@ -129,7 +134,12 @@ impl CredentialRig {
                 }),
             )
             // The fixture models a connector this run consented to (connected in the directory), so its value decisions arm at the boundary.
-            .with_armed_ids(HashSet::from([FIXTURE_ID.to_string()])),
+            .with_armed_ids(HashSet::from([FIXTURE_ID.to_string()]))
+            .with_grants(
+                grant_project.clone(),
+                grant_workload.clone(),
+                grant_store.clone(),
+            ),
         );
         Self {
             session,
@@ -141,8 +151,22 @@ impl CredentialRig {
             timeout,
             connected: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
+            grant_store,
+            grant_project,
+            grant_workload,
             _tempdir: dir,
         }
+    }
+
+    /// True when the run's grant sidecar records a per-workload deny for the connector — the per-workload replacement for the machine-global credential Deny.
+    pub fn workload_deny_recorded(&self, credential_id: &str) -> bool {
+        self.grant_store
+            .load()
+            .map(|f| {
+                f.lookup(&self.grant_project, &self.grant_workload, credential_id)
+                    .is_some_and(|g| g.verdict == GrantVerdict::Deny)
+            })
+            .unwrap_or(false)
     }
 
     pub fn set_host_value(&self, credential_id: &str, value: &str) {
@@ -248,6 +272,7 @@ impl CredentialRig {
         let timeout = Duration::from_secs(30);
         let connected = Arc::new(Mutex::new(Vec::new()));
         let connected_cb = connected.clone();
+        let (grant_store, grant_project, grant_workload) = rig_grant_context(&dir);
         let poll = match outcome {
             RigSignIn::Completes => PollOutcome::Token(TokenSet {
                 scopes: Vec::new(),
@@ -301,6 +326,11 @@ impl CredentialRig {
                     poll: Mutex::new(Some(poll)),
                 }),
                 Arc::new(FixedClock),
+            )
+            .with_grants(
+                grant_project.clone(),
+                grant_workload.clone(),
+                grant_store.clone(),
             ),
         );
         Self {
@@ -313,6 +343,9 @@ impl CredentialRig {
             timeout,
             connected,
             opened: Arc::new(Mutex::new(Vec::new())),
+            grant_store,
+            grant_project,
+            grant_workload,
             _tempdir: dir,
         }
     }
@@ -387,7 +420,23 @@ struct RigShared {
     store: Arc<FlakyCredentialStore>,
     frames: mpsc::UnboundedReceiver<HostFrame>,
     credentials_path: PathBuf,
+    grant_store: Arc<dyn GrantStore>,
+    grant_project: String,
+    grant_workload: WorkloadIdentity,
     dir: TempDir,
+}
+
+fn rig_grant_context(dir: &TempDir) -> (Arc<dyn GrantStore>, String, WorkloadIdentity) {
+    let store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(
+        dir.path().join("workload-grants.json"),
+    ));
+    (
+        store,
+        "rig-project".to_string(),
+        WorkloadIdentity::Definition {
+            dir: "/rig".to_string(),
+        },
+    )
 }
 
 /// The notifier/store/window/emitter scaffolding shared by the pkce rigs (mirrors `new`/`oauth`).
@@ -408,6 +457,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
     let (frame_tx, frame_rx) = mpsc::unbounded_channel();
     let frame_tx_for_emitter = frame_tx.clone();
     let host_values_for_emitter = host_values.clone();
+    let (grant_store, grant_project, grant_workload) = rig_grant_context(&dir);
     let session = CredentialSession::with_policy_emitter(
         state,
         notifier,
@@ -423,6 +473,11 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
                 credentials: Some(credentials),
             }));
         }),
+    )
+    .with_grants(
+        grant_project.clone(),
+        grant_workload.clone(),
+        grant_store.clone(),
     );
     (
         session,
@@ -432,6 +487,9 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
             store,
             frames: frame_rx,
             credentials_path,
+            grant_store,
+            grant_project,
+            grant_workload,
             dir,
         },
     )
@@ -513,6 +571,9 @@ impl CredentialRig {
             timeout: Duration::from_secs(30),
             connected,
             opened,
+            grant_store: shared.grant_store,
+            grant_project: shared.grant_project,
+            grant_workload: shared.grant_workload,
             _tempdir: shared.dir,
         }
     }
@@ -553,6 +614,9 @@ impl CredentialRig {
             timeout: Duration::from_secs(30),
             connected: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
+            grant_store: shared.grant_store,
+            grant_project: shared.grant_project,
+            grant_workload: shared.grant_workload,
             _tempdir: shared.dir,
         }
     }

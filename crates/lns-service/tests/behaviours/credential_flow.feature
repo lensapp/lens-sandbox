@@ -70,10 +70,10 @@ Feature: lns-service credential flow
     And a future request carrying the some-provider placeholder is exchanged silently using the stored value
     And "lns-policy.yaml" is unchanged
 
-  Scenario: Deny fails the held request at the boundary and persists a deny rule
+  Scenario: Deny remembers a per-workload decline and stops re-prompting it
     Given a credential card for "some-provider" is visible
     When the developer picks "deny"
-    Then "~/.lns-credentials.json" gains an entry for "some-provider" with kind "deny"
+    Then the workload grant sidecar records a deny for "some-provider"
     And the workload's held request is failed at the boundary
     And a future request carrying the some-provider placeholder is failed at the boundary without prompting
     And "lns-policy.yaml" is unchanged
