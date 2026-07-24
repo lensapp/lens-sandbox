@@ -372,6 +372,13 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
 /// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
+/// The run's consent boundary at boot: which ids may arm a stored value (`armed`), which of those survive a policy reload (`reload_grants` — the credential slots), and which are offered for a live connect (`connectable_ids`).
+struct CredentialConsent {
+    armed: HashSet<String>,
+    reload_grants: HashSet<String>,
+    connectable_ids: HashSet<String>,
+}
+
 struct OauthWiring {
     configs: HashMap<String, crate::oauth::OauthConfig>,
     pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
@@ -383,8 +390,7 @@ async fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
-    armed_ids: HashSet<String>,
-    connectable_ids: HashSet<String>,
+    consent: CredentialConsent,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
@@ -427,14 +433,15 @@ async fn start_credential_subsystem(
             policy_emitter,
         )
         .with_custom_providers(custom_providers)
-        .with_armed_ids(armed_ids)
+        .with_armed_ids(consent.armed)
+        .with_reload_grants(consent.reload_grants)
         .with_bundled_ids(
             lns_policy::connectors::bundled_connectors()
                 .iter()
                 .map(|i| i.id.clone())
                 .collect(),
         )
-        .with_connect_emitter(connectable_ids, connect_emitter)
+        .with_connect_emitter(consent.connectable_ids, connect_emitter)
         .with_oauth(
             oauth.configs,
             Arc::new(crate::oauth::RealDeviceFlow),
@@ -463,6 +470,13 @@ async fn start_credential_subsystem(
 
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
+    // A policy reload revokes a disconnected connector's arming; slot grants survive because they don't derive from the policy file.
+    let armed_weak = Arc::downgrade(&credential_session);
+    session.set_armed_reconciler(Box::new(move |connectors| {
+        if let Some(cs) = armed_weak.upgrade() {
+            cs.reconcile_armed(connectors);
+        }
+    }));
 
     let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
         .context("watching credentials file")?;
@@ -512,6 +526,12 @@ pub(super) async fn start(
         crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
     let connectable_ids = run.connectable_ids;
     let armed_ids = run.armed;
+    // Slot grants survive a policy reload; overlay-connected ids are re-derived from the reloaded file.
+    let reload_grants: HashSet<String> = sandbox_credentials
+        .iter()
+        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
+        .map(|slot| slot.name.clone())
+        .collect();
     let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
@@ -571,8 +591,11 @@ pub(super) async fn start(
         session.clone(),
         credential_frame_tx,
         custom_providers,
-        armed_ids,
-        connectable_ids,
+        CredentialConsent {
+            armed: armed_ids,
+            reload_grants,
+            connectable_ids,
+        },
         connectable_routes,
         OauthWiring {
             configs: oauth_configs,
