@@ -140,12 +140,12 @@ impl ApprovalSession {
         let _ = self.credentials_provider.set(provider);
     }
 
-    /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
-    /// Installs the armed-reconciler once at boot; idempotent, the first wins.
+    /// Installs the armed-reconciler once at boot so a watcher reload revokes a disconnected connector's arming; idempotent, the first wins.
     pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
         let _ = self.armed_reconciler.set(reconciler);
     }
 
+    /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
     pub fn set_connector_route_deriver(&self, deriver: ConnectorRouteDeriver) {
         let _ = self.connector_routes.set(deriver);
     }

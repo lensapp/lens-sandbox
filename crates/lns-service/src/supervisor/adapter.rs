@@ -383,14 +383,14 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
-/// The run's consent boundary at boot: which ids may arm a stored value (`armed`), which of those survive a policy reload (`reload_grants` — the credential slots), and which are offered for a live connect (`connectable_ids`).
+/// The run's consent boundary at boot: which ids may arm a resolved value (`armed`), which of those survive a policy reload (`reload_grants` — the credential slots), and which are offered for a live connect (`connectable_ids`).
 struct CredentialConsent {
     armed: HashSet<String>,
     reload_grants: HashSet<String>,
     connectable_ids: HashSet<String>,
 }
 
+/// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
 struct OauthWiring {
     configs: HashMap<String, crate::oauth::OauthConfig>,
     pkce_configs: HashMap<String, crate::oauth::PkceConfig>,
@@ -516,7 +516,7 @@ pub(super) async fn start(
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
     let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
     let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
-    // Un-connected catalog connectors are seeded unarmed so their use offers a live connect.
+    // Un-connected catalog connectors resolve as connectable — detect-only unless definition-declared — so their use offers a live connect.
     let declared_connectors = sandbox_policy
         .map(|p| p.connectors.clone())
         .unwrap_or_default();
@@ -569,9 +569,6 @@ pub(super) async fn start(
     ));
 
     tokio::spawn(tick_timeouts_loop(Arc::downgrade(&session)));
-
-    let watcher = PolicyWatcher::spawn(policy_path.to_path_buf(), session.clone())
-        .with_context(|| format!("watching policy {}", policy_path.display()))?;
 
     let oauth_configs: HashMap<String, crate::oauth::OauthConfig> = applied
         .oauth_configs
@@ -626,6 +623,14 @@ pub(super) async fn start(
         ));
     session.set_ledger_recorder(recorder.clone());
     credential_session.set_ledger_recorder(recorder);
+
+    // The watcher goes up only after the armed reconciler is registered, so no reload can fire without one; then one reconcile from disk catches any disconnect landed during subsystem init (the oauth-refresh await) before the relay emits its initial frame.
+    let watcher = PolicyWatcher::spawn(policy_path.to_path_buf(), session.clone())
+        .with_context(|| format!("watching policy {}", policy_path.display()))?;
+    session.apply_external_policy(
+        Policy::load_or_default(policy_path)
+            .with_context(|| format!("reloading policy {}", policy_path.display()))?,
+    );
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(
@@ -1148,6 +1153,26 @@ mod tests {
         let reconcile = make_armed_reconciler(&session);
         drop(session);
         reconcile(&["acme".to_string()]);
+    }
+
+    #[test]
+    fn a_policy_reload_through_the_production_bridge_revokes_a_disconnected_connector() {
+        use lns_policy::Policy;
+        let (cred, _crx) = fixture_credential_session_armed(
+            acme_custom(),
+            HashSet::from(["acme".to_string(), "some-slot".to_string()]),
+            HashSet::from(["some-slot".to_string()]),
+        );
+        let (session, _srx) = fixture_session();
+        // The same bridge start() installs, so this pins the wiring a disconnect-during-init relies on.
+        session.set_armed_reconciler(make_armed_reconciler(&cred));
+        // A reload whose policy no longer lists "acme" (a disconnect) must revoke its arming.
+        session.apply_external_policy(Policy::default());
+        assert_eq!(
+            cred.armed_ids(),
+            HashSet::from(["some-slot".to_string()]),
+            "the disconnected connector loses its arming while the slot grant survives"
+        );
     }
 
     fn acme_custom() -> Arc<Vec<DefProvider>> {
