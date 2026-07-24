@@ -258,6 +258,18 @@ fn make_credentials_provider(
     })
 }
 
+/// `Weak` so the reconciler doesn't keep the credential session alive past the run; a dropped session is a no-op.
+fn make_armed_reconciler(
+    credential_session: &Arc<CredentialSession>,
+) -> crate::approval_flow::session::ArmedReconciler {
+    let weak = Arc::downgrade(credential_session);
+    Box::new(move |connectors| {
+        if let Some(cs) = weak.upgrade() {
+            cs.reconcile_armed(connectors);
+        }
+    })
+}
+
 fn build_credential_notifier(
     decision_tx: tokio::sync::mpsc::UnboundedSender<CredentialDecisionDelivery>,
     custom_providers: Arc<Vec<DefProvider>>,
@@ -471,12 +483,7 @@ async fn start_credential_subsystem(
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
     // A policy reload revokes a disconnected connector's arming; slot grants survive because they don't derive from the policy file.
-    let armed_weak = Arc::downgrade(&credential_session);
-    session.set_armed_reconciler(Box::new(move |connectors| {
-        if let Some(cs) = armed_weak.upgrade() {
-            cs.reconcile_armed(connectors);
-        }
-    }));
+    session.set_armed_reconciler(make_armed_reconciler(&credential_session));
 
     let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
         .context("watching credentials file")?;
@@ -947,6 +954,14 @@ mod tests {
     fn fixture_credential_session_seeding(
         custom: Arc<Vec<DefProvider>>,
     ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
+        fixture_credential_session_armed(custom, HashSet::new(), HashSet::new())
+    }
+
+    fn fixture_credential_session_armed(
+        custom: Arc<Vec<DefProvider>>,
+        armed: HashSet<String>,
+        reload_grants: HashSet<String>,
+    ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         let (store, _dir) = tempfile_credential_store();
         // Leak the tempdir guard for the life of the session (test-only).
@@ -960,7 +975,9 @@ mod tests {
                 frame_tx,
                 std::time::Duration::from_secs(30),
             )
-            .with_custom_providers(custom),
+            .with_custom_providers(custom)
+            .with_armed_ids(armed)
+            .with_reload_grants(reload_grants),
         );
         (session, frame_rx)
     }
@@ -1101,6 +1118,36 @@ mod tests {
         let provider = make_credentials_provider(&session);
         drop(session);
         assert!(provider().is_empty());
+    }
+
+    #[test]
+    fn make_armed_reconciler_reconciles_a_live_session_preserving_slot_grants() {
+        let (session, _frame_rx) = fixture_credential_session_armed(
+            acme_custom(),
+            HashSet::from(["acme".to_string(), "some-slot".to_string()]),
+            HashSet::from(["some-slot".to_string()]),
+        );
+        let reconcile = make_armed_reconciler(&session);
+        reconcile(&["acme".to_string()]);
+        assert_eq!(
+            session.armed_ids(),
+            HashSet::from(["acme".to_string(), "some-slot".to_string()]),
+            "the reloaded connector and the independent slot grant both hold"
+        );
+        reconcile(&[]);
+        assert_eq!(
+            session.armed_ids(),
+            HashSet::from(["some-slot".to_string()]),
+            "disconnecting acme revokes it while the slot grant survives"
+        );
+    }
+
+    #[test]
+    fn make_armed_reconciler_is_a_noop_when_session_dropped() {
+        let (session, _frame_rx) = fixture_credential_session();
+        let reconcile = make_armed_reconciler(&session);
+        drop(session);
+        reconcile(&["acme".to_string()]);
     }
 
     fn acme_custom() -> Arc<Vec<DefProvider>> {
