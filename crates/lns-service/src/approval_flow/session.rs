@@ -506,6 +506,11 @@ impl ApprovalSession {
                 "connector connected in-memory but not persisted: {e}"
             ));
         }
+        // The routes are live above, so requests held on this connector's offer proceed no matter which surface the consent came from.
+        for request_id in self.drain_offer_requests(id) {
+            self.notifier.dismiss(&request_id);
+            self.send_decision_frame(&request_id, Decision::AllowOnce);
+        }
     }
 }
 
@@ -1398,6 +1403,37 @@ pub(crate) mod tests {
             n.presented.lock().unwrap()[0].offer.as_deref(),
             Some("GitHub"),
             "a held request to a connector domain offers to connect it"
+        );
+    }
+
+    #[test]
+    fn connecting_a_connector_releases_its_held_offer_requests() {
+        let (s, n, mut rx) = offer_session(
+            vec![offerable(
+                "some-provider",
+                "SomeProvider",
+                "api.some-provider.example",
+            )],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+        assert_eq!(n.presented.lock().unwrap().len(), 1);
+        s.connect_connector(
+            "some-provider",
+            vec![RouteRule::allow_host("api.some-provider.example")],
+        );
+        let _live_routes = policy_frame(&mut rx);
+        let d = decision_frame(&mut rx);
+        assert_eq!(d.id, "r1");
+        assert_eq!(
+            d.decision,
+            Decision::AllowOnce,
+            "consent from the credential card connected the connector, so its held offer request must release instead of waiting out the timeout"
+        );
+        assert_eq!(
+            n.dismissed.lock().unwrap().as_slice(),
+            &["r1".to_string()],
+            "the offer card asks a question the connect already answered"
         );
     }
 
