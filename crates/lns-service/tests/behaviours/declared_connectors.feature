@@ -1,34 +1,44 @@
-Feature: a sandbox definition's declared connectors are offered, not armed
+Feature: a sandbox definition's declared connectors seed their placeholder but stay unarmed
   A sandbox definition — `./lns.yaml` or a published sandbox artifact —
   lists under `spec.connectors` the connectors its workload would like
-  to use. Declaring is disclosure, not arming: a declared id is surfaced at
-  launch but never force-armed — no placeholder is seeded and no route is
-  opened on its behalf, even for a credential already bound on this machine.
-  Consent stays reactive and per-directory: the first time the workload
-  reaches the connector's domain it is offered a live connect, and
-  accepting it arms the connector and records the id in this directory's
+  to use. Declaring seeds the connector's placeholder env var so the
+  workload sees the variable and attempts its first request, but it never
+  arms the connector: no route is opened and no bound value is injected on
+  its behalf, even for a credential already bound on this machine. Consent
+  stays reactive and per-directory: the first time the workload reaches
+  the connector's domain it is offered a live connect, and accepting it
+  arms the connector and records the id in this directory's
   `lns-policy.yaml`. Only a connector the user has connected in this
   directory (the overlay) arms at launch. A sandbox that must have a
   credential declares a `spec.credentials` slot instead (see
   credential_at_boot.feature). Real secrets never enter the artifact or the
   workload.
 
-  Scenario: A declared connector is not armed at launch, only offered
+  Scenario: A declared connector seeds its placeholder but is not armed, only offered
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
     And the directory's lns-policy.yaml connects no connectors
     When the sandbox is launched
-    Then the workload's environment does not seed the "SOME_TOKEN" placeholder
+    Then the workload's environment contains the "SOME_TOKEN" placeholder
     And the running policy does not allow the "api.some-provider.example" route
     And "some-provider" is offered for a reactive connect
 
-  Scenario: A published sandbox's declared connectors are offered, not armed
+  Scenario: A published sandbox's declared connectors seed their placeholder, offered not armed
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN"
     And a published sandbox artifact declares connector "some-provider"
     And the directory's lns-policy.yaml connects no connectors
     When the published sandbox is launched
-    Then the workload's environment does not seed the "SOME_TOKEN" placeholder
+    Then the workload's environment contains the "SOME_TOKEN" placeholder
     And "some-provider" is offered for a reactive connect
+
+  Scenario: An undeclared catalog connector does not seed a phantom placeholder
+    Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the machine catalog has a credential connector "other-provider" managing "OTHER_TOKEN" with a route to "api.other.example"
+    And the sandbox definition declares connector "some-provider"
+    And the directory's lns-policy.yaml connects no connectors
+    When the sandbox is launched
+    Then the workload's environment does not seed the "OTHER_TOKEN" placeholder
+    And "other-provider" is offered for a reactive connect
 
   Scenario: A connector connected in this directory still arms at launch
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"

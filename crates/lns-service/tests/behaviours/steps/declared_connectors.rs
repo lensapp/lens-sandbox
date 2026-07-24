@@ -118,6 +118,7 @@ fn launch(
     rig.providers = applied
         .providers
         .iter()
+        .chain(connectable.providers.iter().filter(|p| p.seeds_env()))
         .map(|p| {
             (
                 p.id().to_string(),
@@ -482,7 +483,7 @@ fn env_does_not_seed_placeholder(w: &mut BehaviourWorld, env: String) -> Result<
     }
     match rig.providers.iter().find(|(_, var, _)| var == &env) {
         Some(seeded) => Err(format!(
-            "{env} was armed at launch, but a declared connector must only be offered: {seeded:?}"
+            "{env} was seeded at launch, but only a declared or connected connector may seed: {seeded:?}"
         )),
         None => Ok(()),
     }

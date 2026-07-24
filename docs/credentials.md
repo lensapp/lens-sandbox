@@ -30,10 +30,10 @@ and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` conn
 (device sign-in) and `openrouter` as an `oauth` connector (pkce browser sign-in).
 Declare your own for an internal API with `lns connector add`
 (see [Connectors](connectors.md)). A sandbox definition that lists a provider
-under `spec.connectors` only *offers* it — the workload is prompted to connect
-it on first use, never armed automatically; `lns connector connect <id>` arms
-it up front and records it under `connectors:` in that directory's
-`lns-policy.yaml`.
+under `spec.connectors` seeds its placeholder env var but only *offers* it —
+the workload is prompted to connect it on first use, never armed
+automatically; `lns connector connect <id>` arms it up front and records it
+under `connectors:` in that directory's `lns-policy.yaml`.
 
 ## Value decisions
 

@@ -53,9 +53,10 @@ lns connector remove acme
 A connector reaches a project's workloads in any of three ways:
 
 - **Declared in the sandbox definition.** List its id under `spec.connectors`
-  in [`./lns.yaml`](running-workloads.md#defining-a-sandbox). Declaring is
-  disclosure, not arming: the id is surfaced at launch but never force-armed —
-  no placeholder is seeded and no route is opened on its behalf, even for a
+  in [`./lns.yaml`](running-workloads.md#defining-a-sandbox). Declaring seeds
+  the connector's placeholder env var — so a workload that checks for the
+  variable starts up and attempts its first request — but never arms it: no
+  route is opened and no bound value is injected on its behalf, even for a
   credential already bound on this machine. The workload is offered a live
   connect the first time it reaches the connector's domain; accepting it arms
   the connector and records the id in this directory's
@@ -100,9 +101,10 @@ declared routes are allowed and its placeholder is seeded, and the first request
 carrying that placeholder follows the ordinary credential
 [value decision](credentials.md#value-decisions) — it pauses for approval if you
 haven't bound a value yet, where you choose to use the host value, store one, or
-deny. A **declared** id from a sandbox definition never arms on its own; it is
-offered reactively on first use, so an untrusted published sandbox can't open a
-route or spend a bound credential without your say-so. A **required credential
+deny. A **declared** id from a sandbox definition seeds its placeholder but
+never arms on its own; it is offered reactively on first use, so an untrusted
+published sandbox can't open a route or spend a bound credential without your
+say-so. A **required credential
 slot** is the exception a sandbox uses to insist on a credential — it refuses
 the launch when unbound (or blocks on the sign-in for an `oauth` slot), so the
 workload never starts half-provisioned. A new connector reaches a workload

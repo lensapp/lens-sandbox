@@ -508,13 +508,7 @@ pub(super) async fn start(
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let mut custom = applied.providers;
-    // Connectable (undeclared) connectors stay known for an on-domain connect offer but are detect-only, so they never seed a phantom placeholder into the workload env.
-    custom.extend(
-        connectable
-            .providers
-            .into_iter()
-            .map(DefProvider::detect_only),
-    );
+    custom.extend(connectable.providers);
     let custom_providers = Arc::new(custom);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 

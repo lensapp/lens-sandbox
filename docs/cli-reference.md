@@ -283,10 +283,10 @@ lns policy remove <PATTERN>
 
 Manage the credential-connector catalog — the services whose credentials reach a
 workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
-declared in a sandbox definition's `spec.connectors` is only offered — the
-workload is prompted to connect it on first use, never armed automatically;
-connecting one (here or reactively) arms it and records it under `connectors:`
-in that directory's `lns-policy.yaml`.
+declared in a sandbox definition's `spec.connectors` seeds its placeholder env
+var but is only offered — the workload is prompted to connect it on first use,
+never armed automatically; connecting one (here or reactively) arms it and
+records it under `connectors:` in that directory's `lns-policy.yaml`.
 
 ```bash
 lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
