@@ -1,6 +1,6 @@
 [package]
 name = "lns-service"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 description = "Lens Sandbox background service — tray-resident process exposing local IPC and orchestrating microVM runs"
 license = "Apache-2.0"
