@@ -70,6 +70,7 @@ impl ConnectorSignIn for FakeSignIn {
 async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
     let catalog = dir.join(".lns-connectors.yaml");
+    let grants = dir.join(".lns-workload-grants.json");
     let signin = FakeSignIn {
         outcome: world
             .signin_outcome
@@ -82,7 +83,7 @@ async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let run = match parse_args::<ConnectorArgs, _, _>(&full) {
         Ok(args) => {
             let mut buf = Vec::<u8>::new();
-            match connector::run(&args.command, &dir, &catalog, &signin, &mut buf).await {
+            match connector::run(&args.command, &dir, &catalog, &grants, &signin, &mut buf).await {
                 Ok(exit_code) => CliRun {
                     exit_code,
                     output: String::from_utf8_lossy(&buf).into_owned(),

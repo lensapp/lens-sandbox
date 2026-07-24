@@ -7,6 +7,7 @@ use lns_policy::connectors::{
     AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, bundled_connectors,
     effective_connectors,
 };
+use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, JsonFileGrantStore, project_key};
 use lns_policy::providers::is_self_identifying;
 
 use crate::command::{CommandSpec, subcommand};
@@ -36,8 +37,14 @@ pub enum ConnectorCommand {
         about = "Bind a connector's per-machine value decision (oauth connectors sign in); records the id in this directory's policy."
     )]
     Connect(ConnectArgs),
-    #[command(about = "Disconnect a connector from this directory's policy.")]
+    #[command(
+        about = "Disconnect a connector from this directory's policy and forget its per-workload grants here."
+    )]
     Disconnect(DisconnectArgs),
+    #[command(about = "List the per-workload connector grants remembered for this project.")]
+    Grants(GrantsArgs),
+    #[command(about = "Forget a connector's per-workload grants in this project.")]
+    Revoke(RevokeArgs),
 }
 
 #[derive(clap::Args)]
@@ -89,6 +96,31 @@ pub struct DisconnectArgs {
     #[arg(
         long,
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct GrantsArgs {
+    #[arg(
+        long,
+        help = "Policy file path whose project the grants are listed for; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "List grants for every project on this machine, not just this one."
+    )]
+    pub all: bool,
+}
+
+#[derive(clap::Args)]
+pub struct RevokeArgs {
+    #[arg(help = "Connector id whose per-workload grants to forget in this project.")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path whose project the grant is revoked from; defaults to `lns-policy.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -161,6 +193,7 @@ pub async fn run(
     cmd: &ConnectorCommand,
     cwd: &Path,
     catalog_path: &Path,
+    grants_path: &Path,
     signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
@@ -169,7 +202,9 @@ pub async fn run(
         ConnectorCommand::List => list(catalog_path, writer),
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
         ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
-        ConnectorCommand::Disconnect(args) => disconnect(args, cwd, writer),
+        ConnectorCommand::Disconnect(args) => disconnect(args, cwd, grants_path, writer),
+        ConnectorCommand::Grants(args) => grants(args, cwd, grants_path, writer),
+        ConnectorCommand::Revoke(args) => revoke(args, cwd, grants_path, writer),
     }
 }
 
@@ -344,7 +379,12 @@ fn bind_message(id: &str, decision: lns_ipc::CredentialBindDecision) -> String {
     }
 }
 
-pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
+pub fn disconnect(
+    args: &DisconnectArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
@@ -354,7 +394,83 @@ pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) ->
     policy
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
-    writeln!(writer, "Disconnected {:?}", args.id)?;
+    let cleared = clear_project_grants(grants_path, &project_key(&path), &args.id)?;
+    let grants_note = match cleared {
+        0 => String::new(),
+        n => format!(" and forgot {n} per-workload grant(s)"),
+    };
+    writeln!(writer, "Disconnected {:?}{grants_note}", args.id)?;
+    Ok(0)
+}
+
+/// Drop every per-workload grant for one connector in a project from the sidecar, returning how many were removed; leaves the file untouched when there were none.
+fn clear_project_grants(grants_path: &Path, project: &str, connector: &str) -> Result<usize> {
+    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+    let mut cleared = 0;
+    store
+        .update(&mut |file| {
+            cleared = file.clear_project_connector(project, connector);
+            cleared > 0
+        })
+        .with_context(|| format!("updating grants at {}", grants_path.display()))?;
+    Ok(cleared)
+}
+
+fn grants(
+    args: &GrantsArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+    let file = store
+        .load()
+        .with_context(|| format!("reading grants from {}", grants_path.display()))?;
+    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let rows: Vec<&GrantRecord> = if args.all {
+        file.grants.iter().collect()
+    } else {
+        file.for_project(&project).collect()
+    };
+    if rows.is_empty() {
+        let scope = if args.all { "" } else { " for this project" };
+        writeln!(writer, "No connector grants{scope}.")?;
+        return Ok(0);
+    }
+    for g in rows {
+        let verdict = match g.verdict {
+            GrantVerdict::Allow => "allow",
+            GrantVerdict::Deny => "deny",
+        };
+        if args.all {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{verdict}",
+                g.project, g.workload, g.connector
+            )?;
+        } else {
+            writeln!(writer, "{}\t{}\t{verdict}", g.workload, g.connector)?;
+        }
+    }
+    Ok(0)
+}
+
+fn revoke(
+    args: &RevokeArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let cleared = clear_project_grants(grants_path, &project, &args.id)?;
+    if cleared == 0 {
+        bail!("no grants for {:?} in this project", args.id);
+    }
+    writeln!(
+        writer,
+        "Revoked {cleared} grant(s) for {:?} in this project.",
+        args.id
+    )?;
     Ok(0)
 }
 
@@ -957,6 +1073,7 @@ mod tests {
                 policy: None,
             },
             dir.path(),
+            &dir.path().join("grants.json"),
             &mut Vec::new(),
         )
         .unwrap();
@@ -973,6 +1090,7 @@ mod tests {
                 policy: None,
             },
             dir.path(),
+            &dir.path().join("grants.json"),
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -987,6 +1105,7 @@ mod tests {
             &ConnectorCommand::List,
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut out,
         )
@@ -1007,6 +1126,7 @@ mod tests {
             &ConnectorCommand::Add(add_args("acme")),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1017,6 +1137,7 @@ mod tests {
             &ConnectorCommand::Remove(ConnectorRemoveArgs { id: "acme".into() }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1036,6 +1157,7 @@ mod tests {
             }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1054,6 +1176,7 @@ mod tests {
             }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1065,5 +1188,246 @@ mod tests {
                 .connectors
                 .is_empty()
         );
+    }
+
+    fn seed_grant(grants_path: &Path, project: &str, connector: &str) {
+        use lns_policy::grants::WorkloadIdentity;
+        let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+        let mut file = store.load().unwrap();
+        file.upsert(GrantRecord::allow(
+            project,
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            connector,
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        store.save(&file).unwrap();
+    }
+
+    #[test]
+    fn grants_lists_this_projects_grants() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let project = project_key(&dir.path().join("lns-policy.yaml"));
+        seed_grant(&grants_path, &project, "some-provider");
+        let mut out = Vec::new();
+        grants(
+            &GrantsArgs {
+                policy: None,
+                all: false,
+            },
+            dir.path(),
+            &grants_path,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("some-provider"), "got: {text}");
+        assert!(text.contains("allow"), "got: {text}");
+        assert!(
+            text.contains("def:/proj"),
+            "the workload key is shown: {text}"
+        );
+    }
+
+    #[test]
+    fn grants_lists_a_deny_verdict_as_deny() {
+        use lns_policy::grants::WorkloadIdentity;
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let project = project_key(&dir.path().join("lns-policy.yaml"));
+        let store = JsonFileGrantStore::new(grants_path.clone());
+        let mut file = store.load().unwrap();
+        file.upsert(GrantRecord::deny(
+            &project,
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            "some-provider",
+            "SOME_TOKEN",
+            vec![],
+        ));
+        store.save(&file).unwrap();
+        let mut out = Vec::new();
+        grants(
+            &GrantsArgs {
+                policy: None,
+                all: false,
+            },
+            dir.path(),
+            &grants_path,
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out).unwrap().contains("deny"),
+            "a deny grant is rendered with the deny verdict"
+        );
+    }
+
+    #[test]
+    fn grants_reports_none_for_an_empty_project() {
+        let dir = TempDir::new().unwrap();
+        let mut out = Vec::new();
+        grants(
+            &GrantsArgs {
+                policy: None,
+                all: false,
+            },
+            dir.path(),
+            &dir.path().join("grants.json"),
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("No connector grants for this project")
+        );
+    }
+
+    #[test]
+    fn grants_all_lists_grants_from_every_project() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        seed_grant(&grants_path, "/other-project", "some-provider");
+        let mut out = Vec::new();
+        grants(
+            &GrantsArgs {
+                policy: None,
+                all: true,
+            },
+            dir.path(),
+            &grants_path,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("/other-project"),
+            "--all shows the project column and other projects: {text}"
+        );
+    }
+
+    #[test]
+    fn revoke_forgets_a_connectors_grants_in_this_project() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let project = project_key(&dir.path().join("lns-policy.yaml"));
+        seed_grant(&grants_path, &project, "some-provider");
+        let mut out = Vec::new();
+        revoke(
+            &RevokeArgs {
+                id: "some-provider".into(),
+                policy: None,
+            },
+            dir.path(),
+            &grants_path,
+            &mut out,
+        )
+        .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("Revoked 1 grant"));
+        let remaining = JsonFileGrantStore::new(grants_path).load().unwrap();
+        assert!(remaining.for_project(&project).next().is_none());
+    }
+
+    #[test]
+    fn revoke_errors_when_there_is_nothing_to_forget() {
+        let dir = TempDir::new().unwrap();
+        let err = revoke(
+            &RevokeArgs {
+                id: "some-provider".into(),
+                policy: None,
+            },
+            dir.path(),
+            &dir.path().join("grants.json"),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no grants for"));
+    }
+
+    #[test]
+    fn disconnect_forgets_the_connectors_per_workload_grants() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let policy_file = dir.path().join("lns-policy.yaml");
+        let mut policy = Policy::default();
+        policy.connect("some-provider");
+        policy.save_atomic(&policy_file).unwrap();
+        let project = project_key(&policy_file);
+        seed_grant(&grants_path, &project, "some-provider");
+
+        let mut out = Vec::new();
+        disconnect(
+            &DisconnectArgs {
+                id: "some-provider".into(),
+                policy: None,
+            },
+            dir.path(),
+            &grants_path,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("forgot 1 per-workload grant"),
+            "disconnect reports the forgotten grants"
+        );
+        let remaining = JsonFileGrantStore::new(grants_path).load().unwrap();
+        assert!(
+            remaining.for_project(&project).next().is_none(),
+            "the connector's grants are cleared on disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_the_grants_subcommand_to_its_handler() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let project = project_key(&dir.path().join("lns-policy.yaml"));
+        seed_grant(&grants_path, &project, "some-provider");
+        let mut out = Vec::new();
+        run(
+            &ConnectorCommand::Grants(GrantsArgs {
+                policy: None,
+                all: false,
+            }),
+            dir.path(),
+            &dir.path().join("catalog.yaml"),
+            &grants_path,
+            &FakeSignIn::completed(),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("some-provider"));
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_the_revoke_subcommand_to_its_handler() {
+        let dir = TempDir::new().unwrap();
+        let grants_path = dir.path().join("grants.json");
+        let project = project_key(&dir.path().join("lns-policy.yaml"));
+        seed_grant(&grants_path, &project, "some-provider");
+        let mut out = Vec::new();
+        run(
+            &ConnectorCommand::Revoke(RevokeArgs {
+                id: "some-provider".into(),
+                policy: None,
+            }),
+            dir.path(),
+            &dir.path().join("catalog.yaml"),
+            &grants_path,
+            &FakeSignIn::completed(),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("Revoked"));
     }
 }
