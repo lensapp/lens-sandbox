@@ -11,6 +11,8 @@ use oci_client::Reference;
 pub(crate) struct SandboxPlan {
     pub workload: AssembledWorkload,
     pub fileset_specs: Vec<RuntimeFileSpec>,
+    /// The resolved manifest digest of a published sandbox reference, pinning its per-workload grant identity; `None` for a local definition (which keys by directory).
+    pub digest: Option<String>,
 }
 
 /// Peek a run reference's manifest and, when it is a published sandbox, resolve + assemble it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
@@ -54,6 +56,7 @@ pub(crate) async fn peek_and_plan(
             Ok(Some(SandboxPlan {
                 workload: assembly::assemble(&resolved),
                 fileset_specs,
+                digest: Some(digest),
             }))
         }
     }
@@ -72,6 +75,7 @@ pub(crate) async fn plan_local(definition_json: &str) -> Result<SandboxPlan> {
     Ok(SandboxPlan {
         workload: assembly::assemble(&resolved),
         fileset_specs: materialized.into_specs(),
+        digest: None,
     })
 }
 

@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     build_workload_argv, connector_never_arrived, emit_completion, exec_env_strings,
-    vm_ended_before_connector,
+    vm_ended_before_connector, workload_identity,
 };
 
 pub async fn handle(
@@ -110,6 +110,11 @@ async fn orchestrate(
         .unwrap_or_else(|| args.env.clone());
     crate::run_registry::set_resolved_command_and_env(&run_id, &cmd, &env);
 
+    let workload = workload_identity(
+        args.definition_dir.as_deref(),
+        resolved_image,
+        sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
+    );
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
@@ -127,6 +132,7 @@ async fn orchestrate(
                     .unwrap_or_default(),
                 guest_tools.root.clone(),
                 env.clone(),
+                workload.clone(),
             ),
             initramfs::build(&guest_tools),
         )?;

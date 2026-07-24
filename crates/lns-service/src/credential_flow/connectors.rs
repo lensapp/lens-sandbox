@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
+use lns_policy::grants::{GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule, Verdict};
 
@@ -189,6 +190,41 @@ pub fn run_providers(applied: Vec<DefProvider>, connectable: Vec<DefProvider>) -
     }
 }
 
+fn grant_arms(
+    p: &DefProvider,
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> bool {
+    let Some(grant) = grants.lookup(project, workload, p.id()) else {
+        return false;
+    };
+    if grant.verdict != GrantVerdict::Allow {
+        return false;
+    }
+    let (env_var, domains) = p.disclosure_snapshot();
+    let mut recorded = grant.injection_domains.clone();
+    recorded.sort();
+    recorded.dedup();
+    grant.env_var == env_var && recorded == domains
+}
+
+/// Arm only the applied ids this workload holds an allow grant for whose recorded (env var, injection domains) snapshot still matches the resolved provider; an ungranted, denied, or stale id stays unarmed and falls through to a first-use offer, so a machine-global value never arms without this workload's consent.
+pub fn gate_armed_by_grant(
+    applied: &HashSet<String>,
+    providers: &[DefProvider],
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> HashSet<String> {
+    providers
+        .iter()
+        .filter(|p| applied.contains(p.id()))
+        .filter(|p| grant_arms(p, project, workload, grants))
+        .map(|p| p.id().to_string())
+        .collect()
+}
+
 /// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
 fn domains_overlap(a: &str, b: &str) -> bool {
     use crate::approval_flow::session::host_matches_pattern;
@@ -278,6 +314,7 @@ mod tests {
     use super::*;
     use crate::credential_flow::providers::Provider;
     use lns_policy::connectors::{ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow};
+    use lns_policy::grants::GrantRecord;
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
     fn cred_connector(id: &str, env_var: &str, domain: &str) -> Connector {
@@ -323,6 +360,165 @@ mod tests {
         assert_eq!(out.routes.len(), 1);
         assert_eq!(out.routes[0].match_pattern, "gitlab.com");
         assert_eq!(out.routes[0].verdict, lns_policy::Verdict::Allow);
+    }
+
+    fn provider_of(id: &str, env: &str, domain: &str) -> DefProvider {
+        resolve_applied_connectors(&policy_applying(&[id]), &[cred_connector(id, env, domain)])
+            .providers
+            .pop()
+            .expect("one provider")
+    }
+
+    fn allow_grants(
+        workload: &WorkloadIdentity,
+        connector: &str,
+        env: &str,
+        domain: &str,
+    ) -> WorkloadGrantFile {
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            workload,
+            connector,
+            env,
+            vec![domain.to_string()],
+        ));
+        grants
+    }
+
+    #[test]
+    fn gate_armed_by_grant_arms_an_allow_grant_with_a_matching_snapshot() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(
+            armed, applied,
+            "an allow grant whose snapshot matches the resolved provider must arm it"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_leaves_an_ungranted_id_unarmed() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Adhoc;
+        let armed = gate_armed_by_grant(
+            &applied,
+            &providers,
+            "proj",
+            &workload,
+            &WorkloadGrantFile::default(),
+        );
+        assert!(
+            armed.is_empty(),
+            "a connector this workload never consented to must stay unarmed"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_leaves_a_denied_id_unarmed() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(armed.is_empty(), "a denied connector must never arm");
+    }
+
+    #[test]
+    fn gate_armed_by_grant_rejects_a_grant_whose_env_var_drifted() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "OLD_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "a grant pinned to a since-changed env var must be invalidated, not silently inherited"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_rejects_a_grant_whose_injection_domains_drifted() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(&workload, "some-provider", "SOME_TOKEN", "api.old.example");
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "a grant pinned to since-changed injection domains must be invalidated"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_ignores_a_provider_outside_the_applied_set() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&HashSet::new(), &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "only ids in the applied set are candidates for arming, grant or no grant"
+        );
     }
 
     #[test]

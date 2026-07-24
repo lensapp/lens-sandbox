@@ -70,6 +70,7 @@ pub struct SupervisorSession {
 }
 
 impl SupervisorSession {
+    #[allow(clippy::too_many_arguments)] // boot entry point threading independent run inputs; a params struct would only relocate the arity
     pub async fn start_if_policy(
         run_id: String,
         microvm_name: String,
@@ -78,6 +79,7 @@ impl SupervisorSession {
         sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
+        workload: lns_policy::grants::WorkloadIdentity,
     ) -> Result<Option<Self>> {
         let Some(policy_path) = policy else {
             if sandbox_policy.is_some() {
@@ -97,6 +99,7 @@ impl SupervisorSession {
             sandbox_credentials,
             guest_tools_root,
             user_env,
+            workload,
         )
         .await
         .map(Some)
@@ -303,6 +306,7 @@ mod tests {
             &[],
             PathBuf::from("/tmp"),
             vec![],
+            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .unwrap();
@@ -324,6 +328,7 @@ mod tests {
             &[],
             PathBuf::from("/tmp"),
             vec![],
+            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await;
         let err = result
@@ -579,6 +584,7 @@ mod tests {
             &[],
             d.path().to_path_buf(),
             vec![],
+            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .expect("start_if_policy");
@@ -616,6 +622,7 @@ mod tests {
             &[],
             d.path().to_path_buf(),
             vec![],
+            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .expect("start_if_policy");

@@ -561,6 +561,7 @@ mod tests {
                 auto_remove: false,
                 verify_sandbox: false,
                 definition: None,
+                definition_dir: None,
             })),
             Instant::now(),
         )
