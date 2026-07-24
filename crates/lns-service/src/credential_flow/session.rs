@@ -123,6 +123,7 @@ pub struct CredentialSession {
     bundled_ids: HashSet<String>,
     connectable: HashSet<String>,
     armed: Mutex<HashSet<String>>,
+    reload_grants: HashSet<String>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -170,6 +171,7 @@ impl CredentialSession {
             bundled_ids: HashSet::new(),
             connectable: HashSet::new(),
             armed: Mutex::new(HashSet::new()),
+            reload_grants: HashSet::new(),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -274,8 +276,24 @@ impl CredentialSession {
         self
     }
 
+    /// The grants that survive a policy reload because they don't derive from `lns-policy.yaml` — the definition's credential slots; a policy edit that disconnects a connector must not revoke these.
+    pub fn with_reload_grants(mut self, slots: HashSet<String>) -> Self {
+        self.reload_grants = slots;
+        self
+    }
+
     pub fn armed_ids(&self) -> HashSet<String> {
         self.armed.lock().expect("armed mutex poisoned").clone()
+    }
+
+    /// Recompute the armed set from a reloaded policy's connected connectors, preserving the reload-surviving slot grants — so `lns connector disconnect` stops the stored value from arming even when a route still permits the destination.
+    pub fn reconcile_armed(&self, connectors: &[String]) {
+        let mut armed = self.armed.lock().expect("armed mutex poisoned");
+        *armed = connectors
+            .iter()
+            .cloned()
+            .chain(self.reload_grants.iter().cloned())
+            .collect();
     }
 
     fn grant_armed(&self, credential_id: &str) {
@@ -3092,6 +3110,84 @@ mod tests {
             }),
         );
         assert_armed_before_connect(&log.lock().unwrap());
+    }
+
+    fn wire_injections(session: &CredentialSession, id: &str) -> Vec<String> {
+        crate::credential_flow::registry::expand_credentials_for_wire_with_custom(
+            &session.current_state(),
+            session.custom_providers(),
+            &session.armed_ids(),
+        )
+        .into_iter()
+        .find(|c| c.id == id)
+        .expect("provider on the wire")
+        .injections
+        .iter()
+        .map(|inj| match inj {
+            CredentialInjection::Header { value, .. } => value.clone(),
+            CredentialInjection::UriPlaceholder { value, .. } => value.clone(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_policy_reload_dropping_a_connector_revokes_its_stored_value_arming() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "some-provider".into(),
+            CredentialEntry::Stored {
+                value: "some-real".into(),
+            },
+        );
+        let session = CredentialSession::new(state, notifier, store, tx, TEST_TIMEOUT)
+            .with_custom_providers(Arc::new(vec![some_provider()]))
+            .with_armed_ids(HashSet::from(["some-provider".to_string()]));
+        assert!(
+            wire_injections(&session, "some-provider")
+                .iter()
+                .any(|v| v.contains("some-real")),
+            "while connected, the stored value arms"
+        );
+        // `lns connector disconnect` drops the id from lns-policy.yaml; the reload reconciles with the remaining connectors.
+        session.reconcile_armed(&[]);
+        assert!(
+            wire_injections(&session, "some-provider")
+                .iter()
+                .all(|v| v.is_empty()),
+            "after disconnect the stored value must not keep arming, even though a route may still permit the destination"
+        );
+    }
+
+    #[test]
+    fn a_policy_reload_preserves_an_independent_slot_grant() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_reload_grants(HashSet::from(["some-slot".to_string()]))
+        .with_armed_ids(HashSet::from([
+            "some-slot".to_string(),
+            "gitlab".to_string(),
+        ]));
+        session.reconcile_armed(&["gitlab".to_string()]);
+        assert_eq!(
+            session.armed_ids(),
+            HashSet::from(["gitlab".to_string(), "some-slot".to_string()]),
+            "the reloaded connector and the slot grant both hold"
+        );
+        session.reconcile_armed(&[]);
+        assert_eq!(
+            session.armed_ids(),
+            HashSet::from(["some-slot".to_string()]),
+            "a credential slot is an artifact contract, never revoked by a policy edit"
+        );
     }
 
     #[tokio::test]

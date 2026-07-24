@@ -21,6 +21,9 @@ pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
 /// Maps a reloaded policy's `connectors:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
 pub type ConnectorRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send + Sync>;
 
+/// Invoked on a policy reload with the reloaded connected-connector ids so the credential subsystem can revoke a disconnected connector's arming.
+pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
+
 /// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
 pub struct OfferableConnector {
     pub id: String,
@@ -86,6 +89,7 @@ pub struct ApprovalSession {
     timeout: Duration,
     credentials_provider: OnceLock<CredentialsProvider>,
     connector_routes: OnceLock<ConnectorRouteDeriver>,
+    armed_reconciler: OnceLock<ArmedReconciler>,
     offerable: Vec<OfferableConnector>,
     connector: OnceLock<Arc<dyn ConnectPort>>,
     connecting: Mutex<HashSet<String>>,
@@ -116,6 +120,7 @@ impl ApprovalSession {
             timeout,
             credentials_provider: OnceLock::new(),
             connector_routes: OnceLock::new(),
+            armed_reconciler: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
@@ -136,6 +141,11 @@ impl ApprovalSession {
     }
 
     /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
+    /// Installs the armed-reconciler once at boot; idempotent, the first wins.
+    pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
+        let _ = self.armed_reconciler.set(reconciler);
+    }
+
     pub fn set_connector_route_deriver(&self, deriver: ConnectorRouteDeriver) {
         let _ = self.connector_routes.set(deriver);
     }
@@ -441,6 +451,9 @@ impl ApprovalSession {
                 .network
                 .allowed_routes
                 .extend(derive(&new_policy.connectors));
+        }
+        if let Some(reconcile) = self.armed_reconciler.get() {
+            reconcile(&new_policy.connectors);
         }
         *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
         let credentials = self.current_credentials();
@@ -1146,6 +1159,24 @@ pub(crate) mod tests {
             "the floor's deny must stay ordered before the reloaded allow: {routes:?}"
         );
         let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
+    fn apply_external_policy_reconciles_armed_ids_with_the_reloaded_connectors() {
+        let (s, _n, _store, _rx) = fixture();
+        let seen: Arc<StdMutex<Vec<Vec<String>>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        s.set_armed_reconciler(Box::new(move |connectors| {
+            seen_clone.lock().unwrap().push(connectors.to_vec());
+        }));
+        let mut reloaded = Policy::default();
+        reloaded.connect("gitlab");
+        s.apply_external_policy(reloaded);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[vec!["gitlab".to_string()]],
+            "a policy reload must reconcile the credential subsystem's armed set, or a disconnected connector keeps spending its value"
+        );
     }
 
     #[test]
