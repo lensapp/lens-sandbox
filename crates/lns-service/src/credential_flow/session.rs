@@ -405,6 +405,25 @@ impl CredentialSession {
         )
     }
 
+    /// True when the wire expansion would arm this id: a stored/oauth value, or a host-detect entry whose host source resolves to a non-empty value — the same signal the policy emitter uses, so the release tracks what actually landed on the wire.
+    fn has_resolvable_value(&self, credential_id: &str) -> bool {
+        let host_detect = matches!(
+            self.state
+                .lock()
+                .expect("state mutex poisoned")
+                .get(credential_id),
+            Some(CredentialEntry::HostDetect)
+        );
+        if host_detect {
+            return crate::credential_flow::registry::detect_for_with(
+                credential_id,
+                &self.custom_providers,
+            )
+            .is_some_and(|v| !v.is_empty());
+        }
+        self.has_armed_value(credential_id)
+    }
+
     fn injects_for_host(&self, credential_id: &str, host: &str) -> bool {
         self.custom_providers
             .iter()
@@ -438,9 +457,12 @@ impl CredentialSession {
         if let Some(entry) = persistent_entry(request) {
             if connect_now {
                 self.grant_armed(&credential_id);
+            }
+            // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
+            self.apply_persistent_entry(credential_id.clone(), entry);
+            if connect_now {
                 (self.connect)(&credential_id);
             }
-            self.apply_persistent_entry(credential_id, entry);
         }
         for request_id in &request_ids {
             self.send_decision_frame(request_id, kind);
@@ -496,8 +518,8 @@ impl CredentialSession {
         if self.connectable.contains(id) {
             self.grant_armed(id);
             (self.connect)(id);
-            // The connect armed a value already bound on this machine, so a held value card asks an answered question; without a value the card stays — that decision is still owed.
-            if self.has_armed_value(id) {
+            // The connect armed a value the wire expansion resolves (stored, oauth, or a host-detect that the host supplies), so a held value card asks an answered question; with nothing resolvable the card stays — that decision is still owed.
+            if self.has_resolvable_value(id) {
                 self.release_armed_holds(id);
             }
             return true;
@@ -679,13 +701,13 @@ impl CredentialSession {
         }
     }
 
-    /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token.
+    /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token. The value is applied and emitted before the connect, because the connect releases network holds and the released request must not reach the placeholder gate before the armed injection is in hand.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         self.grant_armed(credential_id);
+        self.apply_persistent_entry(credential_id.to_string(), entry);
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
         }
-        self.apply_persistent_entry(credential_id.to_string(), entry);
     }
 
     fn fail_held(&self, request_ids: &[String]) {
@@ -3000,6 +3022,122 @@ mod tests {
             &["c1".to_string()],
             "the value card asks a question the connect already answered"
         );
+    }
+
+    /// Builds a session whose policy emitter and connect emitter append to one ordered log, so a test can pin that the armed-credential frame precedes the connect (which releases network holds in production).
+    fn frame_order_session(log: Arc<StdMutex<Vec<String>>>) -> CredentialSession {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let log_policy = log.clone();
+        let log_connect = log;
+        CredentialSession::with_policy_emitter(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            TEST_TIMEOUT,
+            Box::new(move |state, _armed| {
+                let armed = matches!(
+                    state.get("some-provider"),
+                    Some(CredentialEntry::Stored { value }) if !value.is_empty()
+                );
+                log_policy
+                    .lock()
+                    .unwrap()
+                    .push(format!("policy:armed={armed}"));
+            }),
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(move |_| log_connect.lock().unwrap().push("connect".into())),
+        )
+    }
+
+    fn assert_armed_before_connect(entries: &[String]) {
+        let connect_at = entries
+            .iter()
+            .position(|e| e == "connect")
+            .expect("the connect emitter must fire");
+        assert!(
+            entries[..connect_at].contains(&"policy:armed=true".to_string()),
+            "the connect releases network holds in production, so the armed-credential frame must precede it — else the released request hits the placeholder gate before the real value is in hand: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn arm_connected_emits_the_armed_credential_before_the_connect_releases_network_holds() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let session = frame_order_session(log.clone());
+        session.connect_connector_with_token("some-provider", "pasted".into());
+        assert_armed_before_connect(&log.lock().unwrap());
+    }
+
+    #[test]
+    fn accepting_a_held_card_emits_the_armed_credential_before_the_connect() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let session = frame_order_session(log.clone());
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "typed".into(),
+            }),
+        );
+        assert_armed_before_connect(&log.lock().unwrap());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_host_detect_connect_releases_the_held_request_when_the_host_resolves() {
+        let _g = crate::test_env::EnvVarGuard::set("SOME_TOKEN", "host-real");
+        let (session, notifier, mut rx) =
+            unconsented_session_with(vec![("some-provider", CredentialEntry::HostDetect)]);
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        assert!(session.connect_connector_now("some-provider").await);
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Allow,
+            "a host-detect entry that resolves to a real value is armed on the wire, so the held card asks an answered question"
+        );
+        assert_eq!(
+            notifier.dismissed.lock().unwrap().as_slice(),
+            &["c1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_host_detect_connect_keeps_the_held_request_when_the_host_is_empty() {
+        let _g = crate::test_env::EnvVarGuard::unset("SOME_TOKEN");
+        let (session, notifier, mut rx) =
+            unconsented_session_with(vec![("some-provider", CredentialEntry::HostDetect)]);
+        session.submit_pending(
+            gate(
+                "some-provider",
+                "POST https://api.some-provider.example/issues",
+            ),
+            Instant::now(),
+        );
+        assert!(session.connect_connector_now("some-provider").await);
+        assert!(
+            rx.try_recv().is_err(),
+            "the host has no value, so nothing is armed and nothing may release"
+        );
+        assert!(notifier.dismissed.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
