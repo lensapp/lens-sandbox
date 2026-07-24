@@ -17,7 +17,8 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::connectors::{
-    applied_connector_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
+    applied_connector_routes, gate_armed_by_grant, resolve_applied_with_slots,
+    resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -29,6 +30,10 @@ use crate::credential_flow::store::{
 use crate::credential_flow::watcher::CredentialWatcher;
 use crate::log;
 use crate::relay;
+use lns_policy::grants::{
+    GrantStore, JsonFileGrantStore, WorkloadGrantFile, WorkloadIdentity,
+    default_workload_grants_path, project_key,
+};
 use lns_policy::{FilePolicyStore, Policy, RouteRule};
 
 use super::real::RealFs;
@@ -223,6 +228,18 @@ fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> Credent
     }
 }
 
+/// Defaults to an empty grant set and warns on load error, so a malformed `~/.lns-workload-grants.json` fails safe: every connector re-offers at first use rather than silently arming.
+fn load_grants_or_warn(store: &dyn GrantStore, path: &Path) -> WorkloadGrantFile {
+    match store.load() {
+        Ok(grants) => grants,
+        Err(e) => {
+            let path_str = path.display();
+            log::warn!("could not load {path_str} ({e}); no connector grants apply this run");
+            WorkloadGrantFile::default()
+        }
+    }
+}
+
 /// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-connectors.yaml` doesn't break a run — the bundled catalog still applies.
 fn load_user_catalog_or_warn(path: &Path) -> lns_policy::connectors::Catalog {
     match lns_policy::connectors::Catalog::load_or_default(path) {
@@ -258,14 +275,20 @@ fn make_credentials_provider(
     })
 }
 
-/// `Weak` so the reconciler doesn't keep the credential session alive past the run; a dropped session is a no-op.
+/// `Weak` so the reconciler doesn't keep the credential session alive past the run; a dropped session is a no-op. A reload re-gates the reconnected connectors through the grant snapshot so a policy edit can't re-arm a connector this workload never granted.
 fn make_armed_reconciler(
     credential_session: &Arc<CredentialSession>,
+    project: String,
+    workload: WorkloadIdentity,
+    grants: WorkloadGrantFile,
+    providers: Arc<Vec<DefProvider>>,
 ) -> crate::approval_flow::session::ArmedReconciler {
     let weak = Arc::downgrade(credential_session);
     Box::new(move |connectors| {
         if let Some(cs) = weak.upgrade() {
-            cs.reconcile_armed(connectors);
+            let reloaded: HashSet<String> = connectors.iter().cloned().collect();
+            let granted = gate_armed_by_grant(&reloaded, &providers, &project, &workload, &grants);
+            cs.reconcile_armed(&granted.into_iter().collect::<Vec<_>>(), connectors);
         }
     })
 }
@@ -383,11 +406,14 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The run's consent boundary at boot: which ids may arm a resolved value (`armed`), which of those survive a policy reload (`reload_grants` — the credential slots), and which are offered for a live connect (`connectable_ids`).
+/// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), and the grant snapshot (`project`/`workload`/`grants`) a reload re-gates a reconnected connector against.
 struct CredentialConsent {
     armed: HashSet<String>,
-    reload_grants: HashSet<String>,
+    slot_ids: HashSet<String>,
     connectable_ids: HashSet<String>,
+    project: String,
+    workload: WorkloadIdentity,
+    grants: WorkloadGrantFile,
 }
 
 /// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
@@ -435,6 +461,7 @@ async fn start_credential_subsystem(
         custom_providers.clone(),
     );
     let connect_emitter = make_connect_emitter(session.clone(), connectable_routes);
+    let reconciler_providers = custom_providers.clone();
     let credential_session = Arc::new(
         CredentialSession::with_policy_emitter(
             initial_credential_state,
@@ -446,7 +473,7 @@ async fn start_credential_subsystem(
         )
         .with_custom_providers(custom_providers)
         .with_armed_ids(consent.armed)
-        .with_reload_grants(consent.reload_grants)
+        .with_slot_ids(consent.slot_ids)
         .with_bundled_ids(
             lns_policy::connectors::bundled_connectors()
                 .iter()
@@ -482,8 +509,14 @@ async fn start_credential_subsystem(
 
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
-    // A policy reload revokes a disconnected connector's arming; slot grants survive because they don't derive from the policy file.
-    session.set_armed_reconciler(make_armed_reconciler(&credential_session));
+    // A policy reload re-gates the reconnected connectors through the grant snapshot, so a disconnected — or never-granted — connector's arming is revoked; granted slots survive because they don't derive from the policy file.
+    session.set_armed_reconciler(make_armed_reconciler(
+        &credential_session,
+        consent.project,
+        consent.workload,
+        consent.grants,
+        reconciler_providers,
+    ));
 
     let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
         .context("watching credentials file")?;
@@ -501,6 +534,7 @@ fn effective_running_policy(policy_path: &Path, sandbox_policy: Option<&Policy>)
     })
 }
 
+#[allow(clippy::too_many_arguments)] // boot entry point threading independent run inputs; a params struct would only relocate the arity
 pub(super) async fn start(
     run_id: String,
     microvm_name: String,
@@ -509,6 +543,7 @@ pub(super) async fn start(
     sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
+    workload: WorkloadIdentity,
 ) -> Result<SupervisorSession> {
     let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
@@ -532,9 +567,14 @@ pub(super) async fn start(
     let run =
         crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
     let connectable_ids = run.connectable_ids;
-    let armed_ids = run.armed;
-    // Slot grants survive a policy reload; overlay-connected ids are re-derived from the reloaded file.
-    let reload_grants: HashSet<String> = sandbox_credentials
+    // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
+    let grants_path = default_workload_grants_path();
+    let grant_store = JsonFileGrantStore::new(grants_path.clone());
+    let grants = load_grants_or_warn(&grant_store, &grants_path);
+    let project = project_key(policy_path);
+    let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
+    // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
+    let slot_ids: HashSet<String> = sandbox_credentials
         .iter()
         .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
         .map(|slot| slot.name.clone())
@@ -597,8 +637,11 @@ pub(super) async fn start(
         custom_providers,
         CredentialConsent {
             armed: armed_ids,
-            reload_grants,
+            slot_ids,
             connectable_ids,
+            project,
+            workload,
+            grants,
         },
         connectable_routes,
         OauthWiring {
@@ -658,6 +701,7 @@ pub(super) async fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::grants::GrantRecord;
     use std::io;
 
     fn fixture_session() -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
@@ -965,7 +1009,7 @@ mod tests {
     fn fixture_credential_session_armed(
         custom: Arc<Vec<DefProvider>>,
         armed: HashSet<String>,
-        reload_grants: HashSet<String>,
+        slot_ids: HashSet<String>,
     ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         let (store, _dir) = tempfile_credential_store();
@@ -982,7 +1026,7 @@ mod tests {
             )
             .with_custom_providers(custom)
             .with_armed_ids(armed)
-            .with_reload_grants(reload_grants),
+            .with_slot_ids(slot_ids),
         );
         (session, frame_rx)
     }
@@ -1024,6 +1068,45 @@ mod tests {
         assert!(
             state.is_empty(),
             "malformed credentials file must surface as empty in-memory state, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn load_grants_or_warn_returns_stored_grants_on_ok() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        let store = JsonFileGrantStore::new(path.clone());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut file = WorkloadGrantFile::default();
+        file.upsert(GrantRecord::allow(
+            "proj",
+            &workload,
+            "acme",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+        store.save(&file).expect("save grants");
+        let loaded = load_grants_or_warn(&store, &path);
+        assert!(
+            loaded.lookup("proj", &workload, "acme").is_some(),
+            "a readable sidecar's grants must load"
+        );
+    }
+
+    #[test]
+    fn load_grants_or_warn_defaults_to_empty_and_warns_on_store_error() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+        let store = JsonFileGrantStore::new(path.clone());
+        let grants = load_grants_or_warn(&store, &path);
+        assert!(
+            grants.grants.is_empty(),
+            "a malformed grant sidecar must fail safe to no grants so nothing arms without consent, got {:?}",
+            grants.grants
         );
     }
 
@@ -1125,6 +1208,24 @@ mod tests {
         assert!(provider().is_empty());
     }
 
+    fn acme_workload() -> WorkloadIdentity {
+        WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        }
+    }
+
+    fn acme_grants(workload: &WorkloadIdentity) -> WorkloadGrantFile {
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            workload,
+            "acme",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+        grants
+    }
+
     #[test]
     fn make_armed_reconciler_reconciles_a_live_session_preserving_slot_grants() {
         let (session, _frame_rx) = fixture_credential_session_armed(
@@ -1132,12 +1233,19 @@ mod tests {
             HashSet::from(["acme".to_string(), "some-slot".to_string()]),
             HashSet::from(["some-slot".to_string()]),
         );
-        let reconcile = make_armed_reconciler(&session);
+        let workload = acme_workload();
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            workload.clone(),
+            acme_grants(&workload),
+            acme_custom(),
+        );
         reconcile(&["acme".to_string()]);
         assert_eq!(
             session.armed_ids(),
             HashSet::from(["acme".to_string(), "some-slot".to_string()]),
-            "the reloaded connector and the independent slot grant both hold"
+            "a reloaded connector with a matching grant arms, and the independent slot grant holds"
         );
         reconcile(&[]);
         assert_eq!(
@@ -1148,9 +1256,56 @@ mod tests {
     }
 
     #[test]
+    fn make_armed_reconciler_does_not_arm_an_unconsented_reloaded_connector() {
+        let (session, _frame_rx) =
+            fixture_credential_session_armed(acme_custom(), HashSet::new(), HashSet::new());
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            WorkloadGrantFile::default(),
+            acme_custom(),
+        );
+        reconcile(&["acme".to_string()]);
+        assert!(
+            session.armed_ids().is_empty(),
+            "a reload must not arm a connector this workload never consented to, even when the reloaded policy lists it"
+        );
+    }
+
+    #[test]
+    fn make_armed_reconciler_preserves_an_in_session_connect_across_the_reload_its_write_triggers()
+    {
+        let (session, _frame_rx) = fixture_credential_session_armed(
+            acme_custom(),
+            HashSet::from(["acme".to_string()]),
+            HashSet::new(),
+        );
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            WorkloadGrantFile::default(),
+            acme_custom(),
+        );
+        // A live connect persists "acme" into the policy, which the watcher reloads; the arming just granted must not self-revoke even though no grant is recorded to disk yet.
+        reconcile(&["acme".to_string()]);
+        assert!(
+            session.armed_ids().contains("acme"),
+            "a live connect's arming must survive the watcher reload its own policy-write triggers"
+        );
+    }
+
+    #[test]
     fn make_armed_reconciler_is_a_noop_when_session_dropped() {
         let (session, _frame_rx) = fixture_credential_session();
-        let reconcile = make_armed_reconciler(&session);
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            WorkloadIdentity::Adhoc,
+            WorkloadGrantFile::default(),
+            acme_custom(),
+        );
         drop(session);
         reconcile(&["acme".to_string()]);
     }
@@ -1164,8 +1319,15 @@ mod tests {
             HashSet::from(["some-slot".to_string()]),
         );
         let (session, _srx) = fixture_session();
+        let workload = acme_workload();
         // The same bridge start() installs, so this pins the wiring a disconnect-during-init relies on.
-        session.set_armed_reconciler(make_armed_reconciler(&cred));
+        session.set_armed_reconciler(make_armed_reconciler(
+            &cred,
+            "proj".into(),
+            workload.clone(),
+            acme_grants(&workload),
+            acme_custom(),
+        ));
         // A reload whose policy no longer lists "acme" (a disconnect) must revoke its arming.
         session.apply_external_policy(Policy::default());
         assert_eq!(

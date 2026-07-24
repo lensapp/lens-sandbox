@@ -330,6 +330,9 @@ pub async fn run_image(
         auto_remove: args.auto_remove,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),
+        definition_dir: target
+            .project_dir()
+            .map(|p| p.to_string_lossy().into_owned()),
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

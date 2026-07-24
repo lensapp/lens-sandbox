@@ -2,6 +2,7 @@ use cucumber::{given, then, when};
 use lns_policy::connectors::{
     AuthKind, Connector, ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow,
 };
+use lns_policy::grants::{GrantRecord, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
@@ -10,7 +11,7 @@ use lns_service::artifact::credential_boot::{
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::connectors::{
-    resolve_applied_with_slots, resolve_connectable_with_slots, run_providers,
+    gate_armed_by_grant, resolve_applied_with_slots, resolve_connectable_with_slots, run_providers,
     unknown_connector_ids, unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
@@ -130,7 +131,31 @@ fn launch(
         })
         .collect();
     rig.offered = run.connectable_ids.iter().cloned().collect();
-    rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &run.armed, &|_| None);
+    // The launch consents to its applied connectors by default (the grant a prior first-use card would have left); a scenario withholds an id to model a cloned overlay or a slot with no machine-local grant, and the gate then keeps it unarmed.
+    let workload = WorkloadIdentity::Definition {
+        dir: "/rig/project".into(),
+    };
+    let mut grants = WorkloadGrantFile::default();
+    for p in &run.providers {
+        if run.armed.contains(p.id()) && !rig.withhold_grants.contains(p.id()) {
+            let (env_var, domains) = p.disclosure_snapshot();
+            grants.upsert(GrantRecord::allow(
+                "rig-project",
+                &workload,
+                p.id(),
+                env_var,
+                domains,
+            ));
+        }
+    }
+    let armed = gate_armed_by_grant(
+        &run.armed,
+        &run.providers,
+        "rig-project",
+        &workload,
+        &grants,
+    );
+    rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &armed, &|_| None);
     rig.running_policy = Some(policy);
 }
 
@@ -181,6 +206,12 @@ fn overlay_connects_nothing(w: &mut BehaviourWorld) {
 fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.connectors.push(id);
+}
+
+#[given(regex = r#"^this workload has no grant for "([^"]+)"$"#)]
+fn workload_has_no_grant(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.withhold_grants.insert(id);
 }
 
 #[when("the sandbox is launched")]

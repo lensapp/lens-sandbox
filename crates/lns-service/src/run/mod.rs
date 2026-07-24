@@ -1,5 +1,6 @@
 use anyhow::Result;
 use lns_ipc::{Response, WireFrame};
+use lns_policy::grants::WorkloadIdentity;
 use tokio::sync::mpsc::Sender;
 
 mod orchestrator;
@@ -164,6 +165,34 @@ pub(super) fn connector_never_arrived() -> anyhow::Error {
     anyhow::anyhow!("VM backend never produced a VsockConnector")
 }
 
+/// A published reference reduced to its bare `registry/repository`, so `:tag` and `@digest` of one repo share a workload identity; an unparseable reference is keyed verbatim.
+fn normalize_repo(reference: &str) -> String {
+    match reference.parse::<oci_client::Reference>() {
+        Ok(r) => format!("{}/{}", r.registry(), r.repository()),
+        Err(_) => reference.to_string(),
+    }
+}
+
+/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project shares it), a published sandbox by `repo@digest` (a republished digest re-offers), else ad-hoc.
+pub(super) fn workload_identity(
+    definition_dir: Option<&str>,
+    resolved_ref: Option<&str>,
+    digest: Option<&str>,
+) -> WorkloadIdentity {
+    if let Some(dir) = definition_dir {
+        WorkloadIdentity::Definition {
+            dir: dir.to_string(),
+        }
+    } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
+        WorkloadIdentity::Reference {
+            repo: normalize_repo(reference),
+            digest: digest.to_string(),
+        }
+    } else {
+        WorkloadIdentity::Adhoc
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +210,57 @@ mod tests {
     fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
         assert_eq!(sandbox_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
+    }
+
+    #[test]
+    fn workload_identity_keys_a_local_definition_by_its_directory() {
+        let id = workload_identity(Some("/Users/me/app"), Some("ghcr.io/team/base:1"), None);
+        assert_eq!(
+            id,
+            WorkloadIdentity::Definition {
+                dir: "/Users/me/app".into()
+            },
+            "a local definition keys by its dir even though it carries a base image"
+        );
+    }
+
+    #[test]
+    fn workload_identity_keys_a_published_reference_by_repo_and_digest() {
+        let id = workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), Some("sha256:abc"));
+        assert_eq!(
+            id,
+            WorkloadIdentity::Reference {
+                repo: "ghcr.io/acme/agent".into(),
+                digest: "sha256:abc".into()
+            }
+        );
+    }
+
+    #[test]
+    fn workload_identity_is_adhoc_without_a_definition_or_a_resolved_digest() {
+        assert_eq!(workload_identity(None, None, None), WorkloadIdentity::Adhoc);
+        assert_eq!(
+            workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), None),
+            WorkloadIdentity::Adhoc,
+            "a reference with no resolved digest can't be pinned, so it is ad-hoc"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_strips_a_tag_and_a_digest_to_the_bare_repo() {
+        assert_eq!(
+            normalize_repo("ghcr.io/acme/agent:1.4.0"),
+            "ghcr.io/acme/agent"
+        );
+        assert_eq!(
+            normalize_repo(&format!("ghcr.io/acme/agent@sha256:{}", "a".repeat(64))),
+            "ghcr.io/acme/agent"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_keeps_an_unparseable_reference_verbatim() {
+        assert_eq!(normalize_repo("not a valid ref"), "not a valid ref");
     }
 
     #[test]
