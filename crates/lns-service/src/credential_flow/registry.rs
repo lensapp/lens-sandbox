@@ -12,7 +12,7 @@ pub fn detect_for_with(id: &str, custom: &[DefProvider]) -> Option<String> {
         .and_then(|p| p.detector().detect())
 }
 
-/// Every provider becomes one `Credential` even when unarmed so the MITM can detect every known placeholder in outbound requests; a machine-stored value arms only for ids in `armed` — the connectors consented for this run — so a declared or connectable connector stays unarmed until connected.
+/// Every provider becomes one `Credential` even when unarmed so the MITM can detect every known placeholder in outbound requests; a resolved value (stored, oauth, or host-detect) arms only for ids in `armed` — the connectors consented for this run — so a declared or connectable connector stays unarmed until connected.
 pub fn expand_credentials_for_wire_with_custom(
     state: &CredentialStateFile,
     custom: &[DefProvider],

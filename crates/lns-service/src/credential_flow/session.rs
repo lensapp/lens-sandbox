@@ -17,7 +17,7 @@ use lns_policy::connectors::TokenFallback;
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
-/// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection; receives the run's armed ids because a stored value may only arm for a consented connector.
+/// Invoked after a state-changing decision so a follow-up `Policy` frame arms the matching injection; receives the run's armed ids because a resolved value may only arm for a consented connector.
 pub type PolicyEmitter = Box<dyn Fn(&CredentialStateFile, &HashSet<String>) + Send + Sync>;
 
 /// Invoked when an un-connected catalog connector is accepted, to connect it live (allow its routes + persist `connectors:`).
