@@ -14,6 +14,7 @@ use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, Creden
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
+use lns_policy::grants::{GrantRecord, GrantStore, WorkloadIdentity};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -124,6 +125,9 @@ pub struct CredentialSession {
     connectable: HashSet<String>,
     armed: Mutex<HashSet<String>>,
     slot_ids: HashSet<String>,
+    grant_project: String,
+    grant_workload: WorkloadIdentity,
+    grant_store: Option<Arc<dyn GrantStore>>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -172,6 +176,9 @@ impl CredentialSession {
             connectable: HashSet::new(),
             armed: Mutex::new(HashSet::new()),
             slot_ids: HashSet::new(),
+            grant_project: String::new(),
+            grant_workload: WorkloadIdentity::Adhoc,
+            grant_store: None,
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -282,6 +289,19 @@ impl CredentialSession {
         self
     }
 
+    /// Binds this run's grant context so an accepted credential decision is remembered per (project, workload, connector) in the machine-local sidecar; without it, a decision arms only for this run and the next run re-offers.
+    pub fn with_grants(
+        mut self,
+        project: String,
+        workload: WorkloadIdentity,
+        store: Arc<dyn GrantStore>,
+    ) -> Self {
+        self.grant_project = project;
+        self.grant_workload = workload;
+        self.grant_store = Some(store);
+        self
+    }
+
     pub fn armed_ids(&self) -> HashSet<String> {
         self.armed.lock().expect("armed mutex poisoned").clone()
     }
@@ -299,6 +319,31 @@ impl CredentialSession {
             .lock()
             .expect("armed mutex poisoned")
             .insert(credential_id.to_string());
+    }
+
+    /// Persists an allow grant for `credential_id` in the machine-local sidecar so a later run of the same workload skips the offer; a no-op without a bound grant context or a provider that discloses no injection to pin the grant to.
+    fn remember_grant_allow(&self, credential_id: &str) {
+        let Some(store) = &self.grant_store else {
+            return;
+        };
+        let (Some(env_var), domains, _) = self.provider_disclosure(credential_id) else {
+            return;
+        };
+        let record = GrantRecord::allow(
+            self.grant_project.clone(),
+            &self.grant_workload,
+            credential_id,
+            env_var,
+            domains,
+        );
+        if let Err(e) = store.update(&mut |file| {
+            file.upsert(record.clone());
+            true
+        }) {
+            self.notifier.inform(&format!(
+                "credential consent applied but its grant was not persisted; the next run will ask again: {e}"
+            ));
+        }
     }
 
     fn is_armed_id(&self, credential_id: &str) -> bool {
@@ -468,6 +513,7 @@ impl CredentialSession {
             // Answering the first-use card Allow is this run's consent, so arm the id whether or not it was connectable; a value never arms without a card being answered.
             if is_allow {
                 self.grant_armed(&credential_id);
+                self.remember_grant_allow(&credential_id);
             }
             // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
             self.apply_persistent_entry(credential_id.clone(), entry);
@@ -528,6 +574,7 @@ impl CredentialSession {
         }
         if self.connectable.contains(id) {
             self.grant_armed(id);
+            self.remember_grant_allow(id);
             (self.connect)(id);
             // The connect armed a value the wire expansion resolves (stored, oauth, or a host-detect that the host supplies), so a held value card asks an answered question; with nothing resolvable the card stays — that decision is still owed.
             if self.has_resolvable_value(id) {
@@ -715,6 +762,7 @@ impl CredentialSession {
     /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token. The value is applied and emitted before the connect, because the connect releases network holds and the released request must not reach the placeholder gate before the armed injection is in hand.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         self.grant_armed(credential_id);
+        self.remember_grant_allow(credential_id);
         self.apply_persistent_entry(credential_id.to_string(), entry);
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
@@ -1276,6 +1324,182 @@ mod tests {
                     CredentialInjection::Header { value, .. } if value.contains("some-real")
                 )),
             "the consented value reaches the wire after Allow"
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingGrantStore {
+        saved: StdMutex<lns_policy::grants::WorkloadGrantFile>,
+    }
+    impl GrantStore for CapturingGrantStore {
+        fn load(&self) -> std::io::Result<lns_policy::grants::WorkloadGrantFile> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, s: &lns_policy::grants::WorkloadGrantFile) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = s.clone();
+            Ok(())
+        }
+    }
+
+    struct FailingGrantStore;
+    impl GrantStore for FailingGrantStore {
+        fn load(&self) -> std::io::Result<lns_policy::grants::WorkloadGrantFile> {
+            Ok(lns_policy::grants::WorkloadGrantFile::default())
+        }
+        fn save(&self, _: &lns_policy::grants::WorkloadGrantFile) -> std::io::Result<()> {
+            Err(std::io::Error::other("sidecar unwritable"))
+        }
+    }
+
+    fn grants_session(
+        store: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+        custom: Vec<DefProvider>,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(custom))
+        .with_grants("proj".into(), workload, store)
+    }
+
+    #[test]
+    fn a_consent_allow_persists_an_allow_grant_to_the_sidecar() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("the consent must persist a grant so the next run skips the offer");
+        assert_eq!(grant.verdict, lns_policy::grants::GrantVerdict::Allow);
+        assert_eq!(grant.env_var, "SOME_TOKEN");
+        assert_eq!(grant.injection_domains, ["api.some-provider.example"]);
+    }
+
+    #[test]
+    fn a_grant_persist_failure_informs_the_user_but_still_arms_for_the_run() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Adhoc,
+            Arc::new(FailingGrantStore),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "consent still arms for this run even when the sidecar can't be written"
+        );
+        assert!(
+            notifier
+                .informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("not persisted")),
+            "the user is told the grant did not persist so the re-prompt next run isn't a surprise"
+        );
+    }
+
+    #[test]
+    fn a_consent_for_an_undisclosed_id_persists_no_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let session = grants_session(store.clone(), WorkloadIdentity::Adhoc, vec![]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            store.load().unwrap().grants.is_empty(),
+            "with no injection snapshot to pin the grant to, nothing is persisted"
+        );
+    }
+
+    fn grants_session_connectable(
+        store: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(|_| {}),
+        )
+        .with_grants("proj".into(), workload, store)
+    }
+
+    #[tokio::test]
+    async fn a_network_offer_connect_persists_the_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session_connectable(store.clone(), workload.clone());
+        assert!(session.connect_connector_now("some-provider").await);
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "accepting a network-offer connect must persist the grant so the next run skips the offer"
+        );
+    }
+
+    #[test]
+    fn a_connect_by_pasted_token_persists_the_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session_connectable(store.clone(), workload.clone());
+        session.connect_connector_with_token("some-provider", "some-real".into());
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "connecting with a pasted token (the shared arm_connected tail) must persist the grant"
         );
     }
 

@@ -406,7 +406,7 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), and the grant snapshot (`project`/`workload`/`grants`) a reload re-gates a reconnected connector against.
+/// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), the grant snapshot (`project`/`workload`/`grants`) a reload re-gates a reconnected connector against, and the sidecar `grant_store` a live consent persists its grant to.
 struct CredentialConsent {
     armed: HashSet<String>,
     slot_ids: HashSet<String>,
@@ -414,6 +414,7 @@ struct CredentialConsent {
     project: String,
     workload: WorkloadIdentity,
     grants: WorkloadGrantFile,
+    grant_store: Arc<dyn GrantStore>,
 }
 
 /// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
@@ -474,6 +475,11 @@ async fn start_credential_subsystem(
         .with_custom_providers(custom_providers)
         .with_armed_ids(consent.armed)
         .with_slot_ids(consent.slot_ids)
+        .with_grants(
+            consent.project.clone(),
+            consent.workload.clone(),
+            consent.grant_store,
+        )
         .with_bundled_ids(
             lns_policy::connectors::bundled_connectors()
                 .iter()
@@ -569,8 +575,8 @@ pub(super) async fn start(
     let connectable_ids = run.connectable_ids;
     // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
     let grants_path = default_workload_grants_path();
-    let grant_store = JsonFileGrantStore::new(grants_path.clone());
-    let grants = load_grants_or_warn(&grant_store, &grants_path);
+    let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
+    let grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
     let project = project_key(policy_path);
     let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
     // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
@@ -642,6 +648,7 @@ pub(super) async fn start(
             project,
             workload,
             grants,
+            grant_store,
         },
         connectable_routes,
         OauthWiring {
