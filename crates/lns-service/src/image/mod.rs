@@ -243,6 +243,7 @@ pub struct PulledArtifact {
     pub reference: Reference,
     pub digest: String,
     pub base_image: String,
+    pub tools: Vec<String>,
 }
 
 pub(crate) async fn pull_sandbox_with<R: Registry>(
@@ -271,6 +272,7 @@ pub(crate) async fn pull_sandbox_with<R: Registry>(
         reference,
         digest: manifest_digest,
         base_image: def.spec.image,
+        tools: def.spec.tools,
     })
 }
 
