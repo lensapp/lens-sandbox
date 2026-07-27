@@ -71,6 +71,7 @@ The `spec` fields:
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
+| `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
 
 Check the definition offline — no network, no service — with `validate` and a
 target-less `lns inspect`:
@@ -425,6 +426,46 @@ spec:
 The trust model is pinning plus disclosure: a published sandbox whose fileset
 ref is not digest-pinned is refused, and what a sandbox ships is always
 visible in `lns inspect` before anything runs.
+
+### Tools — declared toolchains
+
+`spec.tools` names the developer tools the workload needs, without baking them
+into the base image or reinstalling them over the network on every cold start:
+
+```yaml
+spec:
+  image: docker.io/library/debian:bookworm-slim
+  tools:
+    - node@22
+    - python@3.12
+```
+
+- Each entry is a portable `name@version`. A version is required — `node@22`
+  pins a major line, `node@latest` says so explicitly, and a bare `node` is a
+  validation error. Engine syntax (`aqua:`, `ubi:`, `npm:` prefixes) never
+  appears in a definition.
+- `lns sandbox validate` checks the shape offline; the version resolves when
+  the tools are provisioned.
+- The service provisions declared tools **before the microVM boots** and caches
+  them per machine: the first run of a tool set downloads it, and every later
+  run — including rebuilt microVMs — reuses the cache without touching the
+  network. Acquisition is a system fetch with the same trust shape as pulling
+  `spec.image`: declaring the tool is the consent, so it needs no approval card
+  and no policy route. What the tools *do* at runtime (npm, pip, go traffic)
+  stays inside the normal policy cage.
+- Tools land read-only on the workload's `PATH`, ahead of the base image's own
+  copies. The workload can't rewrite them, and nothing tool-related persists in
+  the workload's writable layer — the per-machine tool cache is a host-side
+  input, not guest state.
+- Declared tools are always disclosed: `lns inspect` lists each entry, and the
+  run summary shows them at launch. Provisioning is recorded in the run's
+  [audit chain](audit.md).
+
+Tools stack on top of `spec.image` — the image stays required and still decides
+the OS userland; matching builds are selected for its libc flavor (musl or
+glibc). A tool with no build for the image's flavor refuses the launch with
+both remedies: switch to a glibc base image, or bring the runtime via
+`spec.image` as before.
 
 ### Host bind mounts
 

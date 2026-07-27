@@ -95,6 +95,7 @@ pub(crate) fn project_inspection(
                             required: credential.required,
                         })
                         .collect(),
+                    tools: def.spec.tools,
                     policy_flags: resolved
                         .policy
                         .as_ref()
@@ -237,6 +238,7 @@ mod tests {
                 connectors: vec![],
                 env: vec![],
                 credentials: vec![],
+                tools: vec![],
                 policy_flags: vec![
                     "permissive defaultVerdict: allow — the sandbox is open by default".into()
                 ],
@@ -267,8 +269,24 @@ mod tests {
                     env: "SOME_TOKEN".into(),
                     required: true,
                 }],
+                tools: vec![],
                 policy_flags: vec![],
             }))
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_its_declared_tools() {
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","tools":["node@22.11.0","python@3.12.6"]}}"#;
+
+        let inspection = project_sandbox(config).unwrap();
+
+        let ArtifactInspection::Sandbox(view) = inspection else {
+            panic!("expected a sandbox inspection");
+        };
+        assert_eq!(
+            view.tools,
+            vec!["node@22.11.0".to_string(), "python@3.12.6".to_string()]
         );
     }
 
@@ -291,6 +309,7 @@ mod tests {
                 connectors: vec![],
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
                 credentials: vec![],
+                tools: vec![],
                 policy_flags: vec![],
             }))
         );

@@ -84,6 +84,9 @@ pub fn format_summary(
     for (source, mount, owner) in &args.filesets {
         writeln!(s, "  Fileset:   {source} -> {mount} (owner: {owner})").unwrap();
     }
+    if !args.tools.is_empty() {
+        writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
+    }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
@@ -322,6 +325,7 @@ mod tests {
             publish_declared: false,
             declared_unpublished: Vec::new(),
             filesets: Vec::new(),
+            tools: Vec::new(),
             mounts: Vec::new(),
             assume_yes: false,
             quiet: false,
@@ -421,6 +425,7 @@ mod tests {
             connectors: Vec::new(),
             env: Vec::new(),
             credentials: Vec::new(),
+            tools: Vec::new(),
             policy_flags: Vec::new(),
         };
 
@@ -442,6 +447,24 @@ mod tests {
             format!("reg/skills@sha256:{}é…", "a".repeat(11)),
             "a crafted pulled fileset digest must truncate by chars, never panic on a byte boundary"
         );
+    }
+
+    #[test]
+    fn tools_line_lists_declared_tools_and_is_absent_without_them() {
+        let mut args = run_args(Some("prism"));
+        args.tools = vec!["node@22.11.0".into(), "python@3.12.6".into()];
+        let s = format_summary(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Tools:     node@22.11.0, python@3.12.6"),
+            "got: {s}"
+        );
+        let none = summary_with_publish(Vec::new());
+        assert!(!none.contains("Tools:"), "got: {none}");
     }
 
     #[test]
