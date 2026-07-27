@@ -3396,6 +3396,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_oauth_cancelled_records_no_approval() {
+        let (s, n, _store, _rx, _c) = oauth_fixture(FakeFlow::polling(vec![]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        n.cancel_next_sign_in();
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+
+        s.connect_oauth("c1").await;
+
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "cancelling a sign-in is not a refusal, so the audit chain must not record one"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_expired_records_no_approval() {
+        let (s, _n, _store, _rx, _c) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Expired]));
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+
+        s.connect_oauth("c1").await;
+
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "an expired device code is a failure, not the developer refusing the credential"
+        );
+    }
+
+    #[tokio::test]
     async fn connect_oauth_resolves_the_account_through_the_userinfo_fetcher() {
         struct FakeUserInfo;
         impl crate::oauth::UserInfoFetcher for FakeUserInfo {
