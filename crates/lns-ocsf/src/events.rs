@@ -306,6 +306,41 @@ pub fn run_env(ctx: &Context, env: &Map<String, Value>) -> Value {
     .build()
 }
 
+pub fn tool_provision(
+    ctx: &Context,
+    tool: &str,
+    requested: &str,
+    resolved: &str,
+    source_host: &str,
+    backend: &str,
+) -> Value {
+    Event::new(
+        "tool",
+        class::FILE_ACTIVITY,
+        category::SYSTEM,
+        activity::FILE_MOUNT,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("provisioned {requested} → {resolved} from {source_host}").into(),
+    )
+    .set(
+        "file",
+        json!({"name": format!("/.lens/tools/{tool}/{resolved}"), "type_id": file_type::FOLDER}),
+    )
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_tool", tool.into())
+    .note("lns_requested", requested.into())
+    .note("lns_resolved", resolved.into())
+    .note("lns_source", source_host.into())
+    .note("lns_backend", backend.into())
+    .build()
+}
+
 pub fn volume_mount(ctx: &Context, name: &str, target: &str) -> Value {
     Event::new(
         "volume",
@@ -448,6 +483,30 @@ mod tests {
         assert!(ev["unmapped"].get("lns_account").is_none());
         assert!(ev["unmapped"].get("lns_scopes").is_none());
         assert!(ev["unmapped"].get("lns_expires").is_none());
+    }
+
+    #[test]
+    fn tool_provision_discloses_what_was_fetched_from_where_and_the_resolution() {
+        let ev = tool_provision(
+            &ctx(),
+            "node",
+            "node@22",
+            "22.11.0",
+            "nodejs.org",
+            "core:node",
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(
+            ev["message"],
+            "provisioned node@22 → 22.11.0 from nodejs.org"
+        );
+        assert_eq!(ev["file"]["name"], "/.lens/tools/node/22.11.0");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
+        assert_eq!(ev["unmapped"]["lns_tool"], "node");
+        assert_eq!(ev["unmapped"]["lns_requested"], "node@22");
+        assert_eq!(ev["unmapped"]["lns_resolved"], "22.11.0");
+        assert_eq!(ev["unmapped"]["lns_source"], "nodejs.org");
+        assert_eq!(ev["unmapped"]["lns_backend"], "core:node");
     }
 
     #[test]

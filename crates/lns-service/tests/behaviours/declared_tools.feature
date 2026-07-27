@@ -36,7 +36,6 @@ Feature: declared developer tools are provisioned once per machine, outside work
     Then the resolved exact version is recorded on this machine
     And later runs here use the recorded version even after upstream releases a newer 22.x
 
-  @todo
   Scenario: Tool provisioning is audited
     When tools are provisioned for a run
     Then the audit chain records what was fetched, from where, and its resolved version
