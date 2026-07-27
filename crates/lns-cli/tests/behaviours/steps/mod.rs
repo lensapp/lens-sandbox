@@ -5,6 +5,7 @@ pub mod connector_grants;
 pub mod declarative_filesets;
 pub mod declarative_ports;
 pub mod declarative_run;
+pub mod declared_tools;
 pub mod definition_selection;
 pub mod env_file;
 pub mod host_bind;
