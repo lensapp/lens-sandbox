@@ -95,6 +95,14 @@ Feature: distributing a sandbox
     And only the sandbox artifact is pushed
     And the published sandbox config carries the inline content unchanged
 
+  @todo
+  Scenario: Publishing pins resolved tool versions
+    Given a lns.yaml declaring tools ["node@22"]
+    And the version index resolves "node@22" to "22.11.0"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/acme/agent:1.0.0"
+    Then the published artifact carries the exact resolved versions
+
   Scenario: pull hands the reference to the service and reports the digest
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
     When the user runs sandbox command "pull ghcr.io/team/hermes:1.4.0"

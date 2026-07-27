@@ -31,6 +31,7 @@ spec:
       target: /workspace
   filesets: []
   ports: []
+  tools: []
 ";
 
 /// A minimal filesystem seam so the author verbs are host-tested with an in-memory fake; `RealFs` in `real.rs` is the std::fs leaf.

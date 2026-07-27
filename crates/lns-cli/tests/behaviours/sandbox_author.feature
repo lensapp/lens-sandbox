@@ -20,6 +20,7 @@ Feature: authoring a sandbox
     And the file "lns.yaml" contains "credentials:"
     And the file "lns.yaml" contains "filesets:"
     And the file "lns.yaml" contains "ports:"
+    And the file "lns.yaml" contains "tools: []"
 
   Scenario: the scaffolded definition is valid as written
     Given the current directory has no lns.yaml
