@@ -77,7 +77,9 @@ A grant is scoped to the project, the workload, and the connector, and it
 records the environment variable and injection domains the card disclosed to
 you. If the connector is later redefined to use a different variable or
 different domains, the grant no longer matches and you are asked again rather
-than the new shape inheriting the old approval.
+than the new shape inheriting the old approval. That holds for a decline as
+well as an approval — a redefined connector is a different question, so a
+standing no does not carry over to it either.
 
 Grants live in `~/.lns-workload-grants.json` — per-machine, alongside the
 credential values and equally outside anything you commit. Declining a card is
