@@ -284,9 +284,11 @@ lns policy remove <PATTERN>
 Manage the credential-connector catalog — the services whose credentials reach a
 workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
 declared in a sandbox definition's `spec.connectors` seeds its placeholder env
-var but is only offered — the workload is prompted to connect it on first use,
-never armed automatically; connecting one (here or reactively) arms it and
-records it under `connectors:` in that directory's `lns-policy.yaml`.
+var but is only offered — the workload is prompted on first use, never armed
+automatically. Connecting one records it under `connectors:` in that
+directory's `lns-policy.yaml` and binds its value on your machine; the workload
+still meets a first-use card, and answering it is what grants that workload the
+value.
 
 ```bash
 lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
@@ -294,6 +296,8 @@ lns connector list
 lns connector remove <ID>
 lns connector connect <ID> [--policy <PATH>]
 lns connector disconnect <ID> [--policy <PATH>]
+lns connector grants [--policy <PATH>] [--all]
+lns connector revoke <ID> [--policy <PATH>]
 ```
 
 | Subcommand   | Meaning                                                                       |
@@ -302,12 +306,15 @@ lns connector disconnect <ID> [--policy <PATH>]
 | `list`       | List the bundled and user-declared connectors and their auth kind.          |
 | `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
 | `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
-| `disconnect` | Disconnect a connector from this directory's policy.                       |
+| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. |
+| `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
+| `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
 name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
-connected connector are made interactively in the approval window — see
+connected connector are made interactively in the approval window; grants are
+recorded per project and workload in `~/.lns-workload-grants.json`. See
 [Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`
