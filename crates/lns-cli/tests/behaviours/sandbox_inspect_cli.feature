@@ -61,6 +61,13 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "defaultVerdict: allow"
 
+  @todo
+  Scenario: A pulled sandbox's tools are disclosed before anything runs
+    Given a published sandbox declaring tools
+    When I run "lns inspect" on its reference
+    Then each declared tool and its pinned version is listed
+    And the run summary discloses them at launch
+
   Scenario: inspecting names the host that needs a login
     Given the service reports "inspect" needs a login for host "other-registry.example.test"
     When the user runs "lns inspect some-registry.example/some-sandbox:research"
