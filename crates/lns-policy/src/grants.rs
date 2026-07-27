@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 pub enum WorkloadIdentity {
     Definition { dir: String },
     Reference { repo: String, digest: String },
-    Adhoc,
 }
 
 impl WorkloadIdentity {
@@ -20,7 +19,6 @@ impl WorkloadIdentity {
         match self {
             WorkloadIdentity::Definition { dir } => format!("def:{dir}"),
             WorkloadIdentity::Reference { repo, digest } => format!("ref:{repo}@{digest}"),
-            WorkloadIdentity::Adhoc => "adhoc".to_string(),
         }
     }
 }
@@ -312,11 +310,6 @@ mod tests {
             reference("ghcr.io/acme/agent", "sha256:abc").key(),
             "ref:ghcr.io/acme/agent@sha256:abc"
         );
-    }
-
-    #[test]
-    fn adhoc_identity_has_a_stable_key() {
-        assert_eq!(WorkloadIdentity::Adhoc.key(), "adhoc");
     }
 
     #[test]
