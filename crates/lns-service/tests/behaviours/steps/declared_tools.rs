@@ -62,6 +62,56 @@ fn lns_yaml_declaring_tools(w: &mut BehaviourWorld, entries: String) {
     rig.definition = Some(definition_with_tools(&entries));
 }
 
+#[given(
+    regex = r#"^a lns\.yaml declaring tools \[(.*)\] with defaultVerdict ask and no allowedRoutes$"#
+)]
+fn lns_yaml_with_tools_and_ask_policy(w: &mut BehaviourWorld, entries: String) {
+    let tools: Vec<String> = entries
+        .split(',')
+        .map(|entry| format!("{:?}", entry.trim().trim_matches('"')))
+        .collect();
+    let rig = w.tools.get_or_insert_with(Default::default);
+    rig.definition = Some(format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"defaultVerdict":"ask","allowedRoutes":[]}},"tools":[{}]}}}}"#,
+        tools.join(",")
+    ));
+}
+
+#[then("the tools are provisioned without any approval card")]
+fn provisioned_without_card(w: &mut BehaviourWorld) -> Result<(), String> {
+    if let Some(approval) = &w.approval
+        && !approval.notifier.presented.lock().unwrap().is_empty()
+    {
+        return Err("an approval card was presented".into());
+    }
+    let rig = w.tools.as_ref().ok_or("no launch happened")?;
+    if let Some(error) = &rig.error {
+        return Err(format!("the launch failed: {error}"));
+    }
+    let ensured = rig.ensured.as_ref().ok_or("no tools were composed")?;
+    if ensured.provisioned.is_empty() {
+        return Err("nothing was provisioned".into());
+    }
+    Ok(())
+}
+
+#[then("the workload's own network requests still ask as usual")]
+fn workload_requests_still_ask(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.tools.as_ref().ok_or("no launch happened")?;
+    let definition = rig.definition.as_ref().ok_or("no definition staged")?;
+    let def = lns_artifact::sandbox::parse(definition.as_bytes()).map_err(|e| format!("{e:#}"))?;
+    if def.spec.policy.default_verdict != lns_policy::Verdict::Ask {
+        return Err(format!(
+            "expected the running policy to keep asking, got {:?}",
+            def.spec.policy.default_verdict
+        ));
+    }
+    if !def.spec.policy.allowed_routes.is_empty() {
+        return Err("provisioning must not open a route".into());
+    }
+    Ok(())
+}
+
 #[given(regex = r#"^tools \[(.*)\] were provisioned by an earlier run on this machine$"#)]
 async fn tools_provisioned_earlier(w: &mut BehaviourWorld, entries: String) {
     let rig = w.tools.get_or_insert_with(Default::default);

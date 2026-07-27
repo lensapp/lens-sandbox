@@ -35,6 +35,8 @@ pub struct E2eWorld {
     /// Path filesets the project declares, as (directory, file inside it, mountPath).
     pub project_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_inline_filesets: Vec<(String, String, String, Option<String>)>,
+    pub project_tools: Vec<String>,
+    pub project_image: Option<String>,
 }
 
 impl E2eWorld {

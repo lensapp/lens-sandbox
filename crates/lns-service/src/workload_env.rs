@@ -61,15 +61,32 @@ pub fn compose_workload_env(
     }
 }
 
+const GUEST_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 pub fn run_workload_env(
     image_env: Option<&[String]>,
     user_env: &[String],
     agent_command: Option<&str>,
     workdir: Option<&str>,
     extra_managed: &[String],
+    tool_bin_paths: &[String],
 ) -> WorkloadEnv {
     const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
+    if !tool_bin_paths.is_empty() {
+        // Declared tools win over the image's copies, so the tool dirs prepend whatever PATH the image (or -e) composed; the broker's last-wins putenv would otherwise let the image PATH shadow them.
+        let existing = composed
+            .env
+            .iter()
+            .find_map(|kv| kv.strip_prefix("PATH="))
+            .unwrap_or(GUEST_DEFAULT_PATH)
+            .to_string();
+        let value = format!("PATH={}:{existing}", tool_bin_paths.join(":"));
+        match composed.env.iter_mut().find(|kv| kv.starts_with("PATH=")) {
+            Some(slot) => *slot = value,
+            None => composed.env.push(value),
+        }
+    }
     if let Some(agent_command) = agent_command {
         // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
@@ -183,13 +200,13 @@ mod tests {
 
     #[test]
     fn run_workload_env_carries_user_env_for_an_unsupervised_run() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[], &[]);
         assert_eq!(c.env, ["FOO=bar"], "user -e must reach a policy-less run");
     }
 
     #[test]
     fn run_workload_env_adds_no_supervisor_vars_when_unsupervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[], &[]);
         assert!(
             !c.env
                 .iter()
@@ -201,7 +218,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_appends_agent_command_and_term_when_supervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], Some("echo hi"), None, &[]);
+        let c = run_workload_env(None, &["FOO=bar".into()], Some("echo hi"), None, &[], &[]);
         assert!(c.env.contains(&"FOO=bar".to_string()), "got: {:?}", c.env);
         assert!(c.env.contains(&"AGENT_COMMAND=echo hi".to_string()));
         assert!(c.env.contains(&"TERM=xterm-256color".to_string()));
@@ -209,7 +226,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_keeps_supervisor_term_after_a_user_term_so_it_cannot_be_clobbered() {
-        let c = run_workload_env(None, &["TERM=dumb".into()], Some("sh"), None, &[]);
+        let c = run_workload_env(None, &["TERM=dumb".into()], Some("sh"), None, &[], &[]);
         let last_term = c.env.iter().rposition(|e| e.starts_with("TERM=")).unwrap();
         assert_eq!(c.env[last_term], "TERM=xterm-256color");
     }
@@ -222,6 +239,7 @@ mod tests {
             None,
             None,
             &["SOME_TOKEN".to_string()],
+            &[],
         );
         assert_eq!(c.refused, ["SOME_TOKEN"]);
         assert!(c.env.is_empty());
@@ -235,6 +253,7 @@ mod tests {
             None,
             None,
             &["GITLAB_TOKEN".to_string()],
+            &[],
         );
         assert_eq!(c.refused, ["GITLAB_TOKEN"]);
         assert!(c.env.is_empty());
@@ -242,7 +261,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_pins_workspace_path_for_a_supervised_run() {
-        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &[]);
+        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &[], &[]);
         assert!(
             c.env.contains(&"WORKSPACE_PATH=/app".to_string()),
             "got: {:?}",
@@ -252,7 +271,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_omits_workspace_path_without_a_workdir() {
-        let c = run_workload_env(None, &[], Some("sh"), None, &[]);
+        let c = run_workload_env(None, &[], Some("sh"), None, &[], &[]);
         assert!(
             !c.env.iter().any(|e| e.starts_with("WORKSPACE_PATH=")),
             "got: {:?}",
@@ -267,6 +286,7 @@ mod tests {
             &["WORKSPACE_PATH=/evil".into()],
             Some("sh"),
             Some("/app"),
+            &[],
             &[],
         );
         let last = c
@@ -283,12 +303,55 @@ mod tests {
 
     #[test]
     fn run_workload_env_adds_no_workspace_path_when_unsupervised() {
-        let c = run_workload_env(None, &[], None, Some("/app"), &[]);
+        let c = run_workload_env(None, &[], None, Some("/app"), &[], &[]);
         assert!(
             c.env.is_empty(),
             "an unsupervised run's cwd travels via the session, not env: {:?}",
             c.env
         );
+    }
+
+    #[test]
+    fn tool_bin_paths_prepend_and_beat_the_image_path() {
+        let c = run_workload_env(
+            Some(&["PATH=/usr/bin".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &["/.lens/tools/some-tool/1.2.3/bin".into()],
+        );
+        assert_eq!(c.env, ["PATH=/.lens/tools/some-tool/1.2.3/bin:/usr/bin"]);
+    }
+
+    #[test]
+    fn tool_bin_paths_extend_the_guest_default_when_the_image_sets_no_path() {
+        let c = run_workload_env(None, &[], None, None, &[], &["/t/bin".into()]);
+        assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
+    }
+
+    #[test]
+    fn tool_bin_paths_keep_declaration_order_and_precede_the_supervisor_appends() {
+        let c = run_workload_env(
+            None,
+            &[],
+            Some("sh"),
+            None,
+            &[],
+            &["/t/a/bin".into(), "/t/b".into()],
+        );
+        let path = c.env.iter().position(|e| e.starts_with("PATH=")).unwrap();
+        assert!(
+            c.env[path].starts_with("PATH=/t/a/bin:/t/b:"),
+            "got: {:?}",
+            c.env
+        );
+        let agent = c
+            .env
+            .iter()
+            .position(|e| e.starts_with("AGENT_COMMAND="))
+            .unwrap();
+        assert!(path < agent, "PATH must precede the last-wins appends");
     }
 
     #[test]
