@@ -1,0 +1,68 @@
+# Pins the tool-provisioning engine (mise) and everything the disposable
+# provisioner guest needs. Users never see or choose these; bump via the
+# bump-mise CLI, which verifies upstream's SHASUMS256.txt + minisign signature
+# and regenerates src/tools/registry.snapshot from the release's registry/.
+
+[engine]
+version = "2026.7.14"
+
+# sha256 of the bare `mise-v<version>-linux-<arch>-musl` release binary — the
+# static musl build runs dependency-free on both musl and glibc guests.
+[engine.sha256]
+aarch64 = "d425bdcad22eacf39081e8762a4a32fba5e32c8fd1c227a73e878f7dbd1fb8bb"
+x86_64 = "255506718855e217311886eea44a46d1d213308a55fb37ba664d588889fefefe"
+
+# Provisioner guest base images, one per libc flavor, pinned by index digest.
+# The rootfs flavor always matches the flavor being provisioned: node/bun/deno
+# execute the installed tool as a post-install check.
+[provisioner_rootfs]
+gnu = "docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818"
+musl = "docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+
+# Static curl for the rust backend: rustup's bootstrap hard-requires curl or
+# wget with TLS, and busybox wget is not enough.
+[static_curl]
+version = "8.11.0"
+
+[static_curl.sha256]
+aarch64 = "1b050abd1669f9a2ac29b34eb022cdeafb271dce5a4fb57d8ef8fadff6d7be1f"
+x86_64 = "d18aa1f4e03b50b649491ca2c401cd8c5e89e72be91ff758952ad2ab5a83135d"
+
+# Alpine v3.20 main apks. ca-certificates-bundle supplies the CA store at the
+# canonical /etc/ssl/certs path every slim image lacks (mise ignores
+# SSL_CERT_FILE); the rest are the musl companions node/bun need at run time
+# (libstdc++/libgcc) and npm's wrapper script needs (bash + its libs).
+[[companion]]
+name = "ca-certificates-bundle"
+version = "20260413-r0"
+sha256 = { aarch64 = "52974163f51f4292491578a709b505e0c1ab095ced5eb9398e9303a0aa476cf7", x86_64 = "05965b5144feb571c15d075797a48b19c37f8d06296c639f812569836545f402" }
+
+[[companion]]
+name = "libstdc++"
+version = "13.2.1_git20240309-r1"
+sha256 = { aarch64 = "ee68ab3af02350f2135b6c0de393a55be88fbb20171e6182cdda6517c38b60a0", x86_64 = "af0fe894ef5051116e321bf4753a10fffa85abc2b71f30b2e949467775421ace" }
+
+[[companion]]
+name = "libgcc"
+version = "13.2.1_git20240309-r1"
+sha256 = { aarch64 = "0d6aabf922c91c8bfc62cf625366a6669d67048c3a4fef2318a1246f152de2c0", x86_64 = "f348d99e10b5267566afe6f80861661b08cb5aa43a6d4d1c8f1792b5001d0995" }
+
+[[companion]]
+name = "bash"
+version = "5.2.26-r0"
+sha256 = { aarch64 = "081b0a361203d37732fdc65412c9bb2d5944e7dc198c76d23b4cb30743d8c461", x86_64 = "132bb6f77fcad208b44b54d1fd73cb5e02cfea18f884b399f8de0e38b5134a93" }
+
+[[companion]]
+name = "readline"
+version = "8.2.10-r0"
+sha256 = { aarch64 = "9e69da5ea8ff8c0bdde1ffa272ec4287684eebda8fdfe0f4a45d842d0ff787e6", x86_64 = "177b9c76718d0a12cd1c27f2a3e422341ad93259ad56d77f55da712563049aed" }
+
+[[companion]]
+name = "ncurses-terminfo-base"
+version = "6.4_p20240420-r2"
+sha256 = { aarch64 = "82141d0035a58317791e139a0b68c0837c98c0836bc0bafb10bb16adf0bcc7bd", x86_64 = "555948e6b67d4bddc213673843a63bbd3d30548133bdff8aff9e66988285ae7e" }
+
+[[companion]]
+name = "libncursesw"
+version = "6.4_p20240420-r2"
+sha256 = { aarch64 = "0def98cbfab5e85e4ddfacd85840d79039f60a7e9a7717294ffa68a9c63370d8", x86_64 = "db40dff96b7bb668257e45a5d14cab346bdfc7992598d5c51ee64dfc4ad014d5" }
