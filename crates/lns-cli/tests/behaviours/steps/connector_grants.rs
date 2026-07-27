@@ -88,6 +88,23 @@ fn workload_denied(world: &mut BehaviourWorld, workload: String, id: String) {
     );
 }
 
+#[given("the grant sidecar cannot be updated")]
+fn grant_sidecar_unwritable(world: &mut BehaviourWorld) {
+    let lock = cwd(world).join(".lns-workload-grants.json.lock");
+    std::fs::create_dir(&lock).expect("occupy the lock path");
+}
+
+#[then(regex = r#"^this project still connects "([^"]+)"$"#)]
+fn project_still_connects(world: &mut BehaviourWorld, id: String) {
+    let path = cwd(world).join("lns-policy.yaml");
+    let policy = Policy::load_or_default(&path).expect("load policy");
+    assert!(
+        policy.connectors.contains(&id),
+        "a disconnect that could not forget the grants must not have dropped {id} from the policy, got: {:?}",
+        policy.connectors
+    );
+}
+
 #[given(regex = r#"^the project "([^"]+)" granted "([^"]+)"$"#)]
 fn other_project_granted(world: &mut BehaviourWorld, project: String, id: String) {
     seed(

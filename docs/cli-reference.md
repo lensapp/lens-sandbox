@@ -306,7 +306,7 @@ lns connector revoke <ID> [--policy <PATH>]
 | `list`       | List the bundled and user-declared connectors and their auth kind.          |
 | `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
 | `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
-| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. |
+| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
 | `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
 | `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
 

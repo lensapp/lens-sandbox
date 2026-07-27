@@ -59,3 +59,10 @@ Feature: inspecting and forgetting per-workload connector grants
     When the user runs connector command "disconnect some-provider"
     Then the output reports the grants it forgot
     And this project holds no grant for "some-provider"
+
+  Scenario: A disconnect that cannot forget the grants leaves the connector connected
+    Given the workload "def:/work/app" was granted "some-provider"
+    And the grant sidecar cannot be updated
+    When the user runs connector command "disconnect some-provider"
+    Then the exit code is 1
+    And this project still connects "some-provider"
