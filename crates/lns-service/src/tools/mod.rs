@@ -1,6 +1,8 @@
 pub mod cache;
 pub mod libc;
 pub mod mise;
+pub(crate) mod provisioner;
+pub mod real;
 pub mod record;
 pub mod registry;
 
@@ -555,12 +557,12 @@ mod tests {
         let cache = MemCache::default();
         struct Dropper;
         impl ToolProvisioner for Dropper {
-            fn provision(
+            async fn provision(
                 &self,
                 _requests: &[ToolRef],
                 _target: &ProvisionTarget,
-            ) -> impl Future<Output = Result<Vec<StagedTool>, ProvisionError>> + Send {
-                async { Ok(Vec::new()) }
+            ) -> Result<Vec<StagedTool>, ProvisionError> {
+                Ok(Vec::new())
             }
         }
         let err = ensure_tools(
