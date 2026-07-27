@@ -26,6 +26,7 @@ pub struct ResolvedSandbox {
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
     pub credentials: Vec<crate::artifact::spec::CredentialSlot>,
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub struct AssembledWorkload {
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
     pub credentials: Vec<crate::artifact::spec::CredentialSlot>,
+    pub tools: Vec<String>,
 }
 
 pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
@@ -55,5 +57,6 @@ pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
         resources: sandbox.resources.clone(),
         policy: sandbox.policy.clone(),
         credentials: sandbox.credentials.clone(),
+        tools: sandbox.tools.clone(),
     }
 }

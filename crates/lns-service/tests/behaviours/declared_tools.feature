@@ -27,7 +27,6 @@ Feature: declared developer tools are provisioned once per machine, outside work
     Then the launch is refused naming the tool and the cause
     And a later run retries from a clean state
 
-  @todo
   Scenario: A tool unknown to the registry refuses the launch
     Given a lns.yaml declaring tools ["definitely-not-a-tool@1"]
     When I run the sandbox

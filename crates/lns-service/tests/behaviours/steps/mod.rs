@@ -3,6 +3,7 @@ pub mod artifact_dispatch;
 pub mod credential_at_boot;
 pub mod credential_flow;
 pub mod declared_connectors;
+pub mod declared_tools;
 pub mod env_injection;
 pub mod forward;
 pub mod host_binds;
