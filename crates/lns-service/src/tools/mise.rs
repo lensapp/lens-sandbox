@@ -26,8 +26,8 @@ pub struct Engine {
 
 #[derive(Debug, Deserialize)]
 pub struct ProvisionerRootfs {
-    pub gnu: String,
-    pub musl: String,
+    pub gnu: BTreeMap<String, String>,
+    pub musl: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,11 +67,12 @@ impl Manifest {
         &self.engine.sha256[&arch.to_string()]
     }
 
-    pub fn rootfs_reference(&self, libc: Libc) -> &str {
-        match libc {
+    pub fn rootfs_reference(&self, libc: Libc, arch: Arch) -> &str {
+        let flavor = match libc {
             Libc::Gnu => &self.provisioner_rootfs.gnu,
             Libc::Musl => &self.provisioner_rootfs.musl,
-        }
+        };
+        &flavor[&arch.to_string()]
     }
 
     pub fn curl_url(&self, arch: Arch) -> String {
@@ -112,7 +113,7 @@ fn mise_release_arch(arch: Arch) -> &'static str {
     }
 }
 
-/// The fail-loud engine environment: on any fetch failure mise otherwise silently compiles from source, which cannot work on a bare guest and buries the real error; self-update and the version phone-home never belong in a pinned engine.
+/// The fail-loud engine environment: a missing precompiled archive otherwise silently falls back to compiling from source, which cannot work on a bare guest and buries the real error; `CI=1` is the switch mise's version phone-home checks before announcing updates, and every mise path is pinned under /tmp so nothing depends on the guest's HOME layout.
 pub fn provision_env() -> Vec<(String, String)> {
     [
         ("MISE_PYTHON_COMPILE", "0"),
@@ -120,11 +121,12 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("MISE_YES", "1"),
         ("MISE_PARANOID", "0"),
         ("MISE_DISABLE_BACKENDS", "asdf,vfox"),
-        ("MISE_CHECK_FOR_NEW_VERSIONS", "never"),
-        ("MISE_SELF_UPDATE_DISABLED", "1"),
+        ("CI", "1"),
+        ("HOME", "/tmp/mise/home"),
         ("MISE_DATA_DIR", "/tmp/mise/data"),
         ("MISE_CACHE_DIR", "/tmp/mise/cache"),
         ("MISE_STATE_DIR", "/tmp/mise/state"),
+        ("MISE_CONFIG_DIR", "/tmp/mise/config"),
         ("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"),
     ]
     .into_iter()
@@ -152,8 +154,10 @@ mod tests {
                 assert!(is_sha(&companion.sha256[arch]), "{} {arch}", companion.name);
             }
         }
-        assert!(manifest.provisioner_rootfs.gnu.contains("@sha256:"));
-        assert!(manifest.provisioner_rootfs.musl.contains("@sha256:"));
+        for arch in ["aarch64", "x86_64"] {
+            assert!(manifest.provisioner_rootfs.gnu[arch].contains("@sha256:"));
+            assert!(manifest.provisioner_rootfs.musl[arch].contains("@sha256:"));
+        }
     }
 
     #[test]
@@ -206,17 +210,19 @@ mod tests {
     }
 
     #[test]
-    fn the_rootfs_flavors_map_musl_to_alpine_and_gnu_to_debian() {
-        assert!(
-            manifest()
-                .rootfs_reference(Libc::Musl)
-                .starts_with("docker.io/library/alpine@sha256:")
-        );
-        assert!(
-            manifest()
-                .rootfs_reference(Libc::Gnu)
-                .starts_with("docker.io/library/debian@sha256:")
-        );
+    fn the_rootfs_flavors_map_musl_to_alpine_and_gnu_to_debian_per_arch() {
+        for arch in [Arch::Aarch64, Arch::X86_64] {
+            assert!(
+                manifest()
+                    .rootfs_reference(Libc::Musl, arch)
+                    .starts_with("docker.io/library/alpine@sha256:")
+            );
+            assert!(
+                manifest()
+                    .rootfs_reference(Libc::Gnu, arch)
+                    .starts_with("docker.io/library/debian@sha256:")
+            );
+        }
     }
 
     #[test]
@@ -231,7 +237,8 @@ mod tests {
         assert_eq!(get("MISE_PYTHON_COMPILE"), "0");
         assert_eq!(get("MISE_NODE_COMPILE"), "0");
         assert_eq!(get("MISE_DISABLE_BACKENDS"), "asdf,vfox");
-        assert_eq!(get("MISE_CHECK_FOR_NEW_VERSIONS"), "never");
+        assert_eq!(get("CI"), "1");
+        assert_eq!(get("HOME"), "/tmp/mise/home");
         assert_eq!(get("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt");
     }
 
