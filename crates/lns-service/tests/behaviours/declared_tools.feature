@@ -7,7 +7,6 @@ Feature: declared developer tools are provisioned once per machine, outside work
   reused without network; the workload receives them read-only, and its
   own traffic stays inside the normal policy cage.
 
-  @todo
   Scenario: Tool acquisition needs no policy route and raises no approval
     Given a lns.yaml declaring tools ["node@22"] with defaultVerdict ask and no allowedRoutes
     When I run the sandbox for the first time
