@@ -117,6 +117,12 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n    - {id}"));
         }
     }
+    if !world.project_tools.is_empty() {
+        spec_tail.push_str("\n  tools:");
+        for tool in &world.project_tools {
+            spec_tail.push_str(&format!("\n    - {tool}"));
+        }
+    }
     if !world.project_credentials.is_empty() {
         spec_tail.push_str("\n  credentials:");
         for (name, env, required) in &world.project_credentials {
@@ -164,7 +170,10 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
-        pinned_microvm_image()
+        world
+            .project_image
+            .clone()
+            .unwrap_or_else(pinned_microvm_image)
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
@@ -752,6 +761,125 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
         run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
+}
+
+const NODE20_IMAGE: &str = "public.ecr.aws/docker/library/node:20-bookworm-slim";
+
+fn parse_tools_list(entries: &str) -> Vec<String> {
+    entries
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+#[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over a base image that ships no node$"#)]
+fn tools_over_toolless_base(world: &mut E2eWorld, entries: String) {
+    world.project_tools = parse_tools_list(&entries);
+}
+
+#[given(regex = r#"^a base image that ships node 20 and a lns\.yaml declaring tools \[(.*)\]$"#)]
+fn tools_over_node20_base(world: &mut E2eWorld, entries: String) {
+    world.project_image = Some(NODE20_IMAGE.to_string());
+    world.project_tools = parse_tools_list(&entries);
+}
+
+#[when(regex = r#"^the sandbox runs "([^"]+)"$"#)]
+fn sandbox_runs_command(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec![], &cmd_line);
+}
+
+#[then("it prints a node 22 version")]
+fn prints_a_node_22_version(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "run failed:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    assert!(
+        result.stdout.contains("v22."),
+        "expected a node 22 version, got:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
+}
+
+static PUBLISHED_TOOLS_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[given("a published sandbox declaring pinned tools")]
+async fn published_sandbox_with_pinned_tools(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .get_or_insert_with(crate::registry::LocalRegistry::start)
+        .host();
+    let seq = PUBLISHED_TOOLS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = mirror_microvm_image(&host, 9000 + seq).await;
+    let reference = format!("{host}/e2e-tools-sandbox:{seq}");
+    let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - node@22\n"
+    );
+    std::fs::write(publisher.path().join("lns.yaml"), definition)
+        .expect("write published tools lns.yaml");
+    let pushed = run_cli_with_timeout_in_dir(
+        publisher.path(),
+        vec!["push".to_string(), reference.clone()],
+        std::iter::empty::<(&str, &str)>(),
+        MICROVM_RUN_TIMEOUT,
+    );
+    assert_eq!(
+        pushed.exit_code, 0,
+        "push tools sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    world.pushed_ref = Some(reference);
+}
+
+#[given(regex = r#"^I ran "lns pull" on its reference while online$"#)]
+fn pulled_tools_reference_online(world: &mut E2eWorld) {
+    let reference = world.pushed_ref.clone().expect("a published reference");
+    let pulled = world.run_with_service_env(&["pull", &reference]);
+    assert_eq!(
+        pulled.exit_code, 0,
+        "pull tools sandbox:\n{}\n{}",
+        pulled.stdout, pulled.stderr
+    );
+}
+
+#[when("I run the sandbox with no network available")]
+fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
+    world
+        .registry
+        .as_ref()
+        .expect("the local registry exists")
+        .set_online(false);
+    let reference = world.pushed_ref.clone().expect("a published reference");
+    let consumer = world
+        .project
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("consumer project tempdir"))
+        .path()
+        .to_path_buf();
+    std::fs::write(
+        consumer.join("lns-policy.yaml"),
+        "network:\n  defaultVerdict: deny\n",
+    )
+    .expect("write consumer policy");
+    let mut args = vec![
+        "run".to_string(),
+        "--yes".to_string(),
+        reference,
+        "--".to_string(),
+    ];
+    args.extend(split_args("node --version"));
+    let result =
+        run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
+#[then("it starts and the declared tools are available to the workload")]
+fn tools_available_offline(world: &mut E2eWorld) {
+    prints_a_node_22_version(world);
 }
 
 // `lns run` refuses a plain OCI image, so image-driven scenarios publish a minimal sandbox over it to the in-process registry and run that reference.

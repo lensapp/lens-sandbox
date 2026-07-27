@@ -64,6 +64,7 @@ pub(super) fn exec_env_strings(
     supervised: bool,
     extra_managed: &[String],
     workdir: Option<&str>,
+    tool_bin_paths: &[String],
 ) -> crate::workload_env::WorkloadEnv {
     let agent_command = supervised.then(|| match image_config {
         Some(cfg) => {
@@ -80,6 +81,7 @@ pub(super) fn exec_env_strings(
         agent_command.as_deref(),
         workdir,
         extra_managed,
+        tool_bin_paths,
     )
 }
 
@@ -302,6 +304,7 @@ mod tests {
             true,
             &[],
             None,
+            &[],
         );
         assert!(
             env.env.contains(&"AGENT_COMMAND=echo hi".to_string()),
@@ -323,6 +326,7 @@ mod tests {
             true,
             &[],
             None,
+            &[],
         );
         let agent = env
             .env
@@ -345,6 +349,7 @@ mod tests {
             false,
             &[],
             None,
+            &[],
         );
         assert_eq!(
             env.env,
@@ -383,7 +388,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), None, &[], &[], true, &[], None);
+        let env = exec_env_strings(Some(&cfg), None, &[], &[], true, &[], None, &[]);
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
@@ -406,6 +411,7 @@ mod tests {
             true,
             &[],
             None,
+            &[],
         );
         assert!(
             env.env.contains(&"PORT=4000".to_string()),

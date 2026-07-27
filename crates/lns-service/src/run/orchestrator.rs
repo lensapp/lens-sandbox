@@ -93,6 +93,14 @@ async fn orchestrate(
         crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
         gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
+    let tool_requests = match &sandbox_plan {
+        Some(plan) if !plan.workload.tools.is_empty() => {
+            let requests = lns_artifact::tools::parse_all(&plan.workload.tools)?;
+            crate::tools::registry::refuse_unknown_tools(&requests)?;
+            requests
+        }
+        _ => Vec::new(),
+    };
     let launch = sandbox_plan
         .as_ref()
         .map(|plan| super::sandbox_launch(&plan.workload, &args.cmd, &args.env));
@@ -216,17 +224,50 @@ async fn orchestrate(
         )?;
     }
 
+    let ensured_tools = if tool_requests.is_empty() {
+        None
+    } else {
+        let target = crate::tools::ProvisionTarget {
+            arch: crate::tools::host_arch(),
+            libc: crate::tools::libc::detect_libc(&image.bytes)?,
+        };
+        crate::tools::registry::refuse_libc_unsupported(
+            &tool_requests,
+            &target,
+            image_ref.as_deref().unwrap_or_default(),
+        )?;
+        let ensured = crate::tools::real::ensure_for_run(
+            &format!("{run_id}-tools"),
+            &content_store,
+            &tool_requests,
+            &target,
+        )
+        .await?;
+        for outcome in &ensured.provisioned {
+            crate::audit::record_tool_provisioned(
+                &run_id,
+                &microvm,
+                outcome,
+                &crate::oauth::RealClock,
+            )?;
+        }
+        Some(ensured)
+    };
+
     let imageless = args.image.is_none();
-    let fileset_specs: &[runtime_layer::RuntimeFileSpec] = sandbox_plan
+    let mut fileset_specs: Vec<runtime_layer::RuntimeFileSpec> = sandbox_plan
         .as_ref()
-        .map(|p| p.fileset_specs.as_slice())
+        .map(|p| p.fileset_specs.clone())
         .unwrap_or_default();
+    if let Some(ensured) = &ensured_tools {
+        fileset_specs.extend(ensured.specs.iter().cloned());
+    }
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
         &guest_tools,
         session.as_ref().map(|s| &s.assets),
-        fileset_specs,
+        &fileset_specs,
     )?;
 
     let layers = std::mem::take(&mut image.bytes);
@@ -357,6 +398,10 @@ async fn orchestrate(
             .map(|s| s.managed_env_vars.as_slice())
             .unwrap_or(&[]),
         workdir.as_deref(),
+        ensured_tools
+            .as_ref()
+            .map(|ensured| ensured.bin_paths.as_slice())
+            .unwrap_or_default(),
     );
     for refused in &composed.refused {
         let _ = frame_tx
