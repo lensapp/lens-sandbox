@@ -70,7 +70,13 @@ impl ToolManifest {
         let root = guest_root(&self.tool, &self.resolved);
         self.bin_paths
             .iter()
-            .map(|bin| format!("{root}/{bin}"))
+            .map(|bin| {
+                if bin.is_empty() || bin == "." {
+                    root.clone()
+                } else {
+                    format!("{root}/{bin}")
+                }
+            })
             .collect()
     }
 }

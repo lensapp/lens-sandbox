@@ -13,6 +13,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 mod real;
+pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 

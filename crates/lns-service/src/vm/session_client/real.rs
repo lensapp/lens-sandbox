@@ -84,13 +84,33 @@ pub async fn capture_session_output(
     connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
 ) -> Result<String> {
+    let (out, code) = capture_session_exec(
+        connector,
+        argv,
+        Vec::new(),
+        CAPTURE_TIMEOUT,
+        MAX_CAPTURE_BYTES,
+    )
+    .await?;
+    anyhow::ensure!(code == 0, "capture command exited with code {code}");
+    Ok(out)
+}
+
+/// Run argv in the guest and collect combined stdout with the exit code — the long-form capture the tool provisioner drives its install script through.
+pub async fn capture_session_exec(
+    connector: &dyn crate::vm::GuestTransport,
+    argv: Vec<String>,
+    env: Vec<String>,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> Result<(String, i32)> {
     let fd = connector
         .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(10))
         .await
         .context("opening capture vsock to broker")?;
     let params = SessionParams {
         argv,
-        env: Vec::new(),
+        env,
         cwd: None,
         hostname: None,
         tty: false,
@@ -104,17 +124,17 @@ pub async fn capture_session_output(
     let collect = async {
         let mut out: Vec<u8> = Vec::new();
         while let Some(frame) = frame_rx.recv().await {
-            if let WireFrame::Stdout(bytes) = frame {
+            if let WireFrame::Stdout(bytes) | WireFrame::Stderr(bytes) = frame {
                 anyhow::ensure!(
-                    out.len() + bytes.len() <= MAX_CAPTURE_BYTES,
-                    "capture output exceeded {MAX_CAPTURE_BYTES} bytes"
+                    out.len() + bytes.len() <= max_bytes,
+                    "capture output exceeded {max_bytes} bytes"
                 );
                 out.extend_from_slice(&bytes);
             }
         }
         Ok(out)
     };
-    let out = match tokio::time::timeout(CAPTURE_TIMEOUT, collect).await {
+    let out = match tokio::time::timeout(timeout, collect).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             session.abort();
@@ -122,13 +142,12 @@ pub async fn capture_session_output(
         }
         Err(_) => {
             session.abort();
-            anyhow::bail!("capture session timed out after {CAPTURE_TIMEOUT:?}");
+            anyhow::bail!("capture session timed out after {timeout:?}");
         }
     };
     drop(input_keepalive);
     let code = session.await.context("capture session task panicked")??;
-    anyhow::ensure!(code == 0, "capture command exited with code {code}");
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok((String::from_utf8_lossy(&out).into_owned(), code))
 }
 
 async fn pump_session_input(
