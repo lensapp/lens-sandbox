@@ -156,20 +156,21 @@ async fn credential_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        // A pasted token is an Allow(Stored) — it arms the slot directly via record_decision; only the browser-consent Allow drives the device sign-in.
-        let pasted_token = matches!(
+        // A pasted token is an Allow(Stored) and a grant of the token already bound is an AllowBound — both arm the slot directly via record_decision; only the browser-consent Allow drives a fresh device sign-in.
+        let needs_no_sign_in = matches!(
             delivery.request,
             crate::credential_flow::session::CredentialDecisionRequest::Allow(
                 crate::credential_flow::store::CredentialEntry::Stored { .. }
-            )
+            ) | crate::credential_flow::session::CredentialDecisionRequest::AllowBound
         );
         // Accepting an oauth prompt via the browser consent drives a device sign-in (async) instead of arming a static value.
         if session.is_oauth_prompt(&delivery.id)
             && matches!(
                 delivery.request,
                 crate::credential_flow::session::CredentialDecisionRequest::Allow(_)
+                    | crate::credential_flow::session::CredentialDecisionRequest::AllowBound
             )
-            && !pasted_token
+            && !needs_no_sign_in
         {
             session.connect_oauth(&delivery.id).await;
         } else {
@@ -1886,6 +1887,75 @@ mod tests {
             }
         }
         assert!(allowed, "the held request is released on the token paste");
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_grants_an_existing_oauth_token_without_signing_in_again() {
+        use crate::approval_flow::protocol::CredentialPending;
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        use std::collections::HashMap;
+        let (store, _dir) = tempfile_credential_store();
+        Box::leak(Box::new(_dir));
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let configs = HashMap::from([(
+            "acme".to_string(),
+            crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
+                client_id: "Iv1.acme".into(),
+                client_secret: String::new(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let bound = CredentialEntry::Oauth {
+            access_token: "already-signed-in".into(),
+            refresh_token: "some-refresh".into(),
+            expires_at: u64::MAX,
+            scopes: vec![],
+            account: None,
+        };
+        let mut state = CredentialStateFile::new();
+        state.insert("acme".to_string(), bound.clone());
+        let session = Arc::new(
+            CredentialSession::new(
+                state,
+                Arc::new(crate::credential_flow::notification::NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_oauth(configs, Arc::new(LoopFakeFlow), Arc::new(LoopClock)),
+        );
+        session.submit_pending(
+            CredentialPending {
+                id: "c1".into(),
+                credential_id: "acme".into(),
+                action: "use of acme placeholder".into(),
+                reason: "placeholder-unauthorized".into(),
+            },
+            std::time::Instant::now(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
+        tx.send(CredentialDecisionDelivery {
+            id: "c1".into(),
+            request: CredentialDecisionRequest::AllowBound,
+        })
+        .unwrap();
+        drop(tx);
+        credential_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert_eq!(
+            session.current_state().get("acme"),
+            Some(&bound),
+            "granting the existing sign-in must route to record_decision, not connect_oauth — a fresh device flow would replace a token that already works"
+        );
+        assert!(
+            session.armed_ids().contains("acme"),
+            "the grant arms the token already bound"
+        );
     }
 
     #[tokio::test]

@@ -171,6 +171,7 @@ fn seed_all() -> Snapshot {
                 credential_id: "openai".into(),
                 action: "use of openai placeholder".into(),
                 host_value_available: true,
+                bound_value_available: false,
                 oauth_display_name: None,
                 token_fallback: None,
                 env_var: Some("OPENAI_API_KEY".into()),
@@ -182,6 +183,7 @@ fn seed_all() -> Snapshot {
                 credential_id: "some-provider".into(),
                 action: "GET api.some-provider.example/settings".into(),
                 host_value_available: false,
+                bound_value_available: false,
                 oauth_display_name: None,
                 token_fallback: Some(TokenFallback {
                     help: Some("https://api.some-provider.example/tokens".into()),
@@ -196,6 +198,7 @@ fn seed_all() -> Snapshot {
                 credential_id: "github".into(),
                 action: "use of github placeholder".into(),
                 host_value_available: false,
+                bound_value_available: true,
                 oauth_display_name: Some("GitHub".into()),
                 token_fallback: Some(TokenFallback {
                     help: Some("https://github.com/settings/personal-access-tokens/new".into()),

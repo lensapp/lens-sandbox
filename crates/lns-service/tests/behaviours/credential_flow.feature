@@ -70,6 +70,15 @@ Feature: lns-service credential flow
     And a future request carrying the some-provider placeholder is exchanged silently using the stored value
     And "lns-policy.yaml" is unchanged
 
+  Scenario: A value already bound on this machine is granted without binding it again
+    Given a value for "some-provider" is bound on this machine but this workload holds no grant
+    When the workload sends a request carrying the some-provider placeholder
+    Then a credential card appears for "some-provider"
+    And the card offers to use the value already bound on this machine
+    When the developer picks "use the bound value"
+    Then the workload's request leaves the boundary with the bound value substituted for the placeholder
+    And "~/.lns-credentials.json" still holds the value it was bound with
+
   Scenario: Deny remembers a per-workload decline and stops re-prompting it
     Given a credential card for "some-provider" is visible
     When the developer picks "deny"
