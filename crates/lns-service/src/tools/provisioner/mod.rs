@@ -1,12 +1,13 @@
 pub(crate) mod real;
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 
-use super::{ProvisionError, ToolRef};
+use super::{Libc, ProvisionError, ProvisionTarget, StagedTar, StagedTool, ToolRef, mise};
+use crate::download::{Fetcher, Fs, PinnedArtifact, ensure_pinned};
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub const ENGINE_BIN: &str = "/.lens/tools-engine/bin/mise";
@@ -15,6 +16,7 @@ pub const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 pub const DRIVER: &str = "/.lens/tools-engine/provision.sh";
 pub const STAGING: &str = "/staging";
 
+#[derive(Debug)]
 pub(crate) struct EngineArtifacts {
     pub mise: PathBuf,
     pub curl: PathBuf,
@@ -137,6 +139,126 @@ fn output_tail(stdout: &str) -> String {
     lines[tail..].join(" | ")
 }
 
+/// Ensure the pinned engine, static curl, CA bundle, and (musl) companion apks are cached and expanded — every byte sha-verified against the injected manifest before it can reach a guest.
+pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
+    fetcher: &F,
+    fs: &S,
+    manifest: &mise::Manifest,
+    cache_dir: &Path,
+    target: &ProvisionTarget,
+) -> Result<EngineArtifacts> {
+    let arch = target.arch;
+    let root = cache_dir
+        .join("tools")
+        .join("companions")
+        .join(arch.to_string());
+    let mise_bin = ensure_pinned(
+        fetcher,
+        fs,
+        &root.join("mise").join(&manifest.engine.version),
+        &PinnedArtifact {
+            filename: "mise",
+            url: &manifest.engine_url(arch),
+            sha256: manifest.engine_sha256(arch),
+            mode: Some(0o755),
+            label: "mise engine",
+        },
+    )
+    .await?;
+    let curl_bin = ensure_pinned(
+        fetcher,
+        fs,
+        &root.join("curl").join(&manifest.static_curl.version),
+        &PinnedArtifact {
+            filename: "curl",
+            url: &manifest.curl_url(arch),
+            sha256: manifest.curl_sha256(arch),
+            mode: Some(0o755),
+            label: "static curl",
+        },
+    )
+    .await?;
+
+    let mut ca_pem = Vec::new();
+    let mut companion_specs = Vec::new();
+    for companion in &manifest.companion {
+        let is_ca = companion.name == "ca-certificates-bundle";
+        if !is_ca && target.libc != Libc::Musl {
+            continue;
+        }
+        let filename = format!("{}-{}.apk", companion.name, companion.version);
+        let apk_path = ensure_pinned(
+            fetcher,
+            fs,
+            &root.join("apks"),
+            &PinnedArtifact {
+                filename: &filename,
+                url: &mise::companion_url(companion, arch),
+                sha256: mise::companion_sha256(companion, arch),
+                mode: None,
+                label: &companion.name,
+            },
+        )
+        .await?;
+        let bytes = fs
+            .read(&apk_path)
+            .await
+            .with_context(|| format!("reading {}", apk_path.display()))?;
+        if is_ca {
+            ca_pem = ca_bundle_pem(&bytes)?;
+        } else {
+            companion_specs.extend(apk_runtime_specs(&bytes)?);
+        }
+    }
+    anyhow::ensure!(
+        !ca_pem.is_empty(),
+        "the pinned companion set carries no ca-certificates-bundle"
+    );
+    Ok(EngineArtifacts {
+        mise: mise_bin,
+        curl: curl_bin,
+        ca_bundle_pem: ca_pem,
+        companion_specs,
+    })
+}
+
+/// Marry the driver's results back to the requests, in declaration order, with provenance from the registry snapshot and the staged tar path each tool was written to.
+pub(crate) fn staged_tools_from_results(
+    requests: &[ToolRef],
+    results: &[DriverResult],
+    staging: &Path,
+) -> Result<Vec<StagedTool>, ProvisionError> {
+    requests
+        .iter()
+        .map(|request| {
+            let result = results
+                .iter()
+                .find(|result| result.name == request.name)
+                .ok_or_else(|| ProvisionError::Engine(format!("no driver result for {request}")))?;
+            let backend = crate::tools::registry::backend_for(&request.name)
+                .unwrap_or("core:unknown")
+                .to_string();
+            let source_host = crate::tools::registry::source_host(&request.name, &backend);
+            Ok(StagedTool {
+                name: request.name.clone(),
+                requested: request.version.clone(),
+                resolved: result.resolved.clone(),
+                backend,
+                source_host,
+                tar: StagedTar::File(staging.join(format!("{}.tar", request.name))),
+                bin_paths: vec![result.bin_path.clone()],
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn driver_timeout_secs(env_value: Option<&str>) -> u64 {
+    const DEFAULT_DRIVER_TIMEOUT_SECS: u64 = 600;
+    env_value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_DRIVER_TIMEOUT_SECS)
+}
+
 /// Expand an apk's data files into runtime specs at their canonical guest paths (apk payloads are gzipped tars whose control entries start with a dot).
 pub(crate) fn apk_runtime_specs(apk_bytes: &[u8]) -> Result<Vec<RuntimeFileSpec>> {
     let mut specs = Vec::new();
@@ -243,13 +365,15 @@ mod tests {
     fn a_failed_install_attributes_the_cause_to_its_tool() {
         let stdout = "mise ERROR fetching https://nodejs.org: timeout\nLNS_FAIL node\n";
         let err = parse_driver_output(stdout, 3, &[tool("node@22")]).unwrap_err();
-        match err {
-            ProvisionError::FetchFailed { tool, cause } => {
-                assert_eq!(tool, "node@22");
-                assert!(cause.contains("timeout"), "got: {cause}");
-            }
-            other => panic!("expected FetchFailed, got {other}"),
-        }
+        assert!(
+            matches!(&err, ProvisionError::FetchFailed { .. }),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("node@22") && msg.contains("timeout"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -307,6 +431,8 @@ mod tests {
     fn apk_data_files_land_at_canonical_paths_and_control_entries_are_skipped() {
         let apk = build_apk(&[
             (".PKGINFO", tar::EntryType::Regular, "control"),
+            ("usr/lib/", tar::EntryType::Directory, ""),
+            ("dev/pipe", tar::EntryType::Fifo, ""),
             (
                 "usr/lib/libstdc++.so.6.0.32",
                 tar::EntryType::Regular,
@@ -319,12 +445,43 @@ mod tests {
             ),
         ]);
         let specs = apk_runtime_specs(&apk).unwrap();
-        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs.len(),
+            2,
+            "dirs, fifos, and control entries are skipped"
+        );
         assert_eq!(specs[0].guest_path, "/usr/lib/libstdc++.so.6.0.32");
         assert!(matches!(specs[0].source, RuntimeSource::Bytes(_)));
         assert_eq!(specs[1].guest_path, "/usr/lib/libstdc++.so.6");
         assert!(
             matches!(&specs[1].source, RuntimeSource::Symlink(target) if target == "libstdc++.so.6.0.32")
+        );
+    }
+
+    #[test]
+    fn an_escaping_apk_path_is_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut escaping = tar::Header::new_gnu();
+        escaping.set_path("a").unwrap();
+        {
+            let name = escaping.as_gnu_mut().unwrap();
+            let raw = b"usr/../../break";
+            name.name[..raw.len()].copy_from_slice(raw);
+            name.name[raw.len()] = 0;
+        }
+        escaping.set_size(1);
+        escaping.set_mode(0o644);
+        escaping.set_cksum();
+        builder.append(&escaping, &b"x"[..]).unwrap();
+        let tar = builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &tar).unwrap();
+        let apk = encoder.finish().unwrap();
+
+        let err = apk_runtime_specs(&apk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("escapes the guest root"),
+            "got: {err:#}"
         );
     }
 
@@ -338,6 +495,266 @@ mod tests {
         assert_eq!(ca_bundle_pem(&apk).unwrap(), b"PEM");
         let empty = build_apk(&[(".PKGINFO", tar::EntryType::Regular, "x")]);
         assert!(ca_bundle_pem(&empty).is_err());
+    }
+
+    #[test]
+    fn staged_tools_marry_results_to_requests_with_registry_provenance() {
+        let requests = [tool("node@22"), tool("jq@latest")];
+        let results = vec![
+            DriverResult {
+                name: "jq".into(),
+                resolved: "1.7.1".into(),
+                bin_path: ".".into(),
+            },
+            DriverResult {
+                name: "node".into(),
+                resolved: "22.11.0".into(),
+                bin_path: "bin".into(),
+            },
+        ];
+        let staged = staged_tools_from_results(&requests, &results, Path::new("/staging")).unwrap();
+        assert_eq!(staged[0].name, "node", "declaration order wins");
+        assert_eq!(staged[0].resolved, "22.11.0");
+        assert_eq!(staged[0].backend, "core:node");
+        assert_eq!(staged[0].source_host, "nodejs.org");
+        assert!(
+            matches!(&staged[0].tar, StagedTar::File(path) if path == Path::new("/staging/node.tar"))
+        );
+        assert_eq!(staged[1].name, "jq");
+        assert_eq!(staged[1].bin_paths, vec![".".to_string()]);
+
+        let err =
+            staged_tools_from_results(&requests, &results[..1], Path::new("/staging")).unwrap_err();
+        assert!(err.to_string().contains("node@22"), "got: {err}");
+    }
+
+    #[test]
+    fn the_driver_timeout_honors_the_override_and_defaults_to_ten_minutes() {
+        assert_eq!(driver_timeout_secs(None), 600);
+        assert_eq!(driver_timeout_secs(Some("90")), 90);
+        assert_eq!(driver_timeout_secs(Some("not a number")), 600);
+    }
+
+    mod engine_artifacts {
+        use super::*;
+        use crate::download::{Fs as FsPort, WritableFile};
+        use sha2::{Digest, Sha256};
+        use std::collections::{BTreeMap, HashMap};
+        use std::sync::{Arc, Mutex};
+
+        struct FakeFetcher {
+            responses: HashMap<String, Vec<u8>>,
+        }
+
+        impl crate::download::Fetcher for FakeFetcher {
+            async fn fetch(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+                self.responses
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unexpected fetch of {url}"))
+            }
+        }
+
+        #[derive(Default, Clone)]
+        struct FakeFs {
+            files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+        }
+
+        struct FakeFile {
+            path: PathBuf,
+            files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+        }
+
+        impl WritableFile for FakeFile {
+            async fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .entry(self.path.clone())
+                    .or_default()
+                    .extend_from_slice(bytes);
+                Ok(())
+            }
+            async fn sync_all(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl FsPort for FakeFs {
+            type WritableFile = FakeFile;
+
+            async fn create_dir_all(&self, _p: &Path) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn is_file(&self, p: &Path) -> bool {
+                self.files.lock().unwrap().contains_key(p)
+            }
+            async fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+                self.files.lock().unwrap().get(p).cloned().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")
+                })
+            }
+            async fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+                self.files.lock().unwrap().remove(p);
+                Ok(())
+            }
+            async fn create_new(&self, p: &Path) -> std::io::Result<FakeFile> {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(p.to_path_buf(), Vec::new());
+                Ok(FakeFile {
+                    path: p.to_path_buf(),
+                    files: self.files.clone(),
+                })
+            }
+            async fn set_mode(&self, _p: &Path, _mode: u32) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+                let mut files = self.files.lock().unwrap();
+                let bytes = files.remove(from).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")
+                })?;
+                files.insert(to.to_path_buf(), bytes);
+                Ok(())
+            }
+        }
+
+        fn sha(bytes: &[u8]) -> String {
+            format!("{:x}", Sha256::digest(bytes))
+        }
+
+        fn shas(bytes: &[u8]) -> BTreeMap<String, String> {
+            BTreeMap::from([
+                ("aarch64".to_string(), sha(bytes)),
+                ("x86_64".to_string(), sha(bytes)),
+            ])
+        }
+
+        fn fixture() -> (mise::Manifest, FakeFetcher) {
+            let engine = b"engine-elf".to_vec();
+            let curl = b"curl-elf".to_vec();
+            let ca_apk = build_apk(&[(
+                "etc/ssl/certs/ca-certificates.crt",
+                tar::EntryType::Regular,
+                "PEM",
+            )]);
+            let lib_apk = build_apk(&[(
+                "usr/lib/libstdc++.so.6.0.32",
+                tar::EntryType::Regular,
+                "elf",
+            )]);
+            let manifest = mise::Manifest {
+                engine: mise::Engine {
+                    version: "1.0.0".into(),
+                    sha256: shas(&engine),
+                },
+                provisioner_rootfs: mise::ProvisionerRootfs {
+                    gnu: "docker.io/library/debian@sha256:aaaa".into(),
+                    musl: "docker.io/library/alpine@sha256:bbbb".into(),
+                },
+                static_curl: mise::StaticCurl {
+                    version: "8.0.0".into(),
+                    sha256: shas(&curl),
+                },
+                companion: vec![
+                    mise::Companion {
+                        name: "ca-certificates-bundle".into(),
+                        version: "1-r0".into(),
+                        sha256: shas(&ca_apk),
+                    },
+                    mise::Companion {
+                        name: "libstdc++".into(),
+                        version: "13-r1".into(),
+                        sha256: shas(&lib_apk),
+                    },
+                ],
+            };
+            let arch = crate::tools::Arch::Aarch64;
+            let responses = HashMap::from([
+                (manifest.engine_url(arch), engine),
+                (manifest.curl_url(arch), curl),
+                (mise::companion_url(&manifest.companion[0], arch), ca_apk),
+                (mise::companion_url(&manifest.companion[1], arch), lib_apk),
+            ]);
+            (manifest, FakeFetcher { responses })
+        }
+
+        fn target(libc: Libc) -> ProvisionTarget {
+            ProvisionTarget {
+                arch: crate::tools::Arch::Aarch64,
+                libc,
+            }
+        }
+
+        #[tokio::test]
+        async fn the_fake_fs_mirrors_missing_file_errors() {
+            let fs = FakeFs::default();
+            assert!(fs.read(Path::new("/missing")).await.is_err());
+            assert!(
+                fs.rename(Path::new("/missing"), Path::new("/b"))
+                    .await
+                    .is_err()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_gnu_target_fetches_engine_curl_and_ca_but_no_musl_companions() {
+            let (manifest, fetcher) = fixture();
+            let fs = FakeFs::default();
+            let artifacts = ensure_engine_artifacts_with(
+                &fetcher,
+                &fs,
+                &manifest,
+                Path::new("/cache"),
+                &target(Libc::Gnu),
+            )
+            .await
+            .unwrap();
+            assert_eq!(artifacts.ca_bundle_pem, b"PEM");
+            assert!(artifacts.companion_specs.is_empty());
+            assert!(fs.is_file(&artifacts.mise).await);
+            assert!(fs.is_file(&artifacts.curl).await);
+        }
+
+        #[tokio::test]
+        async fn a_musl_target_expands_the_companion_trees_at_canonical_paths() {
+            let (manifest, fetcher) = fixture();
+            let artifacts = ensure_engine_artifacts_with(
+                &fetcher,
+                &FakeFs::default(),
+                &manifest,
+                Path::new("/cache"),
+                &target(Libc::Musl),
+            )
+            .await
+            .unwrap();
+            assert_eq!(artifacts.companion_specs.len(), 1);
+            assert_eq!(
+                artifacts.companion_specs[0].guest_path,
+                "/usr/lib/libstdc++.so.6.0.32"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_companion_set_without_the_ca_bundle_is_refused() {
+            let (mut manifest, fetcher) = fixture();
+            manifest.companion.remove(0);
+            let err = ensure_engine_artifacts_with(
+                &fetcher,
+                &FakeFs::default(),
+                &manifest,
+                Path::new("/cache"),
+                &target(Libc::Gnu),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("no ca-certificates-bundle"),
+                "got: {err:#}"
+            );
+        }
     }
 
     #[test]

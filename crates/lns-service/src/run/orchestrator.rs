@@ -409,17 +409,19 @@ async fn orchestrate(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
         &cmd,
-        &env,
         session.is_some(),
-        session
-            .as_ref()
-            .map(|s| s.managed_env_vars.as_slice())
-            .unwrap_or(&[]),
-        workdir.as_deref(),
-        ensured_tools
-            .as_ref()
-            .map(|ensured| ensured.bin_paths.as_slice())
-            .unwrap_or_default(),
+        super::EnvInputs {
+            user_env: &env,
+            extra_managed: session
+                .as_ref()
+                .map(|s| s.managed_env_vars.as_slice())
+                .unwrap_or(&[]),
+            workdir: workdir.as_deref(),
+            tool_bin_paths: ensured_tools
+                .as_ref()
+                .map(|ensured| ensured.bin_paths.as_slice())
+                .unwrap_or_default(),
+        },
     );
     for refused in &composed.refused {
         let _ = frame_tx

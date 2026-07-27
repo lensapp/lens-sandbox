@@ -217,5 +217,15 @@ mod tests {
             "dl.example.test"
         );
         assert_eq!(source_host("some-core", "core:some-core"), "upstream");
+        assert_eq!(source_host("some", "npm:some"), "upstream");
+    }
+
+    #[test]
+    fn a_musl_tool_without_a_known_gap_passes_the_libc_gate() {
+        let target = ProvisionTarget {
+            arch: Arch::Aarch64,
+            libc: Libc::Musl,
+        };
+        refuse_libc_unsupported(&[tool("node@22")], &target, "alpine:3.20").unwrap();
     }
 }

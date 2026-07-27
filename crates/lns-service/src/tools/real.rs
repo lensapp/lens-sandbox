@@ -51,6 +51,48 @@ pub async fn ensure_for_run(
     Ok(ensured)
 }
 
+/// A pulled sandbox keeps the documented offline-start promise only if its (push-pinned) tools are provisioned while we're online; no run exists yet, so like the image fetch itself this is disclosed in the pull output rather than a run chain.
+pub async fn pre_provision_for_pull(
+    artifact: &crate::image::PulledArtifact,
+    base_image: &crate::image::PulledImage,
+) -> anyhow::Result<()> {
+    if artifact.tools.is_empty() {
+        return Ok(());
+    }
+    let requests = lns_artifact::tools::parse_all(&artifact.tools)?;
+    super::registry::refuse_unknown_tools(&requests)?;
+    let layers: Vec<Vec<u8>> = base_image
+        .layers
+        .iter()
+        .map(|layer| layer.data.to_vec())
+        .collect();
+    let target = ProvisionTarget {
+        arch: super::host_arch(),
+        libc: super::libc::detect_libc(&layers)?,
+    };
+    super::registry::refuse_libc_unsupported(&requests, &target, &artifact.base_image)?;
+    let content_store =
+        crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
+    let scratch_id = format!(
+        "pull-{}",
+        artifact
+            .digest
+            .trim_start_matches("sha256:")
+            .get(..12)
+            .unwrap_or("tools")
+    );
+    let ensured = ensure_for_run(&scratch_id, &content_store, &requests, &target).await?;
+    for outcome in &ensured.provisioned {
+        crate::log::info!(
+            "Provisioned",
+            "{} → {} (cached for offline start)",
+            outcome.requested,
+            outcome.resolved
+        );
+    }
+    Ok(())
+}
+
 struct ScratchGuard(std::path::PathBuf);
 
 impl Drop for ScratchGuard {

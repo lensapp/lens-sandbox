@@ -33,6 +33,17 @@ fn project_dir(world: &mut E2eWorld) -> std::path::PathBuf {
         .to_path_buf()
 }
 
+#[given(regex = r#"^a project definition declaring tool "([^"]+)"$"#)]
+fn definition_declaring_tool(world: &mut E2eWorld, tool: String) {
+    std::fs::write(
+        project_dir(world).join("lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: tooled\nspec:\n  image: registry.example.test/runtime:1\n  tools:\n    - \"{tool}\"\n"
+        ),
+    )
+    .expect("write tooled definition");
+}
+
 #[given(regex = r#"^a project definition at "([^"]*)" missing its image$"#)]
 fn imageless_definition_at(world: &mut E2eWorld, rel: String) {
     let path = project_dir(world).join(&rel);
