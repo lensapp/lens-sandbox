@@ -173,7 +173,15 @@ fn normalize_repo(reference: &str) -> String {
     }
 }
 
-/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project shares it), a published sandbox by `repo@digest` (a republished digest re-offers), else ad-hoc.
+/// Canonicalizes a definition directory for identity purposes, falling back to the raw string when canonicalization can't resolve it (e.g. it no longer exists) — mirrors `lns_policy::grants::project_key`, so a project reached through a symlink or a differently-cased path keys identically either way.
+fn canonical_dir_key(dir: &str) -> String {
+    std::path::Path::new(dir)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dir.to_string())
+}
+
+/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers), else ad-hoc.
 pub(super) fn workload_identity(
     definition_dir: Option<&str>,
     resolved_ref: Option<&str>,
@@ -181,7 +189,7 @@ pub(super) fn workload_identity(
 ) -> WorkloadIdentity {
     if let Some(dir) = definition_dir {
         WorkloadIdentity::Definition {
-            dir: dir.to_string(),
+            dir: canonical_dir_key(dir),
         }
     } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
         WorkloadIdentity::Reference {
@@ -222,6 +230,32 @@ mod tests {
                 dir: "/Users/me/app".into()
             },
             "a local definition keys by its dir even though it carries a base image"
+        );
+    }
+
+    #[test]
+    fn workload_identity_canonicalizes_a_symlinked_definition_directory_to_the_same_key() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        let via_link = workload_identity(Some(link.to_str().unwrap()), None, None);
+        let via_real = workload_identity(Some(real.to_str().unwrap()), None, None);
+        assert_eq!(
+            via_link, via_real,
+            "the same project reached through a symlink must key identically, or a grant made through one path silently misses through the other"
+        );
+    }
+
+    #[test]
+    fn workload_identity_falls_back_to_the_raw_dir_when_it_cannot_be_canonicalized() {
+        assert_eq!(
+            workload_identity(Some("/no/such/project/dir"), None, None),
+            WorkloadIdentity::Definition {
+                dir: "/no/such/project/dir".into()
+            }
         );
     }
 
