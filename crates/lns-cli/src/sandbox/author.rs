@@ -246,6 +246,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         let env = &credential.env;
         writeln!(out, "  credential: {name} -> {env}{required}")?;
     }
+    for tool in &def.spec.tools {
+        writeln!(out, "  tool: {tool}")?;
+    }
     Ok(())
 }
 
@@ -487,6 +490,17 @@ mod tests {
             text.contains("credential: some-provider -> SOME_TOKEN"),
             "got: {text}"
         );
+    }
+
+    #[test]
+    fn inspect_local_lists_each_declared_tool() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  tools:\n    - node@22\n    - python@3.12\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), Some("."), None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("tool: node@22"), "got: {text}");
+        assert!(text.contains("tool: python@3.12"), "got: {text}");
     }
 
     #[test]

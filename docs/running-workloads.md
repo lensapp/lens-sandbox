@@ -48,6 +48,7 @@ spec:
       target: /workspace
   filesets: []
   ports: []
+  tools: []
 ```
 
 The scaffold carries every `spec` field with its default value, so the file

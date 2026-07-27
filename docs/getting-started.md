@@ -145,6 +145,7 @@ spec:
       target: /workspace
   filesets: []
   ports: []
+  tools: []
 ```
 
 Every `spec` field is present with its default so editing is filling in a blank,
