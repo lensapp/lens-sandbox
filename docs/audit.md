@@ -35,6 +35,11 @@ uses recorded across runs in the durable connection ledger. `lns audit <sandbox>
 scopes it to one run (by run id or unique id prefix). See the
 [CLI reference](cli-reference.md) for filters.
 
+Provisioning a run's [declared tools](running-workloads.md#tools--declared-toolchains)
+is recorded in that run's chain: what was fetched, from where, and the exact
+version it resolved to. Warm runs reuse the machine cache and fetch nothing, so
+they add no provisioning events.
+
 Integrity is verified **as the log is read** — there is no separate verify step. As
 `lns audit` reads each chain it compares it against its anchor, and if anything is
 wrong it prints an inline `audit integrity:` warning and still lists what's there,
