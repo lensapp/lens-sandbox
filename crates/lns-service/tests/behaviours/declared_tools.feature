@@ -14,13 +14,11 @@ Feature: declared developer tools are provisioned once per machine, outside work
     Then the tools are provisioned without any approval card
     And the workload's own network requests still ask as usual
 
-  @todo
   Scenario: A provisioned tool set is reused without network
     Given tools ["node@22"] were provisioned by an earlier run on this machine
     When I run the sandbox again
     Then the run starts without downloading anything
 
-  @todo
   Scenario: Failed provisioning refuses the launch cleanly
     Given a lns.yaml declaring a tool whose download cannot complete
     When I run the sandbox
@@ -32,7 +30,6 @@ Feature: declared developer tools are provisioned once per machine, outside work
     When I run the sandbox
     Then the launch is refused naming the unknown tool
 
-  @todo
   Scenario: First provision records resolved versions on this machine
     Given a lns.yaml declaring tools ["node@22"]
     When I run the sandbox for the first time
