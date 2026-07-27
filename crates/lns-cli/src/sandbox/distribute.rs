@@ -69,18 +69,13 @@ pub fn resolve_from_index(name: &str, version: &str, index_body: &str) -> Result
         );
     }
     let resolved = if version == "latest" {
-        lines
-            .iter()
-            .copied()
-            .filter(|line| stable(line))
-            .next_back()
+        lines.iter().copied().rfind(|line| stable(line))
     } else {
         let prefix = format!("{version}.");
         lines
             .iter()
             .copied()
-            .filter(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
-            .next_back()
+            .rfind(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
     };
     match resolved {
         Some(exact) => Ok(exact.to_string()),
