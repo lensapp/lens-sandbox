@@ -1,0 +1,61 @@
+Feature: inspecting and forgetting per-workload connector grants
+  Connecting a connector to a directory binds its value on the machine;
+  letting a particular workload spend that value is a separate decision,
+  remembered per project, workload, and connector. `lns connector grants`
+  shows what this project has granted so the answer isn't only visible in
+  the approval window, and `lns connector revoke` takes a grant back so the
+  connector's next use asks again. `lns connector disconnect` forgets the
+  connector's grants here as part of dropping it from the policy.
+
+  Grants are per-machine, so no grant data reaches `lns-policy.yaml`; these
+  scenarios use an arbitrary user-declared connector, so nothing here pins
+  a shipped service.
+
+  Background:
+    Given this project's policy connects "some-provider"
+
+  Scenario: Listing shows the workload, connector, and verdict this project granted
+    Given the workload "def:/work/app" was granted "some-provider"
+    When the user runs connector command "grants"
+    Then the listing shows "def:/work/app" holding "allow" for "some-provider"
+
+  Scenario: A workload that declined the connector is listed as a deny
+    Given the workload "def:/work/app" was denied "some-provider"
+    When the user runs connector command "grants"
+    Then the listing shows "def:/work/app" holding "deny" for "some-provider"
+
+  Scenario: Listing reports plainly when this project has granted nothing
+    When the user runs connector command "grants"
+    Then the output reports no grants for this project
+
+  Scenario: Another project's grants are not this project's business
+    Given the project "/work/other" granted "some-provider"
+    When the user runs connector command "grants"
+    Then the output reports no grants for this project
+
+  Scenario: Listing every project on this machine needs --all
+    Given the project "/work/other" granted "some-provider"
+    When the user runs connector command "grants --all"
+    Then the listing names the project "/work/other"
+
+  Scenario: Revoking forgets a connector's grants so its next use asks again
+    Given the workload "def:/work/app" was granted "some-provider"
+    When the user runs connector command "revoke some-provider"
+    Then the output reports 1 grant forgotten
+    And this project holds no grant for "some-provider"
+
+  Scenario: Revoking here leaves another project's grant for the same connector alone
+    Given the workload "def:/work/app" was granted "some-provider"
+    And the project "/work/other" granted "some-provider"
+    When the user runs connector command "revoke some-provider"
+    Then the project "/work/other" still holds its grant for "some-provider"
+
+  Scenario: Revoking a connector that was never granted fails rather than reporting success
+    When the user runs connector command "revoke some-provider"
+    Then the command fails noting there is nothing to forget
+
+  Scenario: Disconnecting a connector forgets its grants here too
+    Given the workload "def:/work/app" was granted "some-provider"
+    When the user runs connector command "disconnect some-provider"
+    Then the output reports the grants it forgot
+    And this project holds no grant for "some-provider"
