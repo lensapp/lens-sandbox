@@ -96,6 +96,19 @@ impl GrantRecord {
             injection_domains,
         )
     }
+
+    /// True when the (env var, injection domains) this grant was recorded against still matches what the connector discloses now, so a redefinition invalidates the grant instead of inheriting it; `domains` must already be sorted and de-duplicated, as a provider's disclosure snapshot is.
+    pub fn matches_disclosure(&self, env_var: &str, domains: &[String]) -> bool {
+        let mut recorded = self.injection_domains.clone();
+        recorded.sort();
+        recorded.dedup();
+        self.env_var == env_var && recorded == domains
+    }
+
+    /// True when this grant was recorded without a disclosure to pin it to — a decision about an id the run resolved no provider for, which no redefinition can invalidate.
+    pub fn has_no_disclosure(&self) -> bool {
+        self.env_var.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,12 +173,12 @@ impl WorkloadGrantFile {
     }
 }
 
-/// A read-modify-write of the sidecar failed to serialize against other writers, to load it, or — after the mutation was applied in memory — to persist it; `Save` carries the mutated file so a caller can still apply it for the current run.
+/// A read-modify-write of the sidecar failed to serialize against other writers, to load it, or — after the mutation was applied in memory — to persist it.
 #[derive(Debug)]
 pub enum GrantUpdateError {
     Lock(io::Error),
     Load(io::Error),
-    Save(WorkloadGrantFile, io::Error),
+    Save(io::Error),
 }
 
 impl std::fmt::Display for GrantUpdateError {
@@ -173,7 +186,7 @@ impl std::fmt::Display for GrantUpdateError {
         match self {
             GrantUpdateError::Lock(e) => write!(f, "locking the grant sidecar: {e}"),
             GrantUpdateError::Load(e) => write!(f, "reading the grant sidecar: {e}"),
-            GrantUpdateError::Save(_, e) => write!(f, "writing the grant sidecar: {e}"),
+            GrantUpdateError::Save(e) => write!(f, "writing the grant sidecar: {e}"),
         }
     }
 }
@@ -191,7 +204,7 @@ fn serialized_update<S: GrantStore + ?Sized>(
     if mutate(&mut file)
         && let Err(e) = store.save(&file)
     {
-        return Err(GrantUpdateError::Save(file, e));
+        return Err(GrantUpdateError::Save(e));
     }
     Ok(file)
 }
@@ -346,6 +359,52 @@ mod tests {
         );
         assert_eq!(d.workload, "def:/proj");
         assert_eq!(d.verdict, GrantVerdict::Deny);
+    }
+
+    #[test]
+    fn matches_disclosure_accepts_the_recorded_snapshot_in_any_stored_order() {
+        let g = GrantRecord::allow(
+            "/proj",
+            &def("/proj"),
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["b.example".into(), "a.example".into(), "a.example".into()],
+        );
+        assert!(
+            g.matches_disclosure("SOME_TOKEN", &["a.example".into(), "b.example".into()]),
+            "a hand-edited sidecar's unsorted duplicates must still match the provider's sorted snapshot"
+        );
+    }
+
+    #[test]
+    fn matches_disclosure_rejects_a_drifted_env_var_or_domain_set() {
+        let g = GrantRecord::allow(
+            "/proj",
+            &def("/proj"),
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        );
+        assert!(!g.matches_disclosure("OTHER_TOKEN", &["api.some-provider.example".into()]));
+        assert!(!g.matches_disclosure("SOME_TOKEN", &["api.other.example".into()]));
+        assert!(
+            !g.matches_disclosure("SOME_TOKEN", &[]),
+            "a connector that stopped injecting anywhere is not the one that was approved"
+        );
+    }
+
+    #[test]
+    fn has_no_disclosure_marks_only_a_record_with_no_env_var() {
+        let pinned = GrantRecord::deny(
+            "/proj",
+            &def("/proj"),
+            "some-provider",
+            "SOME_TOKEN",
+            vec![],
+        );
+        let unpinned = GrantRecord::deny("/proj", &def("/proj"), "some-provider", "", vec![]);
+        assert!(!pinned.has_no_disclosure());
+        assert!(unpinned.has_no_disclosure());
     }
 
     #[test]
@@ -773,35 +832,22 @@ mod tests {
     }
 
     #[test]
-    fn update_surfaces_a_save_failure_carrying_the_mutated_file() {
+    fn update_surfaces_a_save_failure_without_persisting_the_mutation() {
         let store = FaultyStore {
             inner: Mutex::new(WorkloadGrantFile::default()),
             fail_load: false,
             fail_save: true,
         };
-        let err = store
-            .update(&mut |file| {
-                file.upsert(GrantRecord::allow(
-                    "/proj",
-                    &def("/proj"),
-                    "some-provider",
-                    "SOME_TOKEN",
-                    vec![],
-                ));
-                true
-            })
-            .unwrap_err();
+        let err = store.update(&mut upsert_some_provider).unwrap_err();
+        assert!(matches!(&err, GrantUpdateError::Save(_)));
+        assert_eq!(format!("{err}"), "writing the grant sidecar: denied");
         assert!(
-            matches!(&err, GrantUpdateError::Save(mutated, _)
-                if mutated.lookup("/proj", &def("/proj"), "some-provider").is_some()),
-            "the save variant carries the in-memory mutation so the run can still apply it"
-        );
-        assert_eq!(
-            format!(
-                "{}",
-                GrantUpdateError::Save(WorkloadGrantFile::default(), io::Error::other("x"))
-            ),
-            "writing the grant sidecar: x"
+            store
+                .load()
+                .unwrap()
+                .lookup("/proj", &def("/proj"), "some-provider")
+                .is_none(),
+            "a failed save leaves the stored file untouched, so the caller's error is the only signal the grant did not land"
         );
     }
 

@@ -203,10 +203,7 @@ fn grant_arms(
         return false;
     }
     let (env_var, domains) = p.disclosure_snapshot();
-    let mut recorded = grant.injection_domains.clone();
-    recorded.sort();
-    recorded.dedup();
-    grant.env_var == env_var && recorded == domains
+    grant.matches_disclosure(&env_var, &domains)
 }
 
 /// Arm only the applied ids this workload holds an allow grant for whose recorded (env var, injection domains) snapshot still matches the resolved provider; an ungranted, denied, or stale id stays unarmed and falls through to a first-use offer, so a machine-global value never arms without this workload's consent.

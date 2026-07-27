@@ -326,38 +326,55 @@ impl CredentialSession {
             .insert(credential_id.to_string());
     }
 
-    /// True when this workload holds a standing deny grant for the connector, so a held request fails without re-prompting for the rest of this run and future runs.
+    /// True when this workload holds a standing deny grant for the connector whose recorded disclosure still describes it, so a held request fails without re-prompting for the rest of this run and future runs; a redefinition invalidates the deny exactly as it invalidates an allow.
     fn workload_denied(&self, credential_id: &str) -> bool {
-        self.grant_state
+        let grant = self
+            .grant_state
             .lock()
             .expect("grant state mutex poisoned")
             .lookup(&self.grant_project, &self.grant_workload, credential_id)
-            .is_some_and(|g| g.verdict == GrantVerdict::Deny)
+            .cloned();
+        let Some(grant) = grant.filter(|g| g.verdict == GrantVerdict::Deny) else {
+            return false;
+        };
+        if grant.has_no_disclosure() {
+            return true;
+        }
+        match self.provider_disclosure(credential_id) {
+            (Some(env_var), domains, _) => grant.matches_disclosure(&env_var, &domains),
+            _ => true,
+        }
     }
 
-    /// Remembers this run's accept/decline for `credential_id` per (project, workload, connector) in the machine-local sidecar so a later run skips the offer; a no-op without a bound grant context, and an allow (unlike a deny, a standing "no") is skipped when the provider discloses no injection to pin it to.
-    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
-        let Some(store) = &self.grant_store else {
-            return;
-        };
-        let (env_var, domains) = match self.provider_disclosure(credential_id) {
+    /// This run's accept/decline as a grant record, unless it is an allow the provider discloses no injection to pin it to (a deny, being a standing "no", needs none).
+    fn grant_record_for(&self, credential_id: &str, verdict: GrantVerdict) -> Option<GrantRecord> {
+        let (env_var, injection_domains) = match self.provider_disclosure(credential_id) {
             (Some(env_var), domains, _) => (env_var, domains),
             _ if verdict == GrantVerdict::Deny => (String::new(), Vec::new()),
-            _ => return,
+            _ => return None,
         };
-        let record = GrantRecord {
+        Some(GrantRecord {
             project: self.grant_project.clone(),
             workload: self.grant_workload.key(),
             connector: credential_id.to_string(),
             verdict,
             env_var,
-            injection_domains: domains,
+            injection_domains,
+        })
+    }
+
+    /// Remembers this run's accept/decline for `credential_id` per (project, workload, connector): always in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable, and in the machine-local sidecar when there is one, so a later run skips the offer.
+    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
+        let Some(record) = self.grant_record_for(credential_id, verdict) else {
+            return;
         };
-        // Run-local memory holds the decision so mid-run deny suppression survives even if the sidecar can't be persisted.
         self.grant_state
             .lock()
             .expect("grant state mutex poisoned")
             .upsert(record.clone());
+        let Some(store) = &self.grant_store else {
+            return;
+        };
         if let Err(e) = store.update(&mut |file| {
             file.upsert(record.clone());
             true
@@ -1802,6 +1819,119 @@ mod tests {
         );
     }
 
+    fn session_with_prior_grant(
+        record: GrantRecord,
+    ) -> (CredentialSession, Arc<RecordingNotifier>) {
+        let store = Arc::new(CapturingGrantStore::default());
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(record);
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            store,
+        );
+        (session, notifier)
+    }
+
+    #[test]
+    fn a_deny_is_remembered_for_the_run_even_with_no_grant_binding() {
+        let (s, n, _store, _rx) = fixture();
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        let after_decline = n.presented.lock().unwrap().len();
+        s.submit_pending(pending("c2", "some-provider"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap().len(),
+            after_decline,
+            "a decline must stop the re-prompt from run-local memory alone; whether a sidecar is bound is not the workload's concern"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_whose_connector_was_redefined_asks_again() {
+        let stale = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            "some-provider",
+            "OLD_TOKEN",
+            vec!["api.old.example".into()],
+        );
+        let (session, notifier) = session_with_prior_grant(stale);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "a deny pinned to a since-changed env var and domain must be re-asked, exactly as a stale allow is re-asked rather than silently inherited"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_holds_when_the_run_resolves_no_provider_to_compare_against() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // No custom providers, so this run has no disclosure to check the recorded one against.
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_grants("proj".into(), workload, store);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "with nothing to compare the recorded disclosure against, the standing no holds rather than failing open into a fresh card"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_recorded_without_a_disclosure_still_suppresses_the_offer() {
+        let unpinned = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            "some-provider",
+            "",
+            vec![],
+        );
+        let (session, notifier) = session_with_prior_grant(unpinned);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "a standing no with no disclosure to pin it to has nothing a redefinition could invalidate, so it holds"
+        );
+    }
+
     #[test]
     fn a_mid_run_deny_suppresses_the_offer_even_when_the_sidecar_write_failed() {
         let notifier = Arc::new(RecordingNotifier::default());
@@ -2258,6 +2388,13 @@ mod tests {
             captured.snapshots.lock().unwrap().is_empty(),
             "a timed-out prompt writes nothing and must not touch the wire"
         );
+        // Positive control: the same emitter fires on a real decision, so the assertion above is about the timeout and not about an unwired emitter.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        session.record_decision(
+            "c2",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert_eq!(captured.snapshots.lock().unwrap().len(), 1);
     }
 
     #[test]
