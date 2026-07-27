@@ -203,6 +203,19 @@ mod tests {
     }
 
     #[test]
+    fn a_dismissed_card_fails_the_bind_and_says_so() {
+        let BindResolution::Failed(reason) =
+            resolve_bind_decision(CredentialDecisionRequest::Dismiss)
+        else {
+            panic!("closing the card decides nothing, so the bind cannot complete");
+        };
+        assert!(
+            reason.contains("dismissed"),
+            "the developer must not be told they denied: {reason}"
+        );
+    }
+
+    #[test]
     fn a_timeout_fails_the_bind_instead_of_persisting_anything() {
         assert_eq!(
             resolve_bind_decision(CredentialDecisionRequest::Timeout),

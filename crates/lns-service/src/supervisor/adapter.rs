@@ -879,6 +879,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_delivery_loop_dismisses_a_closed_card_without_recording_a_decision() {
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        let (session, mut frame_rx) = fixture_session();
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.linear.app".into(),
+                action: "CONNECT api.linear.app:443".into(),
+                reason: "policy-ambiguous".into(),
+            },
+            std::time::Instant::now(),
+        );
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::Dismiss,
+        })
+        .unwrap();
+        drop(tx);
+
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        match frame_rx.try_recv().expect("decision frame") {
+            HostFrame::RequestDecision(d) => {
+                assert_eq!(d.id, "r1");
+                assert_eq!(
+                    d.decision,
+                    Decision::DenyOnce,
+                    "the held request still fails closed"
+                );
+            }
+            other => panic!("expected RequestDecision, got {other:?}"),
+        }
+        assert_eq!(session.current_policy(), Policy::default());
+    }
+
+    #[tokio::test]
     async fn decision_delivery_loop_routes_a_connect_action_to_connect_offer() {
         use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
         use crate::approval_flow::session::OfferableConnector;
