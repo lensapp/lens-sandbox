@@ -4,7 +4,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use flate2::read::GzDecoder;
 
 use super::{Libc, ProvisionError, ProvisionTarget, StagedTar, StagedTool, ToolRef, mise};
 use crate::download::{Fetcher, Fs, PinnedArtifact, ensure_pinned};
@@ -58,7 +57,7 @@ pub(crate) fn provisioner_runtime_specs(
 /// One shell driver per provision: install each tool with the fail-loud engine, tar its tree into the staging share, and emit one `LNS_TOOL <name> <resolved> <binpath>` marker per success — any failure names its tool with `LNS_FAIL` and stops.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
     let mut script = String::from(
-        "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise\n",
+        "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
     );
     for request in requests {
         let spec = request.to_string();
@@ -259,10 +258,11 @@ pub(crate) fn driver_timeout_secs(env_value: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_DRIVER_TIMEOUT_SECS)
 }
 
-/// Expand an apk's data files into runtime specs at their canonical guest paths (apk payloads are gzipped tars whose control entries start with a dot).
+/// Expand an apk's data files into runtime specs at their canonical guest paths. An apk is several concatenated gzip streams (signature, control, data) whose control entries start with a dot, so the decoder must read across stream boundaries.
 pub(crate) fn apk_runtime_specs(apk_bytes: &[u8]) -> Result<Vec<RuntimeFileSpec>> {
     let mut specs = Vec::new();
-    let mut archive = tar::Archive::new(GzDecoder::new(apk_bytes));
+    let mut archive = tar::Archive::new(flate2::read::MultiGzDecoder::new(apk_bytes));
+    archive.set_ignore_zeros(true);
     for entry in archive.entries().context("reading apk")? {
         let mut entry = entry.context("reading apk entry")?;
         let entry_type = entry.header().entry_type();
@@ -429,8 +429,14 @@ mod tests {
 
     #[test]
     fn apk_data_files_land_at_canonical_paths_and_control_entries_are_skipped() {
-        let apk = build_apk(&[
-            (".PKGINFO", tar::EntryType::Regular, "control"),
+        // Real apks concatenate gzip streams (signature, control, data); the data files must be reachable behind the dot-named members.
+        let mut apk = build_apk(&[(".SIGN.RSA.alpine.rsa.pub", tar::EntryType::Regular, "sig")]);
+        apk.extend(build_apk(&[(
+            ".PKGINFO",
+            tar::EntryType::Regular,
+            "control",
+        )]));
+        apk.extend(build_apk(&[
             ("usr/lib/", tar::EntryType::Directory, ""),
             ("dev/pipe", tar::EntryType::Fifo, ""),
             (
@@ -443,7 +449,7 @@ mod tests {
                 tar::EntryType::Symlink,
                 "libstdc++.so.6.0.32",
             ),
-        ]);
+        ]));
         let specs = apk_runtime_specs(&apk).unwrap();
         assert_eq!(
             specs.len(),
@@ -625,6 +631,13 @@ mod tests {
             format!("{:x}", Sha256::digest(bytes))
         }
 
+        fn per_arch(reference: &str) -> BTreeMap<String, String> {
+            BTreeMap::from([
+                ("aarch64".to_string(), reference.to_string()),
+                ("x86_64".to_string(), reference.to_string()),
+            ])
+        }
+
         fn shas(bytes: &[u8]) -> BTreeMap<String, String> {
             BTreeMap::from([
                 ("aarch64".to_string(), sha(bytes)),
@@ -651,8 +664,8 @@ mod tests {
                     sha256: shas(&engine),
                 },
                 provisioner_rootfs: mise::ProvisionerRootfs {
-                    gnu: "docker.io/library/debian@sha256:aaaa".into(),
-                    musl: "docker.io/library/alpine@sha256:bbbb".into(),
+                    gnu: per_arch("docker.io/library/debian@sha256:aaaa"),
+                    musl: per_arch("docker.io/library/alpine@sha256:bbbb"),
                 },
                 static_curl: mise::StaticCurl {
                     version: "8.0.0".into(),

@@ -185,11 +185,17 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
 }
 
 fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
-    world
-        .service_socket
-        .as_ref()
-        .map(|socket| vec![("LNS_SOCKET_PATH", socket.clone().into())])
-        .unwrap_or_default()
+    let mut envs: Vec<(&'static str, std::ffi::OsString)> = Vec::new();
+    if let Some(home) = &world.home {
+        envs.push(("HOME", home.path().into()));
+        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
+        envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
+        envs.push(("XDG_DATA_HOME", home.path().join(".local/share").into()));
+    }
+    if let Some(socket) = &world.service_socket {
+        envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
+    }
+    envs
 }
 
 // Anchored to the CLI's "✓ started run <id>" status line: the workload transcript precedes it and legitimately contains phrases like "run as root".
@@ -811,7 +817,7 @@ fn run_summary_discloses_tools(world: &mut E2eWorld) {
 #[then("the audit chain records the tool provisioning")]
 fn audit_records_tool_provisioning(world: &mut E2eWorld) {
     let run_id = world.last_run_id.clone().expect("a run id was parsed");
-    let audit = world.run_with_service_env(&["audit", &run_id]);
+    let audit = crate::specutil::run_cli_with_env(["audit", run_id.as_str()], socket_env(world));
     assert_eq!(
         audit.exit_code, 0,
         "lns audit failed:\n{}\n{}",
@@ -890,6 +896,17 @@ fn pulled_tools_reference_online(world: &mut E2eWorld) {
         "pull tools sandbox:\n{}\n{}",
         pulled.stdout, pulled.stderr
     );
+    world.pushed_digest = extract_pull_digest(&pulled.stdout);
+}
+
+fn extract_pull_digest(stdout: &str) -> Option<String> {
+    let start = stdout.find("sha256:")?;
+    let digest: String = stdout[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == ':' || c.is_ascii_lowercase())
+        .take(71)
+        .collect();
+    (digest.len() == 71).then_some(digest)
 }
 
 #[when("I run the sandbox with no network available")]
@@ -899,7 +916,13 @@ fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
         .as_ref()
         .expect("the local registry exists")
         .set_online(false);
-    let reference = world.pushed_ref.clone().expect("a published reference");
+    // The offline-start promise is scoped to pinned references (a tag always re-resolves so republishes stay visible), and the manifest cache keys pins as repo@digest, so the consumer drops the tag.
+    let pushed = world.pushed_ref.clone().expect("a published reference");
+    let repo = pushed.rsplit_once(':').map_or(pushed.as_str(), |(r, _)| r);
+    let reference = format!(
+        "{repo}@{}",
+        world.pushed_digest.clone().expect("the pulled digest")
+    );
     let consumer = world
         .project
         .get_or_insert_with(|| tempfile::TempDir::new().expect("consumer project tempdir"))
