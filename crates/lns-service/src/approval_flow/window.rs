@@ -20,8 +20,12 @@ pub struct DecisionDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
+    /// A closed card: fail the held request, but record nothing — the developer made no decision.
+    Dismiss,
     ConnectConnector,
-    UseToken { value: String },
+    UseToken {
+        value: String,
+    },
 }
 
 /// Carries the full [`CredentialDecisionRequest`] rather than a bare enum so the typed credential value threads through to `record_decision`.
@@ -325,6 +329,11 @@ impl WindowState {
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
         self.deliver(id, RequestAction::Decide(decision))
+    }
+
+    /// Drops the card and fails its held request without recording a decision. See [`RequestAction::Dismiss`].
+    pub fn dismiss(&self, id: &str) -> bool {
+        self.deliver(id, RequestAction::Dismiss)
     }
 
     /// Accepts the connector offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].

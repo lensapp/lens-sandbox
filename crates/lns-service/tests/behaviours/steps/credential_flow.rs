@@ -910,3 +910,143 @@ fn decision_allow_assert(frames: &[HostFrame]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[when("the developer closes the card without choosing")]
+fn when_developer_closes_the_card(world: &mut BehaviourWorld) {
+    if let Some(rig) = world.approval.as_mut() {
+        let id = rig
+            .notifier
+            .presented
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a card must be visible before it can be closed")
+            .id
+            .clone();
+        rig.session.dismiss_request(&id);
+    }
+    if let Some(rig) = world.credential.as_mut() {
+        let id = window_credential_id(rig);
+        rig.session
+            .record_decision(&id, CredentialDecisionRequest::Dismiss);
+    }
+}
+
+#[when("the developer closes every card at once")]
+fn when_developer_closes_every_card(world: &mut BehaviourWorld) {
+    let rig = world.credential();
+    for id in rig
+        .window_state
+        .snapshot()
+        .pending_credentials
+        .iter()
+        .map(|c| c.id.clone())
+        .collect::<Vec<_>>()
+    {
+        rig.session
+            .record_decision(&id, CredentialDecisionRequest::Dismiss);
+    }
+}
+
+#[given(regex = r#"^credential cards for "([^"]+)" and "([^"]+)" are visible$"#)]
+fn given_two_credential_cards(world: &mut BehaviourWorld, first: String, second: String) {
+    let rig = world.credential();
+    submit_credential_with_id(rig, "cred-first", &first);
+    submit_credential_with_id(rig, "cred-second", &second);
+}
+
+#[then("both held requests are failed at the boundary")]
+fn then_both_held_requests_failed(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let frames = drain_frames(rig);
+    let failed = frames
+        .iter()
+        .filter_map(|f| match f {
+            HostFrame::CredentialDecision(d) => Some(d),
+            _ => None,
+        })
+        .filter(|d| {
+            matches!(
+                d.decision,
+                CredentialDecisionKind::Deny | CredentialDecisionKind::Timeout
+            )
+        })
+        .count();
+    if failed < 2 {
+        return Err(format!("expected two failed requests, got {failed}"));
+    }
+    Ok(())
+}
+
+#[then("a future request carrying either placeholder fires a fresh credential card")]
+fn then_either_placeholder_fires_fresh_card(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    submit_credential_with_id(rig, "fresh-after-close", FIXTURE_ID);
+    let snap = rig.window_state.snapshot();
+    if snap
+        .pending_credentials
+        .iter()
+        .all(|c| c.credential_id != FIXTURE_ID)
+    {
+        return Err("no fresh credential card after a close-all".into());
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the audit chain records the "([^"]+)" credential approval as denied once$"#)]
+fn then_audit_records_denied_once(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    let rig = world.credential();
+    let events = rig.ledger.events.lock().unwrap();
+    let matched = events.iter().any(|e| {
+        matches!(
+            e,
+            lns_ipc::LedgerEvent::Approval {
+                kind: lns_ipc::ApprovalKind::Credential,
+                target,
+                decision: lns_ipc::Decision::DenyOnce,
+                ..
+            } if target == &credential_id
+        )
+    });
+    if !matched {
+        return Err(format!(
+            "no deny-once approval for {credential_id}; got {events:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the audit chain records no approval for "([^"]+)"$"#)]
+fn then_audit_records_no_approval(
+    world: &mut BehaviourWorld,
+    target_id: String,
+) -> Result<(), String> {
+    let recorded: Vec<lns_ipc::LedgerEvent> = world
+        .approval
+        .as_ref()
+        .map(|r| r.ledger.events.lock().unwrap().clone())
+        .into_iter()
+        .chain(
+            world
+                .credential
+                .as_ref()
+                .map(|r| r.ledger.events.lock().unwrap().clone()),
+        )
+        .flatten()
+        .filter(|e| {
+            matches!(
+                e,
+                lns_ipc::LedgerEvent::Approval { target, .. } if target == &target_id
+            )
+        })
+        .collect();
+    if !recorded.is_empty() {
+        return Err(format!(
+            "a non-decision must earn no audit line, got {recorded:?}"
+        ));
+    }
+    Ok(())
+}

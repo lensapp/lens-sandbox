@@ -257,6 +257,16 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
+    /// Fails a held request because its card was closed: no rule, and no audit line claiming a deny-once the developer never picked.
+    pub fn dismiss_request(&self, id: &str) -> DecisionOutcome {
+        if self.remove_pending(id).is_none() {
+            return DecisionOutcome::UnknownId;
+        }
+        self.notifier.dismiss(id);
+        self.send_decision_frame(id, Decision::DenyOnce);
+        DecisionOutcome::Resolved
+    }
+
     fn record_approval(&self, entry: &PendingEntry, decision: Decision) {
         let Some(recorder) = self.ledger.get() else {
             return;
@@ -834,6 +844,33 @@ pub(crate) mod tests {
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
         assert!(rx.try_recv().is_err());
         assert!(store.saves.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_dismissed_card_fails_the_request_closed_and_records_no_approval() {
+        let (s, n, store, mut rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+
+        let before = s.current_policy();
+        assert_eq!(s.dismiss_request("r1"), DecisionOutcome::Resolved);
+
+        assert_eq!(before, s.current_policy());
+        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "a swatted card must not read as a deny-once the developer picked"
+        );
+    }
+
+    #[test]
+    fn dismissing_an_unknown_request_is_unknownid() {
+        let (s, _n, _store, mut rx) = fixture();
+        assert_eq!(s.dismiss_request("never-held"), DecisionOutcome::UnknownId);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

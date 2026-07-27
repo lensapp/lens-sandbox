@@ -473,6 +473,15 @@ impl eframe::App for TrayApp {
                 self.window_state.cancel_sign_in(&credential_id);
                 ui.ctx().request_repaint();
             }
+            Some(
+                action @ (CardAction::DismissNetwork { .. } | CardAction::DismissCredential { .. }),
+            ) => {
+                if let CardAction::DismissCredential { id } = &action {
+                    self.credential_inputs.remove(id);
+                }
+                apply_dismissal(&self.window_state, &action);
+                ui.ctx().request_repaint();
+            }
             Some(CardAction::ConnectOffer { id }) => {
                 self.window_state.connect_offer(&id);
                 ui.ctx().request_repaint();
@@ -512,6 +521,13 @@ pub enum CardAction {
     DecideCredential {
         id: String,
         request: CredentialDecisionRequest,
+    },
+    /// Closing a card carries no verdict, so a dismissal names only the card — there is nowhere to put a decision the developer did not make.
+    DismissNetwork {
+        id: String,
+    },
+    DismissCredential {
+        id: String,
     },
     DismissInform {
         index: usize,
@@ -804,25 +820,30 @@ fn pile_scroll_offset(
 fn close_all(state: &WindowState, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
-        match *item {
-            StackItem::Network(i) => {
-                state.decide(&snapshot.pending[i].id, Decision::DenyOnce);
-            }
-            StackItem::Credential(i) => {
-                state.decide_credential(
-                    &snapshot.pending_credentials[i].id,
-                    CredentialDecisionRequest::Deny,
-                );
-            }
-            StackItem::SignIn(i) => {
-                state.cancel_sign_in(&snapshot.sign_ins[i].credential_id);
-            }
-            StackItem::Inform(_) => had_inform = true,
-            StackItem::Connecting(_) => {}
+        match close_action(item, snapshot) {
+            Some(CardAction::DismissInform { .. }) => had_inform = true,
+            Some(action) => apply_dismissal(state, &action),
+            None => {}
         }
     }
     if had_inform {
         state.clear_informs();
+    }
+}
+
+/// The single place a closed card becomes a non-decision, shared by the per-card ✕ and the pile's close-all.
+fn apply_dismissal(state: &WindowState, action: &CardAction) {
+    match action {
+        CardAction::DismissNetwork { id } => {
+            state.dismiss(id);
+        }
+        CardAction::DismissCredential { id } => {
+            state.decide_credential(id, CredentialDecisionRequest::Dismiss);
+        }
+        CardAction::CancelSignIn { credential_id } => {
+            state.cancel_sign_in(credential_id);
+        }
+        _ => {}
     }
 }
 
@@ -1253,16 +1274,14 @@ fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
 fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<CardAction> {
     match *item {
         StackItem::Inform(i) => Some(CardAction::DismissInform { index: i }),
-        StackItem::Network(i) => Some(CardAction::Decide {
+        StackItem::Network(i) => Some(CardAction::DismissNetwork {
             id: snapshot.pending[i].id.clone(),
-            decision: Decision::DenyOnce,
         }),
         StackItem::SignIn(i) => Some(CardAction::CancelSignIn {
             credential_id: snapshot.sign_ins[i].credential_id.clone(),
         }),
-        StackItem::Credential(i) => Some(CardAction::DecideCredential {
+        StackItem::Credential(i) => Some(CardAction::DismissCredential {
             id: snapshot.pending_credentials[i].id.clone(),
-            request: CredentialDecisionRequest::Deny,
         }),
         StackItem::Connecting(_) => None,
     }
@@ -2170,14 +2189,11 @@ mod tests {
 
     #[test]
     fn the_hover_close_button_dismisses_a_credential_card_without_deciding() {
-        match click_labelled_control(one_credential_card(), CLOSE_LABEL, false) {
-            Some(CardAction::DecideCredential { request, .. }) => assert_ne!(
-                request,
-                CredentialDecisionRequest::Deny,
-                "the ✕ the developer actually clicks must not persist a standing deny rule"
-            ),
-            other => panic!("the ✕ must fire a credential dismissal, got {other:?}"),
-        }
+        assert_eq!(
+            click_labelled_control(one_credential_card(), CLOSE_LABEL, false),
+            Some(CardAction::DismissCredential { id: "c1".into() }),
+            "the ✕ the developer actually clicks carries no verdict, so it cannot persist a rule"
+        );
     }
 
     #[test]
@@ -2197,15 +2213,9 @@ mod tests {
             order: vec![StackItem::Network(0)],
         };
 
-        let Some(CardAction::Decide { decision, .. }) =
-            close_action(&StackItem::Network(0), &snapshot)
-        else {
-            panic!("closing a network card must resolve the request it holds");
-        };
-
-        assert_ne!(
-            decision,
-            Decision::DenyOnce,
+        assert_eq!(
+            close_action(&StackItem::Network(0), &snapshot),
+            Some(CardAction::DismissNetwork { id: "r1".into() }),
             "a dismissed card must not be recorded in the audit chain as a deny-once the developer picked"
         );
     }
@@ -2222,6 +2232,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            bound_value_available: false,
         }
     }
 
@@ -2238,18 +2249,10 @@ mod tests {
 
     #[test]
     fn closing_a_credential_card_decides_nothing() {
-        let snapshot = one_credential_card();
-
-        let Some(CardAction::DecideCredential { request, .. }) =
-            close_action(&StackItem::Credential(0), &snapshot)
-        else {
-            panic!("closing a credential card must resolve the request it holds");
-        };
-
-        assert_ne!(
-            request,
-            CredentialDecisionRequest::Deny,
-            "a dismissed card is not a decision, so it must not persist a standing deny rule"
+        assert_eq!(
+            close_action(&StackItem::Credential(0), &one_credential_card()),
+            Some(CardAction::DismissCredential { id: "c1".into() }),
+            "a dismissed card is not a decision, so its action has nowhere to carry one"
         );
     }
 
@@ -2264,9 +2267,9 @@ mod tests {
         let delivery = rx
             .try_recv()
             .expect("close-all must resolve every held request");
-        assert_ne!(
+        assert_eq!(
             delivery.request,
-            CredentialDecisionRequest::Deny,
+            CredentialDecisionRequest::Dismiss,
             "one click on close-all must not permanently deny every credential in the stack"
         );
     }

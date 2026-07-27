@@ -135,6 +135,9 @@ async fn decision_delivery_loop(
             RequestAction::Decide(decision) => {
                 session.record_decision(&delivery.id, decision);
             }
+            RequestAction::Dismiss => {
+                session.dismiss_request(&delivery.id);
+            }
             // Accepting a connector offer drives a connect (async) rather than a per-request verdict.
             RequestAction::ConnectConnector => {
                 session.connect_offer(&delivery.id).await;
@@ -2460,6 +2463,10 @@ mod tests {
         .unwrap();
         drop(tx);
         credential_delivery_loop(Arc::downgrade(&session), rx).await;
+        assert!(
+            session.current_state().is_empty(),
+            "denying an oauth prompt fails it closed rather than driving a device sign-in, and leaves no rule"
+        );
         let mut denied = false;
         while let Ok(frame) = frame_rx.try_recv() {
             if let HostFrame::CredentialDecision(d) = frame {

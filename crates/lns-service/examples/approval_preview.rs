@@ -115,6 +115,16 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
             .position(|c| c.credential_id == *credential_id)
             .map(StackItem::SignIn),
         CardAction::DismissInform { index } => Some(StackItem::Inform(*index)),
+        CardAction::DismissNetwork { id } => snapshot
+            .pending
+            .iter()
+            .position(|p| p.id == *id)
+            .map(StackItem::Network),
+        CardAction::DismissCredential { id } => snapshot
+            .pending_credentials
+            .iter()
+            .position(|p| p.id == *id)
+            .map(StackItem::Credential),
         CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
     };
     if let Some(item) = item {
