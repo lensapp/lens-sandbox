@@ -610,6 +610,13 @@ definition, packs the filesets, builds the artifact — and prints the digests
 that would publish (`npm publish --dry-run`-style), so you can preview a
 release offline.
 
+`lns push` also resolves each fuzzy `spec.tools` version (`node@22`,
+`node@latest`) against the tool's public version index and embeds the exact pin
+in the published definition — the same publish-time pinning filesets get, so
+consumers run exactly what you tested. `--dry-run` stays offline and does not
+resolve; it notes when declared tools mean the published digest may differ from
+the preview.
+
 Pushing needs a stored login with **push access** for the registry — sign in once
 with `lns login`. For `ghcr.io` that's a GitHub token with the `write:packages`
 scope, pushed to a repository path you own; the GitHub CLI mints one directly:
@@ -640,8 +647,9 @@ lns run  ghcr.io/acme/reviewer:1.0.0     # run it
 `lns push` preserves `workdir` and every mount declaration in the artifact.
 Consumers resolve relative binds against their own project directory, not the
 publisher's. Preflight pins the resolved artifact digest; after `lns pull` has
-cached that artifact and its referenced OCI content, the published sandbox can
-start offline from the cached snapshot.
+cached that artifact and its referenced OCI content, and the service has
+provisioned its declared tools once, the published sandbox can start offline
+from the cached snapshot.
 
 Re-reference a cached sandbox under another tag with `lns tag` (docker-tag style):
 

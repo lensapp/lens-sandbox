@@ -22,6 +22,75 @@ pub trait Producer {
     ) -> LocalBoxFuture<'a, Result<()>>;
 }
 
+/// Resolves a declared tool's (possibly fuzzy) version to the exact version the published artifact pins, by consulting the tool's public version index; a fake scripts it offline.
+pub trait ToolResolver {
+    fn resolve<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> LocalBoxFuture<'a, Result<String>>;
+}
+
+/// Rewrite `spec.tools` so every entry carries the exact version the index resolves today — the tool analogue of digest-pinning path filesets at push.
+pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
+    resolver: &R,
+    doc: &[u8],
+) -> Result<Vec<u8>> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(doc).context("re-reading the definition for tool pinning")?;
+    let Some(entries) = value["spec"]["tools"].as_array_mut() else {
+        return Ok(doc.to_vec());
+    };
+    if entries.is_empty() {
+        return Ok(doc.to_vec());
+    }
+    for entry in entries {
+        let declared = entry.as_str().context("spec.tools entry is not a string")?;
+        let tool = lns_artifact::tools::parse(declared)?;
+        let exact = resolver
+            .resolve(&tool)
+            .await
+            .with_context(|| format!("resolving {declared} for publishing"))?;
+        *entry = serde_json::Value::String(format!("{}@{exact}", tool.name));
+    }
+    serde_json::to_vec(&value).context("serializing the tool-pinned definition")
+}
+
+/// Pick the exact version a fuzzy request pins from an ascending newline-separated version index; `latest` takes the newest stable line, `22` the newest `22.*` line.
+pub fn resolve_from_index(name: &str, version: &str, index_body: &str) -> Result<String> {
+    let stable = |line: &str| !line.chars().any(|c| c.is_ascii_alphabetic());
+    let lines: Vec<&str> = index_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        bail!(
+            "tool {name:?} is unknown to the version index; check the name against mise's registry"
+        );
+    }
+    let resolved = if version == "latest" {
+        lines
+            .iter()
+            .copied()
+            .filter(|line| stable(line))
+            .next_back()
+    } else {
+        let prefix = format!("{version}.");
+        lines
+            .iter()
+            .copied()
+            .filter(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
+            .next_back()
+    };
+    match resolved {
+        Some(exact) => Ok(exact.to_string()),
+        None => bail!(
+            "no published version of {name} matches {version:?}; newest in the index is {}",
+            lines.last().unwrap_or(&"")
+        ),
+    }
+}
+
 #[derive(Debug)]
 pub struct PackedFileset {
     pub built: BuiltArtifact,
@@ -113,10 +182,11 @@ fn fileset_name(path: &str) -> String {
 }
 
 /// `lns push <ref>`: validate the sandbox definition, pack and upload its path filesets, then build and upload the pinned definition as a sandbox artifact in one step. The caller reads `./lns.yaml` into `doc`.
-pub async fn push<F, P, W>(
+pub async fn push<F, P, R, W>(
     fs: &F,
     cwd: &Path,
     producer: &P,
+    resolver: &R,
     doc: &[u8],
     reference: &str,
     out: &mut W,
@@ -124,9 +194,11 @@ pub async fn push<F, P, W>(
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
     W: Write,
 {
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
+    let doc = pin_declared_tools(resolver, &doc).await?;
     for fileset in &packed {
         producer
             .push_prebuilt(&fileset.built, &fileset.reference)
@@ -157,6 +229,16 @@ where
             "would push fileset {} ({})",
             fileset.reference,
             blob_bytes(&fileset.built)
+        )?;
+    }
+    let declared_tools = serde_json::from_slice::<serde_json::Value>(&doc)
+        .ok()
+        .and_then(|value| value["spec"]["tools"].as_array().map(Vec::len))
+        .unwrap_or(0);
+    if declared_tools > 0 {
+        writeln!(
+            out,
+            "note: {declared_tools} tool version(s) resolve at push time; the published digest may differ from this preview"
         )?;
     }
     let built = lns_artifact::build::build_artifact(&doc)?;
@@ -229,6 +311,48 @@ mod tests {
 
     use crate::sandbox::test_support::MapFs;
 
+    struct FakeResolver {
+        versions: std::collections::HashMap<String, String>,
+    }
+
+    impl FakeResolver {
+        fn with(entries: &[(&str, &str)]) -> Self {
+            Self {
+                versions: entries
+                    .iter()
+                    .map(|(spec, exact)| (spec.to_string(), exact.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl ToolResolver for FakeResolver {
+        fn resolve<'a>(
+            &'a self,
+            tool: &'a lns_artifact::tools::ToolRef,
+        ) -> LocalBoxFuture<'a, Result<String>> {
+            let outcome = self
+                .versions
+                .get(&tool.to_string())
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("tool {:?} is unknown to the version index", tool.name)
+                });
+            Box::pin(async move { outcome })
+        }
+    }
+
+    struct PanickingResolver;
+
+    impl ToolResolver for PanickingResolver {
+        fn resolve<'a>(
+            &'a self,
+            tool: &'a lns_artifact::tools::ToolRef,
+        ) -> LocalBoxFuture<'a, Result<String>> {
+            panic!("a tool-less push must never consult the resolver (asked for {tool})");
+        }
+    }
+
     fn fs_with_skills() -> MapFs {
         MapFs::with(&[("/work/skills/prompts.md", "p")])
     }
@@ -250,6 +374,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
+            &PanickingResolver,
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -271,6 +396,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
+            &PanickingResolver,
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -290,6 +416,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
+            &PanickingResolver,
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -310,6 +437,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
+            &PanickingResolver,
             WITH_PATH_FILESET,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -351,6 +479,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
+            &PanickingResolver,
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -392,6 +521,147 @@ mod tests {
         assert!(
             format!("{err:#}").contains("not digest-pinned"),
             "a truncated sha256 must not pass as pinned: {err:#}"
+        );
+    }
+
+    const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
+
+    #[tokio::test]
+    async fn push_pins_resolved_tool_versions_into_the_published_config() {
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let resolver = FakeResolver::with(&[("node@22", "22.11.0"), ("python@latest", "3.12.6")]);
+        let mut out = Vec::new();
+        let code = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &resolver,
+            WITH_TOOLS,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let docs = producer.docs.borrow();
+        let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
+        assert_eq!(
+            published["spec"]["tools"],
+            serde_json::json!(["node@22.11.0", "python@3.12.6"])
+        );
+        assert_eq!(published["spec"]["image"], "ghcr.io/team/base:1");
+    }
+
+    #[tokio::test]
+    async fn push_refuses_when_the_index_lacks_the_tool() {
+        let producer = FakeProducer::err("must not reach the producer");
+        let resolver = FakeResolver::with(&[]);
+        let mut out = Vec::new();
+        let err = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &resolver,
+            WITH_TOOLS,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("resolving node@22") && msg.contains("unknown to the version index"),
+            "got: {msg}"
+        );
+        assert!(producer.docs.borrow().is_empty(), "nothing must upload");
+    }
+
+    #[tokio::test]
+    async fn push_without_tools_never_consults_the_resolver() {
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let mut out = Vec::new();
+        push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &PanickingResolver,
+            VALID,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn push_dry_run_notes_that_tool_versions_resolve_at_push_time() {
+        let mut out = Vec::new();
+        push_dry_run(
+            &fs_with_skills(),
+            cwd(),
+            WITH_TOOLS,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("note: 2 tool version(s) resolve at push time"),
+            "got: {text}"
+        );
+        let mut quiet = Vec::new();
+        push_dry_run(
+            &fs_with_skills(),
+            cwd(),
+            VALID,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut quiet,
+        )
+        .unwrap();
+        let text = String::from_utf8(quiet).unwrap();
+        assert!(!text.contains("note:"), "got: {text}");
+    }
+
+    #[test]
+    fn resolve_from_index_picks_the_newest_dot_boundary_match() {
+        let body = "20.1.0\n22.9.0\n22.11.0\n220.1.0\n23.0.0\n";
+        assert_eq!(resolve_from_index("node", "22", body).unwrap(), "22.11.0");
+    }
+
+    #[test]
+    fn resolve_from_index_latest_skips_prerelease_lines() {
+        let body = "3.11.9\n3.12.6\n3.13.0rc1\n";
+        assert_eq!(
+            resolve_from_index("python", "latest", body).unwrap(),
+            "3.12.6"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_accepts_an_exact_version_verbatim() {
+        let body = "22.9.0\n22.11.0\n";
+        assert_eq!(
+            resolve_from_index("node", "22.11.0", body).unwrap(),
+            "22.11.0"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_treats_an_empty_index_as_unknown() {
+        let err = resolve_from_index("nodde", "22", "\n").unwrap_err();
+        assert!(
+            format!("{err:#}").contains(r#"tool "nodde" is unknown to the version index"#),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_names_the_newest_when_nothing_matches() {
+        let err = resolve_from_index("node", "99", "22.9.0\n23.0.0\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(r#"no published version of node matches "99""#) && msg.contains("23.0.0"),
+            "got: {msg}"
         );
     }
 

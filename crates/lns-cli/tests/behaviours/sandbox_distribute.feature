@@ -75,7 +75,6 @@ Feature: distributing a sandbox
     And only the sandbox artifact is pushed
     And the published sandbox config carries the inline content unchanged
 
-  @todo
   Scenario: Publishing pins resolved tool versions
     Given a lns.yaml declaring tools ["node@22"]
     And the version index resolves "node@22" to "22.11.0"
