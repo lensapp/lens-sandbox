@@ -391,10 +391,11 @@ pub fn disconnect(
     if !policy.disconnect(&args.id) {
         bail!("{:?} is not connected in {}", args.id, path.display());
     }
+    // Forget the grants before dropping the id, so a sidecar this run cannot update leaves a still-connected policy to retry rather than stale grants a later reconnect would inherit.
+    let cleared = clear_project_grants(grants_path, &project_key(&path), &args.id)?;
     policy
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
-    let cleared = clear_project_grants(grants_path, &project_key(&path), &args.id)?;
     let grants_note = match cleared {
         0 => String::new(),
         n => format!(" and forgot {n} per-workload grant(s)"),
