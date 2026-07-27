@@ -85,6 +85,12 @@ async fn orchestrate(
         }
         (None, None) => None,
     };
+    // Refuse an unidentifiable run before its sign-in gate can drag the user through a device flow.
+    let workload = workload_identity(
+        args.definition_dir.as_deref(),
+        resolved_image,
+        sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
+    )?;
     let mut signed_in = Vec::new();
     if let Some(plan) = &sandbox_plan {
         crate::artifact::real::refuse_unknown_connectors(
@@ -111,11 +117,6 @@ async fn orchestrate(
         .unwrap_or_else(|| args.env.clone());
     crate::run_registry::set_resolved_command_and_env(&run_id, &cmd, &env);
 
-    let workload = workload_identity(
-        args.definition_dir.as_deref(),
-        resolved_image,
-        sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
-    );
     let tools_then_session = async {
         let guest_tools = guest_tools::ensure().await?;
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());

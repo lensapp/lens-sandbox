@@ -181,24 +181,25 @@ fn canonical_dir_key(dir: &str) -> String {
         .unwrap_or_else(|_| dir.to_string())
 }
 
-/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers), else ad-hoc.
+/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers). A run resolving neither refuses — plain-image runs are retired, and a shared fallback bucket would let one run's grant arm another's without a card.
 pub(super) fn workload_identity(
     definition_dir: Option<&str>,
     resolved_ref: Option<&str>,
     digest: Option<&str>,
-) -> WorkloadIdentity {
+) -> Result<WorkloadIdentity> {
     if let Some(dir) = definition_dir {
-        WorkloadIdentity::Definition {
+        Ok(WorkloadIdentity::Definition {
             dir: canonical_dir_key(dir),
-        }
+        })
     } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
-        WorkloadIdentity::Reference {
+        Ok(WorkloadIdentity::Reference {
             repo: normalize_repo(reference),
             digest: digest.to_string(),
-        }
+        })
     } else {
-        // TODO: every plain-image run in a project collapses into this one identity, so a grant made for one arms the next without a card; resolved when plain-image runs are removed and every run keys by definition or digest.
-        WorkloadIdentity::Adhoc
+        anyhow::bail!(
+            "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference"
+        )
     }
 }
 
@@ -223,7 +224,8 @@ mod tests {
 
     #[test]
     fn workload_identity_keys_a_local_definition_by_its_directory() {
-        let id = workload_identity(Some("/Users/me/app"), Some("ghcr.io/team/base:1"), None);
+        let id = workload_identity(Some("/Users/me/app"), Some("ghcr.io/team/base:1"), None)
+            .expect("a definition dir identifies the run");
         assert_eq!(
             id,
             WorkloadIdentity::Definition {
@@ -241,8 +243,10 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&real, &link).expect("create symlink");
 
-        let via_link = workload_identity(Some(link.to_str().unwrap()), None, None);
-        let via_real = workload_identity(Some(real.to_str().unwrap()), None, None);
+        let via_link = workload_identity(Some(link.to_str().unwrap()), None, None)
+            .expect("a definition dir identifies the run");
+        let via_real = workload_identity(Some(real.to_str().unwrap()), None, None)
+            .expect("a definition dir identifies the run");
         assert_eq!(
             via_link, via_real,
             "the same project reached through a symlink must key identically, or a grant made through one path silently misses through the other"
@@ -252,7 +256,8 @@ mod tests {
     #[test]
     fn workload_identity_falls_back_to_the_raw_dir_when_it_cannot_be_canonicalized() {
         assert_eq!(
-            workload_identity(Some("/no/such/project/dir"), None, None),
+            workload_identity(Some("/no/such/project/dir"), None, None)
+                .expect("a definition dir identifies the run"),
             WorkloadIdentity::Definition {
                 dir: "/no/such/project/dir".into()
             }
@@ -261,7 +266,8 @@ mod tests {
 
     #[test]
     fn workload_identity_keys_a_published_reference_by_repo_and_digest() {
-        let id = workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), Some("sha256:abc"));
+        let id = workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), Some("sha256:abc"))
+            .expect("a resolved digest identifies the run");
         assert_eq!(
             id,
             WorkloadIdentity::Reference {
@@ -272,13 +278,15 @@ mod tests {
     }
 
     #[test]
-    fn workload_identity_is_adhoc_without_a_definition_or_a_resolved_digest() {
-        assert_eq!(workload_identity(None, None, None), WorkloadIdentity::Adhoc);
-        assert_eq!(
-            workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), None),
-            WorkloadIdentity::Adhoc,
-            "a reference with no resolved digest can't be pinned, so it is ad-hoc"
-        );
+    fn workload_identity_refuses_a_run_without_a_definition_or_a_resolved_digest() {
+        for (definition_dir, resolved_ref) in [(None, None), (None, Some("ghcr.io/acme/agent:1"))] {
+            let err = workload_identity(definition_dir, resolved_ref, None)
+                .expect_err("an unidentifiable run must refuse, never share a grant bucket");
+            assert!(
+                format!("{err:#}").contains("cannot hold connector grants"),
+                "got: {err:#}"
+            );
+        }
     }
 
     #[test]
