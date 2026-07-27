@@ -160,9 +160,10 @@ impl WorkloadGrantFile {
     }
 }
 
-/// A read-modify-write of the sidecar failed either loading it or, after the mutation was applied in memory, persisting it; `Save` carries the mutated file so a caller can still apply it for the current run.
+/// A read-modify-write of the sidecar failed to serialize against other writers, to load it, or — after the mutation was applied in memory — to persist it; `Save` carries the mutated file so a caller can still apply it for the current run.
 #[derive(Debug)]
 pub enum GrantUpdateError {
+    Lock(io::Error),
     Load(io::Error),
     Save(WorkloadGrantFile, io::Error),
 }
@@ -170,6 +171,7 @@ pub enum GrantUpdateError {
 impl std::fmt::Display for GrantUpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            GrantUpdateError::Lock(e) => write!(f, "locking the grant sidecar: {e}"),
             GrantUpdateError::Load(e) => write!(f, "reading the grant sidecar: {e}"),
             GrantUpdateError::Save(_, e) => write!(f, "writing the grant sidecar: {e}"),
         }
@@ -178,24 +180,32 @@ impl std::fmt::Display for GrantUpdateError {
 
 impl std::error::Error for GrantUpdateError {}
 
+/// Runs the load-mutate-save under the process-wide lock; a store whose backing medium is shared with other processes wraps this in a cross-process lock of its own.
+fn serialized_update<S: GrantStore + ?Sized>(
+    store: &S,
+    mutate: &mut dyn FnMut(&mut WorkloadGrantFile) -> bool,
+) -> Result<WorkloadGrantFile, GrantUpdateError> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut file = store.load().map_err(GrantUpdateError::Load)?;
+    if mutate(&mut file)
+        && let Err(e) = store.save(&file)
+    {
+        return Err(GrantUpdateError::Save(file, e));
+    }
+    Ok(file)
+}
+
 pub trait GrantStore: Send + Sync {
     fn load(&self) -> io::Result<WorkloadGrantFile>;
     fn save(&self, state: &WorkloadGrantFile) -> io::Result<()>;
 
-    /// Serializes a load-mutate-save against the shared machine-global sidecar under a process-wide lock so concurrent runs can't lose each other's grants; `mutate` returns whether it changed anything (only then is a save attempted) and must not call back into `update`.
+    /// Serializes a load-mutate-save against concurrent writers so they can't lose each other's grants; `mutate` returns whether it changed anything (only then is a save attempted) and must not call back into `update`.
     fn update(
         &self,
         mutate: &mut dyn FnMut(&mut WorkloadGrantFile) -> bool,
     ) -> Result<WorkloadGrantFile, GrantUpdateError> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut file = self.load().map_err(GrantUpdateError::Load)?;
-        if mutate(&mut file)
-            && let Err(e) = self.save(&file)
-        {
-            return Err(GrantUpdateError::Save(file, e));
-        }
-        Ok(file)
+        serialized_update(self, mutate)
     }
 }
 
@@ -226,9 +236,26 @@ impl JsonFileGrantStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
+
+    /// Suffixed rather than `with_extension`, which would replace the sidecar's own extension on an arbitrary `LNS_WORKLOAD_GRANTS_PATH`.
+    fn lock_path(&self) -> PathBuf {
+        let mut p = self.path.clone().into_os_string();
+        p.push(".lock");
+        PathBuf::from(p)
+    }
 }
 
 impl GrantStore for JsonFileGrantStore {
+    /// The `lns` CLI and `lns-service` both read-modify-write this file, so the in-process lock alone would let a `lns connector revoke` be silently undone by a run persisting a grant it read beforehand.
+    fn update(
+        &self,
+        mutate: &mut dyn FnMut(&mut WorkloadGrantFile) -> bool,
+    ) -> Result<WorkloadGrantFile, GrantUpdateError> {
+        let _flock = crate::secure_file::lock_sidecar_exclusive(&self.lock_path())
+            .map_err(GrantUpdateError::Lock)?;
+        serialized_update(self, mutate)
+    }
+
     fn load(&self) -> io::Result<WorkloadGrantFile> {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text)
@@ -775,6 +802,103 @@ mod tests {
                 GrantUpdateError::Save(WorkloadGrantFile::default(), io::Error::other("x"))
             ),
             "writing the grant sidecar: x"
+        );
+    }
+
+    fn grant_of(connector: &str) -> GrantRecord {
+        GrantRecord::allow("/proj", &def("/proj"), connector, "SOME_TOKEN", vec![])
+    }
+
+    fn upsert_some_provider(file: &mut WorkloadGrantFile) -> bool {
+        file.upsert(grant_of("some-provider"));
+        true
+    }
+
+    fn some_provider_granted(store: &JsonFileGrantStore) -> bool {
+        store
+            .load()
+            .unwrap()
+            .lookup("/proj", &def("/proj"), "some-provider")
+            .is_some()
+    }
+
+    #[test]
+    fn update_holds_the_file_lock_across_the_whole_load_mutate_save_window() {
+        // The probe is an independent open-file-description, which flock excludes exactly as it would another process; it never touches the in-process mutex, so only the file lock can be what blocks it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("grants.json");
+        let lock_path = dir.path().join("grants.json.lock");
+        let store = JsonFileGrantStore::new(path);
+
+        store
+            .update(&mut |file| {
+                let probe = fs::File::open(&lock_path).expect("lockfile exists during the update");
+                assert!(
+                    matches!(probe.try_lock(), Err(fs::TryLockError::WouldBlock)),
+                    "a second process must not read-modify-write the sidecar mid-update"
+                );
+                upsert_some_provider(file)
+            })
+            .unwrap();
+
+        let after = fs::File::open(&lock_path).unwrap();
+        assert!(
+            after.try_lock().is_ok(),
+            "the lock is released once the update completes"
+        );
+    }
+
+    #[test]
+    fn update_fails_closed_without_touching_the_sidecar_when_the_lock_cannot_be_acquired() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("grants.json");
+        fs::create_dir(dir.path().join("grants.json.lock")).unwrap();
+        let store = JsonFileGrantStore::new(path.clone());
+
+        let err = store.update(&mut upsert_some_provider).unwrap_err();
+
+        assert!(matches!(err, GrantUpdateError::Lock(_)));
+        assert!(
+            format!("{err}").starts_with("locking the grant sidecar: "),
+            "got: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "an unlockable sidecar must not be written unserialized"
+        );
+    }
+
+    #[test]
+    fn update_waits_for_a_foreign_lock_holder_rather_than_failing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let held = crate::secure_file::lock_sidecar_exclusive(&dir.path().join("grants.json.lock"))
+            .unwrap();
+        // Set before the release, so a writer that only ever enters after the release always observes it — a `try_lock` that bailed on contention, or one that ignored the holder, would not.
+        let released = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                store
+                    .update(&mut |file| {
+                        assert!(
+                            released.load(Ordering::Acquire),
+                            "a contended writer must wait for the holder, not read-modify-write alongside it"
+                        );
+                        upsert_some_provider(file)
+                    })
+                    .expect("contention is waited out, never surfaced as an error")
+            });
+            released.store(true, Ordering::Release);
+            drop(held);
+            writer.join().unwrap();
+        });
+
+        assert!(
+            some_provider_granted(&store),
+            "the grant the contended writer was carrying still lands"
         );
     }
 

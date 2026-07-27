@@ -28,6 +28,26 @@ pub fn write_json_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> 
     Ok(())
 }
 
+pub struct SidecarLock {
+    _file: fs::File,
+}
+
+/// Takes the exclusive advisory lock that serializes a sidecar's read-modify-write across processes, on a companion file (never the sidecar itself, whose inode a rename-install replaces); the lock is the kernel's, so it releases when the guard drops and a crashed holder can never wedge later writers.
+pub fn lock_sidecar_exclusive(path: &Path) -> io::Result<SidecarLock> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.lock()?;
+    Ok(SidecarLock { _file: file })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +164,61 @@ mod tests {
         write_json_secret_atomic(&path, b"a").unwrap();
         write_json_secret_atomic(&path, b"b").unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn lock_excludes_an_independent_open_file_description_until_the_guard_drops() {
+        // A second open of the same path is a distinct open-file-description, which flock treats exactly as another process would — so this pins the cross-process exclusion without spawning one.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sidecar.json.lock");
+        let guard = lock_sidecar_exclusive(&path).unwrap();
+
+        let contender = fs::File::open(&path).unwrap();
+        assert!(
+            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "a second holder must be excluded while the guard lives"
+        );
+        drop(contender);
+
+        drop(guard);
+        let after = fs::File::open(&path).unwrap();
+        assert!(
+            after.try_lock().is_ok(),
+            "dropping the guard must release the lock, so a crashed holder can never wedge later writers"
+        );
+    }
+
+    #[test]
+    fn lock_creates_the_lockfile_and_missing_parents_at_mode_0600() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("a/b/sidecar.json.lock");
+        let _guard = lock_sidecar_exclusive(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "got 0o{mode:o}, want 0o600");
+    }
+
+    #[test]
+    fn lock_fails_when_the_lock_path_is_occupied_by_a_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sidecar.json.lock");
+        fs::create_dir(&path).unwrap();
+        assert!(
+            lock_sidecar_exclusive(&path).is_err(),
+            "an unopenable lock path must fail closed rather than yield an unlocked guard"
+        );
+    }
+
+    #[test]
+    fn lock_does_not_follow_a_symlink_planted_at_the_lock_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let attacker_target = dir.path().join("attacker-target");
+        let path = dir.path().join("sidecar.json.lock");
+        std::os::unix::fs::symlink(&attacker_target, &path).unwrap();
+
+        assert!(lock_sidecar_exclusive(&path).is_err());
+        assert!(
+            !attacker_target.exists(),
+            "a symlink at the lock path must not redirect the create"
+        );
     }
 }
