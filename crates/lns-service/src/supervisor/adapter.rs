@@ -1433,7 +1433,7 @@ mod tests {
         let reconcile = make_armed_reconciler(
             &session,
             "proj".into(),
-            WorkloadIdentity::Adhoc,
+            acme_workload(),
             WorkloadGrantFile::default(),
             acme_custom(),
         );

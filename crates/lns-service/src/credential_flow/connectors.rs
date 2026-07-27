@@ -432,7 +432,9 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Adhoc;
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
         let armed = gate_armed_by_grant(
             &applied,
             &providers,
