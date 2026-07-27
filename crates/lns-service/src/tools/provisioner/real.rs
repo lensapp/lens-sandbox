@@ -1,19 +1,16 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use super::{DRIVER, EngineArtifacts};
-use crate::download::{PinnedArtifact, RealFetcher, RealFs, ensure_pinned};
-use crate::tools::{
-    Libc, ProvisionError, ProvisionTarget, StagedTar, StagedTool, ToolProvisioner, ToolRef, mise,
-};
+use crate::download::{RealFetcher, RealFs};
+use crate::tools::{ProvisionError, ProvisionTarget, StagedTool, ToolProvisioner, ToolRef, mise};
 use crate::{cache, composefs, guest_tools, image, ingest, initramfs, kernel, upperfs, vm};
 
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DRIVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_DRIVER_TIMEOUT_SECS: u64 = 600;
 
 pub(crate) struct MiseProvisioner {
     pub scratch_id: String,
@@ -57,7 +54,7 @@ async fn run_provisioner(
     let content_store = crate::content_store::ContentStore::new(cache_dir.join("content"));
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
 
-    let rootfs_ref = mise::rootfs_reference(target.libc).to_string();
+    let rootfs_ref = mise::manifest().rootfs_reference(target.libc).to_string();
     let cmd: [String; 0] = [];
     let want_arch = image::want_arch();
     let (tools_res, image_res, kernel_res, upper_res) = tokio::join!(
@@ -123,7 +120,7 @@ async fn run_provisioner(
         upper_disk
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| Path::new(".").to_path_buf())
             .join("console.log"),
         false,
     )?;
@@ -172,10 +169,8 @@ async fn run_provisioner(
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    let timeout = std::env::var("LNS_TOOLS_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_DRIVER_TIMEOUT_SECS);
+    let timeout =
+        super::driver_timeout_secs(std::env::var("LNS_TOOLS_TIMEOUT_SECS").ok().as_deref());
     let (stdout, exit_code) = vm::session_client::capture_session_exec(
         connector.as_ref(),
         argv,
@@ -187,112 +182,25 @@ async fn run_provisioner(
     .context("driving the provisioner install script")?;
 
     let results = super::parse_driver_output(&stdout, exit_code, requests)?;
-    let staged = requests
-        .iter()
-        .map(|request| {
-            let result = results
-                .iter()
-                .find(|result| result.name == request.name)
-                .ok_or_else(|| ProvisionError::Engine(format!("no driver result for {request}")))?;
-            let backend = crate::tools::registry::backend_for(&request.name)
-                .unwrap_or("core:unknown")
-                .to_string();
-            let source_host = crate::tools::registry::source_host(&request.name, &backend);
-            Ok(StagedTool {
-                name: request.name.clone(),
-                requested: request.version.clone(),
-                resolved: result.resolved.clone(),
-                backend,
-                source_host,
-                tar: StagedTar::File(staging.join(format!("{}.tar", request.name))),
-                bin_paths: vec![result.bin_path.clone()],
-            })
-        })
-        .collect::<Result<Vec<_>, ProvisionError>>()?;
-    Ok(staged)
+    Ok(super::staged_tools_from_results(
+        requests, &results, &staging,
+    )?)
 }
 
 pub(crate) async fn ensure_engine_artifacts(
     cache_dir: &Path,
     target: &ProvisionTarget,
 ) -> Result<EngineArtifacts> {
-    let manifest = mise::manifest();
-    let arch = target.arch;
-    let root = cache_dir
-        .join("tools")
-        .join("companions")
-        .join(arch.to_string());
-    let fetcher = RealFetcher {
-        max_bytes: MAX_ARTIFACT_BYTES,
-    };
-
-    let mise_bin = ensure_pinned(
-        &fetcher,
-        &RealFs,
-        &root.join("mise").join(mise::engine_version()),
-        &PinnedArtifact {
-            filename: "mise",
-            url: &mise::engine_url(arch),
-            sha256: mise::engine_sha256(arch),
-            mode: Some(0o755),
-            label: "mise engine",
+    super::ensure_engine_artifacts_with(
+        &RealFetcher {
+            max_bytes: MAX_ARTIFACT_BYTES,
         },
-    )
-    .await?;
-    let curl_bin = ensure_pinned(
-        &fetcher,
         &RealFs,
-        &root.join("curl").join(&manifest.static_curl.version),
-        &PinnedArtifact {
-            filename: "curl",
-            url: &mise::curl_url(arch),
-            sha256: mise::curl_sha256(arch),
-            mode: Some(0o755),
-            label: "static curl",
-        },
+        mise::manifest(),
+        cache_dir,
+        target,
     )
-    .await?;
-
-    let mut ca_bundle_pem = Vec::new();
-    let mut companion_specs = Vec::new();
-    for companion in &manifest.companion {
-        let is_ca = companion.name == "ca-certificates-bundle";
-        if !is_ca && target.libc != Libc::Musl {
-            continue;
-        }
-        let filename = format!("{}-{}.apk", companion.name, companion.version);
-        let apk_path = ensure_pinned(
-            &fetcher,
-            &RealFs,
-            &root.join("apks"),
-            &PinnedArtifact {
-                filename: &filename,
-                url: &mise::companion_url(companion, arch),
-                sha256: mise::companion_sha256(companion, arch),
-                mode: None,
-                label: &companion.name,
-            },
-        )
-        .await?;
-        let bytes = tokio::fs::read(&apk_path)
-            .await
-            .with_context(|| format!("reading {}", apk_path.display()))?;
-        if is_ca {
-            ca_bundle_pem = super::ca_bundle_pem(&bytes)?;
-        } else {
-            companion_specs.extend(super::apk_runtime_specs(&bytes)?);
-        }
-    }
-    anyhow::ensure!(
-        !ca_bundle_pem.is_empty(),
-        "the pinned companion set carries no ca-certificates-bundle"
-    );
-    Ok(EngineArtifacts {
-        mise: mise_bin,
-        curl: curl_bin,
-        ca_bundle_pem,
-        companion_specs,
-    })
+    .await
 }
 
 /// The musl companion trees a workload guest needs beside node/bun tool trees, injected at their canonical library paths.

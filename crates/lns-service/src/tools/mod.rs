@@ -44,9 +44,12 @@ impl std::fmt::Display for Arch {
 }
 
 pub fn host_arch() -> Arch {
-    if cfg!(target_arch = "x86_64") {
+    #[cfg(target_arch = "x86_64")]
+    {
         Arch::X86_64
-    } else {
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
         Arch::Aarch64
     }
 }
@@ -467,7 +470,14 @@ mod tests {
         )
         .await
         .unwrap();
-        cache.map.lock().unwrap().clear();
+        cache
+            .evict(&ToolCacheKey {
+                name: "some-tool".into(),
+                resolved: "1.2.3".into(),
+                arch: Arch::Aarch64,
+                libc: Libc::Gnu,
+            })
+            .unwrap();
         let upstream_moved_on = Scripted::resolving(&[("some-tool", "1.9.9")]);
         let ensured = ensure_tools(
             &records,
@@ -592,12 +602,10 @@ mod tests {
 
     #[test]
     fn host_arch_matches_the_compilation_target() {
-        let expected = if cfg!(target_arch = "x86_64") {
-            Arch::X86_64
-        } else {
-            Arch::Aarch64
-        };
-        assert_eq!(host_arch(), expected);
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(host_arch(), Arch::X86_64);
+        #[cfg(not(target_arch = "x86_64"))]
+        assert_eq!(host_arch(), Arch::Aarch64);
     }
 
     #[test]

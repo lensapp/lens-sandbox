@@ -13,11 +13,13 @@ members = [
     "crates/lns-session-broker",
     "crates/lns-supervisor",
     "crates/bump-kernel",
+    "crates/bump-mise",
     "crates/coverage-strip-ast",
     "crates/e2e-tests",
 ]
 # Workspace members NOT in default-members are opt-in:
 #   - bump-kernel       : operator tooling for kernel pin bumps
+#   - bump-mise         : operator tooling for mise engine pin bumps
 #   - coverage-strip-ast: AST-aware lcov post-processor (run by make coverage)
 #   - e2e-tests         : Layer 1 (E2E) cucumber harness; spawns real
 #                         binaries with side effects — excluded from

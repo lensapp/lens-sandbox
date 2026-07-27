@@ -1,0 +1,24 @@
+[package]
+name        = "bump-mise"
+version     = "0.1.0"
+edition     = "2024"
+description = "Internal operator CLI: bump the pinned mise tool-provisioning engine and regenerate the registry snapshot"
+publish     = false
+
+[[bin]]
+name = "bump-mise"
+path = "src/main.rs"
+
+[dependencies]
+anyhow          = "1"
+clap            = { version = "4", features = ["derive"] }
+toml            = "0.8"
+toml_edit       = "0.22"
+sha2            = "0.10"
+# Verifies upstream's SHASUMS256.txt.minisig against mise's published minisign key before any pin lands.
+minisign-verify = "0.2"
+flate2          = "1"
+tar             = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

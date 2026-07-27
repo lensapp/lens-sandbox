@@ -54,35 +54,37 @@ pub fn engine_version() -> &'static str {
     &manifest().engine.version
 }
 
-pub fn engine_url(arch: Arch) -> String {
-    let version = engine_version();
-    format!(
-        "https://github.com/jdx/mise/releases/download/v{version}/mise-v{version}-linux-{}-musl",
-        mise_release_arch(arch)
-    )
-}
-
-pub fn engine_sha256(arch: Arch) -> &'static str {
-    &manifest().engine.sha256[&arch.to_string()]
-}
-
-pub fn rootfs_reference(libc: Libc) -> &'static str {
-    match libc {
-        Libc::Gnu => &manifest().provisioner_rootfs.gnu,
-        Libc::Musl => &manifest().provisioner_rootfs.musl,
+impl Manifest {
+    pub fn engine_url(&self, arch: Arch) -> String {
+        let version = &self.engine.version;
+        format!(
+            "https://github.com/jdx/mise/releases/download/v{version}/mise-v{version}-linux-{}-musl",
+            mise_release_arch(arch)
+        )
     }
-}
 
-pub fn curl_url(arch: Arch) -> String {
-    format!(
-        "https://github.com/moparisthebest/static-curl/releases/download/v{}/curl-{}",
-        manifest().static_curl.version,
-        release_arch(arch)
-    )
-}
+    pub fn engine_sha256(&self, arch: Arch) -> &str {
+        &self.engine.sha256[&arch.to_string()]
+    }
 
-pub fn curl_sha256(arch: Arch) -> &'static str {
-    &manifest().static_curl.sha256[&arch.to_string()]
+    pub fn rootfs_reference(&self, libc: Libc) -> &str {
+        match libc {
+            Libc::Gnu => &self.provisioner_rootfs.gnu,
+            Libc::Musl => &self.provisioner_rootfs.musl,
+        }
+    }
+
+    pub fn curl_url(&self, arch: Arch) -> String {
+        format!(
+            "https://github.com/moparisthebest/static-curl/releases/download/v{}/curl-{}",
+            self.static_curl.version,
+            release_arch(arch)
+        )
+    }
+
+    pub fn curl_sha256(&self, arch: Arch) -> &str {
+        &self.static_curl.sha256[&arch.to_string()]
+    }
 }
 
 pub fn companion_url(companion: &Companion, arch: Arch) -> String {
@@ -157,21 +159,29 @@ mod tests {
     #[test]
     fn the_engine_url_names_the_pinned_static_musl_binary() {
         assert_eq!(
-            engine_url(Arch::Aarch64),
+            manifest().engine_url(Arch::Aarch64),
             format!(
                 "https://github.com/jdx/mise/releases/download/v{v}/mise-v{v}-linux-arm64-musl",
                 v = engine_version()
             )
         );
-        assert!(engine_url(Arch::X86_64).ends_with("linux-x64-musl"));
-        assert_eq!(engine_sha256(Arch::Aarch64).len(), 64);
+        assert!(
+            manifest()
+                .engine_url(Arch::X86_64)
+                .ends_with("linux-x64-musl")
+        );
+        assert_eq!(manifest().engine_sha256(Arch::Aarch64).len(), 64);
     }
 
     #[test]
     fn the_curl_url_names_the_pinned_static_binary() {
-        assert!(curl_url(Arch::Aarch64).ends_with("/curl-aarch64"));
-        assert!(curl_url(Arch::X86_64).ends_with("/curl-amd64"));
-        assert_eq!(curl_sha256(Arch::X86_64).len(), 64);
+        assert!(
+            manifest()
+                .curl_url(Arch::Aarch64)
+                .ends_with("/curl-aarch64")
+        );
+        assert!(manifest().curl_url(Arch::X86_64).ends_with("/curl-amd64"));
+        assert_eq!(manifest().curl_sha256(Arch::X86_64).len(), 64);
     }
 
     #[test]
@@ -197,8 +207,16 @@ mod tests {
 
     #[test]
     fn the_rootfs_flavors_map_musl_to_alpine_and_gnu_to_debian() {
-        assert!(rootfs_reference(Libc::Musl).starts_with("docker.io/library/alpine@sha256:"));
-        assert!(rootfs_reference(Libc::Gnu).starts_with("docker.io/library/debian@sha256:"));
+        assert!(
+            manifest()
+                .rootfs_reference(Libc::Musl)
+                .starts_with("docker.io/library/alpine@sha256:")
+        );
+        assert!(
+            manifest()
+                .rootfs_reference(Libc::Gnu)
+                .starts_with("docker.io/library/debian@sha256:")
+        );
     }
 
     #[test]

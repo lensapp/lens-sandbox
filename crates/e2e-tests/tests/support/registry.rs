@@ -346,3 +346,50 @@ fn query_param(query: &str, key: &str) -> Option<String> {
             .map(|(_, v)| v.to_string())
     })
 }
+
+/// A loopback stand-in for the public tool version index `lns push` consults:
+/// serves one newline-separated ascending version list per tool path.
+#[derive(Debug)]
+pub struct VersionIndex {
+    url: String,
+}
+
+impl VersionIndex {
+    pub fn start(tool: &str, versions: &str) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind version index");
+        let url = format!("http://{}", listener.local_addr().expect("index addr"));
+        let expected = format!("GET /{tool} ");
+        let body = versions.to_string();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let (status, payload) = if request.starts_with(&expected) {
+                    ("200 OK", body.as_str())
+                } else {
+                    ("404 Not Found", "")
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        Self { url }
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}

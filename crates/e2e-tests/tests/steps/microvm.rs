@@ -777,6 +777,11 @@ fn tools_over_toolless_base(world: &mut E2eWorld, entries: String) {
     world.project_tools = parse_tools_list(&entries);
 }
 
+#[given(regex = r#"^a lns\.yaml declaring tools \[([^\]]*)\]$"#)]
+fn project_declares_tools(world: &mut E2eWorld, entries: String) {
+    world.project_tools = parse_tools_list(&entries);
+}
+
 #[given(regex = r#"^a base image that ships node 20 and a lns\.yaml declaring tools \[(.*)\]$"#)]
 fn tools_over_node20_base(world: &mut E2eWorld, entries: String) {
     world.project_image = Some(NODE20_IMAGE.to_string());
@@ -786,6 +791,47 @@ fn tools_over_node20_base(world: &mut E2eWorld, entries: String) {
 #[when(regex = r#"^the sandbox runs "([^"]+)"$"#)]
 fn sandbox_runs_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
+}
+
+#[when(regex = r#"^the sandbox runs "([^"]+)" again$"#)]
+fn sandbox_runs_command_again(world: &mut E2eWorld, cmd_line: String) {
+    run_microvm(world, vec![], &cmd_line);
+}
+
+#[then("the run summary discloses the declared tools")]
+fn run_summary_discloses_tools(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    let text = format!("{}\n{}", result.stdout, result.stderr);
+    assert!(
+        text.contains("Tools:") && text.contains("node@22"),
+        "expected a Tools summary line, got:\n{text}"
+    );
+}
+
+#[then("the audit chain records the tool provisioning")]
+fn audit_records_tool_provisioning(world: &mut E2eWorld) {
+    let run_id = world.last_run_id.clone().expect("a run id was parsed");
+    let audit = world.run_with_service_env(&["audit", &run_id]);
+    assert_eq!(
+        audit.exit_code, 0,
+        "lns audit failed:\n{}\n{}",
+        audit.stdout, audit.stderr
+    );
+    assert!(
+        audit.stdout.contains("node@22"),
+        "expected the provisioned tool in the audit timeline, got:\n{}",
+        audit.stdout
+    );
+}
+
+#[then("nothing is provisioned again")]
+fn nothing_provisioned_again(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    let text = format!("{}\n{}", result.stdout, result.stderr);
+    assert!(
+        !text.contains("Provisioning"),
+        "the warm run must not re-provision, got:\n{text}"
+    );
 }
 
 #[then("it prints a node 22 version")]
