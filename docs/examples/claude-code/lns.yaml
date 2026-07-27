@@ -3,7 +3,9 @@ kind: Sandbox
 metadata:
   name: claude-code
 spec:
-  image: docker.io/library/node:lts-alpine
+  image: docker.io/library/debian:bookworm-slim
+  tools:
+    - node@22
   command: sh -lc "export PATH=$HOME/.npm-global/bin:$PATH; command -v claude >/dev/null || npm install --silent --prefix $HOME/.npm-global -g @anthropic-ai/claude-code; exec claude"
   workdir: /workspace
   env:

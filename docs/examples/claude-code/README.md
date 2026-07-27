@@ -7,10 +7,11 @@ hosts you allow.
 
 ## Files
 
-- **`lns.yaml`** — the sandbox definition: a `node:lts-alpine` base that installs
-  Claude Code on first boot, the network allowlist, and the
-  `claude-code-subscription` connector, and inline seed state mounted at the
-  workload's home (`/home/sandbox`). The inline `.claude.json` skips onboarding
+- **`lns.yaml`** — the sandbox definition: a slim Debian base with node declared
+  under `spec.tools` (provisioned once per machine by the service, outside the
+  policy cage), a first-boot install of Claude Code itself, the network
+  allowlist, the `claude-code-subscription` connector, and inline seed state
+  mounted at the workload's home (`/home/sandbox`). The inline `.claude.json` skips onboarding
   and pre-accepts the `/workspace` trust dialog. The inline
   `.claude/settings.json` runs Claude in `bypassPermissions` and turns **off
   Claude's own sandbox**. Both are redundant here: the lns microVM is already
@@ -26,9 +27,12 @@ cd your-project      # now contains lns.yaml
 lns run
 ```
 
-The first boot runs `npm install -g @anthropic-ai/claude-code`; the microVM is
-ephemeral, so each cold start reinstalls it (the `allowedRoutes` keep
-`registry.npmjs.org` open for that reason).
+node comes from `spec.tools`: the service provisions `node@22` once per machine
+before the microVM boots — no base-image coupling, no per-run download, no
+policy route. The first boot still runs `npm install -g
+@anthropic-ai/claude-code` for the agent itself; the microVM is ephemeral, so
+each cold start reinstalls that package (the `allowedRoutes` keep
+`registry.npmjs.org` open for exactly that install).
 
 On first run, an approval card asks for your Claude subscription token and shows
 how to mint it.
@@ -99,8 +103,11 @@ base image.
 ## Notes
 
 - The network allowlist is deliberately tight. `registry.npmjs.org` is only
-  needed for the first-boot install; if you bake Claude Code into a custom image
-  and `lns push` it, you can drop that route and the runtime install entirely.
+  needed for the first-boot `npm install` of Claude Code itself — node already
+  arrives via [`spec.tools`](../../running-workloads.md#tools--declared-toolchains),
+  provisioned by the service outside the policy cage. Baking Claude Code into a
+  custom image and pushing that remains an option that drops the route and the
+  runtime install entirely.
 - Everything except `/workspace` is ephemeral. Session history and any config
   Claude writes at runtime die with the microVM; the inline seed is restored
   from `lns.yaml` on every run. Attach a named volume if you want state to

@@ -537,6 +537,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bump-mise"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "minisign-verify",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "toml",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3456,6 +3471,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "miniz_oxide"

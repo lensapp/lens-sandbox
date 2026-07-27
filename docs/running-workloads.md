@@ -759,8 +759,8 @@ or `lns pull` simply fetches or rebuilds it again.
 
 [`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
-plus a first-boot install, `spec.env`, a tight `policy` allowlist, the
-`claude-code-subscription` connector, a `.` bind at `/workspace`, and a
+plus node declared under `spec.tools`, `spec.env`, a tight `policy` allowlist,
+the `claude-code-subscription` connector, a `.` bind at `/workspace`, and a
 self-contained inline fileset that seeds the agent's home. Copy its `lns.yaml`
 into your project and `lns run`.
 
