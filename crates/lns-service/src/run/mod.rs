@@ -189,6 +189,7 @@ pub(super) fn workload_identity(
             digest: digest.to_string(),
         }
     } else {
+        // TODO: every plain-image run in a project collapses into this one identity, so a grant made for one arms the next without a card; resolved when plain-image runs are removed and every run keys by definition or digest.
         WorkloadIdentity::Adhoc
     }
 }
