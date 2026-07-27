@@ -12,12 +12,18 @@ version = "2026.7.14"
 aarch64 = "d425bdcad22eacf39081e8762a4a32fba5e32c8fd1c227a73e878f7dbd1fb8bb"
 x86_64 = "255506718855e217311886eea44a46d1d213308a55fb37ba664d588889fefefe"
 
-# Provisioner guest base images, one per libc flavor, pinned by index digest.
-# The rootfs flavor always matches the flavor being provisioned: node/bun/deno
-# execute the installed tool as a post-install check.
-[provisioner_rootfs]
-gnu = "docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818"
-musl = "docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+# Provisioner guest base images, one per libc flavor, pinned by the per-arch
+# platform manifest digest (the pull verifies the platform manifest it
+# receives, not the multi-arch index). The rootfs flavor always matches the
+# flavor being provisioned: node/bun/deno execute the installed tool as a
+# post-install check.
+[provisioner_rootfs.gnu]
+aarch64 = "docker.io/library/debian@sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0"
+x86_64 = "docker.io/library/debian@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e"
+
+[provisioner_rootfs.musl]
+aarch64 = "docker.io/library/alpine@sha256:45e09956dc667c5eff3583c9d94830261fb1ca0be10a0a7db36266edf5de9e1d"
+x86_64 = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
 
 # Static curl for the rust backend: rustup's bootstrap hard-requires curl or
 # wget with TLS, and busybox wget is not enough.

@@ -54,7 +54,7 @@ async fn run_provisioner(
     let content_store = crate::content_store::ContentStore::new(cache_dir.join("content"));
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
 
-    let rootfs_ref = mise::manifest().rootfs_reference(target.libc).to_string();
+    let rootfs_ref = mise::manifest().rootfs_reference(target.libc, target.arch).to_string();
     let cmd: [String; 0] = [];
     let want_arch = image::want_arch();
     let (tools_res, image_res, kernel_res, upper_res) = tokio::join!(
