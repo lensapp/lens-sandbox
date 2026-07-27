@@ -1,3 +1,5 @@
+pub mod cache;
+pub mod record;
 pub mod registry;
 
 pub use lns_artifact::tools::ToolRef;
@@ -52,6 +54,24 @@ pub struct ToolCacheKey {
     pub resolved: String,
     pub arch: Arch,
     pub libc: Libc,
+}
+
+/// One tool tree the provisioner staged: identity, provenance, the tarred tree, and its bin dirs relative to the tree root.
+#[derive(Debug, Clone)]
+pub struct StagedTool {
+    pub name: String,
+    pub requested: String,
+    pub resolved: String,
+    pub backend: String,
+    pub source_host: String,
+    pub tar: StagedTar,
+    pub bin_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum StagedTar {
+    File(std::path::PathBuf),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug, thiserror::Error)]
