@@ -13,7 +13,8 @@ Feature: lns-service pkce connector sign-in
   approval surface offers to connect, and accepting runs the browser sign-in
   instead of asking for a value. On success the connector is connected live
   and the key is armed; cancel, timeout, or a rejected exchange fails the held
-  request without persisting. (The PKCE proof — the exchanged verifier hashing
+  request without persisting. None of those three is the developer refusing the
+  credential, so the audit chain records no approval for them. (The PKCE proof — the exchanged verifier hashing
   to the challenge — a forged-callback state mismatch, and a listener that
   can't bind are pinned at the unit layer in `oauth/mod.rs`.)
 
@@ -35,6 +36,7 @@ Feature: lns-service pkce connector sign-in
     Then the held request is failed at the boundary
     And no credential is stored for "some-pkce"
     And the "some-pkce" connector is not connected
+    And the audit chain records no approval for "some-pkce"
 
   Scenario: A pkce sign-in whose callback never arrives times out and stores nothing
     Given an unconnected "some-pkce" oauth connector whose callback never arrives
@@ -42,6 +44,7 @@ Feature: lns-service pkce connector sign-in
     And the developer accepts the prompt
     Then the held request is failed at the boundary
     And no credential is stored for "some-pkce"
+    And the audit chain records no approval for "some-pkce"
 
   Scenario: A pkce code exchange that the provider rejects fails the held request and stores nothing
     Given an unconnected "some-pkce" oauth connector whose code exchange will fail
@@ -49,6 +52,7 @@ Feature: lns-service pkce connector sign-in
     And the developer accepts the prompt
     Then the held request is failed at the boundary
     And no credential is stored for "some-pkce"
+    And the audit chain records no approval for "some-pkce"
 
   Scenario: A pkce-obtained key stays armed on the next run without signing in again
     Given "some-pkce" was connected and its credential stored

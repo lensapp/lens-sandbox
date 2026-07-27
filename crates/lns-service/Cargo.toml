@@ -163,6 +163,7 @@ tokio-test = "0.4"
 # `regex` in as a dev-dep is cheap because cucumber already depends on
 # it transitively.
 regex = "1"
+egui_kittest = "0.34"
 
 # Layer 2 (behavioural unit) cucumber harness. Drives lns_service
 # library modules in-process — no subprocess spawns, no real FS, no

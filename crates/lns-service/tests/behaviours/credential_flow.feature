@@ -10,7 +10,8 @@ Feature: lns-service credential flow
   always-on-top approval window. The card asks the developer for the
   real value: either accept the one detected on the host by the
   provider's per-service detection strategy, type one in, or deny.
-  Every decision is sticky — there is no once/always distinction.
+  Every decision is sticky — there is no once/always distinction — but
+  dismissing a card is not a decision and settles nothing.
   Decisions and any typed values land in `~/.lns-credentials.json` (a
   pluggable host-side store, JSON-file v1). They do NOT live in
   `lns-policy.yaml`: the shareable policy file stays free of
@@ -94,6 +95,27 @@ Feature: lns-service credential flow
     And the workload's held request is failed at the boundary
     And a future request carrying the some-provider placeholder is failed at the boundary without prompting
     And "lns-policy.yaml" is unchanged
+
+  Scenario: Closing a credential card decides nothing and asks again on the next use
+    Given a credential card for "some-provider" is visible
+    When the developer closes the card without choosing
+    Then the workload's held request is failed at the boundary
+    And the credential card is removed from the approval window
+    And "~/.lns-credentials.json" is unchanged
+    And the workload grant sidecar records no grant for "some-provider"
+    And a future request carrying the some-provider placeholder fires a fresh credential card
+
+  Scenario: Closing every card at once decides nothing for any of them
+    Given credential cards for "some-provider" and "some-other-provider" are visible
+    When the developer closes every card at once
+    Then both held requests are failed at the boundary
+    And "~/.lns-credentials.json" is unchanged
+    And a future request carrying either placeholder fires a fresh credential card
+
+  Scenario: A dismissed credential card records no approval in the audit chain
+    Given a credential card for "some-provider" is visible
+    When the developer closes the card without choosing
+    Then the audit chain records no approval for "some-provider"
 
   Scenario: A request needing both an unknown network rule and an unknown credential surfaces both cards in parallel
     Given a workload is running with the seeded "some-provider" placeholder
