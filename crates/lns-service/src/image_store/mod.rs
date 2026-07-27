@@ -428,6 +428,9 @@ pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
+    pre_provision_tools(&artifact, &base_image)
+        .await
+        .with_context(|| format!("provisioning the declared tools of {image}"))?;
     let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
     pull_with(
         &real::RealFs,
@@ -436,6 +439,49 @@ pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
         &crate::run_registry::snapshot(),
     )
     .await
+}
+
+/// A pulled sandbox keeps the documented offline-start promise only if its (push-pinned) tools are provisioned while we're online; no run exists yet, so like the image fetch itself this is disclosed in the pull output rather than a run chain.
+async fn pre_provision_tools(
+    artifact: &crate::image::PulledArtifact,
+    base_image: &crate::image::PulledImage,
+) -> Result<()> {
+    if artifact.tools.is_empty() {
+        return Ok(());
+    }
+    let requests = lns_artifact::tools::parse_all(&artifact.tools)?;
+    crate::tools::registry::refuse_unknown_tools(&requests)?;
+    let layers: Vec<Vec<u8>> = base_image
+        .layers
+        .iter()
+        .map(|layer| layer.data.to_vec())
+        .collect();
+    let target = crate::tools::ProvisionTarget {
+        arch: crate::tools::host_arch(),
+        libc: crate::tools::libc::detect_libc(&layers)?,
+    };
+    crate::tools::registry::refuse_libc_unsupported(&requests, &target, &artifact.base_image)?;
+    let content_store =
+        crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
+    let scratch_id = format!(
+        "pull-{}",
+        artifact
+            .digest
+            .trim_start_matches("sha256:")
+            .get(..12)
+            .unwrap_or("tools")
+    );
+    let ensured =
+        crate::tools::real::ensure_for_run(&scratch_id, &content_store, &requests, &target).await?;
+    for outcome in &ensured.provisioned {
+        crate::log::info!(
+            "Provisioned",
+            "{} → {} (cached for offline start)",
+            outcome.requested,
+            outcome.resolved
+        );
+    }
+    Ok(())
 }
 
 pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
@@ -722,6 +768,7 @@ mod tests {
             reference: "some-sandbox:1.0".parse().unwrap(),
             digest: "sha256:manifest".into(),
             base_image: base_reference.clone(),
+            tools: Vec::new(),
         };
         let base_image = PulledImage {
             reference: base_reference.parse().unwrap(),
