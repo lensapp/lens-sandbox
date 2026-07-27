@@ -31,15 +31,17 @@ and `huggingface` ship in the bundled catalog; `github` ships as an `oauth` conn
 Declare your own for an internal API with `lns connector add`
 (see [Connectors](connectors.md)). A sandbox definition that lists a provider
 under `spec.connectors` seeds its placeholder env var but only *offers* it —
-the workload is prompted to connect it on first use, never armed
-automatically; `lns connector connect <id>` arms it up front and records it
-under `connectors:` in that directory's `lns-policy.yaml`.
+the workload is prompted on first use, never armed automatically.
+`lns connector connect <id>` records the id under `connectors:` in that
+directory's `lns-policy.yaml` and binds the value on your machine, but that
+alone does not arm the credential for a workload — see
+[Workload grants](#workload-grants) below.
 
 ## Value decisions
 
-A provider's *value decision* is per-machine — it's how the real secret (or the
-choice to deny) is bound on your machine. It's stored in `~/.lns-credentials.json`,
-separate from the shareable `lns-policy.yaml`, so secrets are never committed.
+A provider's *value decision* is per-machine — it's how the real secret is bound
+on your machine. It's stored in `~/.lns-credentials.json`, separate from the
+shareable `lns-policy.yaml`, so secrets are never committed.
 
 Decisions are made interactively, at either of two moments:
 
@@ -54,6 +56,46 @@ Decisions are made interactively, at either of two moments:
 Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then
 fail at the boundary). The decision is remembered for next time.
+
+Denying is the one choice whose reach depends on which card you answered.
+Denying the **proactive** card is a decision about the machine, and lands in
+`~/.lns-credentials.json` alongside the values. Declining a **reactive**
+first-use card is a decision about the workload in front of you, and is
+remembered as a per-workload deny instead — see
+[Workload grants](#workload-grants).
+
+## Workload grants
+
+Having a value bound on your machine is not the same as letting a *particular*
+workload spend it. Binding is machine-wide; the decision to spend is per
+workload. So a connector arms only where you have granted it — a copied
+`lns-policy.yaml`, or a sandbox definition that declares a connector you happen
+to have connected, still meets a first-use card rather than silently reaching
+for the real secret.
+
+A grant is scoped to the project, the workload, and the connector, and it
+records the environment variable and injection domains the card disclosed to
+you. If the connector is later redefined to use a different variable or
+different domains, the grant no longer matches and you are asked again rather
+than the new shape inheriting the old approval.
+
+Grants live in `~/.lns-workload-grants.json` — per-machine, alongside the
+credential values and equally outside anything you commit. Declining a card is
+remembered there too, as a standing no for that workload only; the same
+connector is still offered to your other projects, and to other workloads in
+this one.
+
+Inspect and clear them with:
+
+```
+lns connector grants              # what this project granted or declined
+lns connector grants --all        # every project on this machine
+lns connector revoke <id>         # forget this project's grants for one connector
+```
+
+`lns connector disconnect <id>` forgets them too, as part of removing the
+connector from the directory's policy. A revoke applies to the next run — a
+sandbox already running keeps the arming it was granted at launch.
 
 An [`oauth` connector](connectors.md)'s value decision is different in kind: rather
 than a pasted secret it's obtained by an interactive **sign-in**
