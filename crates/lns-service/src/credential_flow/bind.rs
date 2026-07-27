@@ -21,6 +21,8 @@ pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
         env_var: Some(cred.env_var.clone()),
         injection_domains: cred.injections.iter().map(|i| i.domain.clone()).collect(),
         is_project_defined: false,
+        // A bind card exists to make the machine binding, so it never offers to reuse one.
+        bound_value_available: false,
     })
 }
 
@@ -56,6 +58,10 @@ pub fn resolve_bind_decision(request: CredentialDecisionRequest) -> BindResoluti
         }
         CredentialDecisionRequest::Deny => {
             BindResolution::Persist(CredentialEntry::Deny, CredentialBindDecision::Denied)
+        }
+        // A bind card never offers it (there is no binding to reuse yet), so reaching here means no value was decided.
+        CredentialDecisionRequest::AllowBound => {
+            BindResolution::Failed("no value was bound by the decision".into())
         }
         CredentialDecisionRequest::Timeout => {
             BindResolution::Failed("the value decision timed out before it was made".into())
@@ -198,6 +204,24 @@ mod tests {
         assert_eq!(
             resolve_bind_decision(CredentialDecisionRequest::Timeout),
             BindResolution::Failed("the value decision timed out before it was made".into())
+        );
+    }
+
+    #[test]
+    fn reusing_a_binding_is_not_a_bind_so_it_persists_nothing() {
+        assert_eq!(
+            resolve_bind_decision(CredentialDecisionRequest::AllowBound),
+            BindResolution::Failed("no value was bound by the decision".into()),
+            "the bind card exists to create the machine binding, so a grant of an existing one leaves it with nothing to report"
+        );
+    }
+
+    #[test]
+    fn a_bind_card_never_offers_to_reuse_an_existing_binding() {
+        let prompt = bind_prompt(&credential_connector("acme", "ACME_API_KEY")).expect("a prompt");
+        assert!(
+            !prompt.bound_value_available,
+            "the bind card is where the machine binding is made; offering to reuse one would be circular"
         );
     }
 }

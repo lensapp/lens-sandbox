@@ -47,6 +47,8 @@ pub struct CredentialPendingPrompt {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    /// True when a value is already bound for this connector on this machine, so the card can grant that binding instead of demanding the secret again (or re-running a sign-in).
+    pub bound_value_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,10 +102,11 @@ pub enum DecisionOutcome {
     UnknownId,
 }
 
-/// `Allow`/`Deny` persist a rule to the store; `Timeout` persists nothing (S12).
+/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline and `Timeout` records nothing (S12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialDecisionRequest {
     Allow(CredentialEntry),
+    AllowBound,
     Deny,
     Timeout,
 }
@@ -450,6 +453,7 @@ impl CredentialSession {
         };
         let (env_var, injection_domains, is_project_defined) =
             self.provider_disclosure(&req.credential_id);
+        let bound_value_available = self.has_resolvable_value(&req.credential_id);
         self.notifier.present(&CredentialPendingPrompt {
             id: req.id,
             credential_id: req.credential_id,
@@ -459,6 +463,7 @@ impl CredentialSession {
             env_var,
             injection_domains,
             is_project_defined,
+            bound_value_available,
         });
     }
 
@@ -539,7 +544,7 @@ impl CredentialSession {
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
         match &request {
-            CredentialDecisionRequest::Allow(_) => {
+            CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
                 self.record_credential_approval(&credential_id, Decision::Allow)
             }
             CredentialDecisionRequest::Deny => {
@@ -554,6 +559,15 @@ impl CredentialSession {
                 self.remember_grant(&credential_id, GrantVerdict::Allow);
                 // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
                 self.apply_persistent_entry(credential_id.clone(), entry);
+                if self.connectable.contains(&credential_id) {
+                    (self.connect)(&credential_id);
+                }
+            }
+            // Granting the binding already on this machine is consent to spend it, not a decision to rebind: the stored entry is left exactly as `lns connector connect` wrote it and only the armed set changes.
+            CredentialDecisionRequest::AllowBound => {
+                self.grant_armed(&credential_id);
+                self.remember_grant(&credential_id, GrantVerdict::Allow);
+                self.emit_armed_state();
                 if self.connectable.contains(&credential_id) {
                     (self.connect)(&credential_id);
                 }
@@ -838,6 +852,12 @@ impl CredentialSession {
             }));
     }
 
+    /// Re-emits the wire snapshot for an unchanged store, so a decision that only widened the armed set still reaches the boundary with the injection in hand.
+    fn emit_armed_state(&self) {
+        let snapshot = self.state.lock().expect("state mutex poisoned").clone();
+        (self.policy_emitter)(&snapshot, &self.armed_ids());
+    }
+
     fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) {
         self.record_credential_event(&credential_id, &entry);
         let snapshot = {
@@ -974,7 +994,9 @@ impl CredentialSession {
 
 fn decision_kind_of(request: &CredentialDecisionRequest) -> CredentialDecisionKind {
     match request {
-        CredentialDecisionRequest::Allow(_) => CredentialDecisionKind::Allow,
+        CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
+            CredentialDecisionKind::Allow
+        }
         CredentialDecisionRequest::Deny => CredentialDecisionKind::Deny,
         CredentialDecisionRequest::Timeout => CredentialDecisionKind::Timeout,
     }
@@ -2251,6 +2273,11 @@ mod tests {
             CredentialDecisionKind::Allow
         );
         assert_eq!(
+            decision_kind_of(&CredentialDecisionRequest::AllowBound),
+            CredentialDecisionKind::Allow,
+            "granting the existing binding releases the held request like any other allow"
+        );
+        assert_eq!(
             decision_kind_of(&CredentialDecisionRequest::Deny),
             CredentialDecisionKind::Deny
         );
@@ -2450,6 +2477,40 @@ mod tests {
             Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
         );
         (session, notifier, store, rx, connected)
+    }
+
+    #[test]
+    fn granting_a_connectable_ids_existing_binding_connects_it_live_and_keeps_the_stored_value() {
+        let (s, n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        let bound = CredentialEntry::Stored {
+            value: "already-bound".into(),
+        };
+        let mut machine = CredentialStateFile::new();
+        machine.insert("gitlab".to_string(), bound.clone());
+        s.apply_external_state(machine);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        assert!(
+            n.presented.lock().unwrap()[0].bound_value_available,
+            "a value bound on this machine must be offerable for reuse on the card"
+        );
+
+        s.record_decision("c1", CredentialDecisionRequest::AllowBound);
+
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["gitlab".to_string()],
+            "granting the binding still connects the connector live, exactly as a fresh value would"
+        );
+        assert!(s.armed_ids().contains("gitlab"));
+        assert_eq!(
+            s.current_state().get("gitlab"),
+            Some(&bound),
+            "the machine binding is spent, never rewritten"
+        );
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "reusing a binding writes nothing to the credential store"
+        );
     }
 
     #[test]

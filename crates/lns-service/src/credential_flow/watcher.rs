@@ -151,6 +151,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            bound_value_available: false,
         });
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(

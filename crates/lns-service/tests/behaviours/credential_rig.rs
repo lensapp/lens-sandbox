@@ -24,6 +24,8 @@ use tokio::sync::mpsc;
 pub const FIXTURE_ID: &str = "some-provider";
 pub const FIXTURE_ENV: &str = "SOME_TOKEN";
 pub const FIXTURE_PLACEHOLDER: &str = "some-placeholder-0000000000000000000000";
+/// The value `lns connector connect` bound on this machine before any workload was granted it.
+pub const FIXTURE_BOUND_VALUE: &str = "some-already-bound-value";
 pub const FIXTURE_DOMAIN: &str = "api.some-provider.example";
 
 /// An illustrative provider so the credential-flow scenarios pin the mechanism without coupling to any shipped service.
@@ -92,7 +94,29 @@ pub struct CredentialRig {
 }
 
 impl CredentialRig {
+    /// The fixture models a connector this run consented to (connected in the directory), so its value decisions arm at the boundary.
     pub fn new() -> Self {
+        Self::build(
+            HashSet::from([FIXTURE_ID.to_string()]),
+            CredentialStateFile::new(),
+        )
+    }
+
+    /// A connector whose value `lns connector connect` already bound on this machine, in a workload holding no grant for it — so the value stays unarmed and its first use meets a card.
+    pub fn bound_but_ungranted() -> Self {
+        let mut bound = CredentialStateFile::new();
+        bound.insert(
+            FIXTURE_ID.to_string(),
+            CredentialEntry::Stored {
+                value: FIXTURE_BOUND_VALUE.to_string(),
+            },
+        );
+        let rig = Self::build(HashSet::new(), bound.clone());
+        rig.store.save(&bound).expect("seed the machine binding");
+        rig
+    }
+
+    fn build(armed: HashSet<String>, initial: CredentialStateFile) -> Self {
         let dir = TempDir::new().expect("create tempdir");
         let credentials_path = dir.path().join("lns-credentials.json");
         let (grant_store, grant_project, grant_workload) = rig_grant_context(&dir);
@@ -113,7 +137,7 @@ impl CredentialRig {
         let timeout = Duration::from_secs(30);
         let session = Arc::new(
             CredentialSession::with_policy_emitter(
-                CredentialStateFile::new(),
+                initial,
                 notifier,
                 store.clone(),
                 frame_tx,
@@ -133,8 +157,7 @@ impl CredentialRig {
                     }));
                 }),
             )
-            // The fixture models a connector this run consented to (connected in the directory), so its value decisions arm at the boundary.
-            .with_armed_ids(HashSet::from([FIXTURE_ID.to_string()]))
+            .with_armed_ids(armed)
             .with_grants(
                 grant_project.clone(),
                 grant_workload.clone(),

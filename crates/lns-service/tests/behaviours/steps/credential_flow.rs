@@ -1,7 +1,9 @@
 use cucumber::{given, then, when};
 use std::time::Instant;
 
-use crate::credential_rig::{CredentialRig, FIXTURE_ENV, FIXTURE_ID, FIXTURE_PLACEHOLDER};
+use crate::credential_rig::{
+    CredentialRig, FIXTURE_BOUND_VALUE, FIXTURE_ENV, FIXTURE_ID, FIXTURE_PLACEHOLDER,
+};
 use crate::world::BehaviourWorld;
 use lns_service::approval_flow::protocol::{
     CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame, PolicyMessage,
@@ -255,6 +257,61 @@ fn when_developer_types_value(world: &mut BehaviourWorld) {
             value: "typed-value".into(),
         }),
     );
+}
+
+#[given(r#"a value for "some-provider" is bound on this machine but this workload holds no grant"#)]
+fn given_bound_but_ungranted(world: &mut BehaviourWorld) {
+    world.credential = Some(CredentialRig::bound_but_ungranted());
+}
+
+#[then("the card offers to use the value already bound on this machine")]
+fn then_card_offers_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let snap = rig.window_state.snapshot();
+    let card = snap
+        .pending_credentials
+        .last()
+        .ok_or("no credential card visible")?;
+    if !card.bound_value_available {
+        return Err(
+            "expected bound_value_available=true so the card can grant the existing binding rather than demand the secret again".into(),
+        );
+    }
+    Ok(())
+}
+
+#[when(r#"the developer picks "use the bound value""#)]
+fn when_developer_picks_bound_value(world: &mut BehaviourWorld) {
+    let rig = world.credential();
+    let id = window_credential_id(rig);
+    rig.session
+        .record_decision(&id, CredentialDecisionRequest::AllowBound);
+}
+
+#[then(
+    "the workload's request leaves the boundary with the bound value substituted for the placeholder"
+)]
+fn then_request_leaves_with_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let frames = drain_frames(rig);
+    let policy = last_policy_frame(&frames).ok_or("no Policy frame emitted after decision")?;
+    let cred = find_credential(policy, FIXTURE_ID)
+        .ok_or("Policy frame missing some-provider credential")?;
+    assert_credential_armed_with(cred, FIXTURE_BOUND_VALUE)?;
+    decision_allow_assert(&frames)?;
+    Ok(())
+}
+
+#[then(r#""~/.lns-credentials.json" still holds the value it was bound with"#)]
+fn then_credentials_file_keeps_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let on_disk = rig.store.load().map_err(|e| e.to_string())?;
+    match on_disk.get(FIXTURE_ID) {
+        Some(CredentialEntry::Stored { value }) if value == FIXTURE_BOUND_VALUE => Ok(()),
+        other => Err(format!(
+            "granting the existing binding must not rewrite the machine store, got {other:?}"
+        )),
+    }
 }
 
 #[when(r#"the developer picks "deny""#)]

@@ -133,6 +133,7 @@ mod tests {
             id: id.into(),
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
+            bound_value_available: false,
             oauth_display_name: None,
             token_fallback: None,
             env_var: None,

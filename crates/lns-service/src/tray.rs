@@ -1517,7 +1517,7 @@ fn render_credential_card(
                         .color(window::TEXT_WARN),
                 );
             }
-            if !prompt.host_value_available {
+            if !prompt.host_value_available && !prompt.bound_value_available {
                 ui.add_space(8.0);
                 ui.colored_label(
                     window::TEXT_MUTED,
@@ -1548,6 +1548,12 @@ fn render_credential_card(
         },
         |ui| {
             let mut chosen: Option<CredentialDecisionRequest> = None;
+            if prompt.bound_value_available {
+                if primary_button(ui, "Use connected value").clicked() {
+                    chosen = Some(CredentialDecisionRequest::AllowBound);
+                }
+                ui.add_space(BTN_GAP);
+            }
             if prompt.host_value_available {
                 if primary_button(ui, "Use detected value").clicked() {
                     chosen = Some(CredentialDecisionRequest::Allow(
@@ -1610,14 +1616,29 @@ fn render_oauth_consent_card(
                 .size(theme::FONT_BODY)
                 .color(window::TEXT_MUTED),
             );
+            if prompt.bound_value_available {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("You are already signed in to {display_name}."))
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
         },
         |ui| {
             let mut chosen: Option<CredentialDecisionRequest> = None;
+            // An existing sign-in is granted outright; signing in again would only replace a token that already works.
+            let accept = if prompt.bound_value_available {
+                ("Use connection", CredentialDecisionRequest::AllowBound)
+            } else {
+                (
+                    "Connect",
+                    CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+                )
+            };
             ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], "Connect").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Allow(
-                        CredentialEntry::HostDetect,
-                    ));
+                if primary_button(&mut cols[0], accept.0).clicked() {
+                    chosen = Some(accept.1.clone());
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
                     chosen = Some(CredentialDecisionRequest::Deny);
@@ -2055,6 +2076,7 @@ mod tests {
             credential_id: "cred".to_string(),
             action: "read".to_string(),
             host_value_available: false,
+            bound_value_available: false,
             oauth_display_name: None,
             token_fallback: None,
             env_var: None,
