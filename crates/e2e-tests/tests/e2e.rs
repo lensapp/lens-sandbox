@@ -22,6 +22,7 @@ pub struct E2eWorld {
     pub policy_path: Option<PathBuf>,
     pub host_bind_dir: Option<TempDir>,
     pub registry: Option<registry::LocalRegistry>,
+    pub version_index: Option<registry::VersionIndex>,
     pub pushed_ref: Option<String>,
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,

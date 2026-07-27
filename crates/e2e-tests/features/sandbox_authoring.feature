@@ -12,6 +12,25 @@ Feature: authoring a sandbox definition offline
     And the project file "lns.yaml" contains "kind: Sandbox"
     And the project file "lns.yaml" contains "workdir: /workspace"
     And the project file "lns.yaml" contains "volumes:"
+    And the project file "lns.yaml" contains "tools: []"
+
+  Scenario: validate refuses a bare tool name through the real binary
+    Given a project definition declaring tool "node"
+    When I run "lns sandbox validate" in the project directory
+    Then the exit code is non-zero
+    And the output contains "node@latest"
+
+  Scenario: validate refuses an engine backend prefix through the real binary
+    Given a project definition declaring tool "npm:prettier@3"
+    When I run "lns sandbox validate" in the project directory
+    Then the exit code is non-zero
+    And the output contains "engine backend prefix"
+
+  Scenario: inspect lists the declared tools offline
+    Given a project definition declaring tool "node@22"
+    When I run "lns sandbox inspect" in the project directory
+    Then the exit code is 0
+    And the output contains "tool: node@22"
 
   Scenario: init refuses to overwrite an existing lns.yaml
     When I run "lns init" in the project directory

@@ -1,7 +1,6 @@
 mod operations;
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -90,7 +89,7 @@ fn bump(version: &str) -> Result<()> {
 
     println!("==> regenerating the registry snapshot from the release source");
     let tarball = curl_bytes(&operations::source_tarball_url(version))?;
-    let entries = registry_entries_from_tarball(&tarball)?;
+    let entries = operations::registry_entries_from_tarball(&tarball)?;
     std::fs::write(
         &snapshot_path,
         operations::render_registry_snapshot(&entries)?,
@@ -102,30 +101,6 @@ fn bump(version: &str) -> Result<()> {
          \t(registry semantics can drift between mise versions)."
     );
     Ok(())
-}
-
-fn registry_entries_from_tarball(tarball: &[u8]) -> Result<Vec<(String, String)>> {
-    let mut entries = Vec::new();
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
-    for entry in archive.entries().context("reading the source tarball")? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        let mut components = path.components();
-        components.next();
-        let rest: PathBuf = components.collect();
-        if rest.parent() != Some(Path::new("registry"))
-            || rest.extension().and_then(|e| e.to_str()) != Some("toml")
-        {
-            continue;
-        }
-        let Some(stem) = rest.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let mut contents = String::new();
-        entry.read_to_string(&mut contents)?;
-        entries.push((stem.to_string(), contents));
-    }
-    Ok(entries)
 }
 
 fn curl_bytes(url: &str) -> Result<Vec<u8>> {

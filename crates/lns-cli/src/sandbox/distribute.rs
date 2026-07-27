@@ -617,6 +617,15 @@ mod tests {
         assert!(!text.contains("note:"), "got: {text}");
     }
 
+    #[tokio::test]
+    async fn pin_declared_tools_refuses_a_non_string_entry() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[42]}}"#;
+        let err = pin_declared_tools(&PanickingResolver, doc)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not a string"), "got: {err:#}");
+    }
+
     #[test]
     fn resolve_from_index_picks_the_newest_dot_boundary_match() {
         let body = "20.1.0\n22.9.0\n22.11.0\n220.1.0\n23.0.0\n";

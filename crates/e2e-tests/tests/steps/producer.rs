@@ -183,6 +183,68 @@ fn no_companion_fileset_artifact(world: &mut E2eWorld) {
     );
 }
 
+#[given(regex = r#"^a version index resolving "([^"]+)" to versions "([^"]+)"$"#)]
+fn version_index_stub(world: &mut E2eWorld, tool: String, versions: String) {
+    world.version_index = Some(crate::registry::VersionIndex::start(
+        &tool,
+        &versions.replace(',', "\n"),
+    ));
+}
+
+#[when(regex = r#"^the user pushes a sandbox declaring tool "([^"]+)" in one step$"#)]
+async fn push_sandbox_with_tool(world: &mut E2eWorld, tool: String) {
+    let host = world.registry.as_ref().expect("a registry").host();
+    let reference = format!("{host}/e2e-tools-pin-sandbox:1");
+    let base = seed_base_image(&host).await;
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-pin\nspec:\n  image: {base}\n  tools:\n    - {tool}\n"
+    );
+    let mut env = cache_env(world);
+    env.push((
+        "LNS_TOOL_INDEX_URL".to_string(),
+        world
+            .version_index
+            .as_ref()
+            .expect("a version index")
+            .url()
+            .to_string(),
+    ));
+    let project = world.home.as_ref().expect("home set by cache_env").path();
+    std::fs::write(project.join("lns.yaml"), definition).expect("write lns.yaml fixture");
+
+    let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
+    assert_eq!(
+        pushed.exit_code, 0,
+        "lns push must resolve the tool and upload the pinned sandbox:\n{}\n{}",
+        pushed.stdout, pushed.stderr
+    );
+    world.pushed_ref = Some(reference);
+}
+
+#[then(regex = r#"^the pushed config pins tool "([^"]+)"$"#)]
+async fn pushed_config_pins_tool(world: &mut E2eWorld, pinned: String) {
+    let reference = world.pushed_ref.clone().expect("a ref was pushed");
+    let parsed: Reference = reference.parse().expect("valid ref");
+    let client = oci_client::Client::new(ClientConfig {
+        protocol: ClientProtocol::Http,
+        ..Default::default()
+    });
+    let (_, _, config) = client
+        .pull_manifest_and_config(&parsed, &RegistryAuth::Anonymous)
+        .await
+        .expect("registry serves the pushed config");
+    let value: serde_json::Value = serde_json::from_str(&config).expect("pushed config is JSON");
+    let tools = value["spec"]["tools"]
+        .as_array()
+        .expect("pushed config carries spec.tools");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.as_str() == Some(pinned.as_str())),
+        "expected {pinned:?} among {tools:?}"
+    );
+}
+
 #[then("the registry serves the pushed artifact at its ref")]
 async fn registry_serves_pushed(world: &mut E2eWorld) {
     let reference = world.pushed_ref.clone().expect("a ref was pushed");

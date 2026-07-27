@@ -10,6 +10,16 @@ Feature: declared developer tools reach a real guest
     When the sandbox runs "node --version"
     Then it prints a node 22 version
 
+  Scenario: Provisioning is disclosed, audited, and reused on the next run
+    Given a lns.yaml declaring tools ["node@22"] over a base image that ships no node
+    When the sandbox runs "node --version"
+    Then it prints a node 22 version
+    And the run summary discloses the declared tools
+    And the audit chain records the tool provisioning
+    When the sandbox runs "node --version" again
+    Then it prints a node 22 version
+    And nothing is provisioned again
+
   Scenario: A declared tool wins over the base image's copy
     Given a base image that ships node 20 and a lns.yaml declaring tools ["node@22"]
     When the sandbox runs "node --version"

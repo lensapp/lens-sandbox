@@ -107,6 +107,32 @@ pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> 
         .collect())
 }
 
+/// The `registry/*.toml` entries of a release source tarball, as (stem, contents) pairs for snapshot rendering.
+pub fn registry_entries_from_tarball(tarball: &[u8]) -> Result<Vec<(String, String)>> {
+    use std::io::Read;
+    let mut entries = Vec::new();
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
+    for entry in archive.entries().context("reading the source tarball")? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let mut components = path.components();
+        components.next();
+        let rest: std::path::PathBuf = components.collect();
+        if rest.parent() != Some(std::path::Path::new("registry"))
+            || rest.extension().and_then(|e| e.to_str()) != Some("toml")
+        {
+            continue;
+        }
+        let Some(stem) = rest.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let mut contents = String::new();
+        entry.read_to_string(&mut contents)?;
+        entries.push((stem.to_string(), contents));
+    }
+    Ok(entries)
+}
+
 pub fn shasums_url(version: &str) -> String {
     format!("https://github.com/jdx/mise/releases/download/v{version}/SHASUMS256.txt")
 }
@@ -194,6 +220,38 @@ musl = "docker.io/library/alpine@sha256:dddd"
     #[test]
     fn an_empty_registry_refuses_the_snapshot() {
         assert!(render_registry_snapshot(&[]).is_err());
+    }
+
+    #[test]
+    fn the_tarball_walk_extracts_only_registry_entries() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, body) in [
+            (
+                "mise-1.0.0/registry/node.toml",
+                "backends = [\"core:node\"]\n",
+            ),
+            ("mise-1.0.0/registry/README.md", "not toml"),
+            ("mise-1.0.0/src/main.rs", "fn main() {}"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, body.as_bytes()).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&tar).unwrap();
+        let tarball = encoder.finish().unwrap();
+
+        let entries = registry_entries_from_tarball(&tarball).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "node");
+        assert!(entries[0].1.contains("core:node"));
     }
 
     #[test]

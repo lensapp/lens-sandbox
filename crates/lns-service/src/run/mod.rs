@@ -56,15 +56,20 @@ pub(super) fn build_workload_argv(
     vec!["/bin/sh".to_string(), "-c".to_string(), joined]
 }
 
+/// The run-scoped environment sources composed around the image's own env: the user's `-e` vars, the managed credential names they may not clobber, the resolved workdir, and the declared tools' bin dirs.
+pub(super) struct EnvInputs<'a> {
+    pub user_env: &'a [String],
+    pub extra_managed: &'a [String],
+    pub workdir: Option<&'a str>,
+    pub tool_bin_paths: &'a [String],
+}
+
 pub(super) fn exec_env_strings(
     image_config: Option<&oci_client::config::ConfigFile>,
     override_entrypoint: Option<&str>,
     override_cmd: &[String],
-    user_env: &[String],
     supervised: bool,
-    extra_managed: &[String],
-    workdir: Option<&str>,
-    tool_bin_paths: &[String],
+    inputs: EnvInputs<'_>,
 ) -> crate::workload_env::WorkloadEnv {
     let agent_command = supervised.then(|| match image_config {
         Some(cfg) => {
@@ -77,11 +82,11 @@ pub(super) fn exec_env_strings(
         .and_then(|c| c.env.as_deref());
     crate::workload_env::run_workload_env(
         image_env,
-        user_env,
+        inputs.user_env,
         agent_command.as_deref(),
-        workdir,
-        extra_managed,
-        tool_bin_paths,
+        inputs.workdir,
+        inputs.extra_managed,
+        inputs.tool_bin_paths,
     )
 }
 
@@ -300,11 +305,13 @@ mod tests {
             None,
             None,
             &["echo".into(), "hi".into()],
-            &[],
             true,
-            &[],
-            None,
-            &[],
+            EnvInputs {
+                user_env: &[],
+                extra_managed: &[],
+                workdir: None,
+                tool_bin_paths: &[],
+            },
         );
         assert!(
             env.env.contains(&"AGENT_COMMAND=echo hi".to_string()),
@@ -322,11 +329,13 @@ mod tests {
                 "-c".into(),
                 "echo \"hi $USER\"; uname -a".into(),
             ],
-            &[],
             true,
-            &[],
-            None,
-            &[],
+            EnvInputs {
+                user_env: &[],
+                extra_managed: &[],
+                workdir: None,
+                tool_bin_paths: &[],
+            },
         );
         let agent = env
             .env
@@ -345,11 +354,13 @@ mod tests {
             None,
             None,
             &["echo".into(), "hi".into()],
-            &["FOO=bar".into()],
             false,
-            &[],
-            None,
-            &[],
+            EnvInputs {
+                user_env: &["FOO=bar".into()],
+                extra_managed: &[],
+                workdir: None,
+                tool_bin_paths: &[],
+            },
         );
         assert_eq!(
             env.env,
@@ -388,7 +399,18 @@ mod tests {
             }),
             ..Default::default()
         };
-        let env = exec_env_strings(Some(&cfg), None, &[], &[], true, &[], None, &[]);
+        let env = exec_env_strings(
+            Some(&cfg),
+            None,
+            &[],
+            true,
+            EnvInputs {
+                user_env: &[],
+                extra_managed: &[],
+                workdir: None,
+                tool_bin_paths: &[],
+            },
+        );
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
     }
 
@@ -407,11 +429,13 @@ mod tests {
             Some(&cfg),
             None,
             &[],
-            &["PORT=4000".into()],
             true,
-            &[],
-            None,
-            &[],
+            EnvInputs {
+                user_env: &["PORT=4000".into()],
+                extra_managed: &[],
+                workdir: None,
+                tool_bin_paths: &[],
+            },
         );
         assert!(
             env.env.contains(&"PORT=4000".to_string()),

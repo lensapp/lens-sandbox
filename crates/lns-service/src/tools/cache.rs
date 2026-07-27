@@ -422,6 +422,19 @@ mod tests {
     }
 
     #[test]
+    fn a_rootless_bin_path_maps_to_the_tool_root_itself() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut bare = staged(tool_tar());
+        bare.bin_paths = vec![".".into()];
+        let manifest = cache.ingest(&key(), &bare).unwrap();
+        assert_eq!(
+            manifest.guest_bin_paths(),
+            vec!["/.lens/tools/some-tool/1.2.3".to_string()]
+        );
+    }
+
+    #[test]
     fn decode_sha256_rejects_malformed_digests() {
         assert!(decode_sha256("md5:abc").is_err());
         assert!(decode_sha256(&format!("sha256:{}", "a".repeat(63))).is_err());

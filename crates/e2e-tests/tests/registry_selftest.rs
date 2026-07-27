@@ -77,3 +77,26 @@ fn registry_offline_mode_rejects_requests() {
         .expect("read registry response");
     assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
 }
+
+#[tokio::test]
+async fn the_version_index_stub_serves_its_list_and_404s_unknown_tools() {
+    let index = registry::VersionIndex::start("node", "22.9.0\n22.11.0");
+    let body = reqwest_free_get(&format!("{}/node", index.url()));
+    assert!(
+        body.contains("200 OK") && body.contains("22.11.0"),
+        "got: {body}"
+    );
+    let missing = reqwest_free_get(&format!("{}/definitely-not-a-tool", index.url()));
+    assert!(missing.contains("404"), "got: {missing}");
+}
+
+fn reqwest_free_get(url: &str) -> String {
+    let without_scheme = url.trim_start_matches("http://");
+    let (addr, path) = without_scheme.split_once('/').expect("url has a path");
+    let mut stream = TcpStream::connect(addr).expect("connect to the stub");
+    let request = format!("GET /{path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    response
+}
