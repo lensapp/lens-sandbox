@@ -381,16 +381,23 @@ impl CredentialSession {
         })
     }
 
-    /// Remembers this run's accept/decline for `credential_id`: always in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable, and in the machine-local sidecar when a binding names one, so a later run skips the offer.
-    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
-        let Some(record) = self.grant_record_for(credential_id, verdict) else {
-            return;
-        };
+    /// Remembers this run's accept/decline for `credential_id` in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable; the returned record is what [`Self::persist_grant`] later carries to the sidecar.
+    fn remember_grant_for_the_run(
+        &self,
+        credential_id: &str,
+        verdict: GrantVerdict,
+    ) -> Option<GrantRecord> {
+        let record = self.grant_record_for(credential_id, verdict)?;
         self.run_grants
             .lock()
             .expect("run grants mutex poisoned")
             .insert(credential_id.to_string(), record.clone());
-        let Some(binding) = &self.grant_binding else {
+        Some(record)
+    }
+
+    /// Writes a remembered grant to the machine-local sidecar so a later run skips the offer; callers whose decision also writes a value hold this back until that write lands, or the grant would outlive the value it was given for.
+    fn persist_grant(&self, record: Option<GrantRecord>) {
+        let (Some(record), Some(binding)) = (record, &self.grant_binding) else {
             return;
         };
         if let Err(e) = binding.store.update(&mut |file| {
@@ -401,6 +408,12 @@ impl CredentialSession {
                 "credential decision applied but its grant was not persisted; the next run will ask again: {e}"
             ));
         }
+    }
+
+    /// Remembers a decision that writes no value of its own — a decline, or a grant of what is already bound on this machine — so nothing gates its durability.
+    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
+        let record = self.remember_grant_for_the_run(credential_id, verdict);
+        self.persist_grant(record);
     }
 
     fn is_armed_id(&self, credential_id: &str) -> bool {
@@ -571,9 +584,11 @@ impl CredentialSession {
             CredentialDecisionRequest::Allow(entry) => {
                 // Answering the first-use card Allow is this run's consent, so arm the id whether or not it was connectable; a value never arms without a card being answered.
                 self.grant_armed(&credential_id);
-                self.remember_grant(&credential_id, GrantVerdict::Allow);
+                let grant = self.remember_grant_for_the_run(&credential_id, GrantVerdict::Allow);
                 // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
-                self.apply_persistent_entry(credential_id.clone(), entry);
+                if self.apply_persistent_entry(credential_id.clone(), entry) {
+                    self.persist_grant(grant);
+                }
                 if self.connectable.contains(&credential_id) {
                     (self.connect)(&credential_id);
                 }
@@ -582,6 +597,7 @@ impl CredentialSession {
             CredentialDecisionRequest::AllowBound => {
                 self.grant_armed(&credential_id);
                 self.remember_grant(&credential_id, GrantVerdict::Allow);
+                self.record_bound_credential_event(&credential_id);
                 self.emit_armed_state();
                 if self.connectable.contains(&credential_id) {
                     (self.connect)(&credential_id);
@@ -834,8 +850,10 @@ impl CredentialSession {
     /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token. The value is applied and emitted before the connect, because the connect releases network holds and the released request must not reach the placeholder gate before the armed injection is in hand.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         self.grant_armed(credential_id);
-        self.remember_grant(credential_id, GrantVerdict::Allow);
-        self.apply_persistent_entry(credential_id.to_string(), entry);
+        let grant = self.remember_grant_for_the_run(credential_id, GrantVerdict::Allow);
+        if self.apply_persistent_entry(credential_id.to_string(), entry) {
+            self.persist_grant(grant);
+        }
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
         }
@@ -873,20 +891,39 @@ impl CredentialSession {
         (self.policy_emitter)(&snapshot, &self.armed_ids());
     }
 
-    fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) {
+    /// Reports whether the entry reached the store, so a caller can hold back a grant that would otherwise outlive the value it was given for.
+    fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) -> bool {
         self.record_credential_event(&credential_id, &entry);
         let snapshot = {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.insert(credential_id, entry);
             state.clone()
         };
-        if let Err(e) = self.store.save(&snapshot) {
-            self.notifier.inform(&format!(
-                "credential rule applied in-memory but not persisted: {e}"
-            ));
-        }
+        let persisted = match self.store.save(&snapshot) {
+            Ok(()) => true,
+            Err(e) => {
+                self.notifier.inform(&format!(
+                    "credential rule applied in-memory but not persisted: {e}"
+                ));
+                false
+            }
+        };
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
         (self.policy_emitter)(&snapshot, &self.armed_ids());
+        persisted
+    }
+
+    /// Records the ledger event for the value already bound, so granting an existing binding leaves the same audit trail as a decision that binds one.
+    fn record_bound_credential_event(&self, credential_id: &str) {
+        let bound = self
+            .state
+            .lock()
+            .expect("state mutex poisoned")
+            .get(credential_id)
+            .cloned();
+        if let Some(entry) = bound {
+            self.record_credential_event(credential_id, &entry);
+        }
     }
 
     fn record_credential_approval(&self, credential_id: &str, decision: Decision) {
@@ -1502,6 +1539,81 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("not persisted")),
             "the user is told the grant did not persist so the re-prompt next run isn't a surprise"
+        );
+    }
+
+    fn grants_session_with_store(
+        grants: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+        store: Arc<CapturingStore>,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(|_| {}),
+        )
+        .with_grants("proj".into(), workload, grants)
+    }
+
+    #[test]
+    fn a_consent_whose_value_cannot_be_written_persists_no_grant() {
+        let grants = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let store = Arc::new(CapturingStore::default());
+        let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
+        store.fail_next(io::ErrorKind::PermissionDenied, "denied");
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-new".into(),
+            }),
+        );
+
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "the run the developer consented to still arms from the in-memory value"
+        );
+        assert!(
+            grants
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "a grant outliving the value it was given for would silently arm whatever stale value the next run loads from disk, with no card"
+        );
+    }
+
+    #[test]
+    fn a_connect_whose_token_cannot_be_written_persists_no_grant() {
+        let grants = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let store = Arc::new(CapturingStore::default());
+        let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
+        store.fail_next(io::ErrorKind::PermissionDenied, "denied");
+
+        session.connect_connector_with_token("some-provider", "some-new".into());
+
+        assert!(
+            grants
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "the pasted-token tail must hold its grant back too, or the next run arms the stale on-disk value under it"
         );
     }
 
@@ -2558,6 +2670,35 @@ mod tests {
         assert!(
             store.saves.lock().unwrap().is_empty(),
             "reusing a binding writes nothing to the credential store"
+        );
+    }
+
+    #[test]
+    fn granting_an_existing_binding_records_the_credential_use_it_starts() {
+        let (s, _n, _store, _rx, _connected) = fixture_connectable(&["some-provider"]);
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        let mut machine = CredentialStateFile::new();
+        machine.insert(
+            "some-provider".to_string(),
+            CredentialEntry::Stored {
+                value: "some-already-bound".into(),
+            },
+        );
+        s.apply_external_state(machine);
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        s.record_decision("c1", CredentialDecisionRequest::AllowBound);
+
+        let events = recorder.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LedgerEvent::CredentialUse { connector, fp, .. }
+                    if connector == "some-provider"
+                        && fp == &Some(lns_ipc::fingerprint("some-already-bound"))
+            )),
+            "granting a bound value is where that secret starts reaching the workload's destinations, so the audit chain owes the same credential-use row a freshly-bound value writes; got: {events:?}"
         );
     }
 
