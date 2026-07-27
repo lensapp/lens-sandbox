@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod mise;
 pub mod record;
 pub mod registry;
 
