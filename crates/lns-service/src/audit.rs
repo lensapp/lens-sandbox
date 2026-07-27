@@ -283,6 +283,37 @@ pub fn record_sandbox_run(
     )
 }
 
+pub fn record_tool_provisioned_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    outcome: &crate::tools::ProvisionOutcome,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::tool_event(
+            cx,
+            &outcome.tool,
+            &outcome.requested,
+            &outcome.resolved,
+            &outcome.source_host,
+            &outcome.backend,
+        ),
+    )
+}
+
+pub fn record_tool_provisioned(
+    run_id: &str,
+    microvm: &str,
+    outcome: &crate::tools::ProvisionOutcome,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_tool_provisioned_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        outcome,
+    )
+}
+
 pub fn record_volume_attached_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,

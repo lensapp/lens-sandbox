@@ -19,6 +19,18 @@ pub struct ToolsRig {
     pub records: MemRecordStore,
     pub cache: MemToolCache,
     pub provisioner: ScriptedProvisioner,
+    pub audit: Option<(tempfile::TempDir, std::path::PathBuf)>,
+}
+
+impl ToolsRig {
+    pub fn audit_file(&mut self) -> std::path::PathBuf {
+        if self.audit.is_none() {
+            let dir = tempfile::TempDir::new().expect("audit tempdir");
+            let file = dir.path().join("audit.jsonl");
+            self.audit = Some((dir, file));
+        }
+        self.audit.as_ref().expect("audit staged").1.clone()
+    }
 }
 
 #[derive(Debug, Default)]

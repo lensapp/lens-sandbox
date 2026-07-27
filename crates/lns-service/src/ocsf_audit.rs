@@ -96,6 +96,24 @@ pub fn volume_event(cx: &OcsfCtx, name: &str, target: &str) -> Map<String, Value
     into_object(lns_ocsf::volume_mount(&cx.ctx(), name, target))
 }
 
+pub fn tool_event(
+    cx: &OcsfCtx,
+    tool: &str,
+    requested: &str,
+    resolved: &str,
+    source_host: &str,
+    backend: &str,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::tool_provision(
+        &cx.ctx(),
+        tool,
+        requested,
+        resolved,
+        source_host,
+        backend,
+    ))
+}
+
 pub fn sandbox_run_event(
     cx: &OcsfCtx,
     reference: &str,
