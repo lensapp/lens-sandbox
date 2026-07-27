@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
-use lns_policy::grants::{GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
+use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule, Verdict};
 
@@ -219,6 +219,23 @@ pub fn gate_armed_by_grant(
         .filter(|p| applied.contains(p.id()))
         .filter(|p| grant_arms(p, project, workload, grants))
         .map(|p| p.id().to_string())
+        .collect()
+}
+
+/// The allow grants a boot-gate sign-in earns, pinned to each resolved provider's own disclosure snapshot so they satisfy [`gate_armed_by_grant`] by construction; an id with no resolved provider yields none.
+pub fn boot_sign_in_grants(
+    signed_in: &[String],
+    providers: &[DefProvider],
+    project: &str,
+    workload: &WorkloadIdentity,
+) -> Vec<GrantRecord> {
+    signed_in
+        .iter()
+        .filter_map(|id| providers.iter().find(|p| p.id() == id))
+        .map(|p| {
+            let (env_var, domains) = p.disclosure_snapshot();
+            GrantRecord::allow(project, workload, p.id(), env_var, domains)
+        })
         .collect()
 }
 
@@ -515,6 +532,72 @@ mod tests {
         assert!(
             armed.is_empty(),
             "only ids in the applied set are candidates for arming, grant or no grant"
+        );
+    }
+
+    #[test]
+    fn boot_sign_in_grants_arm_through_the_same_gate_that_admits_later_runs() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records = boot_sign_in_grants(
+            &["some-provider".to_string()],
+            &providers,
+            "proj",
+            &workload,
+        );
+        let mut grants = WorkloadGrantFile::default();
+        for r in records {
+            grants.upsert(r);
+        }
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(
+            armed, applied,
+            "the grant a boot sign-in records must satisfy the very gate that admits the next run — a snapshot mismatch here means the fix silently fixes nothing"
+        );
+    }
+
+    #[test]
+    fn boot_sign_in_grant_records_the_slot_remapped_env_var_not_the_catalog_default() {
+        let catalog = vec![oauth_connector(
+            "some-oauth",
+            "SOME_OAUTH_TOKEN",
+            "api.some-oauth.example",
+        )];
+        let slots = vec![slot("some-oauth", "REMAPPED_TOKEN", true)];
+        let providers = resolve_applied_with_slots(&Policy::default(), &slots, &catalog).providers;
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records =
+            boot_sign_in_grants(&["some-oauth".to_string()], &providers, "proj", &workload);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].env_var, "REMAPPED_TOKEN",
+            "the grant must pin the slot's effective env var, or a remapped slot's grant never matches at the next boot"
+        );
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(records[0].clone());
+        let applied: HashSet<String> = ["some-oauth".to_string()].into_iter().collect();
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(armed, applied);
+    }
+
+    #[test]
+    fn boot_sign_in_grants_skip_an_id_that_resolved_no_provider() {
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records = boot_sign_in_grants(&["some-oauth".to_string()], &[], "proj", &workload);
+        assert!(
+            records.is_empty(),
+            "with no resolved provider there is no disclosure to pin a grant to"
         );
     }
 
