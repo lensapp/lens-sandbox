@@ -761,6 +761,25 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_delivers_a_verdict_free_action_and_removes_the_entry() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+
+        assert!(s.dismiss("r1"));
+
+        assert_eq!(s.pending_count(), 0);
+        assert_eq!(
+            rx.try_recv().expect("delivery"),
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Dismiss,
+            },
+            "a closed card carries no decision to the session"
+        );
+    }
+
+    #[test]
     fn decide_routes_to_the_tx_supplied_at_insert_not_a_sibling() {
         let s = WindowState::new();
         let (tx1, mut rx1) = unbounded_channel();
