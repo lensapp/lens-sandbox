@@ -85,13 +85,14 @@ async fn orchestrate(
         }
         (None, None) => None,
     };
+    let mut signed_in = Vec::new();
     if let Some(plan) = &sandbox_plan {
         crate::artifact::real::refuse_unknown_connectors(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,
         )?;
         crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
-        gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
+        signed_in = gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
     let launch = sandbox_plan
         .as_ref()
@@ -126,13 +127,16 @@ async fn orchestrate(
                 sandbox_plan
                     .as_ref()
                     .and_then(|p| p.workload.policy.as_ref()),
-                sandbox_plan
-                    .as_ref()
-                    .map(|p| p.workload.credentials.as_slice())
-                    .unwrap_or_default(),
+                supervisor::RunConsent {
+                    credentials: sandbox_plan
+                        .as_ref()
+                        .map(|p| p.workload.credentials.as_slice())
+                        .unwrap_or_default(),
+                    workload: workload.clone(),
+                    signed_in: signed_in.clone(),
+                },
                 guest_tools.root.clone(),
                 env.clone(),
-                workload.clone(),
             ),
             initramfs::build(&guest_tools),
         )?;
@@ -443,11 +447,11 @@ async fn orchestrate(
     Ok(session_code)
 }
 
-/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
+/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. Returns the ids whose sign-in the user completed this launch — that consent becomes the workload's grant, so the slot arms now and the next run skips the sign-in. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
 async fn gate_declared_sign_ins(
     credentials: &[lns_artifact::spec::CredentialSlot],
     frame_tx: &Sender<WireFrame>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     use crate::artifact::credential_boot::{
         BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_connectors, resolve_connect,
         sign_in_gate_ids,
@@ -457,9 +461,10 @@ async fn gate_declared_sign_ins(
     };
     use lns_ipc::Response;
 
+    let mut signed_in = Vec::new();
     let declared = sign_in_gate_ids(credentials);
     if declared.is_empty() {
-        return Ok(());
+        return Ok(signed_in);
     }
     let user = lns_policy::connectors::Catalog::load_or_default(
         &lns_policy::connectors::default_connectors_path(),
@@ -471,7 +476,7 @@ async fn gate_declared_sign_ins(
         .unwrap_or_default();
     let plans = plan_declared_connectors(&declared, &catalog, &state);
     if boot_gate(&plans) == BootGate::StartWorkload {
-        return Ok(());
+        return Ok(signed_in);
     }
     for plan in plans {
         let SlotPlan::Connect(prompt) = plan else {
@@ -502,6 +507,7 @@ async fn gate_declared_sign_ins(
         }
         match terminal {
             Response::OauthSignInComplete => {
+                signed_in.push(id.clone());
                 let _ = frame_tx
                     .send(WireFrame::Json(Response::RunLog {
                         level: lns_ipc::LogLevel::Info,
@@ -523,5 +529,5 @@ async fn gate_declared_sign_ins(
             }
         }
     }
-    Ok(())
+    Ok(signed_in)
 }

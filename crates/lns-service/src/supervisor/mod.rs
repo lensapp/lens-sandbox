@@ -69,17 +69,22 @@ pub struct SupervisorSession {
     pub managed_env_vars: Vec<String>,
 }
 
+/// The run's consent inputs: the definition's credential slots, the identity its grants key against, and the slot ids whose boot-gate sign-in the user completed this launch.
+pub struct RunConsent<'a> {
+    pub credentials: &'a [lns_artifact::spec::CredentialSlot],
+    pub workload: lns_policy::grants::WorkloadIdentity,
+    pub signed_in: Vec<String>,
+}
+
 impl SupervisorSession {
-    #[allow(clippy::too_many_arguments)] // boot entry point threading independent run inputs; a params struct would only relocate the arity
     pub async fn start_if_policy(
         run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
         sandbox_policy: Option<&lns_policy::Policy>,
-        sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
+        consent: RunConsent<'_>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
-        workload: lns_policy::grants::WorkloadIdentity,
     ) -> Result<Option<Self>> {
         let Some(policy_path) = policy else {
             if sandbox_policy.is_some() {
@@ -96,10 +101,9 @@ impl SupervisorSession {
             microvm_name,
             policy_path,
             sandbox_policy,
-            sandbox_credentials,
+            consent,
             guest_tools_root,
             user_env,
-            workload,
         )
         .await
         .map(Some)
@@ -280,8 +284,9 @@ mod tests {
             .find(|s| s.guest_path == "/bin/sh")
             .expect("/bin/sh in imageless runtime extras");
         let content = &sh.source;
+        let is_symlink = matches!(content, RuntimeSource::Symlink(_));
         assert!(
-            matches!(content, RuntimeSource::Symlink(_)),
+            is_symlink,
             "/bin/sh source must be a symlink, got {content:?}"
         );
         if let RuntimeSource::Symlink(target) = content {
@@ -303,10 +308,9 @@ mod tests {
             "vm-42".into(),
             None,
             None,
-            &[],
+            test_consent(&[]),
             PathBuf::from("/tmp"),
             vec![],
-            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .unwrap();
@@ -325,10 +329,9 @@ mod tests {
             "vm-42".into(),
             None,
             Some(&sandbox_policy),
-            &[],
+            test_consent(&[]),
             PathBuf::from("/tmp"),
             vec![],
-            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await;
         let err = result
@@ -448,10 +451,9 @@ mod tests {
                 body_str.contains("=<redacted>"),
                 "env dump must mask secret-shaped values with <redacted>: {body_str}"
             );
-            assert!(
-                !body_str.contains("env | sort | sed 's/^/[wrap]   /'"),
-                "env dump must not be a bare unredacted prefix dump: {body_str}"
-            );
+            let bare_dump = body_str.contains("env | sort | sed 's/^/[wrap]   /'");
+            let msg = format!("env dump must not be a bare unredacted prefix dump: {body_str}");
+            assert!(!bare_dump, "{msg}");
         }
         let ships_real = specs
             .iter()
@@ -558,6 +560,110 @@ mod tests {
         );
     }
 
+    fn test_consent(credentials: &[lns_artifact::spec::CredentialSlot]) -> RunConsent<'_> {
+        RunConsent {
+            credentials,
+            workload: lns_policy::grants::WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            signed_in: vec![],
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn start_persists_a_boot_sign_in_grant_to_the_sidecar() {
+        use crate::approval_flow::window::{self, WindowState};
+        use crate::test_env::EnvVarGuard;
+        use lns_policy::grants::{
+            GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
+        };
+        window::install(WindowState::new());
+        let d = tempfile::TempDir::new().expect("tempdir");
+        let _home = EnvVarGuard::set("HOME", d.path());
+        let _cp = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
+        let _gp = EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH");
+        let supervisor_bin = d.path().join("supervisor.real");
+        std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
+        let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
+        let policy_path = d.path().join("lns-policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
+        )
+        .expect("policy");
+        lns_policy::connectors::Catalog {
+            connectors: vec![lns_policy::connectors::Connector {
+                id: "some-oauth".into(),
+                name: None,
+                auth_kind: lns_policy::connectors::AuthKind::Oauth,
+                routes: Vec::new(),
+                credential: None,
+                oauth: Some(lns_policy::connectors::OauthAuth {
+                    flow: lns_policy::connectors::OauthFlow::Device,
+                    client_id: Some("some-client".into()),
+                    client_secret: None,
+                    scopes: Vec::new(),
+                    device_authorization_endpoint: Some(
+                        "https://api.some-oauth.example/device".into(),
+                    ),
+                    authorization_endpoint: None,
+                    token_endpoint: "https://api.some-oauth.example/token".into(),
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    env_var: "CATALOG_DEFAULT_TOKEN".into(),
+                    placeholder: "some-oauth-LNSPLACEHOLDER0000".into(),
+                    injections: vec![lns_policy::providers::InjectionDef {
+                        kind: lns_policy::providers::InjectionKind::BearerHeader,
+                        domain: "api.some-oauth.example".into(),
+                        header: None,
+                    }],
+                }),
+                token_fallback: None,
+            }],
+        }
+        .save_atomic(&d.path().join(".lns-connectors.yaml"))
+        .expect("user catalog");
+        let slot = lns_artifact::spec::CredentialSlot {
+            name: "some-oauth".into(),
+            env: "SOME_OAUTH_TOKEN".into(),
+            required: true,
+        };
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+
+        let result = SupervisorSession::start_if_policy(
+            "deadbeef00000000000000000000aa97".to_string(),
+            "calm-finch".into(),
+            Some(&policy_path),
+            None,
+            RunConsent {
+                credentials: std::slice::from_ref(&slot),
+                workload: workload.clone(),
+                signed_in: vec!["some-oauth".into()],
+            },
+            d.path().to_path_buf(),
+            vec![],
+        )
+        .await
+        .expect("start_if_policy");
+        let session = result.expect("Some(session) with policy set");
+
+        let sidecar = JsonFileGrantStore::new(d.path().join(".lns-workload-grants.json"));
+        let grants = sidecar.load().expect("sidecar readable");
+        let grant = grants
+            .lookup(&project_key(&policy_path), &workload, "some-oauth")
+            .expect("the boot sign-in must persist a grant so the next run skips the sign-in");
+        assert_eq!(grant.verdict, GrantVerdict::Allow);
+        assert_eq!(
+            grant.env_var, "SOME_OAUTH_TOKEN",
+            "the grant pins the slot's effective env var, not the catalog default"
+        );
+        drop(session);
+        tokio::task::yield_now().await;
+    }
+
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn start_if_policy_with_policy_threads_through_adapter_to_supervisor_session() {
@@ -581,10 +687,9 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             None,
-            &[],
+            test_consent(&[]),
             d.path().to_path_buf(),
             vec![],
-            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .expect("start_if_policy");
@@ -619,10 +724,9 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             Some(&sandbox_policy),
-            &[],
+            test_consent(&[]),
             d.path().to_path_buf(),
             vec![],
-            lns_policy::grants::WorkloadIdentity::Adhoc,
         )
         .await
         .expect("start_if_policy");

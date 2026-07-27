@@ -15,6 +15,8 @@ pub struct DeclaredRig {
     pub store: CredentialStateFile,
     /// Ids this workload has NOT granted; the launch defaults to consenting to its applied connectors, so a scenario adds an id here to model a cloned overlay or a slot with no machine-local grant.
     pub withhold_grants: HashSet<String>,
+    /// Ids whose boot-gate sign-in the user completed this launch; their consent grants the workload even where a grant was withheld.
+    pub signed_in: Vec<String>,
     /// Armed providers as (connector id, env var, placeholder).
     pub providers: Vec<(String, String, String)>,
     /// The run's wire credentials as the boundary would receive them at boot.

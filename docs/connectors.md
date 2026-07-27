@@ -74,7 +74,9 @@ A connector reaches a project's workloads in any of three ways:
   before any microVM boots — naming the credential, its injection target, and
   the `lns connector connect` fix — and a credential you've denied refuses
   distinctly. An optional slot runs reactively. A required `oauth`-kind slot
-  blocks on the sign-in instead.
+  blocks on the sign-in instead, and completing that sign-in is itself the
+  [grant](credentials.md#workload-grants) — the workload starts armed rather
+  than asking you twice.
 - **Connected to the directory.** `lns connector connect` binds the
   connector's per-machine [value decision](credentials.md#value-decisions) —
   the approval-window card for a credential connector, the sign-in for an

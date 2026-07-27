@@ -17,7 +17,7 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::connectors::{
-    applied_connector_routes, gate_armed_by_grant, resolve_applied_with_slots,
+    applied_connector_routes, boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_slots,
     resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
@@ -238,6 +238,34 @@ fn load_grants_or_warn(store: &dyn GrantStore, path: &Path) -> WorkloadGrantFile
             log::warn!("could not load {path_str} ({e}); no connector grants apply this run");
             WorkloadGrantFile::default()
         }
+    }
+}
+
+/// Records the boot-gate sign-ins the user completed this launch as allow grants — into the run's snapshot so the gate below arms them, and into the sidecar so the next run skips the sign-in; a failed persist warns and this run still arms.
+fn record_boot_sign_in_grants(
+    signed_in: &[String],
+    providers: &[DefProvider],
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &mut WorkloadGrantFile,
+    store: &dyn GrantStore,
+) {
+    let records = boot_sign_in_grants(signed_in, providers, project, workload);
+    if records.is_empty() {
+        return;
+    }
+    for r in &records {
+        grants.upsert(r.clone());
+    }
+    if let Err(e) = store.update(&mut |file| {
+        for r in &records {
+            file.upsert(r.clone());
+        }
+        true
+    }) {
+        log::warn!(
+            "boot sign-in granted for this run but not persisted; the next run will ask to sign in again: {e}"
+        );
     }
 }
 
@@ -541,17 +569,17 @@ fn effective_running_policy(policy_path: &Path, sandbox_policy: Option<&Policy>)
     })
 }
 
-#[allow(clippy::too_many_arguments)] // boot entry point threading independent run inputs; a params struct would only relocate the arity
 pub(super) async fn start(
     run_id: String,
     microvm_name: String,
     policy_path: &Path,
     sandbox_policy: Option<&Policy>,
-    sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
+    consent: super::RunConsent<'_>,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
-    workload: WorkloadIdentity,
 ) -> Result<SupervisorSession> {
+    let sandbox_credentials = consent.credentials;
+    let workload = consent.workload;
     let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
@@ -577,8 +605,16 @@ pub(super) async fn start(
     // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
     let grants_path = default_workload_grants_path();
     let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
-    let grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
+    let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
     let project = project_key(policy_path);
+    record_boot_sign_in_grants(
+        &consent.signed_in,
+        &run.providers,
+        &project,
+        &workload,
+        &mut grants,
+        grant_store.as_ref(),
+    );
     let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
     // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
     let slot_ids: HashSet<String> = sandbox_credentials
@@ -1115,6 +1151,93 @@ mod tests {
             grants.grants.is_empty(),
             "a malformed grant sidecar must fail safe to no grants so nothing arms without consent, got {:?}",
             grants.grants
+        );
+    }
+
+    #[test]
+    fn record_boot_sign_in_grants_arms_this_run_and_persists_to_the_sidecar() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+
+        record_boot_sign_in_grants(
+            &["acme".to_string()],
+            &providers,
+            "proj",
+            &workload,
+            &mut grants,
+            &store,
+        );
+
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the just-recorded grant must arm through the same gate that admits the next run"
+        );
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "acme")
+                .is_some(),
+            "the grant persists so the next run skips the sign-in"
+        );
+    }
+
+    #[test]
+    fn record_boot_sign_in_grants_without_sign_ins_touches_nothing() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let mut grants = WorkloadGrantFile::default();
+        record_boot_sign_in_grants(
+            &[],
+            &acme_custom(),
+            "proj",
+            &acme_workload(),
+            &mut grants,
+            &store,
+        );
+        assert!(grants.grants.is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no sign-ins means the sidecar (and its lockfile) are never touched"
+        );
+    }
+
+    #[test]
+    fn a_boot_sign_in_grant_that_cannot_persist_still_arms_this_run_and_warns() {
+        init_tracing_capture();
+        struct FailingGrantStore;
+        impl GrantStore for FailingGrantStore {
+            fn load(&self) -> std::io::Result<WorkloadGrantFile> {
+                Ok(WorkloadGrantFile::default())
+            }
+            fn save(&self, _: &WorkloadGrantFile) -> std::io::Result<()> {
+                Err(std::io::Error::other("sidecar unwritable"))
+            }
+        }
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+
+        record_boot_sign_in_grants(
+            &["acme".to_string()],
+            &providers,
+            "proj",
+            &workload,
+            &mut grants,
+            &FailingGrantStore,
+        );
+
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the sign-in the user just completed must arm this run even when the sidecar can't be written"
         );
     }
 
