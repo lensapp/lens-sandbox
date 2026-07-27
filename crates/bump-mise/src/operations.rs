@@ -255,6 +255,66 @@ musl = "docker.io/library/alpine@sha256:dddd"
     }
 
     #[test]
+    fn the_pinned_release_fixtures_verify_against_the_minisign_key() {
+        verify_shasums_signature(
+            include_bytes!("../fixtures/SHASUMS256.txt"),
+            include_str!("../fixtures/SHASUMS256.txt.minisig"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_tampered_shasums_is_refused_by_the_signature() {
+        let mut tampered = include_bytes!("../fixtures/SHASUMS256.txt").to_vec();
+        tampered[0] ^= 0xff;
+        let err = verify_shasums_signature(
+            &tampered,
+            include_str!("../fixtures/SHASUMS256.txt.minisig"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not verify"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn table_form_backends_and_non_string_entries_are_handled() {
+        let entries = vec![(
+            "tabular".to_string(),
+            "backends = [{ full = \"aqua:owner/tabular\" }, 42]\n".to_string(),
+        )];
+        let snapshot = render_registry_snapshot(&entries).unwrap();
+        assert!(snapshot.contains("tabular\taqua:owner/tabular\n"));
+    }
+
+    #[test]
+    fn a_non_utf8_registry_stem_is_skipped() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut weird = tar::Header::new_gnu();
+        weird.set_path("a").unwrap();
+        {
+            let name = weird.as_gnu_mut().unwrap();
+            let raw = b"m-1/registry/\xff.toml";
+            name.name[..raw.len()].copy_from_slice(raw);
+            name.name[raw.len()] = 0;
+        }
+        weird.set_size(0);
+        weird.set_mode(0o644);
+        weird.set_cksum();
+        builder.append(&weird, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&tar).unwrap();
+        let tarball = encoder.finish().unwrap();
+
+        assert!(registry_entries_from_tarball(&tarball).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_bad_signature_is_refused() {
         let err = verify_shasums_signature(b"payload", "not a signature").unwrap_err();
         assert!(

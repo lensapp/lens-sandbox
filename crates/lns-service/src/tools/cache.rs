@@ -283,13 +283,6 @@ mod tests {
 
     fn tool_tar() -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
-        let body = b"#!binary";
-        let mut header = tar::Header::new_gnu();
-        header.set_path("./bin/some-tool").unwrap();
-        header.set_size(body.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder.append(&header, &body[..]).unwrap();
         let mut link = tar::Header::new_gnu();
         link.set_entry_type(tar::EntryType::Symlink);
         link.set_path("bin/alias").unwrap();
@@ -298,6 +291,13 @@ mod tests {
         link.set_mode(0o777);
         link.set_cksum();
         builder.append(&link, std::io::empty()).unwrap();
+        let body = b"#!binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("./bin/some-tool").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, &body[..]).unwrap();
         let mut dir = tar::Header::new_gnu();
         dir.set_entry_type(tar::EntryType::Directory);
         dir.set_path("lib/").unwrap();
@@ -331,6 +331,75 @@ mod tests {
         cache.evict(&key()).unwrap();
         assert_eq!(cache.lookup(&key()).unwrap(), None);
         cache.evict(&key()).unwrap();
+    }
+
+    #[test]
+    fn a_ready_marker_without_a_readable_manifest_is_a_miss_or_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let key_dir = dir.path().join("trees/some-tool/1.2.3").join(format!(
+            "{}-{}",
+            Arch::Aarch64,
+            Libc::Musl
+        ));
+        std::fs::create_dir_all(&key_dir).unwrap();
+        std::fs::write(key_dir.join(".ready"), b"").unwrap();
+        assert_eq!(cache.lookup(&key()).unwrap(), None, "missing manifest");
+        std::fs::write(key_dir.join("manifest.json"), b"not json").unwrap();
+        assert_eq!(cache.lookup(&key()).unwrap(), None, "corrupt manifest");
+        std::fs::remove_file(key_dir.join("manifest.json")).unwrap();
+        std::fs::create_dir_all(key_dir.join("manifest.json")).unwrap();
+        assert!(cache.lookup(&key()).is_err(), "unreadable manifest");
+    }
+
+    #[test]
+    fn a_staged_tar_file_on_disk_ingests_like_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let tar_path = dir.path().join("staged.tar");
+        std::fs::write(&tar_path, tool_tar()).unwrap();
+        let mut from_file = staged(Vec::new());
+        from_file.tar = StagedTar::File(tar_path);
+        let manifest = cache.ingest(&key(), &from_file).unwrap();
+        assert_eq!(manifest.entries.len(), 2);
+    }
+
+    #[test]
+    fn evicting_an_unremovable_key_surfaces_the_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let key_dir = dir.path().join("trees/some-tool/1.2.3").join(format!(
+            "{}-{}",
+            Arch::Aarch64,
+            Libc::Musl
+        ));
+        std::fs::create_dir_all(key_dir.parent().unwrap()).unwrap();
+        std::fs::write(&key_dir, b"a file where the tree dir belongs").unwrap();
+        assert!(cache.evict(&key()).is_err());
+    }
+
+    #[test]
+    fn a_control_character_in_a_tar_path_is_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("a").unwrap();
+        {
+            let name = header.as_gnu_mut().unwrap();
+            name.name[..4].copy_from_slice(b"a\x07bc");
+            name.name[4] = 0;
+        }
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("control characters"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

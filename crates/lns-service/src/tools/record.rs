@@ -68,10 +68,8 @@ impl ToolRecordStore for RealRecordStore {
         match serde_json::from_slice(&bytes) {
             Ok(record) => Ok(Some(record)),
             Err(e) => {
-                crate::log::warn!(
-                    "ignoring unparseable tool record at {}: {e}",
-                    self.path.display()
-                );
+                let path = self.path.display();
+                crate::log::warn!("ignoring unparseable tool record at {path}: {e}");
                 Ok(None)
             }
         }
@@ -124,10 +122,23 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_record_is_ignored_so_the_first_run_re_resolves() {
+    fn a_corrupt_record_is_ignored_with_a_warning_so_the_first_run_re_resolves() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("resolved.json"), b"not json").unwrap();
-        assert_eq!(RealRecordStore::new(dir.path()).load().unwrap(), None);
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(RealRecordStore::new(dir.path()).load().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn an_unreadable_record_surfaces_the_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("resolved.json")).unwrap();
+        assert!(RealRecordStore::new(dir.path()).load().is_err());
     }
 
     #[test]

@@ -365,13 +365,15 @@ mod tests {
     fn a_failed_install_attributes_the_cause_to_its_tool() {
         let stdout = "mise ERROR fetching https://nodejs.org: timeout\nLNS_FAIL node\n";
         let err = parse_driver_output(stdout, 3, &[tool("node@22")]).unwrap_err();
-        match err {
-            ProvisionError::FetchFailed { tool, cause } => {
-                assert_eq!(tool, "node@22");
-                assert!(cause.contains("timeout"), "got: {cause}");
-            }
-            other => panic!("expected FetchFailed, got {other}"),
-        }
+        assert!(
+            matches!(&err, ProvisionError::FetchFailed { .. }),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("node@22") && msg.contains("timeout"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -429,6 +431,8 @@ mod tests {
     fn apk_data_files_land_at_canonical_paths_and_control_entries_are_skipped() {
         let apk = build_apk(&[
             (".PKGINFO", tar::EntryType::Regular, "control"),
+            ("usr/lib/", tar::EntryType::Directory, ""),
+            ("dev/pipe", tar::EntryType::Fifo, ""),
             (
                 "usr/lib/libstdc++.so.6.0.32",
                 tar::EntryType::Regular,
@@ -441,12 +445,43 @@ mod tests {
             ),
         ]);
         let specs = apk_runtime_specs(&apk).unwrap();
-        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs.len(),
+            2,
+            "dirs, fifos, and control entries are skipped"
+        );
         assert_eq!(specs[0].guest_path, "/usr/lib/libstdc++.so.6.0.32");
         assert!(matches!(specs[0].source, RuntimeSource::Bytes(_)));
         assert_eq!(specs[1].guest_path, "/usr/lib/libstdc++.so.6");
         assert!(
             matches!(&specs[1].source, RuntimeSource::Symlink(target) if target == "libstdc++.so.6.0.32")
+        );
+    }
+
+    #[test]
+    fn an_escaping_apk_path_is_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut escaping = tar::Header::new_gnu();
+        escaping.set_path("a").unwrap();
+        {
+            let name = escaping.as_gnu_mut().unwrap();
+            let raw = b"usr/../../break";
+            name.name[..raw.len()].copy_from_slice(raw);
+            name.name[raw.len()] = 0;
+        }
+        escaping.set_size(1);
+        escaping.set_mode(0o644);
+        escaping.set_cksum();
+        builder.append(&escaping, &b"x"[..]).unwrap();
+        let tar = builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &tar).unwrap();
+        let apk = encoder.finish().unwrap();
+
+        let err = apk_runtime_specs(&apk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("escapes the guest root"),
+            "got: {err:#}"
         );
     }
 
@@ -651,6 +686,17 @@ mod tests {
                 arch: crate::tools::Arch::Aarch64,
                 libc,
             }
+        }
+
+        #[tokio::test]
+        async fn the_fake_fs_mirrors_missing_file_errors() {
+            let fs = FakeFs::default();
+            assert!(fs.read(Path::new("/missing")).await.is_err());
+            assert!(
+                fs.rename(Path::new("/missing"), Path::new("/b"))
+                    .await
+                    .is_err()
+            );
         }
 
         #[tokio::test]

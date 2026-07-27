@@ -607,6 +607,28 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn record_tool_provisioned_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let outcome = crate::tools::ProvisionOutcome {
+            tool: "some-tool".into(),
+            requested: "some-tool@1".into(),
+            resolved: "1.2.3".into(),
+            backend: "core:some-tool".into(),
+            source_host: "upstream.example.test".into(),
+        };
+        record_tool_provisioned("aa125", "calm-finch", &outcome, &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa125").unwrap()).unwrap();
+        assert!(content.contains("\"lns_resolved\":\"1.2.3\""), "{content}");
+        assert!(
+            content.contains("\"lns_source\":\"upstream.example.test\""),
+            "{content}"
+        );
+    }
+
+    #[test]
     fn successive_events_form_a_valid_hash_chain() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");

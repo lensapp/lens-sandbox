@@ -281,12 +281,22 @@ mod tests {
 
         let inspection = project_sandbox(config).unwrap();
 
-        let ArtifactInspection::Sandbox(view) = inspection else {
-            panic!("expected a sandbox inspection");
-        };
         assert_eq!(
-            view.tools,
-            vec!["node@22.11.0".to_string(), "python@3.12.6".to_string()]
+            inspection,
+            ArtifactInspection::Sandbox(Box::new(SandboxView {
+                reference: "registry.example.test/team/sandbox:latest".into(),
+                digest: digest(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: None,
+                mounts: vec![],
+                ports: vec![],
+                filesets: vec![],
+                connectors: vec![],
+                env: vec![],
+                credentials: vec![],
+                tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
+                policy_flags: vec![],
+            }))
         );
     }
 

@@ -337,15 +337,9 @@ mod tests {
         }
     }
 
-    struct PanickingResolver;
-
-    impl ToolResolver for PanickingResolver {
-        fn resolve<'a>(
-            &'a self,
-            tool: &'a lns_artifact::tools::ToolRef,
-        ) -> LocalBoxFuture<'a, Result<String>> {
-            panic!("a tool-less push must never consult the resolver (asked for {tool})");
-        }
+    /// An empty index: any resolution attempt fails, so a passing push proves the resolver was never consulted.
+    fn unconsultable() -> FakeResolver {
+        FakeResolver::with(&[])
     }
 
     fn fs_with_skills() -> MapFs {
@@ -369,7 +363,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -391,7 +385,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -411,7 +405,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -432,7 +426,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             WITH_PATH_FILESET,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -474,7 +468,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -579,7 +573,7 @@ mod tests {
             &fs_with_skills(),
             cwd(),
             &producer,
-            &PanickingResolver,
+            &unconsultable(),
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
@@ -618,11 +612,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pin_declared_tools_leaves_an_empty_tool_list_untouched() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[]}}"#;
+        let pinned = pin_declared_tools(&unconsultable(), doc).await.unwrap();
+        assert_eq!(pinned, doc.to_vec());
+    }
+
+    #[tokio::test]
     async fn pin_declared_tools_refuses_a_non_string_entry() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[42]}}"#;
-        let err = pin_declared_tools(&PanickingResolver, doc)
-            .await
-            .unwrap_err();
+        let err = pin_declared_tools(&unconsultable(), doc).await.unwrap_err();
         assert!(format!("{err:#}").contains("not a string"), "got: {err:#}");
     }
 
