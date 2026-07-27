@@ -713,6 +713,7 @@ mod tests {
             publish_declared: false,
             declared_unpublished: Vec::new(),
             filesets: Vec::new(),
+            tools: Vec::new(),
             mounts: Vec::new(),
             assume_yes: false,
             quiet: false,

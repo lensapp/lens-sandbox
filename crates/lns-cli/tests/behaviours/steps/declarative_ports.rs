@@ -55,6 +55,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }
 }

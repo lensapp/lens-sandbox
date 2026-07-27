@@ -130,6 +130,7 @@ struct PublishedTarget {
     image: String,
     defaults: crate::run::declarative::Defaults,
     filesets: Vec<(String, String, String)>,
+    tools: Vec<String>,
 }
 
 fn published_target(
@@ -148,6 +149,7 @@ fn published_target(
                 image: parsed.clone_with_digest(view.digest.clone()).to_string(),
                 defaults: crate::run::declarative::Defaults::from_view(&view),
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
+                tools: view.tools,
             })
         }
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
@@ -244,6 +246,11 @@ pub async fn run_image(
             })
             .collect(),
         (_, Some(published)) => published.filesets.clone(),
+        _ => Vec::new(),
+    };
+    args.tools = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => def.spec.tools.clone(),
+        (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
     let quiet = args.quiet;
@@ -1105,6 +1112,7 @@ mod tests {
                 connectors: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
+                tools: Vec::new(),
                 policy_flags: Vec::new(),
             })),
         )
@@ -1156,6 +1164,7 @@ mod tests {
                 connectors: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
+                tools: Vec::new(),
                 policy_flags: Vec::new(),
             })),
         )
