@@ -155,11 +155,45 @@ async fn push_local(
         &RealFs,
         &project_dir,
         &RealProducer,
+        &RealToolResolver,
         &doc,
         reference,
         &mut out,
     )
     .await
+}
+
+struct RealToolResolver;
+
+const TOOL_INDEX_URL: &str = "https://mise-versions.jdx.dev";
+
+impl super::distribute::ToolResolver for RealToolResolver {
+    fn resolve<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let base =
+                std::env::var("LNS_TOOL_INDEX_URL").unwrap_or_else(|_| TOOL_INDEX_URL.to_string());
+            let url = format!("{}/{}", base.trim_end_matches('/'), tool.name);
+            let response = reqwest::get(&url)
+                .await
+                .with_context(|| format!("querying the tool version index at {url}"))?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!(
+                    "tool {:?} is unknown to the version index ({url}); check the name against mise's registry",
+                    tool.name
+                );
+            }
+            let body = response
+                .error_for_status()
+                .with_context(|| format!("tool version index at {url}"))?
+                .text()
+                .await
+                .with_context(|| format!("reading the version index at {url}"))?;
+            super::distribute::resolve_from_index(&tool.name, &tool.version, &body)
+        })
+    }
 }
 
 struct RealProducer;

@@ -273,6 +273,24 @@ impl distribute::Producer for StepProducer {
     }
 }
 
+struct StepResolver {
+    versions: HashMap<String, String>,
+}
+
+impl distribute::ToolResolver for StepResolver {
+    fn resolve<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
+        let outcome = self
+            .versions
+            .get(&tool.to_string())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("tool {:?} is unknown to the version index", tool.name));
+        Box::pin(async move { outcome })
+    }
+}
+
 fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
     let cwd = Path::new("/work");
     let fs = StepFs {
@@ -341,10 +359,14 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
                 distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
             }
             Ok(doc) => {
+                let resolver = StepResolver {
+                    versions: w.tool_index.clone(),
+                };
                 distribute::push(
                     &fs,
                     &project_dir,
                     &producer,
+                    &resolver,
                     &doc,
                     &push_args.reference,
                     &mut out,
