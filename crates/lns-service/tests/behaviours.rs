@@ -18,6 +18,8 @@ mod policy_rig;
 mod runner;
 #[path = "behaviours/steps/mod.rs"]
 mod steps;
+#[path = "behaviours/tools_rig.rs"]
+mod tools_rig;
 #[path = "behaviours/volume_rig.rs"]
 mod volume_rig;
 #[path = "behaviours/world.rs"]

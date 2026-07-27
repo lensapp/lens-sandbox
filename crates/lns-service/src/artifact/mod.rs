@@ -118,6 +118,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
             connectors: def.spec.connectors.clone(),
         }),
         credentials: def.spec.credentials.clone(),
+        tools: def.spec.tools.clone(),
     }
 }
 

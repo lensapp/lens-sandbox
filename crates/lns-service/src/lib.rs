@@ -36,6 +36,7 @@ pub mod runtime_layer;
 pub mod shutdown;
 pub mod supervisor;
 mod time_fmt;
+pub mod tools;
 pub mod tray;
 pub mod ui;
 pub mod update_check;
