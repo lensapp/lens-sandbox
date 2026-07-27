@@ -55,6 +55,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
@@ -84,6 +85,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
@@ -113,6 +115,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
@@ -164,6 +167,7 @@ fn inspects_sandbox_credential_with_requirement(
             env,
             required,
         }],
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
@@ -182,6 +186,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: vec![
             "permissive defaultVerdict: allow — the sandbox is open by default".into(),
         ],
@@ -202,6 +207,7 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
         connectors: Vec::new(),
         env: vec![entry],
         credentials: Vec::new(),
+        tools: Vec::new(),
         policy_flags: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);

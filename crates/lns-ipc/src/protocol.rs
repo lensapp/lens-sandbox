@@ -284,6 +284,8 @@ pub struct SandboxView {
     #[serde(default)]
     pub credentials: Vec<SandboxCredential>,
     #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
     pub policy_flags: Vec<String>,
 }
 
@@ -1369,6 +1371,7 @@ mod tests {
                 env: "SOME_TOKEN".into(),
                 required: true,
             }],
+            tools: vec!["node@22.11.0".into()],
             policy_flags: Vec::new(),
         };
         let response = Response::ImageInspected {

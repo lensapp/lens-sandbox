@@ -213,6 +213,9 @@ pub struct RunArgs {
     #[arg(skip)]
     pub filesets: Vec<(String, String, String)>,
 
+    #[arg(skip)]
+    pub tools: Vec<String>,
+
     #[arg(
         short = 'v',
         long = "volume",

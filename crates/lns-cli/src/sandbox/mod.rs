@@ -808,6 +808,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 let env = &credential.env;
                 writeln!(out, "credential: {name} -> {env}{required}")?;
             }
+            for tool in &view.tools {
+                writeln!(out, "tool: {tool}")?;
+            }
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Image(view) => {
@@ -1535,6 +1538,7 @@ mod tests {
                     connectors: vec!["some-provider".into()],
                     env: Vec::new(),
                     credentials: Vec::new(),
+                    tools: vec!["node@22.11.0".into()],
                     policy_flags: Vec::new(),
                 })),
             },
@@ -1549,6 +1553,7 @@ mod tests {
             "got: {text}"
         );
         assert!(text.contains("connector: some-provider"), "got: {text}");
+        assert!(text.contains("tool: node@22.11.0"), "got: {text}");
     }
 
     #[tokio::test]
