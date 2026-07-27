@@ -14,6 +14,7 @@ use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
     CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
+use lns_service::ledger::LedgerRecorder;
 use lns_service::oauth::{
     AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
     OauthConfig, PkceChallenge, PkceConfig, PollOutcome, TokenSet,
@@ -41,6 +42,18 @@ fn fixture_providers() -> Vec<DefProvider> {
             header: None,
         }],
     })]
+}
+
+/// Captures the audit lines a scenario earns, so a scenario can assert the chain stayed silent for a non-decision.
+#[derive(Default)]
+pub struct RigRecorder {
+    pub events: Mutex<Vec<lns_ipc::LedgerEvent>>,
+}
+
+impl LedgerRecorder for RigRecorder {
+    fn record(&self, event: lns_ipc::LedgerEvent) {
+        self.events.lock().unwrap().push(event);
+    }
 }
 
 pub struct FlakyCredentialStore {
@@ -90,6 +103,7 @@ pub struct CredentialRig {
     grant_store: Arc<dyn GrantStore>,
     grant_project: String,
     grant_workload: WorkloadIdentity,
+    pub ledger: Arc<RigRecorder>,
     _tempdir: TempDir,
 }
 
@@ -166,6 +180,8 @@ impl CredentialRig {
                 grant_store.clone(),
             ),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state,
@@ -179,6 +195,7 @@ impl CredentialRig {
             grant_store,
             grant_project,
             grant_workload,
+            ledger,
             _tempdir: dir,
         }
     }
@@ -378,6 +395,8 @@ impl CredentialRig {
                 grant_store.clone(),
             ),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state,
@@ -391,6 +410,7 @@ impl CredentialRig {
             grant_store,
             grant_project,
             grant_workload,
+            ledger,
             _tempdir: dir,
         }
     }
@@ -606,6 +626,8 @@ impl CredentialRig {
                     "OpenRouter".to_string(),
                 )])),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state: shared.window_state,
@@ -619,6 +641,7 @@ impl CredentialRig {
             grant_store: shared.grant_store,
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
+            ledger,
             _tempdir: shared.dir,
         }
     }
@@ -649,6 +672,8 @@ impl CredentialRig {
                 .with_custom_providers(Arc::new(vec![provider]))
                 .with_armed_ids(HashSet::from([id.to_string()])),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state: shared.window_state,
@@ -662,6 +687,7 @@ impl CredentialRig {
             grant_store: shared.grant_store,
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
+            ledger,
             _tempdir: shared.dir,
         }
     }

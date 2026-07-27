@@ -100,12 +100,31 @@ pub enum DecisionOutcome {
     UnknownId,
 }
 
-/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline and `Timeout` records nothing (S12).
+/// How an interactive sign-in ended. `Refused` is the developer declining in the browser; `Failed` covers cancel, expiry, and transport errors, which are not a decision and so earn no audit line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignInOutcome {
+    Connected,
+    Refused,
+    Failed,
+}
+
+impl SignInOutcome {
+    fn ledger_decision(self) -> Option<Decision> {
+        match self {
+            Self::Connected => Some(Decision::Allow),
+            Self::Refused => Some(Decision::DenyOnce),
+            Self::Failed => None,
+        }
+    }
+}
+
+/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline. `Dismiss` and `Timeout` are the absence of a decision and record nothing (S12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialDecisionRequest {
     Allow(CredentialEntry),
     AllowBound,
     Deny,
+    Dismiss,
     Timeout,
 }
 
@@ -628,14 +647,8 @@ impl CredentialSession {
         };
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
-        match &request {
-            CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
-                self.record_credential_approval(&credential_id, Decision::Allow)
-            }
-            CredentialDecisionRequest::Deny => {
-                self.record_credential_approval(&credential_id, Decision::Deny)
-            }
-            CredentialDecisionRequest::Timeout => {}
+        if let Some(decision) = ledger_decision_of(&request) {
+            self.record_credential_approval(&credential_id, decision);
         }
         match request {
             CredentialDecisionRequest::Allow(entry) => {
@@ -664,7 +677,7 @@ impl CredentialSession {
             CredentialDecisionRequest::Deny => {
                 self.remember_grant(&credential_id, GrantVerdict::Deny);
             }
-            CredentialDecisionRequest::Timeout => {}
+            CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => {}
         }
         for request_id in &request_ids {
             self.send_decision_frame(request_id, kind);
@@ -686,18 +699,13 @@ impl CredentialSession {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(prompt_id);
-        let connected = self.run_signin_connect(&credential_id).await;
+        let outcome = self.run_signin_connect(&credential_id).await;
         self.notifier
             .connect_finished(&self.display_name_for(&credential_id));
-        self.record_credential_approval(
-            &credential_id,
-            if connected {
-                Decision::Allow
-            } else {
-                Decision::Deny
-            },
-        );
-        if connected {
+        if let Some(decision) = outcome.ledger_decision() {
+            self.record_credential_approval(&credential_id, decision);
+        }
+        if outcome == SignInOutcome::Connected {
             for request_id in &request_ids {
                 self.send_decision_frame(request_id, CredentialDecisionKind::Allow);
             }
@@ -710,7 +718,7 @@ impl CredentialSession {
     /// Connects connector `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
     pub async fn connect_connector_now(&self, id: &str) -> bool {
         if self.is_signin(id) {
-            let ok = self.run_signin_connect(id).await;
+            let ok = self.run_signin_connect(id).await == SignInOutcome::Connected;
             if ok {
                 // The same connect arms the token, so any placeholder card already held for this connector is satisfied too — don't ask for it separately.
                 self.release_armed_holds(id);
@@ -754,7 +762,7 @@ impl CredentialSession {
     }
 
     /// Routes an accepted interactive sign-in to its flow: the pkce browser redirect when one is wired for `credential_id`, otherwise the device grant.
-    async fn run_signin_connect(&self, credential_id: &str) -> bool {
+    async fn run_signin_connect(&self, credential_id: &str) -> SignInOutcome {
         if let (Some(cfg), Some(flow), Some(listener)) = (
             self.pkce_configs.get(credential_id),
             self.pkce_flow.as_ref(),
@@ -767,14 +775,14 @@ impl CredentialSession {
         self.run_oauth_connect(credential_id).await
     }
 
-    /// Runs the pkce browser-redirect sign-in and, on success, arms the obtained key as a durable credential and connects the connector live; returns whether a key was obtained. Cancel, timeout, or error yields false.
+    /// Runs the pkce browser-redirect sign-in and, on success, arms the obtained key as a durable credential and connects the connector live. Cancel, timeout, and a rejected exchange are all failures, never the developer refusing the credential.
     async fn run_pkce_connect(
         &self,
         credential_id: &str,
         cfg: &crate::oauth::PkceConfig,
         flow: &dyn crate::oauth::AuthCodeFlow,
         listener: &dyn crate::oauth::CallbackListener,
-    ) -> bool {
+    ) -> SignInOutcome {
         let display_name = self.display_name_for(credential_id);
         let token_fallback = self.token_fallbacks.get(credential_id).cloned();
         let (env_var, injection_domains, is_project_defined) =
@@ -818,25 +826,27 @@ impl CredentialSession {
         match result {
             Ok(crate::oauth::PkceSignIn::Completed(key)) => {
                 self.arm_connected(credential_id, CredentialEntry::Stored { value: key });
-                true
+                SignInOutcome::Connected
             }
-            Ok(crate::oauth::PkceSignIn::Cancelled | crate::oauth::PkceSignIn::TimedOut) => false,
+            Ok(crate::oauth::PkceSignIn::Cancelled | crate::oauth::PkceSignIn::TimedOut) => {
+                SignInOutcome::Failed
+            }
             Err(e) => {
                 self.notifier
                     .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
-                false
+                SignInOutcome::Failed
             }
         }
     }
 
-    /// Runs the device sign-in for an oauth connector and, on success, arms the token set and connects it live; returns whether a token was obtained. A missing config, denial, expiry, cancel, or error yields false.
-    async fn run_oauth_connect(&self, credential_id: &str) -> bool {
+    /// Runs the device sign-in for an oauth connector and, on success, arms the token set and connects it live. Only a denial in the browser is the developer refusing; a missing config, expiry, cancel, or error is a failure.
+    async fn run_oauth_connect(&self, credential_id: &str) -> SignInOutcome {
         let (Some(cfg), Some(flow), Some(clock)) = (
             self.oauth_configs.get(credential_id),
             self.device_flow.as_ref(),
             self.clock.as_ref(),
         ) else {
-            return false;
+            return SignInOutcome::Failed;
         };
         let display_name = self.display_name_for(credential_id);
         let token_fallback = self.token_fallbacks.get(credential_id).cloned();
@@ -873,22 +883,21 @@ impl CredentialSession {
                 let token = self.resolve_account(cfg, token).await;
                 let entry = crate::oauth::entry_from_token(clock.as_ref(), &token);
                 self.arm_connected(credential_id, entry);
-                true
+                SignInOutcome::Connected
             }
             // Pivoting to a pasted token mid-flow arms it in the same credential slot, exactly as a completed sign-in would.
             Ok(crate::oauth::SignIn::Token(value)) => {
                 self.arm_connected(credential_id, CredentialEntry::Stored { value });
-                true
+                SignInOutcome::Connected
             }
-            Ok(
-                crate::oauth::SignIn::Denied
-                | crate::oauth::SignIn::Expired
-                | crate::oauth::SignIn::Cancelled,
-            ) => false,
+            Ok(crate::oauth::SignIn::Denied) => SignInOutcome::Refused,
+            Ok(crate::oauth::SignIn::Expired | crate::oauth::SignIn::Cancelled) => {
+                SignInOutcome::Failed
+            }
             Err(e) => {
                 self.notifier
                     .inform(&format!("sign-in to {credential_id} failed: {e:#}"));
-                false
+                SignInOutcome::Failed
             }
         }
     }
@@ -1107,9 +1116,23 @@ fn decision_kind_of(request: &CredentialDecisionRequest) -> CredentialDecisionKi
             CredentialDecisionKind::Allow
         }
         CredentialDecisionRequest::Deny => CredentialDecisionKind::Deny,
-        CredentialDecisionRequest::Timeout => CredentialDecisionKind::Timeout,
+        CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => {
+            CredentialDecisionKind::Timeout
+        }
     }
 }
+
+/// The audit line a card outcome earns: a decision the developer actually made. A dismissal and a timeout are the absence of one, so they earn nothing.
+fn ledger_decision_of(request: &CredentialDecisionRequest) -> Option<Decision> {
+    match request {
+        CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
+            Some(Decision::Allow)
+        }
+        CredentialDecisionRequest::Deny => Some(Decision::Deny),
+        CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => None,
+    }
+}
+
 
 /// The host an outbound request targets, parsed from a gate `action` like `POST https://api.some-oauth.example/x` or `CONNECT api.some-oauth.example:443`.
 fn request_host(action: &str) -> Option<&str> {
@@ -2368,6 +2391,38 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_fails_the_held_request_as_undecided_and_persists_nothing() {
+        let (s, n, store, mut rx) = fixture();
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        s.record_decision("c1", CredentialDecisionRequest::Dismiss);
+
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Timeout,
+            "a closed card reads on the wire as no decision, not as a refusal"
+        );
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["c1".to_string()]);
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert!(s.current_state().is_empty());
+    }
+
+    #[test]
+    fn a_dismissed_card_records_no_approval() {
+        let (s, _n, _store, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        s.record_decision("c1", CredentialDecisionRequest::Dismiss);
+
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "closing a card is the absence of a decision, so the audit chain stays silent"
+        );
+    }
+
+    #[test]
     fn timeout_request_emits_decision_frame_but_does_not_persist() {
         let (s, n, store, mut rx) = fixture();
         s.submit_pending(pending("c1", "some-provider"), Instant::now());
@@ -2652,6 +2707,11 @@ mod tests {
         assert_eq!(
             decision_kind_of(&CredentialDecisionRequest::Deny),
             CredentialDecisionKind::Deny
+        );
+        assert_eq!(
+            decision_kind_of(&CredentialDecisionRequest::Dismiss),
+            CredentialDecisionKind::Timeout,
+            "a dismissal is not a refusal, so it reads on the wire as no decision"
         );
         assert_eq!(
             decision_kind_of(&CredentialDecisionRequest::Timeout),
@@ -3388,7 +3448,7 @@ mod tests {
             LedgerEvent::Approval {
                 kind: ApprovalKind::Credential,
                 target: "some-oauth".into(),
-                decision: Decision::Deny,
+                decision: Decision::DenyOnce,
                 reason: None,
                 connector: Some("some-oauth".into()),
             }

@@ -63,6 +63,9 @@ pub fn resolve_bind_decision(request: CredentialDecisionRequest) -> BindResoluti
         CredentialDecisionRequest::AllowBound => {
             BindResolution::Failed("no value was bound by the decision".into())
         }
+        CredentialDecisionRequest::Dismiss => {
+            BindResolution::Failed("the value card was dismissed before a decision was made".into())
+        }
         CredentialDecisionRequest::Timeout => {
             BindResolution::Failed("the value decision timed out before it was made".into())
         }
