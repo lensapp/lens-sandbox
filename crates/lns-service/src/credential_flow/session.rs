@@ -14,9 +14,7 @@ use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, Creden
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
-use lns_policy::grants::{
-    GrantRecord, GrantStore, GrantVerdict, WorkloadGrantFile, WorkloadIdentity,
-};
+use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, WorkloadIdentity};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -117,6 +115,12 @@ struct PendingEntry {
     deadline: Instant,
 }
 
+struct GrantBinding {
+    project: String,
+    workload: WorkloadIdentity,
+    store: Arc<dyn GrantStore>,
+}
+
 pub struct CredentialSession {
     state: Mutex<CredentialStateFile>,
     pending: Mutex<HashMap<String, PendingEntry>>,
@@ -130,10 +134,8 @@ pub struct CredentialSession {
     connectable: HashSet<String>,
     armed: Mutex<HashSet<String>>,
     slot_ids: HashSet<String>,
-    grant_project: String,
-    grant_workload: WorkloadIdentity,
-    grant_store: Option<Arc<dyn GrantStore>>,
-    grant_state: Mutex<WorkloadGrantFile>,
+    grant_binding: Option<GrantBinding>,
+    run_grants: Mutex<HashMap<String, GrantRecord>>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -182,10 +184,8 @@ impl CredentialSession {
             connectable: HashSet::new(),
             armed: Mutex::new(HashSet::new()),
             slot_ids: HashSet::new(),
-            grant_project: String::new(),
-            grant_workload: WorkloadIdentity::Adhoc,
-            grant_store: None,
-            grant_state: Mutex::new(WorkloadGrantFile::default()),
+            grant_binding: None,
+            run_grants: Mutex::new(HashMap::new()),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -296,17 +296,28 @@ impl CredentialSession {
         self
     }
 
-    /// Binds this run's grant context so an accepted or declined credential decision is remembered per (project, workload, connector) in the machine-local sidecar; run-local grant state is seeded from the sidecar so a prior deny suppresses the offer, and without a binding a decision is not remembered at all.
+    /// Binds this run's grant context so an accepted or declined credential decision is remembered per (project, workload, connector) in the machine-local sidecar; run-local memory is seeded with this workload's own sidecar records so a prior deny suppresses the offer, and without a binding a decision is remembered for the run alone.
     pub fn with_grants(
         mut self,
         project: String,
         workload: WorkloadIdentity,
         store: Arc<dyn GrantStore>,
     ) -> Self {
-        self.grant_state = Mutex::new(store.load().unwrap_or_default());
-        self.grant_project = project;
-        self.grant_workload = workload;
-        self.grant_store = Some(store);
+        let key = workload.key();
+        let seeded = store
+            .load()
+            .unwrap_or_default()
+            .grants
+            .into_iter()
+            .filter(|g| g.project == project && g.workload == key)
+            .map(|g| (g.connector.clone(), g))
+            .collect();
+        self.run_grants = Mutex::new(seeded);
+        self.grant_binding = Some(GrantBinding {
+            project,
+            workload,
+            store,
+        });
         self
     }
 
@@ -332,10 +343,10 @@ impl CredentialSession {
     /// True when this workload holds a standing deny grant for the connector whose recorded disclosure still describes it, so a held request fails without re-prompting for the rest of this run and future runs; a redefinition invalidates the deny exactly as it invalidates an allow.
     fn workload_denied(&self, credential_id: &str) -> bool {
         let grant = self
-            .grant_state
+            .run_grants
             .lock()
-            .expect("grant state mutex poisoned")
-            .lookup(&self.grant_project, &self.grant_workload, credential_id)
+            .expect("run grants mutex poisoned")
+            .get(credential_id)
             .cloned();
         let Some(grant) = grant.filter(|g| g.verdict == GrantVerdict::Deny) else {
             return false;
@@ -349,16 +360,20 @@ impl CredentialSession {
         }
     }
 
-    /// This run's accept/decline as a grant record, unless it is an allow the provider discloses no injection to pin it to (a deny, being a standing "no", needs none).
+    /// This run's accept/decline as a grant record, unless it is an allow the provider discloses no injection to pin it to (a deny, being a standing "no", needs none); an unbound session's record carries empty keys nothing ever reads — run-local memory keys by connector alone.
     fn grant_record_for(&self, credential_id: &str, verdict: GrantVerdict) -> Option<GrantRecord> {
         let (env_var, injection_domains) = match self.provider_disclosure(credential_id) {
             (Some(env_var), domains, _) => (env_var, domains),
             _ if verdict == GrantVerdict::Deny => (String::new(), Vec::new()),
             _ => return None,
         };
+        let (project, workload) = match &self.grant_binding {
+            Some(b) => (b.project.clone(), b.workload.key()),
+            None => (String::new(), String::new()),
+        };
         Some(GrantRecord {
-            project: self.grant_project.clone(),
-            workload: self.grant_workload.key(),
+            project,
+            workload,
             connector: credential_id.to_string(),
             verdict,
             env_var,
@@ -366,19 +381,19 @@ impl CredentialSession {
         })
     }
 
-    /// Remembers this run's accept/decline for `credential_id` per (project, workload, connector): always in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable, and in the machine-local sidecar when there is one, so a later run skips the offer.
+    /// Remembers this run's accept/decline for `credential_id`: always in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable, and in the machine-local sidecar when a binding names one, so a later run skips the offer.
     fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
         let Some(record) = self.grant_record_for(credential_id, verdict) else {
             return;
         };
-        self.grant_state
+        self.run_grants
             .lock()
-            .expect("grant state mutex poisoned")
-            .upsert(record.clone());
-        let Some(store) = &self.grant_store else {
+            .expect("run grants mutex poisoned")
+            .insert(credential_id.to_string(), record.clone());
+        let Some(binding) = &self.grant_binding else {
             return;
         };
-        if let Err(e) = store.update(&mut |file| {
+        if let Err(e) = binding.store.update(&mut |file| {
             file.upsert(record.clone());
             true
         }) {
@@ -1021,6 +1036,7 @@ fn injection_targets_host(inj: &CredentialInjection, host: &str) -> bool {
 mod tests {
     use super::*;
     use crate::approval_flow::session::tests::CapturingRecorder;
+    use lns_policy::grants::WorkloadGrantFile;
     use std::io;
     use std::sync::Mutex as StdMutex;
 
@@ -1462,7 +1478,9 @@ mod tests {
         .with_custom_providers(Arc::new(vec![some_provider()]))
         .with_grants(
             "proj".into(),
-            WorkloadIdentity::Adhoc,
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
             Arc::new(FailingGrantStore),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
@@ -1490,7 +1508,13 @@ mod tests {
     #[test]
     fn a_consent_for_an_undisclosed_id_persists_no_grant() {
         let store = Arc::new(CapturingGrantStore::default());
-        let session = grants_session(store.clone(), WorkloadIdentity::Adhoc, vec![]);
+        let session = grants_session(
+            store.clone(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            vec![],
+        );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision(
             "c1",
@@ -1791,7 +1815,9 @@ mod tests {
     #[test]
     fn a_card_deny_for_an_undisclosed_id_persists_a_standing_deny() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Adhoc;
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
         let session = grants_session(store.clone(), workload.clone(), vec![]);
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision("c1", CredentialDecisionRequest::Deny);
@@ -1866,6 +1892,26 @@ mod tests {
             store,
         );
         (session, notifier)
+    }
+
+    #[test]
+    fn a_prior_deny_for_another_workload_does_not_suppress_this_workloads_card() {
+        let foreign = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/other".into(),
+            },
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        );
+        let (session, notifier) = session_with_prior_grant(foreign);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "another workload's decline is not this workload's answer; the card must still be asked"
+        );
     }
 
     #[test]
@@ -1968,7 +2014,9 @@ mod tests {
         .with_custom_providers(Arc::new(vec![some_provider()]))
         .with_grants(
             "proj".into(),
-            WorkloadIdentity::Adhoc,
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
             Arc::new(FailingGrantStore),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
