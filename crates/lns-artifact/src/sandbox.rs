@@ -111,6 +111,8 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub credentials: Vec<CredentialSlot>,
     #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
     pub volumes: Vec<Volume>,
     #[serde(default)]
     pub filesets: Vec<FilesetEntry>,
@@ -239,6 +241,7 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             );
         }
     }
+    crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
         if !targets.insert(&fileset.mount_path) {
@@ -478,6 +481,59 @@ mod tests {
             r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn parse_reads_declared_tools() {
+        let json = def_json(r#"{"image":"ghcr.io/team/base:1","tools":["node@22","python@3.12"]}"#);
+        let def = parse(&json).unwrap();
+        assert_eq!(
+            def.spec.tools,
+            vec!["node@22".to_string(), "python@3.12".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_defaults_tools_to_empty() {
+        let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
+        assert!(def.spec.tools.is_empty());
+    }
+
+    #[test]
+    fn parse_requires_a_tool_version() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","tools":["node"]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(r#"explicit version such as "node@22" or "node@latest""#),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_malformed_tool_entry() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","tools":["node@"]}"#,
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(r#""node@""#) && msg.contains(r#""name@version""#),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_engine_prefixed_tool() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","tools":["aqua:node@22"]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("engine backend prefix"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
