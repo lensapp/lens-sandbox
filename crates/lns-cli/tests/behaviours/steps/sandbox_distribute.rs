@@ -8,6 +8,32 @@ fn registry_accepts_push(w: &mut BehaviourWorld) {
     w.push_outcome = Some(Ok(format!("sha256:{}", "a".repeat(64))));
 }
 
+#[given(regex = r#"^the version index resolves "([^"]+)" to "([^"]+)"$"#)]
+fn version_index_resolves(w: &mut BehaviourWorld, spec: String, exact: String) {
+    w.tool_index.insert(spec, exact);
+}
+
+#[then("the published artifact carries the exact resolved versions")]
+fn published_carries_exact_versions(w: &mut BehaviourWorld) -> Result<(), String> {
+    let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(doc).map_err(|e| format!("invalid pushed doc: {e}"))?;
+    let tools = value["spec"]["tools"]
+        .as_array()
+        .ok_or("the pushed config carries no spec.tools")?;
+    for (spec, exact) in &w.tool_index {
+        let name = spec.split('@').next().unwrap_or_default();
+        let pinned = format!("{name}@{exact}");
+        if !tools.iter().any(|t| t.as_str() == Some(pinned.as_str())) {
+            return Err(format!("expected {pinned:?} among {tools:?}"));
+        }
+        if tools.iter().any(|t| t.as_str() == Some(spec.as_str())) {
+            return Err(format!("the fuzzy entry {spec:?} survived in {tools:?}"));
+        }
+    }
+    Ok(())
+}
+
 #[given("the stored credential for the registry lacks push scope")]
 fn credential_lacks_push_scope(w: &mut BehaviourWorld) {
     w.push_outcome = Some(Err("credential for ghcr.io lacks push scope".to_string()));
