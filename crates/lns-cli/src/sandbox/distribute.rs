@@ -30,15 +30,6 @@ pub trait ToolResolver {
     ) -> LocalBoxFuture<'a, Result<String>>;
 }
 
-/// A version is already a pin when it names every component of a release, so there is nothing left for the index to resolve.
-fn is_exact_version(version: &str) -> bool {
-    version != lns_artifact::tools::LATEST
-        && version.split('.').count() >= 3
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
-}
-
 /// What a declared entry was published as, so the publisher sees the version they shipped rather than having to read it back out of the registry.
 #[derive(Debug)]
 pub struct PinnedTool {
@@ -64,7 +55,7 @@ pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
         let declared = entry.as_str().context("spec.tools entry is not a string")?;
         let tool = lns_artifact::tools::parse(declared)?;
         // An entry that already names an exact version is its own pin; re-publishing must not need the index, which may be blocked or may have dropped that version.
-        let published = if is_exact_version(&tool.version) {
+        let published = if lns_artifact::tools::is_exact_version(&tool.version) {
             declared.to_string()
         } else {
             let exact = resolver
