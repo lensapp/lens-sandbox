@@ -458,15 +458,24 @@ spec:
   run — including rebuilt microVMs — reuses the cache without touching the
   network. The one exception is a `@latest` entry, which asks the version index
   each run; when the index is unreachable it falls back to the last version
-  resolved here, so an offline start still works. Acquisition is a system fetch
-  with the same trust shape as pulling
-  `spec.image`: declaring the tool is the consent, so it needs no approval card
-  and no policy route. What the tools *do* at runtime (npm, pip, go traffic)
-  stays inside the normal policy cage.
+  resolved here, so an offline start still works. Declaring the tool is the
+  consent, so acquisition needs no approval card and no policy route. What the
+  tools *do* at runtime (npm, pip, go traffic) stays inside the normal policy
+  cage.
+- **Provisioning runs the tool's own install code, not just a download.** It
+  happens in a disposable guest of its own — separate from your workload, thrown
+  away when the install finishes, and never sharing your workload's writable
+  layer or your project's bind mounts. That guest reaches the network freely:
+  tool backends are arbitrary upstream hosts, so no allowlist would fit, and it
+  runs no policy gate. Each tool installs against its own engine state, so one
+  tool's install code can't tamper with another's. This is a stronger trust
+  assumption than pulling `spec.image`, which only fetches inert layers —
+  declare tools you trust as you would a base image you run.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
-  copies. The workload can't rewrite them, and nothing tool-related persists in
-  the workload's writable layer — the per-machine tool cache is a host-side
-  input, not guest state.
+  copies. Nothing tool-related persists in the workload's writable layer — the
+  per-machine tool cache is a host-side input, not guest state, so a workload
+  that shadows a tool in its own overlay affects only that run and never the
+  cache other projects read.
 - Declared tools are always disclosed: `lns inspect` lists each entry, and the
   run summary shows them at launch. Provisioning is recorded in the
   [audit chain](audit.md) — in the run's own chain when a run does the
