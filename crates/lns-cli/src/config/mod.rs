@@ -21,9 +21,9 @@ pub enum ConfigCommand {
     #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
     Get(ConfigKeyArgs),
     #[command(about = "Remove a default.")]
-    Unset(ConfigKeyArgs),
+    Unset(ConfigUnsetArgs),
     #[command(about = "List every configured default.")]
-    List,
+    List(crate::output::OutputArgs),
 }
 
 const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, or run.registry.";
@@ -40,9 +40,17 @@ pub struct ConfigSetArgs {
 }
 
 #[derive(clap::Args)]
+pub struct ConfigUnsetArgs {
+    #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
+    pub key: ConfigKey,
+}
+
+#[derive(clap::Args)]
 pub struct ConfigKeyArgs {
     #[arg(value_parser = ConfigKey::parse, help = CONFIG_KEY_HELP)]
     pub key: ConfigKey,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -180,9 +188,9 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
 pub fn run(cmd: &ConfigCommand, path: &Path, writer: &mut impl Write) -> Result<i32> {
     match cmd {
         ConfigCommand::Set(args) => set(args, path, writer),
-        ConfigCommand::Get(args) => get(args.key, path, writer),
+        ConfigCommand::Get(args) => get(args, path, writer),
         ConfigCommand::Unset(args) => unset(args.key, path, writer),
-        ConfigCommand::List => list(path, writer),
+        ConfigCommand::List(output) => list(output, path, writer),
     }
 }
 
@@ -200,16 +208,39 @@ fn set(args: &ConfigSetArgs, path: &Path, writer: &mut impl Write) -> Result<i32
     Ok(0)
 }
 
-fn get(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn get(args: &ConfigKeyArgs, path: &Path, writer: &mut impl Write) -> Result<i32> {
     let cfg = load(path)?;
-    let values = values_of(&cfg, key);
-    if values.is_empty() {
-        return Ok(1);
+    let values = values_of(&cfg, args.key);
+    if args.output.format == crate::output::Format::Json {
+        let rows = rows_for(args.key, &values);
+        crate::output::emit_object(&rows, writer)?;
+        return Ok(exit_code_for(&values));
     }
     for v in &values {
         writeln!(writer, "{v}")?;
     }
-    Ok(0)
+    Ok(exit_code_for(&values))
+}
+
+/// An unset key is reported by the exit code in both formats: --format changes the shape, never the semantics.
+fn exit_code_for(values: &[String]) -> i32 {
+    i32::from(values.is_empty())
+}
+
+fn rows_for(key: ConfigKey, values: &[String]) -> Vec<ConfigRow> {
+    values
+        .iter()
+        .map(|v| ConfigRow {
+            key: key.name(),
+            value: v.clone(),
+        })
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+struct ConfigRow {
+    key: &'static str,
+    value: String,
 }
 
 fn unset(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -223,28 +254,27 @@ fn unset(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
     Ok(0)
 }
 
-fn list(path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn list(output: &crate::output::OutputArgs, path: &Path, writer: &mut impl Write) -> Result<i32> {
     let cfg = load(path)?;
-    let lines: Vec<String> = ConfigKey::ALL
+    let rows: Vec<ConfigRow> = ConfigKey::ALL
         .iter()
-        .flat_map(|&key| {
-            values_of(&cfg, key)
-                .into_iter()
-                .map(move |v| format!("{} = {v}", key.name()))
-        })
+        .flat_map(|&key| rows_for(key, &values_of(&cfg, key)))
         .collect();
-    if lines.is_empty() {
+    for legacy in legacy_entries(&cfg) {
+        crate::log::warn!(
+            "{legacy} is no longer supported and is ignored; env, volumes, and ports now live in the sandbox definition"
+        );
+    }
+    if output.format == crate::output::Format::Json {
+        crate::output::emit_object(&rows, writer)?;
+        return Ok(0);
+    }
+    if rows.is_empty() {
         writeln!(writer, "No defaults set in {}", path.display())?;
     } else {
-        for line in &lines {
-            writeln!(writer, "{line}")?;
+        for row in &rows {
+            writeln!(writer, "{} = {}", row.key, row.value)?;
         }
-    }
-    for legacy in legacy_entries(&cfg) {
-        writeln!(
-            writer,
-            "⚠ {legacy} is no longer supported and is ignored; env, volumes, and ports now live in the sandbox definition"
-        )?;
     }
     Ok(0)
 }
@@ -390,6 +420,20 @@ fn image_has_registry(image: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn unset_does_not_advertise_a_format_it_cannot_honour() {
+        let err = crate::command::build_cli()
+            .try_get_matches_from(["lns", "config", "unset", "run.cpus", "--format", "json"])
+            .expect_err("unset prints a confirmation, so --format would promise nothing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    fn table_args() -> crate::output::OutputArgs {
+        crate::output::OutputArgs {
+            format: crate::output::Format::Table,
+        }
+    }
 
     fn set_cmd(key: ConfigKey, values: &[&str]) -> ConfigCommand {
         ConfigCommand::Set(ConfigSetArgs {
@@ -566,7 +610,7 @@ mod tests {
             let (code, _) = run_ok(&set_cmd(key, values), &path);
             assert_eq!(code, 0, "set {} failed", key.name());
         }
-        let (_, listing) = run_ok(&ConfigCommand::List, &path);
+        let (_, listing) = run_ok(&ConfigCommand::List(table_args()), &path);
         for needle in ["run.cpus = 4", "run.mem = 2048", "run.registry = ghcr.io"] {
             assert!(
                 listing.lines().any(|l| l == needle),
@@ -574,14 +618,20 @@ mod tests {
             );
         }
         for (key, values) in seeds {
-            let (code, out) = run_ok(&ConfigCommand::Get(ConfigKeyArgs { key }), &path);
+            let (code, out) = run_ok(
+                &ConfigCommand::Get(ConfigKeyArgs {
+                    key,
+                    output: table_args(),
+                }),
+                &path,
+            );
             assert_eq!(code, 0);
             assert_eq!(out.lines().count(), values.len(), "get {}", key.name());
-            let (code, out) = run_ok(&ConfigCommand::Unset(ConfigKeyArgs { key }), &path);
+            let (code, out) = run_ok(&ConfigCommand::Unset(ConfigUnsetArgs { key }), &path);
             assert_eq!(code, 0, "unset {} failed", key.name());
             assert!(out.contains("Unset"), "got: {out}");
         }
-        let (_, listing) = run_ok(&ConfigCommand::List, &path);
+        let (_, listing) = run_ok(&ConfigCommand::List(table_args()), &path);
         assert!(listing.starts_with("No defaults set in "), "got: {listing}");
     }
 
@@ -682,15 +732,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn list_warns_that_a_hand_edited_legacy_key_is_ignored() {
+    /// Collects the warn-level messages `emit` logs, so a test can assert on stderr-bound warnings.
+    fn capture_warn(emit: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer};
+        use tracing_subscriber::prelude::*;
+
+        type Sink = Arc<Mutex<Vec<String>>>;
+        struct CapturingLayer(Sink);
+        impl<S: tracing::Subscriber> Layer<S> for CapturingLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _: LayerContext<'_, S>) {
+                struct V<'a>(&'a mut String);
+                impl Visit for V<'_> {
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        if field.name() == "message" {
+                            *self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = String::new();
+                event.record(&mut V(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+        }
+
+        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        sink.lock().unwrap().clone()
+    }
+
+    fn list_with_legacy_env(format: crate::output::Format) -> (String, Vec<String>) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "run:\n  env:\n    - TZ=UTC\n").unwrap();
-        let (code, out) = run_ok(&ConfigCommand::List, &path);
-        assert_eq!(code, 0);
-        assert!(out.contains("run.env"), "got: {out}");
-        assert!(out.contains("no longer supported"), "got: {out}");
+        let mut out = String::new();
+        let warnings = capture_warn(|| {
+            let (code, text) = run_ok(
+                &ConfigCommand::List(crate::output::OutputArgs { format }),
+                &path,
+            );
+            assert_eq!(code, 0);
+            out = text;
+        });
+        (out, warnings)
+    }
+
+    #[test]
+    fn a_hand_edited_legacy_key_warns_on_stderr_in_either_format() {
+        for format in [crate::output::Format::Table, crate::output::Format::Json] {
+            let (_, warnings) = list_with_legacy_env(format);
+            assert_eq!(warnings.len(), 1, "{format:?} got: {warnings:?}");
+            assert!(warnings[0].contains("run.env"), "got: {warnings:?}");
+            assert!(
+                warnings[0].contains("no longer supported"),
+                "got: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_warning_never_reaches_the_parseable_stdout() {
+        let (json, _) = list_with_legacy_env(crate::output::Format::Json);
+        serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap_or_else(|e| panic!("stdout must stay parseable ({e}): {json:?}"));
+        let (table, _) = list_with_legacy_env(crate::output::Format::Table);
+        assert!(
+            !table.contains("no longer supported"),
+            "warnings belong on stderr: {table:?}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_key_is_never_listed_as_an_active_default() {
+        let (out, _) = list_with_legacy_env(crate::output::Format::Table);
         assert!(
             !out.lines().any(|l| l.starts_with("run.env = ")),
             "a legacy key must not be listed as an active default: {out}"
@@ -706,10 +822,13 @@ mod tests {
             "run:\n  volume:\n    - cache:/var/cache\n  publish:\n    - 8080:80\n",
         )
         .unwrap();
-        let (code, out) = run_ok(&ConfigCommand::List, &path);
-        assert_eq!(code, 0);
-        assert!(out.contains("run.volume"), "got: {out}");
-        assert!(out.contains("run.publish"), "got: {out}");
+        let warnings = capture_warn(|| {
+            let (code, _) = run_ok(&ConfigCommand::List(table_args()), &path);
+            assert_eq!(code, 0);
+        });
+        let joined = warnings.join("\n");
+        assert!(joined.contains("run.volume"), "got: {joined}");
+        assert!(joined.contains("run.publish"), "got: {joined}");
     }
 
     #[test]
@@ -741,6 +860,7 @@ mod tests {
         let (_, shown) = run_ok(
             &ConfigCommand::Get(ConfigKeyArgs {
                 key: ConfigKey::RunMem,
+                output: table_args(),
             }),
             &path,
         );

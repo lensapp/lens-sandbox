@@ -53,3 +53,30 @@ Feature: lns config stores persistent run defaults
   Scenario: A zero memory default is rejected when set
     When the developer sets the default "run.mem" to "0"
     Then the command fails mentioning "run.mem"
+
+  Scenario: Listing the defaults as JSON yields key/value rows for scripts
+    Given the default "run.cpus" is "4"
+    And the default "run.registry" is "ghcr.io"
+    When the developer lists the configured defaults as JSON
+    Then the exit code is 0
+    And the output is a JSON array of 2 rows
+    And JSON row 0 has "key" set to "run.cpus"
+    And JSON row 0 has "value" set to "4"
+
+  Scenario: Listing nothing configured as JSON is an empty array, not prose
+    When the developer lists the configured defaults as JSON
+    Then the exit code is 0
+    And the output is an empty JSON array
+
+  Scenario: Getting a set default as JSON gives the key alongside its value
+    Given the default "run.cpus" is "4"
+    When the developer gets the default "run.cpus" as JSON
+    Then the exit code is 0
+    And the output is a JSON array of 1 rows
+    And JSON row 0 has "key" set to "run.cpus"
+    And JSON row 0 has "value" set to "4"
+
+  Scenario: Getting an unset default as JSON still exits 1, with an empty array
+    When the developer gets the default "run.cpus" as JSON
+    Then the exit code is 1
+    And the output is an empty JSON array
