@@ -206,7 +206,7 @@ fn grant_arms(
     grant.matches_disclosure(&env_var, &domains)
 }
 
-/// Arm only the applied ids this workload holds an allow grant for whose recorded (env var, injection domains) snapshot still matches the resolved provider; an ungranted, denied, or stale id stays unarmed and falls through to a first-use offer, so a machine-global value never arms without this workload's consent.
+/// Arm only the applied ids this workload holds an allow grant for whose recorded (env var, injection domains) snapshot still matches *every* provider resolved under that id — arming is per id, so one unmatched provider would ride in on another's grant; an ungranted, denied, or stale id stays unarmed and falls through to a first-use offer, so a machine-global value never arms without this workload's consent.
 pub fn gate_armed_by_grant(
     applied: &HashSet<String>,
     providers: &[DefProvider],
@@ -214,12 +214,17 @@ pub fn gate_armed_by_grant(
     workload: &WorkloadIdentity,
     grants: &WorkloadGrantFile,
 ) -> HashSet<String> {
-    providers
-        .iter()
-        .filter(|p| applied.contains(p.id()))
-        .filter(|p| grant_arms(p, project, workload, grants))
-        .map(|p| p.id().to_string())
-        .collect()
+    let mut armed: HashSet<String> = HashSet::new();
+    let mut unmatched: HashSet<&str> = HashSet::new();
+    for p in providers.iter().filter(|p| applied.contains(p.id())) {
+        if grant_arms(p, project, workload, grants) {
+            armed.insert(p.id().to_string());
+        } else {
+            unmatched.insert(p.id());
+        }
+    }
+    armed.retain(|id| !unmatched.contains(id.as_str()));
+    armed
 }
 
 /// The allow grants a boot-gate sign-in earns, pinned to each resolved provider's own disclosure snapshot so they satisfy [`gate_armed_by_grant`] by construction; an id with no resolved provider yields none.
@@ -421,6 +426,29 @@ mod tests {
         assert_eq!(
             armed, applied,
             "an allow grant whose snapshot matches the resolved provider must arm it"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_holds_an_id_whose_second_provider_the_grant_does_not_cover() {
+        let providers = vec![
+            provider_of("some-provider", "SOME_TOKEN", "api.some-provider.example"),
+            provider_of("some-provider", "OTHER_TOKEN", "api.some-provider.example"),
+        ];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "arming is per id, so admitting the id on one matching provider would arm the other one too — injecting the secret under an env var the card never disclosed"
         );
     }
 
