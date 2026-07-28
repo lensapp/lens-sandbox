@@ -30,7 +30,7 @@ pub enum ConnectorCommand {
     #[command(about = "Declare a credential connector in your machine-global catalog.")]
     Add(ConnectorAddArgs),
     #[command(about = "List the bundled and user-declared connectors.")]
-    List,
+    List(ConnectorListArgs),
     #[command(about = "Remove a user-declared connector; bundled ones cannot be removed.")]
     Remove(ConnectorRemoveArgs),
     #[command(
@@ -101,6 +101,12 @@ pub struct DisconnectArgs {
 }
 
 #[derive(clap::Args)]
+pub struct ConnectorListArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
 pub struct GrantsArgs {
     #[arg(
         long,
@@ -112,6 +118,8 @@ pub struct GrantsArgs {
         help = "List grants for every project on this machine, not just this one."
     )]
     pub all: bool,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -199,7 +207,7 @@ pub async fn run(
 ) -> Result<i32> {
     match cmd {
         ConnectorCommand::Add(args) => add(args, catalog_path, writer),
-        ConnectorCommand::List => list(catalog_path, writer),
+        ConnectorCommand::List(args) => list(args, catalog_path, writer),
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
         ConnectorCommand::Connect(args) => {
             connect(args, cwd, catalog_path, grants_path, signin, writer).await
@@ -284,19 +292,51 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     Ok(0)
 }
 
-fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn list(args: &ConnectorListArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    for i in bundled_connectors() {
-        writeln!(writer, "{}  (bundled)  {}", i.id, kind_word(i.auth_kind))?;
-    }
-    for i in &user.connectors {
-        // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
-        if is_bundled(&i.id) {
-            continue;
-        }
-        writeln!(writer, "{}  (user)  {}", i.id, kind_word(i.auth_kind))?;
-    }
+    let mut rows: Vec<ConnectorRow> = bundled_connectors()
+        .iter()
+        .map(|i| ConnectorRow::new(i, "bundled"))
+        .collect();
+    // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
+    rows.extend(
+        user.connectors
+            .iter()
+            .filter(|i| !is_bundled(&i.id))
+            .map(|i| ConnectorRow::new(i, "user")),
+    );
+    crate::output::emit(args.output.format, &rows, writer)?;
     Ok(0)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorRow {
+    id: String,
+    source: &'static str,
+    auth_kind: &'static str,
+}
+
+impl ConnectorRow {
+    fn new(connector: &Connector, source: &'static str) -> Self {
+        Self {
+            id: connector.id.clone(),
+            source,
+            auth_kind: kind_word(connector.auth_kind),
+        }
+    }
+}
+
+impl crate::output::TableRow for ConnectorRow {
+    const HEADERS: &'static [&'static str] = &["CONNECTOR", "SOURCE", "AUTH"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.source.to_string(),
+            self.auth_kind.to_string(),
+        ]
+    }
 }
 
 fn remove(args: &ConnectorRemoveArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -455,6 +495,11 @@ fn grants(
     } else {
         file.for_project(&project).collect()
     };
+    if args.output.format == crate::output::Format::Json {
+        let json: Vec<GrantRow> = rows.iter().map(|g| GrantRow::new(g)).collect();
+        crate::output::emit_object(&json, writer)?;
+        return Ok(0);
+    }
     if rows.is_empty() {
         let scope = if args.all { "" } else { " for this project" };
         writeln!(writer, "No connector grants{scope}.")?;
@@ -476,6 +521,32 @@ fn grants(
         }
     }
     Ok(0)
+}
+
+/// The grants table varies its columns with `--all`, so json carries the full row regardless of scope.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantRow {
+    project: String,
+    workload: String,
+    connector: String,
+    verdict: &'static str,
+    env_var: String,
+}
+
+impl GrantRow {
+    fn new(grant: &GrantRecord) -> Self {
+        Self {
+            project: grant.project.clone(),
+            workload: grant.workload.clone(),
+            connector: grant.connector.clone(),
+            verdict: match grant.verdict {
+                GrantVerdict::Allow => "allow",
+                GrantVerdict::Deny => "deny",
+            },
+            env_var: grant.env_var.clone(),
+        }
+    }
 }
 
 fn revoke(
@@ -597,6 +668,20 @@ mod tests {
     fn parse_injection_rejects_a_header_segment_on_kinds_that_do_not_use_one() {
         let err = parse_injection("bearer_header:api.acme.corp:x-api-key").unwrap_err();
         assert!(err.contains("does not take a header name"), "got: {err}");
+    }
+
+    fn row_for<'a>(text: &'a str, id: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.starts_with(id))
+            .unwrap_or_else(|| panic!("no listing row for {id} in:\n{text}"))
+    }
+
+    fn list_args() -> ConnectorListArgs {
+        ConnectorListArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
     }
 
     fn add_args(id: &str) -> ConnectorAddArgs {
@@ -732,10 +817,17 @@ mod tests {
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("gitlab  (bundled)  credential"), "{text}");
-        assert!(text.contains("acme  (user)  credential"), "{text}");
+        assert!(text.contains("CONNECTOR"), "{text}");
+        assert!(
+            row_for(&text, "gitlab").ends_with("bundled  credential"),
+            "{text}"
+        );
+        assert!(
+            row_for(&text, "acme").ends_with("user     credential"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -744,11 +836,9 @@ mod tests {
         let path = catalog_at(dir.path());
         write_user_catalog(&path, vec![oauth_connector("somesaas")]);
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("somesaas  (user)  oauth"),
+            String::from_utf8(out).unwrap().contains("somesaas"),
             "oauth kind must be labelled"
         );
     }
@@ -774,11 +864,11 @@ mod tests {
             }],
         );
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("gitlab  (bundled)"), "{text}");
+        assert!(row_for(&text, "gitlab").contains("bundled"), "{text}");
         assert!(
-            !text.contains("gitlab  (user)"),
+            text.lines().filter(|l| l.starts_with("gitlab")).count() == 1,
             "a shadow must not be listed: {text}"
         );
     }
@@ -788,7 +878,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         std::fs::write(&path, "connectors: not-a-list\n").unwrap();
-        let err = list(&path, &mut Vec::new()).unwrap_err();
+        let err = list(&list_args(), &path, &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("loading"));
     }
 
@@ -1150,7 +1240,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut out = Vec::new();
         run(
-            &ConnectorCommand::List,
+            &ConnectorCommand::List(list_args()),
             dir.path(),
             &catalog_at(dir.path()),
             &dir.path().join("grants.json"),
@@ -1159,11 +1249,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("gitlab  (bundled)")
-        );
+        assert!(String::from_utf8(out).unwrap().contains("gitlab"));
     }
 
     #[tokio::test]

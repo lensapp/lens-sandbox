@@ -80,3 +80,22 @@ Feature: inspecting and forgetting per-workload connector grants
     When the user runs connector command "disconnect some-provider"
     Then the exit code is 1
     And this project still connects "some-provider"
+
+  Scenario: Listing grants as JSON names the project each grant belongs to
+    Given the workload "def:/work/app" was granted "some-provider"
+    When the user runs connector command "grants --format json"
+    Then the output is a JSON array of 1 rows
+    And JSON row 0 has "workload" set to "def:/work/app"
+    And JSON row 0 has "connector" set to "some-provider"
+    And JSON row 0 has "verdict" set to "allow"
+    And JSON row 0 has a non-empty "project"
+
+  Scenario: A project that has granted nothing lists as an empty JSON array
+    When the user runs connector command "grants --format json"
+    Then the output is an empty JSON array
+
+  Scenario: A declined grant is visible to a script, not filtered out
+    Given the workload "def:/work/app" was denied "some-provider"
+    When the user runs connector command "grants --format json"
+    Then the output is a JSON array of 1 rows
+    And JSON row 0 has "verdict" set to "deny"

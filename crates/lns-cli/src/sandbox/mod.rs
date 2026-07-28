@@ -255,9 +255,11 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_ps(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<PsArgs>("ps").about(
-        "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
-    ))
+    app.subcommand(
+        subcommand::<PsArgs>("ps").about(
+            "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
+        ),
+    )
 }
 
 pub const PS_SPEC: CommandSpec = CommandSpec {
@@ -1483,9 +1485,13 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
 
-        let err = ps(&CannedService::new(Response::Pong), &ps_args(), &mut Vec::new())
-            .await
-            .unwrap_err();
+        let err = ps(
+            &CannedService::new(Response::Pong),
+            &ps_args(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 

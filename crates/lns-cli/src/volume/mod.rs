@@ -107,11 +107,7 @@ async fn send(svc: &dyn VolumeService, req: Request) -> Result<Response> {
     Ok(response)
 }
 
-async fn ls(
-    svc: &dyn VolumeService,
-    args: &VolumeLsArgs,
-    writer: &mut impl Write,
-) -> Result<i32> {
+async fn ls(svc: &dyn VolumeService, args: &VolumeLsArgs, writer: &mut impl Write) -> Result<i32> {
     match send(svc, Request::ListVolumes).await? {
         Response::VolumeList { volumes } => {
             let rows: Vec<VolumeRow> = volumes.iter().map(VolumeRow::new).collect();
@@ -248,7 +244,6 @@ fn confirm_prune(input: &mut dyn BufRead, writer: &mut impl Write) -> Result<boo
     }
     Ok(yes)
 }
-
 
 fn in_use_str(holder: Option<&str>) -> String {
     match holder {
