@@ -103,6 +103,11 @@ pub(crate) fn parse_driver_output(
                 "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_path:?}"
             )));
         }
+        if results.iter().any(|result| result.name == name) {
+            return Err(ProvisionError::Engine(format!(
+                "the provisioner driver reported {name} twice"
+            )));
+        }
         results.push(DriverResult {
             name: name.to_string(),
             resolved: resolved.to_string(),
@@ -415,6 +420,16 @@ mod tests {
                 "marker {marker:?}: got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_second_marker_for_one_tool_fails_the_whole_provision() {
+        // A tool's own install code runs in this guest, so it can forge a sibling's marker — but it cannot suppress the genuine one, and two markers is the tell.
+        let stdout =
+            "LNS_TOOL jq 6.6.6 bin\nLNS_TOOL node 22.11.0 bin\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
+        let err =
+            parse_driver_output(stdout, 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
+        assert!(err.to_string().contains("reported jq twice"), "got: {err}");
     }
 
     #[test]
