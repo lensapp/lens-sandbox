@@ -220,6 +220,19 @@ pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>
     }
 }
 
+/// The connector is what makes a run exec-able, so a run that has tool paths publishes both in one mutation — an exec that saw the gate open but not the paths would run with the tool dirs missing from its PATH and no error.
+pub fn set_connector_with_tool_bin_paths(
+    run_id: &str,
+    connector: std::sync::Arc<dyn GuestTransport>,
+    paths: Vec<String>,
+) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+        h.tool_bin_paths = paths;
+        h.connector = Some(connector);
+    }
+}
+
 /// Record the VM size a sandbox run resolved to (from its resources) so `lns inspect` reports what actually booted, not the pre-resolution request.
 pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
@@ -653,6 +666,20 @@ mod tests {
         assert!(tool_bin_paths("ghost").is_empty());
         deregister(&id);
         assert!(tool_bin_paths(&id).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_run_never_becomes_exec_able_before_its_tool_paths_are_readable() {
+        // The connector is the gate `lns exec` passes; publishing it a moment before the PATH would let an exec in that window run with no tool dirs and no error.
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id.clone(), None, h).unwrap();
+        let paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        set_connector_with_tool_bin_paths(&id, std::sync::Arc::new(StubTransport), paths.clone());
+        assert!(connector(&id).is_some());
+        assert_eq!(tool_bin_paths(&id), paths);
+        deregister(&id);
     }
 
     #[tokio::test]
