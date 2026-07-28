@@ -250,7 +250,7 @@ Filters compose:
   `lns connector list`; they also appear in the `DETAIL` column. Per-run egress/mount
   events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
-  `connection`, `credential`.
+  `connection`, `credential`, `tool`.
 - `--format jsonl` — one raw JSON event per line instead of the table. (`--json` is the
   older spelling of the same thing and still works.)
 
