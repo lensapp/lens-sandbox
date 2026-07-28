@@ -8,6 +8,19 @@ use flate2::read::GzDecoder;
 
 use super::Libc;
 
+/// Gunzipping and walking every layer is CPU work on borrowed data, so it moves off the async worker rather than holding one for the length of the scan; a current-thread runtime (tests) has nowhere to move it and runs it inline.
+pub fn detect_libc_off_runtime(
+    layer_digests: &[String],
+    layers: &[impl AsRef<[u8]>],
+) -> Result<Libc> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| detect_libc_for(layer_digests, layers))
+        }
+        _ => detect_libc_for(layer_digests, layers),
+    }
+}
+
 /// The flavor is a pure function of the layer set, so a warm run re-answers it from the digests instead of gunzipping every layer body again.
 pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
     static MEMO: OnceLock<Mutex<HashMap<String, Libc>>> = OnceLock::new();
@@ -122,6 +135,26 @@ mod tests {
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu);
         let empty: [Vec<u8>; 0] = [];
         assert_eq!(detect_libc(&empty).unwrap(), Libc::Gnu);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_scan_moves_off_the_worker_on_a_multi_thread_runtime() {
+        let digests = vec!["sha256:offruntime".to_string()];
+        let layers = vec![layer_with(&["lib/ld-musl-aarch64.so.1"])];
+        assert_eq!(
+            detect_libc_off_runtime(&digests, &layers).unwrap(),
+            Libc::Musl
+        );
+    }
+
+    #[tokio::test]
+    async fn the_scan_runs_inline_where_there_is_nowhere_to_move_it() {
+        let digests = vec!["sha256:inline".to_string()];
+        let layers = vec![layer_with(&["lib/ld-linux-aarch64.so.1"])];
+        assert_eq!(
+            detect_libc_off_runtime(&digests, &layers).unwrap(),
+            Libc::Gnu
+        );
     }
 
     #[test]
