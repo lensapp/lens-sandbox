@@ -471,6 +471,12 @@ spec:
   so a tool you declare is trusted by the others you declare alongside it. This
   is a stronger trust assumption than pulling `spec.image`, which only fetches
   inert layers — declare tools you trust as you would a base image you run.
+- The per-machine tool cache is **not reclaimed automatically**, and `lns prune`
+  does not touch it: it sweeps images and volumes only. Every version a tool
+  resolves to keeps its tree, so a long-lived `node@latest` accumulates one per
+  upstream release. To reclaim the space today, stop the service and remove
+  `tools/` and `content/` under the cache root (`~/Library/Caches/lns` on macOS,
+  `$XDG_CACHE_HOME/lns` on Linux); the next run re-provisions what it needs.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
   copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
   `/etc/profile`, which on most images resets `PATH` outright and so discards the
