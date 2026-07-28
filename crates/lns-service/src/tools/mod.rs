@@ -72,7 +72,6 @@ pub struct ToolCacheKey {
 #[derive(Debug, Clone)]
 pub struct StagedTool {
     pub name: String,
-    pub requested: String,
     pub resolved: String,
     pub backend: String,
     pub source_host: String,
@@ -362,7 +361,6 @@ mod tests {
                     .iter()
                     .map(|request| StagedTool {
                         name: request.name.clone(),
-                        requested: request.version.clone(),
                         resolved: map
                             .get(&request.name)
                             .cloned()

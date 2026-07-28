@@ -269,7 +269,6 @@ pub(crate) fn staged_tools_from_results(
             let source_host = crate::tools::registry::source_host(&request.name, &backend);
             Ok(StagedTool {
                 name: request.name.clone(),
-                requested: request.version.clone(),
                 resolved: result.resolved.clone(),
                 backend,
                 source_host,

@@ -119,7 +119,6 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("MISE_PYTHON_COMPILE", "0"),
         ("MISE_NODE_COMPILE", "0"),
         ("MISE_YES", "1"),
-        ("MISE_PARANOID", "0"),
         ("MISE_DISABLE_BACKENDS", "asdf,vfox"),
         ("CI", "1"),
         ("HOME", "/tmp/mise/home"),

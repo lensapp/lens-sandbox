@@ -124,7 +124,6 @@ impl ToolProvisioner for ScriptedProvisioner {
                 };
                 StagedTool {
                     name: request.name.clone(),
-                    requested: request.version.clone(),
                     resolved,
                     backend: format!("core:{}", request.name),
                     source_host: "upstream.example.test".into(),
