@@ -60,6 +60,20 @@ Feature: inspecting and forgetting per-workload connector grants
     Then the output reports the grants it forgot
     And this project holds no grant for "some-provider"
 
+  Scenario: Connecting says so when a workload here has declined the connector
+    Given a user catalog declares the "some-provider" credential connector
+    And the background service is available to sign in
+    And the workload "def:/work/app" was denied "some-provider"
+    When the developer runs "lns connector connect some-provider"
+    Then the output points at revoking the standing decline for "some-provider"
+
+  Scenario: Connecting stays quiet when nothing here has declined the connector
+    Given a user catalog declares the "some-provider" credential connector
+    And the background service is available to sign in
+    And the workload "def:/work/app" was granted "some-provider"
+    When the developer runs "lns connector connect some-provider"
+    Then the output says nothing about a standing decline
+
   Scenario: A disconnect that cannot forget the grants leaves the connector connected
     Given the workload "def:/work/app" was granted "some-provider"
     And the grant sidecar cannot be updated

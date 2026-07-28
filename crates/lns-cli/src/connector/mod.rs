@@ -201,7 +201,9 @@ pub async fn run(
         ConnectorCommand::Add(args) => add(args, catalog_path, writer),
         ConnectorCommand::List => list(catalog_path, writer),
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
-        ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
+        ConnectorCommand::Connect(args) => {
+            connect(args, cwd, catalog_path, grants_path, signin, writer).await
+        }
         ConnectorCommand::Disconnect(args) => disconnect(args, cwd, grants_path, writer),
         ConnectorCommand::Grants(args) => grants(args, cwd, grants_path, writer),
         ConnectorCommand::Revoke(args) => revoke(args, cwd, grants_path, writer),
@@ -318,6 +320,7 @@ pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
+    grants_path: &Path,
     signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
@@ -361,7 +364,26 @@ pub async fn connect(
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
     writeln!(writer, "{closing}")?;
+    // Binding the value cannot lift a workload's decline, so say what will: otherwise the connect reports success and the workload goes on being refused with nothing on screen explaining it.
+    match standing_declines(grants_path, &project_key(&path), &args.id) {
+        0 => {}
+        n => writeln!(
+            writer,
+            "note: {n} workload(s) in this project declined {:?} and will keep being refused; run `lns connector revoke {}` to forget this project's grants for it.",
+            args.id, args.id
+        )?,
+    }
     Ok(0)
+}
+
+/// How many workloads in this project have declined the connector; an unreadable sidecar reports none rather than failing a connect that has already landed.
+fn standing_declines(grants_path: &Path, project: &str, connector: &str) -> usize {
+    let Ok(file) = JsonFileGrantStore::new(grants_path.to_path_buf()).load() else {
+        return 0;
+    };
+    file.for_project(project)
+        .filter(|g| g.connector == connector && g.verdict == GrantVerdict::Deny)
+        .count()
 }
 
 /// Each completed value decision reads back what was bound on this machine — never an effect on any sandbox definition.
@@ -481,6 +503,18 @@ mod tests {
     use lns_policy::connectors::{OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
+
+    #[test]
+    fn standing_declines_reports_none_when_the_sidecar_cannot_be_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("grants.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            standing_declines(&path, "/proj", "some-provider"),
+            0,
+            "the bind has already landed by the time the note is composed, so an unreadable sidecar must cost the user a note, not the connect"
+        );
+    }
 
     #[test]
     fn parse_injection_accepts_the_two_declarable_kinds() {
@@ -857,6 +891,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut out,
         )
@@ -876,6 +911,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -896,6 +932,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -921,6 +958,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::returning(SignInOutcome::Failed("access_denied".into())),
             &mut Vec::new(),
         )
@@ -945,6 +983,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::HostDetect,
             )),
@@ -974,6 +1013,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::Denied,
             )),
@@ -995,6 +1035,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Failed("the value decision timed out".into())),
             &mut Vec::new(),
         )
@@ -1018,6 +1059,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -1041,6 +1083,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::returning(SignInOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -1063,6 +1106,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )

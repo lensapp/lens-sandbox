@@ -193,6 +193,24 @@ fn other_project_keeps_grant(world: &mut BehaviourWorld, project: String, id: St
     );
 }
 
+#[then(regex = r#"^the output points at revoking the standing decline for "([^"]+)"$"#)]
+fn points_at_revoking_the_decline(world: &mut BehaviourWorld, id: String) {
+    let out = output(world);
+    assert!(
+        out.contains("declined") && out.contains(&format!("revoke {id}")),
+        "binding the value cannot undo a workload's decline, so the connect that looks like it fixed things must name the command that does: {out}"
+    );
+}
+
+#[then("the output says nothing about a standing decline")]
+fn says_nothing_about_a_decline(world: &mut BehaviourWorld) {
+    let out = output(world);
+    assert!(
+        !out.contains("declined"),
+        "a project holding only allows has no decline to report: {out}"
+    );
+}
+
 #[then("the command fails noting there is nothing to forget")]
 fn fails_nothing_to_forget(world: &mut BehaviourWorld) {
     let run = world.result.as_ref().expect("a run must have happened");
