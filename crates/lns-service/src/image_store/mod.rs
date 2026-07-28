@@ -428,9 +428,12 @@ pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
-    crate::tools::real::pre_provision_for_pull(&artifact, &base_image)
-        .await
-        .with_context(|| format!("provisioning the declared tools of {image}"))?;
+    // Pre-provisioning only buys an offline first start; the run path provisions anyway, so a transient index or provisioner failure must not throw away a pull whose layers already landed.
+    if let Err(e) = crate::tools::real::pre_provision_for_pull(&artifact, &base_image).await {
+        crate::log::warn!(
+            "could not provision the declared tools of {image} ({e:#}); the sandbox is cached, but its first run needs the network"
+        );
+    }
     let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
     pull_with(
         &real::RealFs,
