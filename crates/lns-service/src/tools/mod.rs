@@ -110,7 +110,6 @@ pub struct EnsuredTools {
     pub bin_paths: Vec<String>,
     /// Only newly-fetched tools — empty on a warm run, so audit events match actual acquisition.
     pub provisioned: Vec<ProvisionOutcome>,
-    pub record: record::ResolvedRecord,
 }
 
 /// Provision-or-reuse for a declared tool set: recorded requests pin to their exact versions, cache hits contribute specs with zero network, and every miss goes to the provisioner in one call before the record learns the new resolutions (first resolution wins forever).
@@ -226,7 +225,6 @@ where
         specs,
         bin_paths,
         provisioned,
-        record,
     })
 }
 
@@ -265,6 +263,16 @@ pub enum ProvisionError {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    fn recorded(records: &MemRecords, request: &str) -> String {
+        records
+            .record
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|saved| saved.recorded(request).map(|entry| entry.resolved.clone()))
+            .unwrap_or_default()
+    }
 
     #[derive(Default)]
     struct MemRecords {
@@ -408,8 +416,9 @@ mod tests {
         assert_eq!(provisioner.calls.lock().unwrap().len(), 1);
         assert_eq!(ensured.provisioned.len(), 2);
         assert_eq!(
-            ensured.record.recorded("some-tool@1").unwrap().resolved,
-            "1.2.3"
+            recorded(&records, "some-tool@1"),
+            "1.2.3",
+            "the saved record pins the first resolution"
         );
         assert_eq!(
             ensured.bin_paths,
@@ -479,7 +488,7 @@ mod tests {
             })
             .unwrap();
         let upstream_moved_on = Scripted::resolving(&[("some-tool", "1.9.9")]);
-        let ensured = ensure_tools(
+        ensure_tools(
             &records,
             &cache,
             &upstream_moved_on,
@@ -496,8 +505,9 @@ mod tests {
             "the recorded pin is requested exactly"
         );
         assert_eq!(
-            ensured.record.recorded("some-tool@1").unwrap().resolved,
-            "1.2.3"
+            recorded(&records, "some-tool@1"),
+            "1.2.3",
+            "the saved record pins the first resolution"
         );
     }
 
