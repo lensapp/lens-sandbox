@@ -1,13 +1,33 @@
 use crate::spec;
 
-/// Validate a single artifact document: schema + cross-field guards for its declared kind.
+/// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the guards that belong to authoring only.
+///
+/// Whether this build can provision a declared tool is deliberately not part of parsing: the shipped registry shrinks and re-backends entries over time, so a consumer must still be able to inspect an artifact whose tool this build could no longer install. The launch keeps its own gate.
 pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
-    let schema = if crate::sandbox::is_sandbox_definition(doc) {
+    let is_sandbox = crate::sandbox::is_sandbox_definition(doc);
+    let schema = if is_sandbox {
         crate::sandbox::validate(doc)
     } else {
         spec::validate_any(doc)
     };
-    schema.map_err(|e| vec![format!("schema: {e:#}")])
+    schema.map_err(|e| vec![format!("schema: {e:#}")])?;
+    if is_sandbox {
+        refuse_unprovisionable_tools(doc).map_err(|problem| vec![problem])?;
+    }
+    Ok(())
+}
+
+/// The authoring-time half of the tool gate: an author is refused here rather than by a consumer's failed launch.
+pub fn refuse_unprovisionable_tools(doc: &[u8]) -> Result<(), String> {
+    let def = match crate::sandbox::parse(doc) {
+        Ok(def) => def,
+        Err(_) => return Ok(()),
+    };
+    let requests = match crate::tools::parse_all(&def.spec.tools) {
+        Ok(requests) => requests,
+        Err(_) => return Ok(()),
+    };
+    crate::tools::registry::refuse_unprovisionable(&requests).map_err(|e| format!("tools: {e}"))
 }
 
 #[cfg(test)]
@@ -35,6 +55,34 @@ mod tests {
             problems.iter().any(|p| p.contains("digest-pinned")),
             "a floating base image must be reported: {problems:?}"
         );
+    }
+
+    #[test]
+    fn a_tool_this_build_cannot_provision_is_an_authoring_problem() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
+        let problems = validate(doc).unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("not a tool lns can provision")),
+            "got: {problems:?}"
+        );
+        let plugin_backed = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["prettier@3"]}}"#;
+        assert!(
+            validate(plugin_backed)
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("bring it via spec.image")),
+            "a plugin-backed tool is refused at authoring time too"
+        );
+    }
+
+    #[test]
+    fn parsing_an_artifact_declaring_such_a_tool_still_succeeds() {
+        // The shipped registry shrinks over time; a consumer must still be able to see what a published sandbox declares.
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
+        let def = crate::sandbox::parse(doc).expect("the definition still parses and inspects");
+        assert_eq!(def.spec.tools, vec!["definitely-not-a-tool@1".to_string()]);
     }
 
     #[test]
