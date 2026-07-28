@@ -62,6 +62,16 @@ fn json_row_string(
     }
 }
 
+#[then(regex = r#"^JSON row (\d+) has a null "([^"]+)"$"#)]
+fn json_row_null(world: &mut BehaviourWorld, index: usize, key: String) -> Result<(), String> {
+    let found = field(&row(world, index)?, &key)?;
+    if found.is_null() {
+        Ok(())
+    } else {
+        Err(format!("expected {key} to be null, got {found}"))
+    }
+}
+
 #[then(regex = r#"^JSON row (\d+) has "([^"]+)" set to (-?\d+)$"#)]
 fn json_row_number(
     world: &mut BehaviourWorld,

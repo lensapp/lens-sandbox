@@ -123,6 +123,11 @@ fn named_volume_still_exists(w: &mut BehaviourWorld, volume: String) -> Result<(
     }
 }
 
+#[given(regex = r"^the service reports no cached sandboxes$")]
+fn reports_no_cached_sandboxes(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::ImageList { images: Vec::new() });
+}
+
 #[given(regex = r#"^the service reports one cached sandbox "([^"]+)"$"#)]
 fn reports_one_cached_sandbox(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.response = Some(Response::ImageList {
