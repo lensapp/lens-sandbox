@@ -490,10 +490,12 @@ fn exec_env(mut env: Vec<String>, tool_bin_paths: &[String]) -> Vec<String> {
     env
 }
 
+/// `run_id` is the *resolved* id: `args.run` may be a name or an id prefix, and the registry keys tool paths by id alone.
 pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
+    run_id: &str,
 ) -> crate::vm::session_client::SessionParams {
-    let env = exec_env(args.env, &crate::run_registry::tool_bin_paths(&args.run));
+    let env = exec_env(args.env, &crate::run_registry::tool_bin_paths(run_id));
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env,
@@ -1903,7 +1905,7 @@ mod tests {
             stdin: false,
             initial_winsize: Some((24, 80)),
         };
-        let params = build_session_params(args);
+        let params = build_session_params(args, "1");
         assert_eq!(params.argv, vec!["echo".to_string()]);
         assert_eq!(params.env, vec!["A=B".to_string()]);
         assert_eq!(
@@ -1925,8 +1927,34 @@ mod tests {
 
     #[test]
     fn build_session_params_leaves_winsize_unset_when_absent() {
-        let params = build_session_params(exec_args(vec!["echo".into()], false, false));
+        let params = build_session_params(exec_args(vec!["echo".into()], false, false), "1");
         assert!(params.initial_winsize.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn exec_by_name_sees_the_same_tools_as_exec_by_id() {
+        // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.clone(), Some("calm-finch".into()), handle)
+            .expect("register the run");
+        crate::run_registry::set_tool_bin_paths(
+            &run_id,
+            vec!["/.lens/tools/node/22.11.0/bin".to_string()],
+        );
+
+        let by_name = crate::run_registry::resolve("calm-finch").expect("name resolves");
+        let params = build_session_params(exec_args(vec!["node".into()], false, false), &by_name);
+        assert!(
+            params
+                .env
+                .iter()
+                .any(|kv| kv.starts_with("PATH=/.lens/tools/node/22.11.0/bin:")),
+            "got: {:?}",
+            params.env
+        );
+        crate::run_registry::deregister(&run_id);
     }
 
     #[test]
