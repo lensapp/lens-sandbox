@@ -198,7 +198,7 @@ pub(super) fn workload_identity(
         })
     } else {
         anyhow::bail!(
-            "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference"
+            "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference, and if `lns` was upgraded while this service kept running, restart it (`lns service stop` then `lns service start`) so the two match"
         )
     }
 }
@@ -287,6 +287,15 @@ mod tests {
                 "got: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn workload_identity_refusal_names_the_service_restart_a_stale_service_needs() {
+        let err = workload_identity(None, None, None).expect_err("an unidentifiable run refuses");
+        assert!(
+            format!("{err:#}").contains("lns service stop"),
+            "a matching CLI always resolves an identity, so the developer who sees this is most likely running an upgraded `lns` against a service left running from before; got: {err:#}"
+        );
     }
 
     #[test]
