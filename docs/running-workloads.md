@@ -467,10 +467,10 @@ spec:
   away when the install finishes, and never sharing your workload's writable
   layer or your project's bind mounts. That guest reaches the network freely:
   tool backends are arbitrary upstream hosts, so no allowlist would fit, and it
-  runs no policy gate. Each tool installs against its own engine state, so one
-  tool's install code can't tamper with another's. This is a stronger trust
-  assumption than pulling `spec.image`, which only fetches inert layers —
-  declare tools you trust as you would a base image you run.
+  runs no policy gate. Every declared tool installs in that one guest, as root,
+  so a tool you declare is trusted by the others you declare alongside it. This
+  is a stronger trust assumption than pulling `spec.image`, which only fetches
+  inert layers — declare tools you trust as you would a base image you run.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
   copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
   `/etc/profile`, which on most images resets `PATH` outright and so discards the
