@@ -61,11 +61,12 @@ pub async fn ensure_for_run(
 pub async fn pre_provision_for_pull(
     artifact: &crate::image::PulledArtifact,
     base_image: &crate::image::PulledImage,
-) -> anyhow::Result<()> {
+) -> Result<(), ProvisionError> {
     if artifact.tools.is_empty() {
         return Ok(());
     }
-    let requests = lns_artifact::tools::parse_all(&artifact.tools)?;
+    let requests = lns_artifact::tools::parse_all(&artifact.tools)
+        .map_err(|e| ProvisionError::Engine(format!("{e:#}")))?;
     super::registry::refuse_unknown_tools(&requests)?;
     let layers: Vec<&[u8]> = base_image
         .layers
@@ -74,11 +75,11 @@ pub async fn pre_provision_for_pull(
         .collect();
     let target = ProvisionTarget {
         arch: super::host_arch(),
-        libc: super::libc::detect_libc_for(&base_image.layer_digests, &layers)?,
+        libc: super::libc::detect_libc_for(&base_image.layer_digests, &layers)
+            .map_err(|e| ProvisionError::Engine(format!("reading the base image: {e:#}")))?,
     };
     super::registry::refuse_libc_unsupported(&requests, &target, &artifact.base_image)?;
-    let content_store =
-        crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
+    let content_store = crate::content_store::ContentStore::new(cache_dir()?.join("content"));
     let scratch_id = format!(
         "pull-{}",
         artifact

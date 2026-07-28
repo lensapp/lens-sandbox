@@ -54,33 +54,38 @@ pub fn is_supported_backend(backend: &str) -> bool {
     SUPPORTED_BACKEND_KINDS.contains(&backend_kind(backend))
 }
 
-/// The host the tool's bodies are fetched from — audit metadata, derived from the backend shorthand.
-pub fn source_host(name: &str, backend: &str) -> String {
+/// The host the tool's bodies come from, when the backend reference says so — `None` when it does not, because a guessed host in an audit chain is a false attestation, and this label is never observed from the download itself.
+pub fn source_host(name: &str, backend: &str) -> Option<String> {
+    let reference = backend.split_once(':').map(|(_, rest)| rest).unwrap_or("");
     match backend_kind(backend) {
-        "core" => core_source_host(name).to_string(),
-        "aqua" | "ubi" | "github" => "github.com".to_string(),
-        "gitlab" => "gitlab.com".to_string(),
-        "http" => backend
+        "core" => core_source_host(name).map(str::to_string),
+        // An aqua package is `owner/repo` on GitHub unless its first segment is a domain, which is how aqua spells a vendor-hosted release (`aqua:oracle.com/sqlcl`).
+        "aqua" => Some(match reference.split('/').next() {
+            Some(vendor) if vendor.contains('.') => vendor.to_string(),
+            _ => "github.com".to_string(),
+        }),
+        "ubi" | "github" => Some("github.com".to_string()),
+        "gitlab" => Some("gitlab.com".to_string()),
+        "http" => reference
             .split_once("://")
             .and_then(|(_, rest)| rest.split('/').next())
-            .unwrap_or("upstream")
-            .to_string(),
-        _ => "upstream".to_string(),
+            .map(str::to_string),
+        _ => None,
     }
 }
 
-fn core_source_host(name: &str) -> &'static str {
+fn core_source_host(name: &str) -> Option<&'static str> {
     match name {
-        "node" => "nodejs.org",
-        "python" => "github.com",
-        "go" => "go.dev",
-        "rust" => "static.rust-lang.org",
-        "java" => "api.adoptium.net",
-        "deno" => "dl.deno.land",
-        "bun" => "github.com",
-        "zig" => "ziglang.org",
-        "ruby" => "cache.ruby-lang.org",
-        _ => "upstream",
+        "node" => Some("nodejs.org"),
+        "python" => Some("github.com"),
+        "go" => Some("go.dev"),
+        "rust" => Some("static.rust-lang.org"),
+        "java" => Some("api.adoptium.net"),
+        "deno" => Some("dl.deno.land"),
+        "bun" => Some("github.com"),
+        "zig" => Some("ziglang.org"),
+        "ruby" => Some("cache.ruby-lang.org"),
+        _ => None,
     }
 }
 
@@ -166,15 +171,51 @@ mod tests {
     }
 
     #[test]
-    fn source_hosts_derive_from_the_backend_shorthand() {
-        assert_eq!(source_host("node", "core:node"), "nodejs.org");
-        assert_eq!(source_host("jq", "aqua:jqlang/jq"), "github.com");
-        assert_eq!(source_host("some", "gitlab:owner/repo"), "gitlab.com");
+    fn a_source_host_is_claimed_only_when_the_backend_reference_names_one() {
         assert_eq!(
-            source_host("some", "http:https://dl.example.test/some.tar.gz"),
-            "dl.example.test"
+            source_host("node", "core:node").as_deref(),
+            Some("nodejs.org")
         );
-        assert_eq!(source_host("some-core", "core:some-core"), "upstream");
-        assert_eq!(source_host("some", "npm:some"), "upstream");
+        assert_eq!(
+            source_host("jq", "aqua:jqlang/jq").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            source_host("some", "gitlab:owner/repo").as_deref(),
+            Some("gitlab.com")
+        );
+        assert_eq!(
+            source_host("some", "http:https://dl.example.test/some.tar.gz").as_deref(),
+            Some("dl.example.test")
+        );
+        // The shipped snapshot carries these shapes, and none of them says where the bytes come from.
+        assert_eq!(source_host("elixir", "core:elixir"), None);
+        assert_eq!(source_host("dart", "http:dart"), None);
+        assert_eq!(source_host("some", "npm:some"), None);
+    }
+
+    #[test]
+    fn a_vendor_hosted_aqua_package_is_not_attributed_to_github() {
+        for (name, backend, host) in [
+            ("acli", "aqua:atlassian.com/acli", "atlassian.com"),
+            ("dbt-fusion", "aqua:getdbt.com/dbt-fusion", "getdbt.com"),
+            ("kiro-cli", "aqua:kiro.dev/kiro-cli", "kiro.dev"),
+            ("sqlcl", "aqua:oracle.com/sqlcl", "oracle.com"),
+        ] {
+            assert_eq!(source_host(name, backend).as_deref(), Some(host));
+        }
+    }
+
+    #[test]
+    fn every_shipped_entry_either_names_a_host_or_claims_none() {
+        // The snapshot is the audit's only provenance input, so this pins that no shape in it produces a guess.
+        for (name, backend) in entries().iter() {
+            if let Some(host) = source_host(name, backend) {
+                assert!(
+                    host.contains('.') && !host.contains('/'),
+                    "{name} ({backend}) claims {host:?}"
+                );
+            }
+        }
     }
 }

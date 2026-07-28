@@ -174,7 +174,7 @@ mod tests {
             "node",
             "node@22",
             "22.11.0",
-            "nodejs.org",
+            Some("nodejs.org"),
             "core:node",
         )
         .to_string()
@@ -356,7 +356,7 @@ mod tests {
             "node",
             "node@22",
             "22.11.0",
-            "nodejs.org",
+            Some("nodejs.org"),
             "core:node",
         )
         .to_string()]);
