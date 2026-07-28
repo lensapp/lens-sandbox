@@ -243,6 +243,17 @@ async fn run_provisioner(
 
     let results =
         super::parse_driver_output(&captured.stdout, &captured.stderr, exit_code, requests)?;
+    // The caller ingests the staged tars from this share, and every tool installed as root in this guest — including one that left a process running past its own marker — can rewrite a sibling's tar until the guest is gone. Stop it and wait before naming the files final.
+    drop(_stop_guard);
+    if tokio::time::timeout(REAP_BUDGET, &mut vm_task)
+        .await
+        .is_err()
+    {
+        vm_task.abort();
+        anyhow::bail!(
+            "the provisioner guest did not stop within {REAP_BUDGET:?}, so its staged trees cannot be trusted"
+        );
+    }
     Ok(super::staged_tools_from_results(
         requests, &results, &staging,
     )?)
