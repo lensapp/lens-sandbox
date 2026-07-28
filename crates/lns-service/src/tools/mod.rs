@@ -127,6 +127,14 @@ impl ToolPlan {
     }
 }
 
+/// A version that names every component of a release needs no resolution, so its cache key is fully determined by the request.
+fn is_exact(version: &str) -> bool {
+    version.split('.').count() >= 3
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
+}
+
 /// A blackholing proxy or captive portal answers neither way, so the index query is bounded: the documented fallback to the last version resolved here only holds if a stalled query becomes an error instead of a hung launch.
 const INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -197,6 +205,8 @@ where
                     recorded
                 }
             },
+            // An exact request is its own pin, so a pulled sandbox starts from the cache even when the record was lost.
+            version if is_exact(version) => recorded.or_else(|| version.parse().ok()),
             _ => recorded,
         };
         let manifest = match &pinned {
@@ -371,8 +381,12 @@ where
                 source_host: tool.source_host.clone(),
             });
             hits.insert(tool.name.clone(), manifest);
+            // Persist per tool: a failure ingesting a later one must not leave this tree cached but unreferenceable.
+            records
+                .save(&record)
+                .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
+            record_changed = false;
         }
-        record_changed = true;
     }
     if record_changed {
         records
@@ -446,6 +460,7 @@ mod tests {
     #[derive(Default)]
     struct MemCache {
         map: Mutex<HashMap<ToolCacheKey, cache::ToolManifest>>,
+        ingests_before_failing: Mutex<Option<u32>>,
     }
 
     impl ToolCache for MemCache {
@@ -457,6 +472,12 @@ mod tests {
             key: &ToolCacheKey,
             staged: &StagedTool,
         ) -> anyhow::Result<cache::ToolManifest> {
+            if let Some(remaining) = self.ingests_before_failing.lock().unwrap().as_mut() {
+                if *remaining == 0 {
+                    anyhow::bail!("ingesting {} failed", key.name);
+                }
+                *remaining -= 1;
+            }
             let manifest = cache::ToolManifest {
                 schema_version: cache::MANIFEST_SCHEMA_VERSION,
                 tool: staged.name.clone(),
@@ -472,10 +493,6 @@ mod tests {
                 .unwrap()
                 .insert(key.clone(), manifest.clone());
             Ok(manifest)
-        }
-        fn evict(&self, key: &ToolCacheKey) -> anyhow::Result<()> {
-            self.map.lock().unwrap().remove(key);
-            Ok(())
         }
     }
 
@@ -617,7 +634,36 @@ mod tests {
                 "/.lens/tools/other-tool/2.0.1/bin".to_string()
             ]
         );
-        assert_eq!(*records.saves.lock().unwrap(), 1);
+        assert_eq!(
+            *records.saves.lock().unwrap(),
+            2,
+            "the record is persisted per ingested tool, not once at the end"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_ingested_before_a_later_failure_stays_referenceable() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        *cache.ingests_before_failing.lock().unwrap() = Some(1);
+        let provisioner = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        let err = ensure_tools(
+            &records,
+            &cache,
+            &provisioner,
+            &refs(&["some-tool@1", "other-tool@2"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("ingesting"), "got: {err:#}");
+        assert_eq!(
+            recorded(&records, "some-tool@1"),
+            "1.2.3",
+            "the tree ingested before the failure is still named by the record"
+        );
     }
 
     #[tokio::test]
@@ -981,6 +1027,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exact_request_starts_from_the_cache_with_no_record_at_all() {
+        // A pulled sandbox carries push-pinned versions; losing resolved.json must not send every one of them back to the network.
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &refs(&["some-tool@1.2.3"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        *records.record.lock().unwrap() = None;
+        let offline = Scripted::default();
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &refs(&["some-tool@1.2.3"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap();
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "the request itself determines the cache key"
+        );
+        assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/1.2.3/bin"]);
+    }
+
+    #[tokio::test]
     async fn a_recorded_but_evicted_tool_reprovisions_at_the_recorded_exact_version() {
         let records = MemRecords::default();
         let cache = MemCache::default();
@@ -996,14 +1080,7 @@ mod tests {
         )
         .await
         .unwrap();
-        cache
-            .evict(&ToolCacheKey {
-                name: "some-tool".into(),
-                resolved: version("1.2.3"),
-                arch: Arch::Aarch64,
-                libc: Libc::Gnu,
-            })
-            .unwrap();
+        cache.map.lock().unwrap().clear();
         let upstream_moved_on = Scripted::resolving(&[("some-tool", "1.9.9")]);
         ensure_tools(
             &records,

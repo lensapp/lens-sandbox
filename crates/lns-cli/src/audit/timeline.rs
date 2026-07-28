@@ -167,6 +167,18 @@ mod tests {
         .to_string()
     }
 
+    fn tool_provision(run: &str, ts: &str) -> String {
+        lns_ocsf::tool_provision(
+            &octx(run, ts),
+            "node",
+            "node@22",
+            "22.11.0",
+            "nodejs.org",
+            "core:node",
+        )
+        .to_string()
+    }
+
     fn credential_use(run: &str, ts: &str) -> String {
         lns_ocsf::credential_use(
             &octx(run, ts),
@@ -310,6 +322,23 @@ mod tests {
             text.contains("use some-provider fp 9c2f1a3d → api.some-provider.example"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_tool_kind_can_be_selected_like_every_other_disclosure() {
+        let fix = Fixture::new();
+        fix.write_ledger(&[
+            tool_provision(RUN, "2026-06-29T14:00:00Z"),
+            connection(RUN, "2026-06-29T15:00:00Z"),
+        ]);
+        let filtered = AuditArgs {
+            kind: Some(KindArg::Tool),
+            ..args()
+        };
+        let rows = fix.collect(&filtered).unwrap();
+        assert_eq!(rows.len(), 1, "got: {rows:?}");
+        assert_eq!(rows[0].kind, KindArg::Tool.label());
+        assert!(rows[0].detail.contains("provisioned node@22"));
     }
 
     #[test]
