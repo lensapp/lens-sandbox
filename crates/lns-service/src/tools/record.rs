@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
 
-/// The machine-level memory of what each requested spec resolved to, so `node@22` never drifts between runs on this machine even when upstream releases a newer 22.x; a `@latest` entry is instead the fallback for a run that cannot reach the index.
+/// The machine-level memory of what each requested spec resolved to, so `node@22` never drifts between runs while a `@latest` entry is the fallback for a run that cannot reach the index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRecord {
     pub schema_version: u32,

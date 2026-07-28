@@ -1,8 +1,6 @@
 use crate::spec;
 
-/// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the guards that belong to authoring only.
-///
-/// Whether this build can provision a declared tool is deliberately not part of parsing: the shipped registry shrinks and re-backends entries over time, so a consumer must still be able to inspect an artifact whose tool this build could no longer install. The launch keeps its own gate.
+/// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the guards that belong to authoring only — whether this build can provision a declared tool is deliberately not part of parsing, since a consumer must still be able to inspect an artifact whose tool the shipped registry has since dropped.
 pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
     let is_sandbox = crate::sandbox::is_sandbox_definition(doc);
     let schema = if is_sandbox {
