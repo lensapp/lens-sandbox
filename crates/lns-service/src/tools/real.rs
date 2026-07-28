@@ -26,32 +26,20 @@ pub async fn ensure_for_run(
     let provisioner = MiseProvisioner {
         scratch_id: scratch_id.to_string(),
     };
-    let warm = super::ensure_warm_tools(
-        &records,
-        &cache,
-        &provisioner,
+    let ask = super::EnsureRequest {
         requests,
         target,
-        mise::engine_version(),
-        now_unix_secs(),
-    )
-    .await?;
+        engine_version: mise::engine_version(),
+        now_unix_secs: now_unix_secs(),
+        disclose,
+    };
+    let warm = super::ensure_warm_tools(&records, &cache, &provisioner, &ask).await?;
     let mut ensured = match warm {
         Some(ensured) => ensured,
         None => {
             let _serialized = PROVISION_LOCK.lock().await;
             let scratch = ScratchGuard(cache_dir.join("runs").join(scratch_id));
-            let ensured = ensure_tools(
-                &records,
-                &cache,
-                &provisioner,
-                requests,
-                target,
-                mise::engine_version(),
-                now_unix_secs(),
-                disclose,
-            )
-            .await?;
+            let ensured = ensure_tools(&records, &cache, &provisioner, &ask).await?;
             drop(scratch);
             ensured
         }

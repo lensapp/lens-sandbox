@@ -113,6 +113,15 @@ pub struct EnsuredTools {
     pub provisioned: Vec<ProvisionOutcome>,
 }
 
+/// One request to satisfy a declared tool set: what was asked for, what it has to run on, and where each acquisition is disclosed as it commits.
+pub struct EnsureRequest<'a> {
+    pub requests: &'a [ToolRef],
+    pub target: &'a ProvisionTarget,
+    pub engine_version: &'a str,
+    pub now_unix_secs: u64,
+    pub disclose: &'a (dyn Fn(&ProvisionOutcome) + Send + Sync),
+}
+
 /// What a declared tool set needs before it can be injected: the trees already cached, the requests that still have to be installed, and the record as the plan left it.
 struct ToolPlan {
     record: record::ResolvedRecord,
@@ -147,10 +156,7 @@ async fn plan_tools<R, C, P>(
     records: &R,
     cache: &C,
     provisioner: &P,
-    requests: &[ToolRef],
-    target: &ProvisionTarget,
-    engine_version: &str,
-    now_unix_secs: u64,
+    ask: &EnsureRequest<'_>,
 ) -> Result<ToolPlan, ProvisionError>
 where
     R: ToolRecordStore,
@@ -173,13 +179,13 @@ where
         None => record::ResolvedRecord::default(),
     };
     let mut record_changed = record.schema_version != record::RECORD_SCHEMA_VERSION
-        || record.engine_version != engine_version;
+        || record.engine_version != ask.engine_version;
     record.schema_version = record::RECORD_SCHEMA_VERSION;
-    record.engine_version = engine_version.to_string();
+    record.engine_version = ask.engine_version.to_string();
 
     let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
     let mut misses: Vec<ToolRef> = Vec::new();
-    for request in requests {
+    for request in ask.requests {
         let recorded = record
             .recorded(&request.to_string())
             .map(|entry| entry.resolved.clone());
@@ -208,8 +214,8 @@ where
                 .lookup(&ToolCacheKey {
                     name: request.name.clone(),
                     resolved: resolved.clone(),
-                    arch: target.arch,
-                    libc: target.libc,
+                    arch: ask.target.arch,
+                    libc: ask.target.libc,
                 })
                 .map_err(|e| ProvisionError::Engine(format!("tool cache lookup: {e:#}")))?,
             None => None,
@@ -223,7 +229,7 @@ where
                             resolved: manifest.resolved.clone(),
                             backend: manifest.backend.clone(),
                             source_host: manifest.source_host.clone(),
-                            resolved_at_unix: now_unix_secs,
+                            resolved_at_unix: ask.now_unix_secs,
                         },
                     );
                 }
@@ -275,30 +281,18 @@ pub async fn ensure_warm_tools<R, C, P>(
     records: &R,
     cache: &C,
     provisioner: &P,
-    requests: &[ToolRef],
-    target: &ProvisionTarget,
-    engine_version: &str,
-    now_unix_secs: u64,
+    ask: &EnsureRequest<'_>,
 ) -> Result<Option<EnsuredTools>, ProvisionError>
 where
     R: ToolRecordStore,
     C: ToolCache,
     P: ToolProvisioner,
 {
-    let plan = plan_tools(
-        records,
-        cache,
-        provisioner,
-        requests,
-        target,
-        engine_version,
-        now_unix_secs,
-    )
-    .await?;
+    let plan = plan_tools(records, cache, provisioner, ask).await?;
     if !plan.is_fully_warm() {
         return Ok(None);
     }
-    compose(requests, &plan.hits, Vec::new()).map(Some)
+    compose(ask.requests, &plan.hits, Vec::new()).map(Some)
 }
 
 /// Provision-or-reuse for a declared tool set: a bounded request pins to the version it first resolved to, `@latest` re-asks the index every run, cache hits contribute specs without booting anything, and every miss goes to the provisioner in one call.
@@ -306,11 +300,7 @@ pub async fn ensure_tools<R, C, P>(
     records: &R,
     cache: &C,
     provisioner: &P,
-    requests: &[ToolRef],
-    target: &ProvisionTarget,
-    engine_version: &str,
-    now_unix_secs: u64,
-    disclose: &(dyn Fn(&ProvisionOutcome) + Send + Sync),
+    ask: &EnsureRequest<'_>,
 ) -> Result<EnsuredTools, ProvisionError>
 where
     R: ToolRecordStore,
@@ -322,21 +312,12 @@ where
         mut hits,
         misses,
         mut record_changed,
-    } = plan_tools(
-        records,
-        cache,
-        provisioner,
-        requests,
-        target,
-        engine_version,
-        now_unix_secs,
-    )
-    .await?;
+    } = plan_tools(records, cache, provisioner, ask).await?;
 
     let mut provisioned = Vec::new();
     if !misses.is_empty() {
-        let staged = provisioner.provision(&misses, target).await?;
-        for request in requests {
+        let staged = provisioner.provision(&misses, ask.target).await?;
+        for request in ask.requests {
             let Some(tool) = staged.iter().find(|tool| tool.name == request.name) else {
                 if hits.contains_key(&request.name) {
                     continue;
@@ -350,8 +331,8 @@ where
                     &ToolCacheKey {
                         name: tool.name.clone(),
                         resolved: tool.resolved.clone(),
-                        arch: target.arch,
-                        libc: target.libc,
+                        arch: ask.target.arch,
+                        libc: ask.target.libc,
                     },
                     tool,
                 )
@@ -360,7 +341,7 @@ where
                 resolved: tool.resolved.clone(),
                 backend: tool.backend.clone(),
                 source_host: tool.source_host.clone(),
-                resolved_at_unix: now_unix_secs,
+                resolved_at_unix: ask.now_unix_secs,
             };
             let spec = request.to_string();
             if request.version == LATEST {
@@ -381,7 +362,7 @@ where
                 .save(&record)
                 .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
             record_changed = false;
-            disclose(&outcome);
+            (ask.disclose)(&outcome);
             provisioned.push(outcome);
         }
     }
@@ -390,7 +371,7 @@ where
             .save(&record)
             .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
     }
-    compose(requests, &hits, provisioned)
+    compose(ask.requests, &hits, provisioned)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -418,6 +399,9 @@ pub enum ProvisionError {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Scenarios that are not about disclosure hand it nowhere.
+    fn discard(_outcome: &ProvisionOutcome) {}
 
     fn version(literal: &str) -> SafeVersion {
         literal.parse().expect("a usable version")
@@ -610,11 +594,13 @@ mod tests {
             &records,
             &cache,
             &provisioner,
-            &refs(&["some-tool@1", "other-tool@2"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1", "other-tool@2"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -650,15 +636,17 @@ mod tests {
             &records,
             &cache,
             &provisioner,
-            &refs(&["some-tool@1", "other-tool@2"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|outcome| {
-                disclosed
-                    .lock()
-                    .unwrap()
-                    .push(format!("{} -> {}", outcome.requested, outcome.resolved))
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1", "other-tool@2"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &|outcome| {
+                    disclosed
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} -> {}", outcome.requested, outcome.resolved))
+                },
             },
         )
         .await
@@ -685,11 +673,13 @@ mod tests {
             &records,
             &cache,
             &cold,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -699,10 +689,13 @@ mod tests {
             &records,
             &cache,
             &warm,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap()
@@ -727,10 +720,13 @@ mod tests {
                 &records,
                 &cache,
                 &cold,
-                &refs(&["some-tool@1"]),
-                &target(),
-                "2026.7.14",
-                1_700_000_000,
+                &EnsureRequest {
+                    requests: &refs(&["some-tool@1"]),
+                    target: &target(),
+                    engine_version: "2026.7.14",
+                    now_unix_secs: 1_700_000_000,
+                    disclose: &discard,
+                },
             )
             .await
             .unwrap()
@@ -766,11 +762,13 @@ mod tests {
             &records,
             &cache,
             &provisioner,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -802,11 +800,13 @@ mod tests {
             &records,
             &cache,
             &cold,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -815,10 +815,13 @@ mod tests {
                 &records,
                 &cache,
                 &Scripted::default(),
-                &refs(&["some-tool@1"]),
-                &target(),
-                "2026.8.01",
-                1_700_000_009,
+                &EnsureRequest {
+                    requests: &refs(&["some-tool@1"]),
+                    target: &target(),
+                    engine_version: "2026.8.01",
+                    now_unix_secs: 1_700_000_009,
+                    disclose: &discard,
+                },
             )
             .await
             .unwrap()
@@ -836,11 +839,13 @@ mod tests {
             &records,
             &cache,
             &first,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -851,11 +856,13 @@ mod tests {
             &records,
             &cache,
             &moved_on,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -881,11 +888,13 @@ mod tests {
             &records,
             &cache,
             &first,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -894,11 +903,13 @@ mod tests {
             &records,
             &cache,
             &unchanged,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -922,11 +933,13 @@ mod tests {
             &records,
             &cache,
             &online,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -936,11 +949,13 @@ mod tests {
             &records,
             &cache,
             &blackholed,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -961,11 +976,13 @@ mod tests {
             &records,
             &cache,
             &online,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -975,11 +992,13 @@ mod tests {
             &records,
             &cache,
             &offline,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -999,11 +1018,13 @@ mod tests {
             &records,
             &cache,
             &offline,
-            &refs(&["some-tool@latest"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@latest"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1024,11 +1045,13 @@ mod tests {
             &records,
             &cache,
             &first,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1037,11 +1060,13 @@ mod tests {
             &records,
             &cache,
             &second,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1060,11 +1085,13 @@ mod tests {
             &records,
             &cache,
             &cold,
-            &refs(&["some-tool@1.2.3"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1.2.3"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1075,11 +1102,13 @@ mod tests {
             &records,
             &cache,
             &offline,
-            &refs(&["some-tool@1.2.3"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1.2.3"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1099,11 +1128,13 @@ mod tests {
             &records,
             &cache,
             &first,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1113,11 +1144,13 @@ mod tests {
             &records,
             &cache,
             &upstream_moved_on,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1142,11 +1175,13 @@ mod tests {
             &records,
             &cache,
             &first,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1155,11 +1190,13 @@ mod tests {
             &records,
             &cache,
             &second,
-            &refs(&["some-tool@1", "other-tool@2"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_009,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1", "other-tool@2"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap();
@@ -1183,11 +1220,13 @@ mod tests {
             &records,
             &cache,
             &provisioner,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap_err();
@@ -1205,11 +1244,13 @@ mod tests {
             &records,
             &cache,
             &dropper,
-            &refs(&["some-tool@1"]),
-            &target(),
-            "2026.7.14",
-            1_700_000_000,
-            &|_| {},
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
         )
         .await
         .unwrap_err();

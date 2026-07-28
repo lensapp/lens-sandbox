@@ -56,11 +56,13 @@ async fn launch(w: &mut BehaviourWorld) {
         &rig.records,
         &rig.cache,
         &rig.provisioner,
-        &requests,
-        &target,
-        "2026.7.14",
-        1_700_000_000,
-        &disclose,
+        &lns_service::tools::EnsureRequest {
+            requests: &requests,
+            target: &target,
+            engine_version: "2026.7.14",
+            now_unix_secs: 1_700_000_000,
+            disclose: &disclose,
+        },
     )
     .await
     {
