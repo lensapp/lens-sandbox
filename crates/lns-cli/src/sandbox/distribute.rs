@@ -175,6 +175,9 @@ where
     R: ToolResolver + ?Sized,
     W: Write,
 {
+    lns_artifact::validate::refuse_unprovisionable_tools(doc).map_err(|problem| {
+        anyhow::anyhow!("refusing to push a sandbox no consumer can start: {problem}")
+    })?;
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     for fileset in &packed {
@@ -205,12 +208,8 @@ where
 {
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
     for fileset in &packed {
-        writeln!(
-            out,
-            "would push fileset {} ({})",
-            fileset.reference,
-            blob_bytes(&fileset.built)
-        )?;
+        let bytes = blob_bytes(&fileset.built);
+        writeln!(out, "would push fileset {} ({bytes})", fileset.reference)?;
     }
     let declared_tools = serde_json::from_slice::<serde_json::Value>(&doc)
         .ok()
@@ -223,11 +222,11 @@ where
         )?;
     }
     let built = lns_artifact::build::build_artifact(&doc)?;
+    let bytes = blob_bytes(&built);
     writeln!(
         out,
-        "would push {reference}@{} ({})",
-        built.manifest_digest,
-        blob_bytes(&built)
+        "would push {reference}@{} ({bytes})",
+        built.manifest_digest
     )?;
     writeln!(out, "dry run — built and validated; nothing uploaded")?;
     Ok(0)
@@ -530,6 +529,33 @@ mod tests {
             text.contains("pinned node@22 → node@22.11.0")
                 && text.contains("pinned python@latest → python@3.12.6"),
             "the publisher sees the versions they shipped: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_refuses_a_tool_no_consumer_could_provision() {
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["prettier@3"]}}"#;
+        let mut out = Vec::new();
+        let err = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no consumer can start")
+                && format!("{err:#}").contains("bring it via spec.image"),
+            "got: {err:#}"
+        );
+        assert!(
+            producer.docs.borrow().is_empty(),
+            "nothing is uploaded and the index is never consulted"
         );
     }
 
