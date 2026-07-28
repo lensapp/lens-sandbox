@@ -88,17 +88,27 @@ pub(crate) fn parse_driver_output(
     exit_code: i32,
     requests: &[ToolRef],
 ) -> Result<Vec<DriverResult>, ProvisionError> {
-    let results: Vec<DriverResult> = stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.strip_prefix("LNS_TOOL ")?.split_whitespace();
-            Some(DriverResult {
-                name: parts.next()?.to_string(),
-                resolved: parts.next()?.to_string(),
-                bin_path: parts.next().unwrap_or(".").to_string(),
-            })
-        })
-        .collect();
+    let mut results: Vec<DriverResult> = Vec::new();
+    for line in stdout.lines() {
+        let Some(marker) = line.strip_prefix("LNS_TOOL ") else {
+            continue;
+        };
+        let mut parts = marker.split_whitespace();
+        let (Some(name), Some(resolved)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let bin_path = parts.next().unwrap_or(".");
+        if !is_safe_segment(resolved) || !is_safe_bin_path(bin_path) {
+            return Err(ProvisionError::Engine(format!(
+                "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_path:?}"
+            )));
+        }
+        results.push(DriverResult {
+            name: name.to_string(),
+            resolved: resolved.to_string(),
+            bin_path: bin_path.to_string(),
+        });
+    }
     if exit_code == 0 && stdout.lines().any(|line| line.trim() == "LNS_DONE") {
         for request in requests {
             if !results.iter().any(|result| result.name == request.name) {
@@ -127,6 +137,20 @@ pub(crate) fn parse_driver_output(
         "the provisioner driver exited with code {exit_code}: {}",
         output_tail(stdout)
     )))
+}
+
+/// The driver's output is guest-supplied and both fields become path components on the host cache and in the guest layer, so they are allowlisted before anything joins them.
+fn is_safe_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
+fn is_safe_bin_path(bin_path: &str) -> bool {
+    bin_path == "." || bin_path.split('/').all(is_safe_segment)
 }
 
 fn output_tail(stdout: &str) -> String {
@@ -374,6 +398,34 @@ mod tests {
             msg.contains("node@22") && msg.contains("timeout"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn a_driver_result_escaping_the_cache_tree_is_refused_before_it_becomes_a_path() {
+        for marker in [
+            "LNS_TOOL node ../../../../tmp/pwn bin",
+            "LNS_TOOL node .. bin",
+            "LNS_TOOL node 22.11.0 ../../etc",
+            "LNS_TOOL node 22/11 bin",
+        ] {
+            let err = parse_driver_output(&format!("{marker}\nLNS_DONE\n"), 0, &[tool("node@22")])
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unusable location for node"),
+                "marker {marker:?}: got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_bin_dir_is_still_accepted() {
+        let results = parse_driver_output(
+            "LNS_TOOL node 22.11.0 libexec/bin\nLNS_DONE\n",
+            0,
+            &[tool("node@22")],
+        )
+        .unwrap();
+        assert_eq!(results[0].bin_path, "libexec/bin");
     }
 
     #[test]
