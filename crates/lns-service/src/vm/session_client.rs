@@ -17,19 +17,52 @@ pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 
-/// Which of a captured session's output streams the caller wants; a machine-parsed probe must not have diagnostics spliced into its payload, while a human-facing failure tail needs both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Captured {
-    StdoutOnly,
-    StdoutAndStderr,
+/// A captured session's two streams, kept apart: the guest writes them down independent fds at arbitrary chunk boundaries, so merging them into one buffer splices a partial stderr line in front of the next stdout line and corrupts anything parsed out of it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CapturedStreams {
+    pub stdout: String,
+    pub stderr: String,
 }
 
-impl Captured {
-    pub(super) fn bytes_of(self, frame: &WireFrame) -> Option<&[u8]> {
-        match frame {
-            WireFrame::Stdout(bytes) => Some(bytes),
-            WireFrame::Stderr(bytes) if self == Captured::StdoutAndStderr => Some(bytes),
-            _ => None,
+pub(super) struct CaptureBuffers {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl CaptureBuffers {
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    pub(super) fn push(&mut self, frame: &WireFrame) -> Result<()> {
+        let (bytes, to_stdout) = match frame {
+            WireFrame::Stdout(bytes) => (bytes, true),
+            WireFrame::Stderr(bytes) => (bytes, false),
+            WireFrame::Json(_) => return Ok(()),
+        };
+        anyhow::ensure!(
+            self.stdout.len() + self.stderr.len() + bytes.len() <= self.max_bytes,
+            "capture output exceeded {} bytes",
+            self.max_bytes
+        );
+        let sink = if to_stdout {
+            &mut self.stdout
+        } else {
+            &mut self.stderr
+        };
+        sink.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> CapturedStreams {
+        CapturedStreams {
+            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
         }
     }
 }
@@ -125,30 +158,31 @@ mod tests {
     }
 
     #[test]
-    fn a_stdout_only_capture_drops_stderr_so_a_parsed_probe_cannot_be_spliced() {
-        let out = WireFrame::Stdout(b"cpu 1 2 3 4 5".to_vec());
-        let err = WireFrame::Stderr(b"cat: warning".to_vec());
-        assert_eq!(
-            Captured::StdoutOnly.bytes_of(&out),
-            Some(&b"cpu 1 2 3 4 5"[..])
-        );
-        assert_eq!(Captured::StdoutOnly.bytes_of(&err), None);
+    fn interleaved_frames_never_splice_stderr_into_a_parsed_stdout_line() {
+        // A progress renderer writes a partial line with no trailing newline; merged into one buffer it would eat the marker that follows.
+        let mut buffers = CaptureBuffers::new(1024);
+        for frame in [
+            WireFrame::Stderr(b"downloading node 50%\r".to_vec()),
+            WireFrame::Stdout(b"LNS_TOOL node 22.11.0 bin\n".to_vec()),
+            WireFrame::Stderr(b"installed".to_vec()),
+            WireFrame::Json(lns_ipc::Response::Pong),
+        ] {
+            buffers.push(&frame).unwrap();
+        }
+        let captured = buffers.finish();
+        assert_eq!(captured.stdout, "LNS_TOOL node 22.11.0 bin\n");
+        assert_eq!(captured.stderr, "downloading node 50%\rinstalled");
     }
 
     #[test]
-    fn a_merged_capture_keeps_stderr_for_the_failure_tail() {
-        let err = WireFrame::Stderr(b"mise ERROR timeout".to_vec());
-        assert_eq!(
-            Captured::StdoutAndStderr.bytes_of(&err),
-            Some(&b"mise ERROR timeout"[..])
-        );
-    }
-
-    #[test]
-    fn neither_capture_mode_collects_a_json_frame() {
-        let json = WireFrame::Json(lns_ipc::Response::Pong);
-        assert_eq!(Captured::StdoutOnly.bytes_of(&json), None);
-        assert_eq!(Captured::StdoutAndStderr.bytes_of(&json), None);
+    fn the_capture_cap_counts_both_streams_together() {
+        let mut buffers = CaptureBuffers::new(8);
+        buffers.push(&WireFrame::Stdout(b"1234".to_vec())).unwrap();
+        buffers.push(&WireFrame::Stderr(b"5678".to_vec())).unwrap();
+        let err = buffers
+            .push(&WireFrame::Stdout(b"9".to_vec()))
+            .expect_err("the ninth byte is over the cap");
+        assert!(err.to_string().contains("exceeded 8 bytes"), "got: {err}");
     }
 
     #[test]

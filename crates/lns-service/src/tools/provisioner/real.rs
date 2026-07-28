@@ -190,18 +190,18 @@ async fn run_provisioner(
         .collect();
     let timeout =
         super::driver_timeout_secs(std::env::var("LNS_TOOLS_TIMEOUT_SECS").ok().as_deref());
-    let (stdout, exit_code) = vm::session_client::capture_session_exec(
+    let (captured, exit_code) = vm::session_client::capture_session_exec(
         connector.as_ref(),
         argv,
         env,
-        vm::session_client::Captured::StdoutAndStderr,
         std::time::Duration::from_secs(timeout),
         MAX_DRIVER_OUTPUT_BYTES,
     )
     .await
     .context("driving the provisioner install script")?;
 
-    let results = super::parse_driver_output(&stdout, exit_code, requests)?;
+    let results =
+        super::parse_driver_output(&captured.stdout, &captured.stderr, exit_code, requests)?;
     Ok(super::staged_tools_from_results(
         requests, &results, &staging,
     )?)
