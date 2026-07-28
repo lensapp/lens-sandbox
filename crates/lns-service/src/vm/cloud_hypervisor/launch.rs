@@ -43,7 +43,7 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BindIdMap {
     pub guest_uid: u32,
     pub guest_gid: u32,
