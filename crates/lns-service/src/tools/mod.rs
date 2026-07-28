@@ -74,7 +74,7 @@ pub struct StagedTool {
     pub name: String,
     pub resolved: SafeVersion,
     pub backend: String,
-    pub source_host: String,
+    pub source_host: Option<String>,
     pub tar: StagedTar,
     pub bin_paths: Vec<String>,
 }
@@ -102,7 +102,7 @@ pub struct ProvisionOutcome {
     pub requested: String,
     pub resolved: String,
     pub backend: String,
-    pub source_host: String,
+    pub source_host: Option<String>,
 }
 
 #[derive(Debug)]
@@ -395,6 +395,16 @@ pub enum ProvisionError {
     Engine(String),
 }
 
+impl ProvisionError {
+    /// Whether trying again on a working network could change the answer; a refusal by name or libc flavor never will.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ProvisionError::Unprovisionable(_) | ProvisionError::LibcUnsupported { .. } => false,
+            ProvisionError::FetchFailed { .. } | ProvisionError::Engine(_) => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,7 +566,7 @@ mod tests {
                                 .unwrap_or(&request.version),
                         ),
                         backend: format!("core:{}", request.name),
-                        source_host: "upstream.example.test".into(),
+                        source_host: Some("upstream.example.test".into()),
                         tar: StagedTar::Bytes(Vec::new()),
                         bin_paths: vec!["bin".into()],
                     })
@@ -752,7 +762,7 @@ mod tests {
                 record::ResolvedEntry {
                     resolved: version("1.0.0-from-the-future"),
                     backend: "core:some-tool".into(),
-                    source_host: "upstream.example.test".into(),
+                    source_host: Some("upstream.example.test".into()),
                     resolved_at_unix: 1_600_000_000,
                 },
             )]),

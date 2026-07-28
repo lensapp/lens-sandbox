@@ -25,7 +25,7 @@ pub fn append_tool_provisioned(
         &outcome.tool,
         &outcome.requested,
         &outcome.resolved,
-        &outcome.source_host,
+        outcome.source_host.as_deref(),
         &outcome.backend,
     ))
 }
@@ -273,7 +273,7 @@ mod tests {
                 requested: "node@22".into(),
                 resolved: "22.11.0".into(),
                 backend: "core:node".into(),
-                source_host: "nodejs.org".into(),
+                source_host: Some("nodejs.org".into()),
             },
         )
         .unwrap();

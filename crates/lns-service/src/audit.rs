@@ -295,7 +295,7 @@ pub fn record_tool_provisioned_at(
             &outcome.tool,
             &outcome.requested,
             &outcome.resolved,
-            &outcome.source_host,
+            outcome.source_host.as_deref(),
             &outcome.backend,
         ),
     )
@@ -617,7 +617,7 @@ mod tests {
             requested: "some-tool@1".into(),
             resolved: "1.2.3".into(),
             backend: "core:some-tool".into(),
-            source_host: "upstream.example.test".into(),
+            source_host: Some("upstream.example.test".into()),
         };
         record_tool_provisioned("aa125", "calm-finch", &outcome, &CLOCK).unwrap();
         let content = std::fs::read_to_string(audit_path("aa125").unwrap()).unwrap();

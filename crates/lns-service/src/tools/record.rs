@@ -20,7 +20,8 @@ pub struct ResolvedRecord {
 pub struct ResolvedEntry {
     pub resolved: lns_artifact::tools::SafeVersion,
     pub backend: String,
-    pub source_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
     pub resolved_at_unix: u64,
 }
 
@@ -101,7 +102,7 @@ mod tests {
         ResolvedEntry {
             resolved: resolved.parse().expect("a usable version"),
             backend: "core:some-tool".into(),
-            source_host: "upstream.example.test".into(),
+            source_host: Some("upstream.example.test".into()),
             resolved_at_unix: 1_700_000_000,
         }
     }

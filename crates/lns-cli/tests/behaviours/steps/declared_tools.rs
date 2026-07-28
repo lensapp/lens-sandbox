@@ -134,7 +134,7 @@ fn run_summary_discloses_tools(w: &mut BehaviourWorld) -> Result<(), String> {
     let view = w.pulled_view.take().ok_or("a pulled view is staged")?;
     let mut args: lns_cli::cli::RunArgs =
         parse_args(["lns", "run", TOOLS_REFERENCE]).map_err(|e| format!("{e:#}"))?;
-    args.tools = view.tools;
+    args.tools = lns_cli::run::summary::tools_from_view(&view);
     if w.cwd.is_none() {
         w.cwd = Some(tempfile::TempDir::new().map_err(|e| e.to_string())?);
     }

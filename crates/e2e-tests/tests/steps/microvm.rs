@@ -778,8 +778,8 @@ fn parse_tools_list(entries: &str) -> Vec<String> {
         .collect()
 }
 
-#[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over a base image that ships no node$"#)]
-fn tools_over_toolless_base(world: &mut E2eWorld, entries: String) {
+#[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over the pinned base image$"#)]
+fn tools_over_pinned_base(world: &mut E2eWorld, entries: String) {
     world.project_tools = parse_tools_list(&entries);
 }
 
@@ -832,11 +832,21 @@ fn audit_records_tool_provisioning(world: &mut E2eWorld) {
 
 #[then("nothing is provisioned again")]
 fn nothing_provisioned_again(world: &mut E2eWorld) {
-    let result = world.result.as_ref().expect("a run result");
-    let text = format!("{}\n{}", result.stdout, result.stderr);
+    // Progress output never reaches a piped stderr, so the chain is the observable: a provision that happened would have disclosed itself.
+    let run_id = world.last_run_id.clone().expect("a run id was parsed");
+    let audit = crate::specutil::run_cli_with_env(
+        ["audit", run_id.as_str(), "--kind", "tool"],
+        socket_env(world),
+    );
+    assert_eq!(
+        audit.exit_code, 0,
+        "lns audit failed:\n{}\n{}",
+        audit.stdout, audit.stderr
+    );
     assert!(
-        !text.contains("Provisioning"),
-        "the warm run must not re-provision, got:\n{text}"
+        !audit.stdout.contains("provisioned"),
+        "the warm run must not re-provision, but its chain carries a tool event:\n{}",
+        audit.stdout
     );
 }
 
@@ -949,6 +959,8 @@ fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
 #[then("it starts and the declared tools are available to the workload")]
 fn tools_available_offline(world: &mut E2eWorld) {
     prints_a_node_22_version(world);
+    // Tool bodies come from the live network, not the local registry, so "offline" is proven by the run having fetched nothing — which is exactly what the pull is for.
+    nothing_provisioned_again(world);
 }
 
 // `lns run` refuses a plain OCI image, so image-driven scenarios publish a minimal sandbox over it to the in-process registry and run that reference.
