@@ -55,18 +55,8 @@ pub(crate) async fn launch<S: Spawner>(
     .await?;
     let mut virtiofsd = vec![content];
 
-    let bind_id_map = match (spec.workload_uid, spec.workload_gid) {
-        (Some(guest_uid), Some(guest_gid)) => {
-            let (host_uid, host_gid) = host_ids();
-            Some(BindIdMap {
-                guest_uid,
-                guest_gid,
-                host_uid,
-                host_gid,
-            })
-        }
-        _ => None,
-    };
+    let (host_uid, host_gid) = host_ids();
+    let bind_id_map = bind_id_map(spec, host_uid, host_gid);
     for (i, bind) in spec.binds.iter().enumerate() {
         match prepare_bind(
             spawner,
@@ -146,6 +136,17 @@ async fn prepare_bind<S: Spawner>(
         timeout,
     )
     .await
+}
+
+/// virtiofsd runs as this unprivileged user, so a guest write is EPERM unless the guest's own ids are mapped onto it. Every guest that writes to a bind needs the map, including the provisioner guest, which runs as root and whose gid the host cannot look up.
+fn bind_id_map(spec: &VmSpec, host_uid: u32, host_gid: u32) -> Option<BindIdMap> {
+    let guest_uid = spec.workload_uid?;
+    Some(BindIdMap {
+        guest_uid,
+        guest_gid: spec.workload_gid.unwrap_or(guest_uid),
+        host_uid,
+        host_gid,
+    })
 }
 
 fn host_ids() -> (u32, u32) {
@@ -343,6 +344,39 @@ mod tests {
             #[cfg(target_os = "macos")]
             console_fd: -1,
         }
+    }
+
+    #[test]
+    fn every_guest_that_writes_to_a_bind_gets_a_map() {
+        // The provisioner guest runs as root and the host cannot look up its gid; without a map virtiofsd serves the writable share as its own unprivileged user and the guest's tar fails with EPERM.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut root_guest = spec(dir.path());
+        root_guest.workload_uid = Some(0);
+        root_guest.workload_gid = None;
+        assert_eq!(
+            bind_id_map(&root_guest, 501, 20),
+            Some(BindIdMap {
+                guest_uid: 0,
+                guest_gid: 0,
+                host_uid: 501,
+                host_gid: 20,
+            })
+        );
+
+        let sandbox_user = spec(dir.path());
+        assert_eq!(
+            bind_id_map(&sandbox_user, 501, 20),
+            Some(BindIdMap {
+                guest_uid: 65534,
+                guest_gid: 65534,
+                host_uid: 501,
+                host_gid: 20,
+            })
+        );
+
+        let mut unsupervised = spec(dir.path());
+        unsupervised.workload_uid = None;
+        assert_eq!(bind_id_map(&unsupervised, 501, 20), None);
     }
 
     fn bins() -> VmmBinaries {
@@ -573,24 +607,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_serves_a_bind_1to1_when_the_host_cannot_map_the_workload_gid() {
+    async fn a_bind_is_mapped_even_when_the_host_cannot_look_up_the_workload_gid() {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let proj = tempfile::TempDir::new().unwrap();
         let mut s = spec(d.path());
+        s.workload_uid = Some(0);
         s.workload_gid = None;
         s.binds = vec![bind(proj.path(), "/work", false)];
         let spawner = FakeSpawner::ready();
         let running = launch(&spawner, &s, &bins(), &layout, None, &fast())
             .await
-            .expect("a bind still boots without a known gid");
+            .expect("a bind boots without a known gid");
 
         assert_eq!(running.virtiofsd.len(), 2);
         let bind_args = &spawner.records()[1].args;
         assert!(
-            bind_args.iter().any(|a| a == "--sandbox=none")
-                && !bind_args.iter().any(|a| a.starts_with("--uid-map=")),
-            "an unknown gid can't be namespace-mapped, so the bind falls back to 1:1 passthrough: {bind_args:?}"
+            bind_args.iter().any(|a| a == "--sandbox=namespace")
+                && bind_args.iter().any(|a| a.starts_with("--uid-map=:0:"))
+                && bind_args.iter().any(|a| a.starts_with("--gid-map=:0:")),
+            "1:1 passthrough would make the guest's own write EPERM against virtiofsd's unprivileged user: {bind_args:?}"
         );
     }
 
