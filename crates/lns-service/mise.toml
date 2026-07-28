@@ -2,6 +2,10 @@
 # provisioner guest needs. Users never see or choose these; bump via the
 # bump-mise CLI, which verifies upstream's SHASUMS256.txt + minisign signature
 # and regenerates src/tools/registry.snapshot from the release's registry/.
+#
+# The provisioner guest has unrestricted egress: tool backends are arbitrary
+# upstream hosts, and beyond those it reaches mise-versions.jdx.dev (the version
+# index) and tuf-repo-cdn.sigstore.dev (attesting python-build-standalone).
 
 [engine]
 version = "2026.7.14"

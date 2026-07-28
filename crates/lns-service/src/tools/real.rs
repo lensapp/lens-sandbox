@@ -61,10 +61,10 @@ pub async fn pre_provision_for_pull(
     }
     let requests = lns_artifact::tools::parse_all(&artifact.tools)?;
     super::registry::refuse_unknown_tools(&requests)?;
-    let layers: Vec<Vec<u8>> = base_image
+    let layers: Vec<&[u8]> = base_image
         .layers
         .iter()
-        .map(|layer| layer.data.to_vec())
+        .map(|layer| &layer.data[..])
         .collect();
     let target = ProvisionTarget {
         arch: super::host_arch(),

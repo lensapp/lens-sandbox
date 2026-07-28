@@ -6,10 +6,12 @@ use flate2::read::GzDecoder;
 use super::Libc;
 
 /// Decide the image's libc flavor from its layer tars so installed tool builds match the workload: the dynamic loader's file name is definitive, later layers override earlier ones (overlay semantics), and a static/distroless image with no loader defaults to gnu.
-pub fn detect_libc(layers: &[Vec<u8>]) -> Result<Libc> {
+pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
     let mut verdict = None;
     for (idx, layer) in layers.iter().enumerate() {
-        if let Some(found) = scan_layer(layer).with_context(|| format!("scanning layer {idx}"))? {
+        if let Some(found) =
+            scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))?
+        {
             verdict = Some(found);
         }
     }
@@ -74,7 +76,15 @@ mod tests {
     fn a_loaderless_image_defaults_to_gnu() {
         let layer = layer_with(&["app/server"]);
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu);
-        assert_eq!(detect_libc(&[]).unwrap(), Libc::Gnu);
+        let empty: [Vec<u8>; 0] = [];
+        assert_eq!(detect_libc(&empty).unwrap(), Libc::Gnu);
+    }
+
+    #[test]
+    fn a_borrowed_layer_set_is_scanned_without_owning_the_bytes() {
+        let owned = layer_with(&["lib/ld-musl-aarch64.so.1"]);
+        let borrowed: Vec<&[u8]> = vec![owned.as_slice()];
+        assert_eq!(detect_libc(&borrowed).unwrap(), Libc::Musl);
     }
 
     #[test]
