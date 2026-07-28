@@ -302,8 +302,9 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
 
 /// Injection resolves a path's parent segments *through* symlinks, so a link out of the tree makes every entry "under" it land wherever the link points — over the supervisor's own files, which are injected first. Only a target that still resolves inside the tool's own root may be preserved.
 fn target_stays_in_tree(link_rel: &str, target: &Path) -> bool {
+    // An empty segment (`bin//esc`) must not count as a level, or it absorbs one `..` and a target that leaves the tree reads as staying inside it.
     let mut resolved: Vec<&str> = match link_rel.rsplit_once('/') {
-        Some((parent, _)) => parent.split('/').collect(),
+        Some((parent, _)) => parent.split('/').filter(|seg| !seg.is_empty()).collect(),
         None => Vec::new(),
     };
     for component in target.components() {
@@ -498,6 +499,36 @@ mod tests {
                 "{link} -> {target}: got {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn a_double_slash_in_the_link_path_buys_no_level_back() {
+        // A crafted tar can carry `bin//esc`; the empty segment would otherwise absorb one `..`.
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_path("placeholder").unwrap();
+        {
+            let name = header.as_gnu_mut().unwrap();
+            let raw = b"bin//esc";
+            name.name[..raw.len()].copy_from_slice(raw);
+            name.name[raw.len()] = 0;
+        }
+        header.set_link_name("../..").unwrap();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = cache(dir.path())
+            .ingest(&key(), &staged(tar))
+            .expect_err("bin//esc -> ../.. resolves above the tool root");
+        assert!(
+            format!("{err:#}").contains("escapes the tool tree"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
