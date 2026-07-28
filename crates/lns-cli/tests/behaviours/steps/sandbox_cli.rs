@@ -418,6 +418,11 @@ fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
     });
 }
 
+#[given(regex = r"^the service reports no runs$")]
+fn canned_no_runs(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::RunList { runs: Vec::new() });
+}
+
 pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
     FakeSandboxService {
         response: w.sandbox.response.clone(),
@@ -468,7 +473,11 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
-        &SandboxCommand::Ps,
+        &SandboxCommand::Ps(lns_cli::sandbox::PsArgs {
+            output: lns_cli::output::OutputArgs {
+                format: lns_cli::output::Format::Table,
+            },
+        }),
         &svc,
         TermInfo::default(),
         &mut out,

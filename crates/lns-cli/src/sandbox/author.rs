@@ -286,7 +286,11 @@ mod tests {
         assert!(is_offline(&inspect_cmd(Some("../other"))));
         assert!(!is_offline(&inspect_cmd(Some("ghcr.io/team/hermes:1"))));
         assert!(!is_offline(&inspect_cmd(Some("brave_narwhal"))));
-        assert!(!is_offline(&SandboxCommand::Ps));
+        assert!(!is_offline(&SandboxCommand::Ps(crate::sandbox::PsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        })));
         assert!(!is_offline(&SandboxCommand::Ls));
     }
 
