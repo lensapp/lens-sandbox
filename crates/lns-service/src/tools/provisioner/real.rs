@@ -12,6 +12,7 @@ use crate::{cache, composefs, guest_tools, image, ingest, initramfs, kernel, upp
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DRIVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
+const BOOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub(crate) struct MiseProvisioner {
     pub scratch_id: String,
@@ -53,6 +54,15 @@ impl ToolProvisioner for MiseProvisioner {
     }
 }
 
+/// The guest ended before it was reachable: surface why rather than collapsing every cause into "never became reachable".
+fn boot_failure(outcome: Result<Result<()>, tokio::task::JoinError>) -> anyhow::Error {
+    match outcome {
+        Ok(Ok(())) => anyhow::anyhow!("the provisioner guest exited before it was reachable"),
+        Ok(Err(e)) => e.context("booting the provisioner guest"),
+        Err(e) => anyhow::anyhow!("the provisioner guest boot task panicked: {e}"),
+    }
+}
+
 async fn run_provisioner(
     scratch_id: &str,
     requests: &[ToolRef],
@@ -72,7 +82,7 @@ async fn run_provisioner(
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
 
     let rootfs_ref = mise::manifest()
-        .rootfs_reference(target.libc, target.arch)
+        .rootfs_reference(target.libc, target.arch)?
         .to_string();
     let cmd: [String; 0] = [];
     let want_arch = image::want_arch();
@@ -178,9 +188,14 @@ async fn run_provisioner(
     let connector = tokio::select! {
         biased;
         r = &mut vm_task => {
-            anyhow::bail!("the provisioner guest ended before it was reachable: {r:?}");
+            return Err(boot_failure(r));
         }
         c = connector_rx => c.context("the provisioner guest never became reachable")?,
+        // One wedged VMM would otherwise hold the provision lock for the service's lifetime.
+        _ = tokio::time::sleep(BOOT_BUDGET) => {
+            vm_task.abort();
+            anyhow::bail!("the provisioner guest did not become reachable within {BOOT_BUDGET:?}");
+        }
     };
     let _stop_guard = vm::VmStopGuard::new(connector.clone());
 
@@ -229,5 +244,5 @@ pub(crate) async fn workload_companion_specs(
     target: &ProvisionTarget,
 ) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
     let artifacts = ensure_engine_artifacts(cache_dir, target).await?;
-    Ok(artifacts.companion_specs)
+    Ok(artifacts.workload_companion_specs)
 }

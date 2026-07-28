@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::{Arch, Libc};
@@ -63,16 +64,16 @@ impl Manifest {
         )
     }
 
-    pub fn engine_sha256(&self, arch: Arch) -> &str {
-        &self.engine.sha256[&arch.to_string()]
+    pub fn engine_sha256(&self, arch: Arch) -> Result<&str> {
+        pinned(&self.engine.sha256, arch, "engine sha256")
     }
 
-    pub fn rootfs_reference(&self, libc: Libc, arch: Arch) -> &str {
+    pub fn rootfs_reference(&self, libc: Libc, arch: Arch) -> Result<&str> {
         let flavor = match libc {
             Libc::Gnu => &self.provisioner_rootfs.gnu,
             Libc::Musl => &self.provisioner_rootfs.musl,
         };
-        &flavor[&arch.to_string()]
+        pinned(flavor, arch, "provisioner rootfs")
     }
 
     pub fn curl_url(&self, arch: Arch) -> String {
@@ -83,8 +84,8 @@ impl Manifest {
         )
     }
 
-    pub fn curl_sha256(&self, arch: Arch) -> &str {
-        &self.static_curl.sha256[&arch.to_string()]
+    pub fn curl_sha256(&self, arch: Arch) -> Result<&str> {
+        pinned(&self.static_curl.sha256, arch, "static curl sha256")
     }
 }
 
@@ -95,8 +96,16 @@ pub fn companion_url(companion: &Companion, arch: Arch) -> String {
     )
 }
 
-pub fn companion_sha256(companion: &Companion, arch: Arch) -> &str {
-    &companion.sha256[&arch.to_string()]
+pub fn companion_sha256(companion: &Companion, arch: Arch) -> Result<&str> {
+    pinned(&companion.sha256, arch, &companion.name)
+}
+
+/// The manifest is checked in, but a hand edit or an interrupted bump can leave an arch out; the service must say so rather than panic inside a run.
+fn pinned<'a>(table: &'a BTreeMap<String, String>, arch: Arch, what: &str) -> Result<&'a str> {
+    table
+        .get(&arch.to_string())
+        .map(String::as_str)
+        .with_context(|| format!("mise.toml pins no {what} for {arch}"))
 }
 
 fn release_arch(arch: Arch) -> &'static str {
@@ -122,7 +131,7 @@ pub fn version_index_url(name: &str) -> String {
     format!("{}/{name}", base.trim_end_matches('/'))
 }
 
-/// The fail-loud engine environment: a missing precompiled archive otherwise silently falls back to compiling from source, which cannot work on a bare guest and buries the real error; `CI=1` is the switch mise's version phone-home checks before announcing updates, and every mise path is pinned under /tmp so nothing depends on the guest's HOME layout. The per-tool data and cache dirs are set by the driver, not here.
+/// The fail-loud engine environment: compiling from source cannot work on a bare guest and buries the real error, `CI=1` silences the version phone-home, every mise path is pinned under /tmp, and the per-tool data and cache dirs are the driver's to set.
 pub fn provision_env() -> Vec<(String, String)> {
     [
         ("MISE_PYTHON_COMPILE", "0"),
@@ -175,7 +184,7 @@ mod tests {
                 .engine_url(Arch::X86_64)
                 .ends_with("linux-x64-musl")
         );
-        assert_eq!(manifest().engine_sha256(Arch::Aarch64).len(), 64);
+        assert_eq!(manifest().engine_sha256(Arch::Aarch64).unwrap().len(), 64);
     }
 
     #[test]
@@ -186,7 +195,7 @@ mod tests {
                 .ends_with("/curl-aarch64")
         );
         assert!(manifest().curl_url(Arch::X86_64).ends_with("/curl-amd64"));
-        assert_eq!(manifest().curl_sha256(Arch::X86_64).len(), 64);
+        assert_eq!(manifest().curl_sha256(Arch::X86_64).unwrap().len(), 64);
     }
 
     #[test]
@@ -207,7 +216,7 @@ mod tests {
                 ca.name, ca.version
             )
         );
-        assert_eq!(companion_sha256(ca, Arch::Aarch64).len(), 64);
+        assert_eq!(companion_sha256(ca, Arch::Aarch64).unwrap().len(), 64);
     }
 
     #[test]
@@ -216,11 +225,13 @@ mod tests {
             assert!(
                 manifest()
                     .rootfs_reference(Libc::Musl, arch)
+                    .unwrap()
                     .starts_with("docker.io/library/alpine@sha256:")
             );
             assert!(
                 manifest()
                     .rootfs_reference(Libc::Gnu, arch)
+                    .unwrap()
                     .starts_with("docker.io/library/debian@sha256:")
             );
         }
@@ -235,6 +246,35 @@ mod tests {
         );
         let _guard = crate::test_env::EnvVarGuard::set("LNS_TOOL_INDEX_URL", "http://localhost:9/");
         assert_eq!(version_index_url("node"), "http://localhost:9/node");
+    }
+
+    #[test]
+    fn an_arch_the_manifest_does_not_pin_is_an_error_not_a_panic() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [engine]
+            version = "1.0.0"
+            [engine.sha256]
+            aarch64 = "aa"
+            [provisioner_rootfs.gnu]
+            aarch64 = "debian@sha256:aa"
+            [provisioner_rootfs.musl]
+            aarch64 = "alpine@sha256:bb"
+            [static_curl]
+            version = "8.0.0"
+            [static_curl.sha256]
+            aarch64 = "cc"
+            "#,
+        )
+        .expect("a partial manifest still parses");
+        let err = manifest.engine_sha256(Arch::X86_64).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("pins no engine sha256 for x86_64"),
+            "got: {err:#}"
+        );
+        assert!(manifest.curl_sha256(Arch::X86_64).is_err());
+        assert!(manifest.rootfs_reference(Libc::Musl, Arch::X86_64).is_err());
+        assert!(manifest.engine_sha256(Arch::Aarch64).is_ok());
     }
 
     #[test]
