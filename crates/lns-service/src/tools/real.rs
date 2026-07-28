@@ -7,6 +7,17 @@ use crate::content_store::ContentStore;
 
 static PROVISION_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Installing is serialized service-wide, so a second cold run can wait out the first — up to the driver timeout. Say so instead of looking like a hang.
+async fn serialized_install() -> tokio::sync::MutexGuard<'static, ()> {
+    match PROVISION_LOCK.try_lock() {
+        Ok(held) => held,
+        Err(_) => {
+            crate::log::progress("Waiting", "for another sandbox's tool install", 0, 0);
+            PROVISION_LOCK.lock().await
+        }
+    }
+}
+
 /// Composition root for a run's declared tools: real record store, real cache over the content store, and the mise provisioner. Installing is serialized across the service's runs so two of them provision a shared tool set once — but a run with nothing to install never joins that queue, or it would wait out an unrelated cold provision.
 pub async fn ensure_for_run(
     scratch_id: &str,
@@ -37,7 +48,7 @@ pub async fn ensure_for_run(
     let mut ensured = match warm {
         Some(ensured) => ensured,
         None => {
-            let _serialized = PROVISION_LOCK.lock().await;
+            let _serialized = serialized_install().await;
             let scratch = ScratchGuard(cache_dir.join("runs").join(scratch_id));
             let ensured = ensure_tools(&records, &cache, &provisioner, &ask).await?;
             drop(scratch);
