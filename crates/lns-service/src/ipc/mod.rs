@@ -1902,6 +1902,41 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
+    async fn exec_and_the_workload_compose_the_same_path_for_the_same_tools() {
+        // Two copies of the PATH rule drift into "run finds node, exec does not"; this fails the moment they disagree.
+        let tools = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        let workload = crate::workload_env::run_workload_env(
+            Some(&["PATH=/usr/bin".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &tools,
+        );
+        let workload_path = workload
+            .env
+            .iter()
+            .find(|kv| kv.starts_with("PATH="))
+            .expect("the workload gets a PATH");
+
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        crate::run_registry::set_tool_bin_paths(&run_id, tools.clone());
+        let mut args = exec_args(vec!["node".into()], false, false);
+        args.env = vec!["PATH=/usr/bin".into()];
+        let params = build_session_params(args, &run_id);
+        crate::run_registry::deregister(&run_id);
+
+        assert_eq!(
+            params.env.iter().find(|kv| kv.starts_with("PATH=")),
+            Some(workload_path),
+            "exec must reach the PATH the workload got"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn exec_by_name_sees_the_same_tools_as_exec_by_id() {
         // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
         let run_id = crate::run_registry::allocate_run_id();
