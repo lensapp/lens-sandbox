@@ -74,19 +74,24 @@ pub fn source_host(name: &str, backend: &str) -> Option<String> {
     }
 }
 
+/// Where each `core:` tool's bytes come from. Hand-maintained and emitted as an audit attestation, so it is re-verified against the engine on every bump (see runbooks/mise-bump.md) — a name that stops being core-backed is caught here by test.
+const CORE_SOURCE_HOSTS: &[(&str, &str)] = &[
+    ("node", "nodejs.org"),
+    ("python", "github.com"),
+    ("go", "go.dev"),
+    ("rust", "static.rust-lang.org"),
+    ("java", "api.adoptium.net"),
+    ("deno", "dl.deno.land"),
+    ("bun", "github.com"),
+    ("zig", "ziglang.org"),
+    ("ruby", "cache.ruby-lang.org"),
+];
+
 fn core_source_host(name: &str) -> Option<&'static str> {
-    match name {
-        "node" => Some("nodejs.org"),
-        "python" => Some("github.com"),
-        "go" => Some("go.dev"),
-        "rust" => Some("static.rust-lang.org"),
-        "java" => Some("api.adoptium.net"),
-        "deno" => Some("dl.deno.land"),
-        "bun" => Some("github.com"),
-        "zig" => Some("ziglang.org"),
-        "ruby" => Some("cache.ruby-lang.org"),
-        _ => None,
-    }
+    CORE_SOURCE_HOSTS
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, host)| *host)
 }
 
 pub fn refuse_unprovisionable(requests: &[ToolRef]) -> Result<(), ToolRefusal> {
@@ -203,6 +208,20 @@ mod tests {
             ("sqlcl", "aqua:oracle.com/sqlcl", "oracle.com"),
         ] {
             assert_eq!(source_host(name, backend).as_deref(), Some(host));
+        }
+    }
+
+    #[test]
+    fn every_attested_core_host_belongs_to_a_tool_the_snapshot_still_backs_with_core() {
+        // The table is an attestation the snapshot diff cannot show. If a bump moves a tool off the core backend, the host we claim for it is no longer the host that serves it.
+        for (tool, host) in CORE_SOURCE_HOSTS {
+            let backend = backend_for(tool)
+                .unwrap_or_else(|| panic!("{tool} claims {host} but left the registry"));
+            assert_eq!(
+                backend_kind(backend),
+                "core",
+                "{tool} claims {host} but the snapshot now installs it via {backend}"
+            );
         }
     }
 

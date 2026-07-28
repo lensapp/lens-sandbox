@@ -5,6 +5,19 @@ use anyhow::{Context, Result, bail};
 /// mise's published minisign key (checked into the mise repo as minisign.pub); every SHASUMS256.txt must verify against it before a pin lands.
 pub const MISE_MINISIGN_PUBKEY: &str = "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ";
 
+/// A half-written pin is worse than no bump and the operator's only recovery signal is `git status`, so each file is either the old one or the new one — and a failure leaves no temp file to puzzle over.
+pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("bump-tmp");
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e).with_context(|| format!("replacing {}", path.display()))
+        }
+    }
+}
+
 fn is_download_only(backend: &str) -> bool {
     let kind = backend.split(':').next().unwrap_or(backend);
     lns_artifact::tools::registry::SUPPORTED_BACKEND_KINDS.contains(&kind)
@@ -298,6 +311,46 @@ musl = "docker.io/library/alpine@sha256:dddd"
         )];
         let snapshot = render_registry_snapshot(&entries).unwrap();
         assert!(snapshot.contains("tabular\taqua:owner/tabular\n"));
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_no_temp_behind() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pin = dir.path().join("mise.toml");
+        std::fs::write(&pin, b"old").unwrap();
+
+        write_atomically(&pin, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&pin).unwrap(), b"new");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "mise.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "got: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_failed_atomic_write_leaves_the_previous_pin_and_no_temp() {
+        // The operator's only recovery signal is `git status`, so a half-finished bump must not leave a stray file to puzzle over.
+        let dir = tempfile::TempDir::new().unwrap();
+        let occupied = dir.path().join("snapshot");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), b"in the way").unwrap();
+
+        let err = write_atomically(&occupied, b"new").unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("snapshot"),
+            "the error names the file: {err:#}"
+        );
+        assert!(occupied.join("keep").exists(), "the old state survives");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "snapshot")
+            .collect();
+        assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
     }
 
     #[test]
