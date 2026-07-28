@@ -165,7 +165,6 @@ async fn push_local(
 
 struct RealToolResolver;
 
-const TOOL_INDEX_URL: &str = "https://mise-versions.jdx.dev";
 /// A push must fail with a diagnostic rather than hang against a blackholing proxy, and the index body is a version list, not a download.
 const TOOL_INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const MAX_TOOL_INDEX_BYTES: usize = 8 * 1024 * 1024;
@@ -176,9 +175,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
         tool: &'a lns_artifact::tools::ToolRef,
     ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let base =
-                std::env::var("LNS_TOOL_INDEX_URL").unwrap_or_else(|_| TOOL_INDEX_URL.to_string());
-            let url = format!("{}/{}", base.trim_end_matches('/'), tool.name);
+            let url = lns_artifact::tools::version_index_url(&tool.name);
             let response = reqwest::Client::builder()
                 .timeout(TOOL_INDEX_TIMEOUT)
                 .build()
@@ -193,20 +190,38 @@ impl super::distribute::ToolResolver for RealToolResolver {
                     tool.name
                 );
             }
-            let body = response
+            let response = response
                 .error_for_status()
-                .with_context(|| format!("tool version index at {url}"))?
-                .text()
-                .await
-                .with_context(|| format!("reading the version index at {url}"))?;
-            anyhow::ensure!(
-                body.len() <= MAX_TOOL_INDEX_BYTES,
-                "the version index at {url} returned {} bytes, over the {MAX_TOOL_INDEX_BYTES}-byte limit",
-                body.len()
-            );
+                .with_context(|| format!("tool version index at {url}"))?;
+            // Stop at the limit mid-stream: checking a fully buffered body cannot prevent the allocation it names.
+            let body = capped_body(response, &url, MAX_TOOL_INDEX_BYTES).await?;
             lns_artifact::tools::resolve_from_index(&tool.name, &tool.version, &body)
         })
     }
+}
+
+async fn capped_body(response: reqwest::Response, url: &str, max_bytes: usize) -> Result<String> {
+    use futures_util::StreamExt;
+    let too_big = |seen: usize| {
+        anyhow::anyhow!(
+            "the version index at {url} returned at least {seen} bytes, over the {max_bytes}-byte limit"
+        )
+    };
+    if let Some(declared) = response.content_length()
+        && declared > max_bytes as u64
+    {
+        return Err(too_big(declared as usize));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading the version index at {url}"))?;
+        if body.len() + chunk.len() > max_bytes {
+            return Err(too_big(body.len() + chunk.len()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).with_context(|| format!("the version index at {url} is not text"))
 }
 
 struct RealProducer;

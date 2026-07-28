@@ -70,6 +70,21 @@ fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String, verdi
         .split(',')
         .map(|entry| format!("{:?}", entry.trim().trim_matches('"')))
         .collect();
+    // A live approval session carrying this verdict, so "no card was raised" is asserted against a notifier a policy-consulting provisioner would have driven.
+    let policy = lns_policy::Policy {
+        network: lns_policy::NetworkPolicy {
+            default_verdict: match verdict.as_str() {
+                "deny" => lns_policy::Verdict::Deny,
+                "allow" => lns_policy::Verdict::Allow,
+                _ => lns_policy::Verdict::Ask,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let approval = w.approval();
+    lns_policy::PolicyStore::save(&*approval.store, &policy).expect("staging the run's policy");
+    approval.session.set_policy_floor(policy);
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
         r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"defaultVerdict":"{}","allowedRoutes":[]}},"tools":[{}]}}}}"#,
@@ -80,9 +95,11 @@ fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String, verdi
 
 #[then("the tools are provisioned without any approval card")]
 fn provisioned_without_card(w: &mut BehaviourWorld) -> Result<(), String> {
-    if let Some(approval) = &w.approval
-        && !approval.notifier.presented.lock().unwrap().is_empty()
-    {
+    let approval = w
+        .approval
+        .as_ref()
+        .ok_or("no approval session was staged, so this claim would not be checked")?;
+    if !approval.notifier.presented.lock().unwrap().is_empty() {
         return Err("an approval card was presented".into());
     }
     let rig = w.tools.as_ref().ok_or("no launch happened")?;

@@ -19,8 +19,16 @@ it, so a bump never re-provisions installed tools.
    regenerates `registry.snapshot` (names, aliases, and preferred download
    backends) from the release's `registry/` directory.
 
-2. Review the snapshot diff: renamed tools or backend changes surface here.
-   `crates/lns-service/src/tools/registry.rs` pins the spike-validated names in
+   **What the signature does and does not cover.** The minisign check covers the
+   engine binary's sha256 — the bytes that reach a guest. It does **not** cover
+   the source tarball the snapshot is generated from: upstream publishes no sum
+   for it, so that download is trusted on your review in step 2, not on a
+   signature. The snapshot is both the provisionability allowlist and the source
+   of every `source_host` audit label, so read its diff as security-relevant.
+
+2. Review the snapshot diff: renamed tools or backend changes surface here, and
+   this review is the only control on the tarball the snapshot came from.
+   `crates/lns-artifact/src/tools/registry.rs` pins the spike-validated names in
    its unit tests, so a vanished mainline tool fails `make test`.
 
 3. Companions (`[provisioner_rootfs]`, `[static_curl]`, `[[companion]]` apks)
