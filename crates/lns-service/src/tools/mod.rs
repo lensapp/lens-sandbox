@@ -127,6 +127,21 @@ impl ToolPlan {
     }
 }
 
+/// A blackholing proxy or captive portal answers neither way, so the index query is bounded: the documented fallback to the last version resolved here only holds if a stalled query becomes an error instead of a hung launch.
+const INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn newest_within_budget<P: ToolProvisioner>(
+    provisioner: &P,
+    name: &str,
+) -> anyhow::Result<String> {
+    match tokio::time::timeout(INDEX_BUDGET, provisioner.newest_version(name)).await {
+        Ok(answer) => answer,
+        Err(_) => Err(anyhow::anyhow!(
+            "the version index did not answer within {INDEX_BUDGET:?}"
+        )),
+    }
+}
+
 /// The read-only half: consult the record and the cache for each request, re-asking the index for `@latest`. Nothing is written and no guest boots, so this is safe to run without holding the provision lock.
 async fn plan_tools<R, C, P>(
     records: &R,
@@ -169,7 +184,7 @@ where
             .recorded(&request.to_string())
             .map(|entry| entry.resolved.clone());
         let pinned = match request.version.as_str() {
-            LATEST => match provisioner.newest_version(&request.name).await {
+            LATEST => match newest_within_budget(provisioner, &request.name).await {
                 Ok(newest) => {
                     record_changed |= recorded.as_deref() != Some(newest.as_str());
                     Some(newest)
@@ -460,6 +475,7 @@ mod tests {
         fail: Mutex<Option<(String, String)>>,
         calls: Mutex<Vec<Vec<ToolRef>>>,
         index: Mutex<Option<String>>,
+        index_stalls: Mutex<bool>,
         index_calls: Mutex<u32>,
         drops_everything: Mutex<bool>,
     }
@@ -484,6 +500,11 @@ mod tests {
             self
         }
 
+        fn index_never_answers(self) -> Self {
+            *self.index_stalls.lock().unwrap() = true;
+            self
+        }
+
         fn dropping_every_request(self) -> Self {
             *self.drops_everything.lock().unwrap() = true;
             self
@@ -497,7 +518,13 @@ mod tests {
         ) -> impl Future<Output = anyhow::Result<String>> + Send {
             *self.index_calls.lock().unwrap() += 1;
             let scripted = self.index.lock().unwrap().clone();
-            async move { scripted.ok_or_else(|| anyhow::anyhow!("the version index is unreachable")) }
+            let stalls = *self.index_stalls.lock().unwrap();
+            async move {
+                if stalls {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+                scripted.ok_or_else(|| anyhow::anyhow!("the version index is unreachable"))
+            }
         }
 
         fn provision(
@@ -810,6 +837,43 @@ mod tests {
             unchanged.calls.lock().unwrap().is_empty(),
             "an unchanged @latest is a cache hit — no guest boots"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_index_that_never_answers_falls_back_instead_of_hanging_the_launch() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let online = Scripted::resolving(&[("some-tool", "1.2.3")]).index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &online,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let blackholed = Scripted::resolving(&[("some-tool", "9.9.9")]).index_never_answers();
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &blackholed,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ensured.bin_paths,
+            vec!["/.lens/tools/some-tool/1.2.3/bin"],
+            "the launch proceeds on the last version resolved here"
+        );
+        assert!(blackholed.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
