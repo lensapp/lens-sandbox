@@ -472,7 +472,10 @@ spec:
   assumption than pulling `spec.image`, which only fetches inert layers —
   declare tools you trust as you would a base image you run.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
-  copies. Nothing tool-related persists in the workload's writable layer — the
+  copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
+  `/etc/profile`, which on most images resets `PATH` outright and so discards the
+  tool dirs — run your command without `-l`, or re-export `PATH` yourself.
+  Nothing tool-related persists in the workload's writable layer — the
   per-machine tool cache is a host-side input, not guest state, so a workload
   that shadows a tool in its own overlay affects only that run and never the
   cache other projects read.
