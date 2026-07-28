@@ -17,7 +17,7 @@ pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 
-/// A captured session's two streams, kept apart: the guest writes them down independent fds at arbitrary chunk boundaries, so merging them into one buffer splices a partial stderr line in front of the next stdout line and corrupts anything parsed out of it.
+/// A captured session's two streams, kept apart: the guest writes them down independent fds at arbitrary boundaries, so merging them splices a partial stderr line in front of the next stdout line.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CapturedStreams {
     pub stdout: String,
@@ -39,23 +39,26 @@ impl CaptureBuffers {
         }
     }
 
+    /// Only stdout is parsed, so only stdout is worth failing over; stderr keeps a bounded tail so a chatty install never loses a finished provision to its own progress output.
     pub(super) fn push(&mut self, frame: &WireFrame) -> Result<()> {
-        let (bytes, to_stdout) = match frame {
-            WireFrame::Stdout(bytes) => (bytes, true),
-            WireFrame::Stderr(bytes) => (bytes, false),
-            WireFrame::Json(_) => return Ok(()),
-        };
-        anyhow::ensure!(
-            self.stdout.len() + self.stderr.len() + bytes.len() <= self.max_bytes,
-            "capture output exceeded {} bytes",
-            self.max_bytes
-        );
-        let sink = if to_stdout {
-            &mut self.stdout
-        } else {
-            &mut self.stderr
-        };
-        sink.extend_from_slice(bytes);
+        match frame {
+            WireFrame::Stdout(bytes) => {
+                anyhow::ensure!(
+                    self.stdout.len() + bytes.len() <= self.max_bytes,
+                    "capture output exceeded {} bytes",
+                    self.max_bytes
+                );
+                self.stdout.extend_from_slice(bytes);
+            }
+            WireFrame::Stderr(bytes) => {
+                self.stderr.extend_from_slice(bytes);
+                let overflow = self.stderr.len().saturating_sub(self.max_bytes);
+                if overflow > 0 {
+                    self.stderr.drain(..overflow);
+                }
+            }
+            WireFrame::Json(_) => {}
+        }
         Ok(())
     }
 
@@ -175,14 +178,28 @@ mod tests {
     }
 
     #[test]
-    fn the_capture_cap_counts_both_streams_together() {
-        let mut buffers = CaptureBuffers::new(8);
+    fn only_stdout_overflow_fails_the_capture() {
+        let mut buffers = CaptureBuffers::new(4);
         buffers.push(&WireFrame::Stdout(b"1234".to_vec())).unwrap();
-        buffers.push(&WireFrame::Stderr(b"5678".to_vec())).unwrap();
         let err = buffers
-            .push(&WireFrame::Stdout(b"9".to_vec()))
-            .expect_err("the ninth byte is over the cap");
-        assert!(err.to_string().contains("exceeded 8 bytes"), "got: {err}");
+            .push(&WireFrame::Stdout(b"5".to_vec()))
+            .expect_err("the parsed stream is bounded hard");
+        assert!(err.to_string().contains("exceeded 4 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn a_chatty_stderr_keeps_its_tail_instead_of_failing_the_run() {
+        // A finished multi-tool install must not be thrown away because the engine printed too much progress.
+        let mut buffers = CaptureBuffers::new(4);
+        for chunk in [&b"aaaa"[..], b"bbbb", b"cc"] {
+            buffers.push(&WireFrame::Stderr(chunk.to_vec())).unwrap();
+        }
+        buffers
+            .push(&WireFrame::Stdout(b"LNS_"[..].to_vec()))
+            .unwrap();
+        let captured = buffers.finish();
+        assert_eq!(captured.stderr, "bbcc", "the newest diagnostics survive");
+        assert_eq!(captured.stdout, "LNS_");
     }
 
     #[test]
