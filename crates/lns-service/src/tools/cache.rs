@@ -8,7 +8,7 @@ use super::{StagedTar, StagedTool, ToolCacheKey};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// A provisioned tool tree, ingested into the content store and described entry-by-entry so injection composes specs without re-reading any file body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +21,9 @@ pub struct ToolManifest {
     pub source_host: Option<String>,
     /// Debugging metadata only — never part of the cache key.
     pub engine_version: String,
+    /// Who shared this tree's provisioner guest; a sandbox that does not declare all of them must not reuse it.
+    #[serde(default)]
+    pub co_installed: Vec<String>,
     pub entries: Vec<ManifestEntry>,
     pub bin_paths: Vec<String>,
 }
@@ -98,7 +101,8 @@ fn decode_sha256(digest: &str) -> Result<[u8; 32]> {
 }
 
 pub trait ToolCache {
-    fn lookup(&self, key: &ToolCacheKey) -> Result<Option<ToolManifest>>;
+    /// `declared` is the requesting sandbox's own tool list: a tree is only reused when every tool that shared its guest is one this sandbox declares too.
+    fn lookup(&self, key: &ToolCacheKey, declared: &[String]) -> Result<Option<ToolManifest>>;
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest>;
 }
 
@@ -126,7 +130,7 @@ impl RealToolCache {
 }
 
 impl ToolCache for RealToolCache {
-    fn lookup(&self, key: &ToolCacheKey) -> Result<Option<ToolManifest>> {
+    fn lookup(&self, key: &ToolCacheKey, declared: &[String]) -> Result<Option<ToolManifest>> {
         let dir = self.key_dir(key);
         if !dir.join(".ready").exists() {
             return Ok(None);
@@ -142,6 +146,13 @@ impl ToolCache for RealToolCache {
         };
         // A tree written under different manifest semantics is a miss, not something to reinterpret under today's.
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+            return Ok(None);
+        }
+        if !manifest
+            .co_installed
+            .iter()
+            .all(|neighbour| declared.iter().any(|tool| tool == neighbour))
+        {
             return Ok(None);
         }
         if let Err(e) = validate_tree(&manifest.entries, &manifest.bin_paths) {
@@ -174,6 +185,7 @@ impl ToolCache for RealToolCache {
             backend: staged.backend.clone(),
             source_host: staged.source_host.clone(),
             engine_version: self.engine_version.clone(),
+            co_installed: staged.co_installed.clone(),
             entries,
             bin_paths: staged.bin_paths.clone(),
         };
@@ -417,6 +429,7 @@ mod tests {
         StagedTool {
             name: "some-tool".into(),
             resolved: version("1.2.3"),
+            co_installed: Vec::new(),
             backend: "core:some-tool".into(),
             source_host: Some("upstream.example.test".into()),
             tar: StagedTar::Bytes(tar),
@@ -467,7 +480,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cache = cache(dir.path());
         let manifest = cache.ingest(&key(), &staged(tool_tar())).unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), Some(manifest.clone()));
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), Some(manifest.clone()));
         assert_eq!(manifest.entries.len(), 2, "dirs are skipped");
         assert_eq!(manifest.engine_version, "2026.7.14");
     }
@@ -476,10 +489,10 @@ mod tests {
     fn lookup_misses_before_ingest_and_after_the_tree_is_removed() {
         let dir = tempfile::TempDir::new().unwrap();
         let cache = cache(dir.path());
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
         cache.ingest(&key(), &staged(tool_tar())).unwrap();
         std::fs::remove_dir_all(tree_dir(dir.path())).unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]
@@ -493,12 +506,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&key_dir).unwrap();
         std::fs::write(key_dir.join(".ready"), b"").unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), None, "missing manifest");
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None, "missing manifest");
         std::fs::write(key_dir.join("manifest.json"), b"not json").unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), None, "corrupt manifest");
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None, "corrupt manifest");
         std::fs::remove_file(key_dir.join("manifest.json")).unwrap();
         std::fs::create_dir_all(key_dir.join("manifest.json")).unwrap();
-        assert!(cache.lookup(&key()).is_err(), "unreadable manifest");
+        assert!(cache.lookup(&key(), &[]).is_err(), "unreadable manifest");
     }
 
     #[test]
@@ -737,6 +750,7 @@ mod tests {
                 &StagedTool {
                     name: "some-tool".into(),
                     resolved: version("1.2.3"),
+                    co_installed: Vec::new(),
                     backend: "core:some-tool".into(),
                     source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
@@ -765,6 +779,7 @@ mod tests {
                 &StagedTool {
                     name: "some-tool".into(),
                     resolved: version("1.2.3"),
+                    co_installed: Vec::new(),
                     backend: "core:some-tool".into(),
                     source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
@@ -787,6 +802,40 @@ mod tests {
     }
 
     #[test]
+    fn a_tree_provisioned_beside_other_tools_is_not_adopted_by_a_sandbox_that_lacks_them() {
+        // Every tool in a provision runs its install code as root in one guest, so a neighbour could have tampered with this tree; reuse is only safe for a sandbox that trusts that neighbour too.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut staged = staged(tool_tar());
+        staged.co_installed = vec!["hostile@1".to_string()];
+        cache.ingest(&key(), &staged).unwrap();
+
+        assert_eq!(
+            cache.lookup(&key(), &["some-tool@1".to_string()]).unwrap(),
+            None,
+            "a sandbox declaring only this tool must not adopt a tree a stranger shared a guest with"
+        );
+        assert!(
+            cache
+                .lookup(
+                    &key(),
+                    &["some-tool@1".to_string(), "hostile@1".to_string()]
+                )
+                .unwrap()
+                .is_some(),
+            "a sandbox that declares the neighbour already trusts it"
+        );
+    }
+
+    #[test]
+    fn a_tree_provisioned_alone_is_reusable_by_any_sandbox() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        assert!(cache.lookup(&key(), &[]).unwrap().is_some());
+    }
+
+    #[test]
     fn a_cached_manifest_whose_bin_path_escapes_the_tree_is_a_miss() {
         // bin_paths goes straight onto the workload's PATH — and every later `lns exec` into that run — so a tampered cache file must not be readable.
         let dir = tempfile::TempDir::new().unwrap();
@@ -795,7 +844,7 @@ mod tests {
         tamper_manifest(dir.path(), |raw| {
             raw["bin_paths"] = serde_json::json!(["../../../../../../workspace"]);
         });
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]
@@ -811,7 +860,7 @@ mod tests {
                     "size": 1,
                 }]);
             });
-            assert_eq!(cache.lookup(&key()).unwrap(), None, "path {path}");
+            assert_eq!(cache.lookup(&key(), &[]).unwrap(), None, "path {path}");
         }
     }
 
@@ -829,7 +878,7 @@ mod tests {
                  "size": 1},
             ]);
         });
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]
@@ -849,7 +898,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         raw["resolved"] = serde_json::Value::String("../../..".into());
         std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]
@@ -867,7 +916,7 @@ mod tests {
             .join("manifest.json");
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert_eq!(
-            cache.lookup(&key()).unwrap(),
+            cache.lookup(&key(), &[]).unwrap(),
             None,
             "the tree is re-provisioned rather than read under today's semantics"
         );
@@ -887,7 +936,7 @@ mod tests {
             })
             .unwrap();
         std::fs::remove_file(cache.store.path_for(&digest).unwrap()).unwrap();
-        assert_eq!(cache.lookup(&key()).unwrap(), None);
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]

@@ -324,6 +324,12 @@ pub(crate) fn staged_tools_from_results(
                 resolved: result.resolved.clone(),
                 backend,
                 source_host,
+                // Everything else installed in this guest could have reached this tree; record it so no sandbox reuses the tree without also declaring them.
+                co_installed: requests
+                    .iter()
+                    .filter(|other| other.name != request.name)
+                    .map(ToolRef::to_string)
+                    .collect(),
                 tar: StagedTar::File(staging.join(format!("{}.tar", request.name))),
                 bin_paths: vec![result.bin_path.clone()],
             })

@@ -467,13 +467,12 @@ spec:
   layer or your project's bind mounts. That guest reaches the network freely:
   tool backends are arbitrary upstream hosts, so no allowlist would fit, and it
   runs no policy gate. Every declared tool installs in that one guest, as root,
-  and the tree it produces is cached per machine with no tie to the sandbox that
-  provisioned it — so a tool you declare is trusted by every project that later
-  declares one of its neighbours, not only by the sandbox that declared it, and a
-  poisoned tree persists until you clear the cache. This is a stronger trust
-  assumption than pulling `spec.image`, which only fetches inert layers — declare
-  tools you trust as you would a base image you run, and read an untrusted
-  published sandbox's tool list as something you are adopting machine-wide.
+  so a tool you declare is trusted by the tools declared alongside it. The cache
+  keeps that boundary: a tree records which tools shared its guest, and another
+  sandbox reuses it only if it declares those tools too — so a published sandbox
+  you don't trust cannot hand you a poisoned `node@22`. This is still a stronger
+  trust assumption than pulling `spec.image`, which only fetches inert layers:
+  declare tools you trust as you would a base image you run.
 - On a **musl** image, declaring `node` or `bun` also injects the pinned Alpine
   `libstdc++`/`libgcc` those builds link, at their canonical `/usr/lib` paths. If
   your image ships its own newer copies the injected ones replace them for that

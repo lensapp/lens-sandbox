@@ -73,6 +73,8 @@ pub struct ToolCacheKey {
 pub struct StagedTool {
     pub name: String,
     pub resolved: SafeVersion,
+    /// The other tools that installed in the same provisioner guest, as declared (`name@version`); each of them ran its own install code as root beside this tree.
+    pub co_installed: Vec<String>,
     pub backend: String,
     pub source_host: Option<String>,
     pub tar: StagedTar,
@@ -183,6 +185,8 @@ where
     record.schema_version = record::RECORD_SCHEMA_VERSION;
     record.engine_version = ask.engine_version.to_string();
 
+    // What this sandbox declares is what it already trusts, so it is the yardstick for adopting a tree a neighbour shared a guest with.
+    let declared: Vec<String> = ask.requests.iter().map(ToolRef::to_string).collect();
     let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
     let mut misses: Vec<ToolRef> = Vec::new();
     for request in ask.requests {
@@ -211,12 +215,15 @@ where
         };
         let manifest = match &pinned {
             Some(resolved) => cache
-                .lookup(&ToolCacheKey {
-                    name: request.name.clone(),
-                    resolved: resolved.clone(),
-                    arch: ask.target.arch,
-                    libc: ask.target.libc,
-                })
+                .lookup(
+                    &ToolCacheKey {
+                        name: request.name.clone(),
+                        resolved: resolved.clone(),
+                        arch: ask.target.arch,
+                        libc: ask.target.libc,
+                    },
+                    &declared,
+                )
                 .map_err(|e| ProvisionError::Engine(format!("tool cache lookup: {e:#}")))?,
             None => None,
         };
@@ -455,8 +462,23 @@ mod tests {
     }
 
     impl ToolCache for MemCache {
-        fn lookup(&self, key: &ToolCacheKey) -> anyhow::Result<Option<cache::ToolManifest>> {
-            Ok(self.map.lock().unwrap().get(key).cloned())
+        fn lookup(
+            &self,
+            key: &ToolCacheKey,
+            declared: &[String],
+        ) -> anyhow::Result<Option<cache::ToolManifest>> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .filter(|manifest| {
+                    manifest
+                        .co_installed
+                        .iter()
+                        .all(|neighbour| declared.iter().any(|tool| tool == neighbour))
+                })
+                .cloned())
         }
         fn ingest(
             &self,
@@ -476,6 +498,7 @@ mod tests {
                 backend: staged.backend.clone(),
                 source_host: staged.source_host.clone(),
                 engine_version: "2026.7.14".into(),
+                co_installed: staged.co_installed.clone(),
                 entries: Vec::new(),
                 bin_paths: staged.bin_paths.clone(),
             };
@@ -560,6 +583,11 @@ mod tests {
                     .iter()
                     .map(|request| StagedTool {
                         name: request.name.clone(),
+                        co_installed: requests
+                            .iter()
+                            .filter(|other| other.name != request.name)
+                            .map(ToolRef::to_string)
+                            .collect(),
                         resolved: version(
                             map.get(&request.name)
                                 .map(String::as_str)
