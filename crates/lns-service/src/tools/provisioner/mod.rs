@@ -61,7 +61,7 @@ pub(crate) fn provisioner_runtime_specs(
     specs
 }
 
-/// One shell driver per provision: each tool installs against its own engine state (a tool's install code runs as root here and could otherwise plant a sibling's `installs/<version>/`), tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpath>` marker; any failure names its tool with `LNS_FAIL` and stops.
+/// One shell driver per provision: each tool installs under its own engine state so no install resolves a version a sibling left behind, tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpath>` marker; any failure names its tool with `LNS_FAIL` and stops.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
     let mut script = String::from(
         "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn each_tool_installs_against_its_own_engine_state() {
-        // A tool's install code runs as root here; against a shared data dir it could plant a sibling's installs/<version>/ and have the engine report a genuine install of it.
+        // Separate state per tool, so no install resolves a version a sibling's install left behind; a tool that deliberately writes a sibling's dir still can, since they share the guest as root.
         let script = render_driver(&[tool("node@22"), tool("jq@latest")]);
         assert!(
             script.contains("MISE_DATA_DIR='/tmp/mise/tools/node/data'")
