@@ -34,3 +34,21 @@ Feature: machine-readable output from the list verbs
     Then the exit code is 0
     And the output contains "CPU %"
     And the output contains "88.0 MiB"
+
+  Scenario: sandbox ls json exposes the fields the table has no room for
+    Given the service reports one cached sandbox "hermes:1.4.0"
+    When the user runs sandbox command "ls --format json"
+    Then the exit code is 0
+    And the output is a JSON array of 1 rows
+    And JSON row 0 has "reference" set to "hermes:1.4.0"
+    And JSON row 0 has "sizeBytes" set to 14680064
+    And JSON row 0 has "layers" set to 3
+    And JSON row 0 has "digest" set to "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    And JSON row 0 has "pulled" set to "2026-01-01T00:00:00Z"
+    And JSON row 0 has a null "inUseBy"
+
+  Scenario: sandbox ls with an empty cache is an empty array
+    Given the service reports no cached sandboxes
+    When the user runs sandbox command "ls --format json"
+    Then the exit code is 0
+    And the output is an empty JSON array

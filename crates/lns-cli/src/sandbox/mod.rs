@@ -44,7 +44,7 @@ pub enum SandboxCommand {
         visible_alias = "list",
         about = "List cached sandboxes (pulled or built) in the local store."
     )]
-    Ls,
+    Ls(LsArgs),
     #[command(about = "Run a sandbox in a microVM (the top-level `lns run`).")]
     Run(Box<RunArgs>),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
@@ -71,6 +71,12 @@ pub enum SandboxCommand {
 
 #[derive(clap::Args)]
 pub struct PsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct LsArgs {
     #[command(flatten)]
     pub output: crate::output::OutputArgs,
 }
@@ -393,7 +399,7 @@ where
         SandboxCommand::Pull(args) => pull(svc, args, out).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
         SandboxCommand::Ps(args) => ps(svc, args, out).await,
-        SandboxCommand::Ls => ls(svc, out).await,
+        SandboxCommand::Ls(args) => ls(svc, args, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
@@ -490,7 +496,7 @@ async fn ps<W: std::io::Write>(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PsRow {
+struct PsRow {
     id: String,
     name: String,
     image: String,
@@ -536,11 +542,16 @@ impl crate::output::TableRow for PsRow {
     }
 }
 
-async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+async fn ls<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &LsArgs,
+    out: &mut W,
+) -> Result<i32> {
     match svc.one_shot(Request::ListImages).await? {
         Response::ImageList { mut images } => {
             images.sort_by(|a, b| a.reference.cmp(&b.reference));
-            render_cached_table(out, &images)?;
+            let rows: Vec<SandboxRow> = images.iter().map(SandboxRow::new).collect();
+            crate::output::emit(args.output.format, &rows, out)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -548,18 +559,36 @@ async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result
     }
 }
 
-fn render_cached_table<W: std::io::Write>(
-    out: &mut W,
-    images: &[lns_ipc::ImageInfo],
-) -> Result<()> {
-    let ref_w = "SANDBOX"
-        .len()
-        .max(images.iter().map(|i| i.reference.len()).max().unwrap_or(0));
-    writeln!(out, "{:<ref_w$}  STATE", "SANDBOX")?;
-    for image in images {
-        writeln!(out, "{:<ref_w$}  cached", image.reference)?;
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxRow {
+    reference: String,
+    digest: String,
+    size_bytes: u64,
+    layers: u32,
+    pulled: String,
+    in_use_by: Option<String>,
+}
+
+impl SandboxRow {
+    fn new(image: &lns_ipc::ImageInfo) -> Self {
+        Self {
+            reference: image.reference.clone(),
+            digest: image.digest.clone(),
+            size_bytes: image.size_bytes,
+            layers: image.layers,
+            pulled: image.pulled.clone(),
+            in_use_by: image.in_use_by.clone(),
+        }
     }
-    Ok(())
+}
+
+impl crate::output::TableRow for SandboxRow {
+    const HEADERS: &'static [&'static str] = &["SANDBOX", "STATE"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![self.reference.clone(), "cached".to_string()]
+    }
 }
 
 async fn kill<W: std::io::Write>(
@@ -1360,7 +1389,7 @@ mod tests {
             message: "registry poisoned".into(),
         });
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
     }
 
@@ -1368,8 +1397,16 @@ mod tests {
     async fn ls_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    fn ls_args() -> LsArgs {
+        LsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
     }
 
     fn ps_args() -> PsArgs {

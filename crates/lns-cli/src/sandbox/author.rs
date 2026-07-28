@@ -291,7 +291,11 @@ mod tests {
                 format: crate::output::Format::Table,
             },
         })));
-        assert!(!is_offline(&SandboxCommand::Ls));
+        assert!(!is_offline(&SandboxCommand::Ls(crate::sandbox::LsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        })));
     }
 
     #[test]
