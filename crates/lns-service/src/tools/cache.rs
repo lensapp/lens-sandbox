@@ -194,9 +194,11 @@ impl ToolCache for RealToolCache {
     }
 }
 
-/// Expand a staged tool tar into content-store entries. Fail-closed like fileset ingestion — escaping paths and exotic entry types are refused — but tool trees legitimately carry symlinks (`bin/node -> ../lib/...`), so those are preserved as manifest entries.
+/// Expand a staged tool tar into content-store entries. Fail-closed like fileset ingestion — escaping paths and exotic entry types are refused — but tool trees legitimately carry symlinks (`bin/node -> ../lib/...`) and hardlinks (JDK layouts), so those are preserved as manifest entries.
 fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<ManifestEntry>> {
     let mut entries = Vec::new();
+    let mut by_path: std::collections::HashMap<String, EntryKind> =
+        std::collections::HashMap::new();
     let mut archive = tar::Archive::new(tar);
     for entry in archive.entries().context("reading staged tool tar")? {
         let mut entry = entry.context("reading staged tool entry")?;
@@ -234,22 +236,47 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
             });
             continue;
         }
+        // tar names the second and later copies of a multiply-linked file as a link to the first; the content store already holds those bytes, so the entry resolves to the same digest.
+        if entry_type.is_hard_link() {
+            let target = entry
+                .link_name()
+                .context("reading hardlink target")?
+                .with_context(|| format!("tool hardlink {} has no target", path.display()))?;
+            let kind = by_path
+                .get(&normalized(&target))
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "tool hardlink {} points at {}, which is not in the tree",
+                        path.display(),
+                        target.display()
+                    )
+                })?;
+            entries.push(ManifestEntry {
+                path: rel,
+                mode,
+                kind,
+            });
+            continue;
+        }
         if !entry_type.is_file() {
             bail!(
-                "tool entry {} is neither a regular file, a directory, nor a symlink",
+                "tool entry {} is neither a regular file, a directory, a symlink, nor a hardlink",
                 path.display()
             );
         }
         let installed = store
             .install_from_reader(&mut entry)
             .with_context(|| format!("installing tool entry {}", path.display()))?;
+        let kind = EntryKind::Regular {
+            digest: installed.digest,
+            size: installed.size,
+        };
+        by_path.insert(rel.clone(), kind.clone());
         entries.push(ManifestEntry {
             path: rel,
             mode,
-            kind: EntryKind::Regular {
-                digest: installed.digest,
-                size: installed.size,
-            },
+            kind,
         });
     }
     Ok(entries)
@@ -401,6 +428,59 @@ mod tests {
         let err = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap_err();
         assert!(
             format!("{err:#}").contains("control characters"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_hardlinked_file_resolves_to_the_digest_already_ingested() {
+        // GNU and busybox tar both name the second copy of a multiply-linked file as a type-1 link; JDK trees ship them.
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"elf";
+        let mut first = tar::Header::new_gnu();
+        first.set_path("bin/java").unwrap();
+        first.set_size(payload.len() as u64);
+        first.set_mode(0o755);
+        first.set_cksum();
+        builder.append(&first, &payload[..]).unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Link);
+        link.set_path("bin/javac").unwrap();
+        link.set_link_name("bin/java").unwrap();
+        link.set_size(0);
+        link.set_mode(0o755);
+        link.set_cksum();
+        builder.append(&link, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let manifest = cache.ingest(&key(), &staged(tar)).unwrap();
+        assert_eq!(manifest.entries.len(), 2);
+        assert_eq!(
+            manifest.entries[0].kind, manifest.entries[1].kind,
+            "the link carries the same content as the file it points at"
+        );
+        assert_eq!(manifest.entries[1].path, "bin/javac");
+    }
+
+    #[test]
+    fn a_hardlink_to_something_outside_the_tree_is_refused_by_name() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Link);
+        link.set_path("bin/javac").unwrap();
+        link.set_link_name("/etc/shadow").unwrap();
+        link.set_size(0);
+        link.set_mode(0o755);
+        link.set_cksum();
+        builder.append(&link, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not in the tree"),
             "got: {err:#}"
         );
     }
