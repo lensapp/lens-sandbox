@@ -65,14 +65,14 @@ pub fn compose_workload_env(
 pub const GUEST_DEFAULT_PATH: &str =
     "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// The one PATH rule for a guest that has declared tools: the tool dirs win over whatever the image (or `-e`) composed, and `lns exec` into the same guest must reach the same answer — two copies of this drift into exactly the "run finds node, exec does not" bug.
-pub fn prepend_tool_paths(env: &mut Vec<String>, tool_bin_paths: &[String]) {
-    if tool_bin_paths.is_empty() {
+/// The one PATH rule for a guest: declared tool dirs win over whatever the image (or `-e`) composed, and no blank segment survives either way. `lns exec` into the same guest applies this same rule, so the tool dirs it resolves match the workload's — two copies of this drift into exactly the "run finds node, exec does not" bug.
+pub fn compose_guest_path(env: &mut Vec<String>, tool_bin_paths: &[String]) {
+    let declared = env.iter().find_map(|kv| kv.strip_prefix("PATH="));
+    // Nothing to prepend and nothing to sanitize: lns-init already exports the default, so composing one here would only duplicate it.
+    if tool_bin_paths.is_empty() && declared.is_none() {
         return;
     }
-    let existing = env
-        .iter()
-        .find_map(|kv| kv.strip_prefix("PATH="))
+    let existing = declared
         .filter(|path| !path.is_empty())
         .unwrap_or(GUEST_DEFAULT_PATH)
         .to_string();
@@ -107,7 +107,7 @@ pub fn run_workload_env(
     const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
-    prepend_tool_paths(&mut composed.env, tool_bin_paths);
+    compose_guest_path(&mut composed.env, tool_bin_paths);
     if let Some(agent_command) = agent_command {
         // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
@@ -376,6 +376,31 @@ mod tests {
             &["/t/bin".into()],
         );
         assert_eq!(c.env, ["PATH=/t/bin:/usr/bin"]);
+    }
+
+    #[test]
+    fn a_blank_image_path_segment_is_dropped_even_with_no_declared_tools() {
+        // The cwd-on-PATH hazard comes from the image, so the sanitation cannot be a side effect of happening to declare a tool.
+        let c = run_workload_env(
+            Some(&["PATH=/usr/bin::/usr/bin".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(c.env, ["PATH=/usr/bin"]);
+    }
+
+    #[test]
+    fn a_run_with_no_tools_and_no_image_path_is_left_to_the_kernel_default() {
+        // Composing one here would put a second copy of the same value in the env for no reason; lns-init already exports it.
+        let c = run_workload_env(None, &[], None, None, &[], &[]);
+        assert!(
+            !c.env.iter().any(|kv| kv.starts_with("PATH=")),
+            "got: {:?}",
+            c.env
+        );
     }
 
     #[test]
