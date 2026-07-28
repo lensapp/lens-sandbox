@@ -26,6 +26,7 @@ pub fn fresh_handle(
         status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
         logs: std::sync::Arc::new(lns_service::run_log::RunLogBuffer::default()),
         config,
+        tool_bin_paths: Vec::new(),
     }
 }
 

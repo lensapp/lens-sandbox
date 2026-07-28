@@ -468,12 +468,35 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
     Ok(())
 }
 
+/// `lns exec` enters the run's own guest, so it must see the run's own PATH: the broker inherits the kernel default, which carries no tool dirs.
+fn exec_env(mut env: Vec<String>, tool_bin_paths: &[String]) -> Vec<String> {
+    if tool_bin_paths.is_empty() {
+        return env;
+    }
+    let existing = env
+        .iter()
+        .find_map(|kv| kv.strip_prefix("PATH="))
+        .filter(|path| !path.is_empty())
+        .unwrap_or(crate::workload_env::GUEST_DEFAULT_PATH)
+        .to_string();
+    let value = format!(
+        "PATH={}",
+        crate::workload_env::join_path(tool_bin_paths, &existing)
+    );
+    match env.iter_mut().find(|kv| kv.starts_with("PATH=")) {
+        Some(slot) => *slot = value,
+        None => env.push(value),
+    }
+    env
+}
+
 pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
 ) -> crate::vm::session_client::SessionParams {
+    let env = exec_env(args.env, &crate::run_registry::tool_bin_paths(&args.run));
     crate::vm::session_client::SessionParams {
         argv: args.argv,
-        env: args.env,
+        env,
         cwd: None,
         hostname: None,
         tty: args.tty,
@@ -919,6 +942,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                tool_bin_paths: Vec::new(),
             },
         );
 
@@ -1278,6 +1302,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            tool_bin_paths: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
         let resp = handle_request(
@@ -1312,6 +1337,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            tool_bin_paths: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1367,6 +1393,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            tool_bin_paths: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1455,6 +1482,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                tool_bin_paths: Vec::new(),
             },
         );
     }
@@ -1802,6 +1830,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                tool_bin_paths: Vec::new(),
             },
         );
 
@@ -1887,6 +1916,37 @@ mod tests {
     fn build_session_params_leaves_winsize_unset_when_absent() {
         let params = build_session_params(exec_args(vec!["echo".into()], false, false));
         assert!(params.initial_winsize.is_none());
+    }
+
+    #[test]
+    fn exec_sees_the_runs_tools_on_its_path() {
+        // Same guest, same binaries: `lns run` finding node and `lns exec` reporting "not found" is the bug.
+        let env = exec_env(
+            vec!["FOO=bar".into()],
+            &["/.lens/tools/node/22.11.0/bin".to_string()],
+        );
+        assert_eq!(
+            env,
+            vec![
+                "FOO=bar".to_string(),
+                format!(
+                    "PATH=/.lens/tools/node/22.11.0/bin:{}",
+                    crate::workload_env::GUEST_DEFAULT_PATH
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_keeps_the_callers_path_ahead_of_nothing_when_no_tools_are_declared() {
+        assert_eq!(
+            exec_env(vec!["PATH=/usr/bin".into()], &[]),
+            vec!["PATH=/usr/bin".to_string()]
+        );
+        assert_eq!(
+            exec_env(vec!["PATH=/usr/bin".into()], &["/t/bin".to_string()]),
+            vec!["PATH=/t/bin:/usr/bin".to_string()]
+        );
     }
 
     #[tokio::test]

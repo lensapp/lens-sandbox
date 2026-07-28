@@ -560,6 +560,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
             logs,
             config,
+            tool_bin_paths: Vec::new(),
         },
     );
     match registered {

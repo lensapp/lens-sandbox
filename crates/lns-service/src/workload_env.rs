@@ -66,7 +66,7 @@ pub const GUEST_DEFAULT_PATH: &str =
     "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// An empty PATH segment is the current directory to `execvp`, so a blank entry — from `PATH=` in the image config, or a stray `::` — must never survive into the workload's PATH.
-fn join_path(tool_bin_paths: &[String], existing: &str) -> String {
+pub fn join_path(tool_bin_paths: &[String], existing: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     tool_bin_paths
         .iter()

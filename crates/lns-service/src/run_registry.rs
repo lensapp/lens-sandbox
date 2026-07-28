@@ -30,6 +30,8 @@ pub struct RunHandle {
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
     pub config: lns_ipc::RunConfig,
+    /// Where this run's declared tools landed in its guest, so `lns exec` into the same guest sees the same PATH the workload does.
+    pub tool_bin_paths: Vec<String>,
 }
 
 pub fn allocate_run_id() -> String {
@@ -194,6 +196,21 @@ pub fn connector(run_id: &str) -> Option<std::sync::Arc<dyn GuestTransport>> {
     g.as_ref()
         .and_then(|m| m.get(run_id))
         .and_then(|h| h.connector.clone())
+}
+
+pub fn tool_bin_paths(run_id: &str) -> Vec<String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(run_id))
+        .map(|h| h.tool_bin_paths.clone())
+        .unwrap_or_default()
+}
+
+pub fn set_tool_bin_paths(run_id: &str, paths: Vec<String>) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+        h.tool_bin_paths = paths;
+    }
 }
 
 pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>) {
@@ -389,6 +406,7 @@ mod tests {
                 status: std::sync::Mutex::new(RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                tool_bin_paths: Vec::new(),
             },
             cancel_rx,
         )
