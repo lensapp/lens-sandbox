@@ -46,6 +46,8 @@ pub struct PolicyScopeArgs {
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -124,28 +126,44 @@ fn list_rules(args: &PolicyScopeArgs, cwd: &Path, writer: &mut impl Write) -> Re
     let path = policy_path(args.policy.as_deref(), cwd);
     let policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
-    let routes = &policy.network.allowed_routes;
-    if routes.is_empty() {
-        writeln!(writer, "No rules in {}", path.display())?;
-        return Ok(0);
-    }
-    for rule in routes {
-        match &rule.description {
-            Some(desc) => writeln!(
-                writer,
-                "{}  {}  ({desc})",
-                verdict_word(rule.verdict),
-                rule.match_pattern
-            )?,
-            None => writeln!(
-                writer,
-                "{}  {}",
-                verdict_word(rule.verdict),
-                rule.match_pattern
-            )?,
+    let rows: Vec<RuleRow> = policy
+        .network
+        .allowed_routes
+        .iter()
+        .map(RuleRow::new)
+        .collect();
+    let note = format!("No rules in {}", path.display());
+    crate::output::emit_or_note(args.output.format, &rows, &note, writer)?;
+    Ok(0)
+}
+
+#[derive(serde::Serialize)]
+struct RuleRow {
+    verdict: &'static str,
+    pattern: String,
+    description: Option<String>,
+}
+
+impl RuleRow {
+    fn new(rule: &RouteRule) -> Self {
+        Self {
+            verdict: verdict_word(rule.verdict),
+            pattern: rule.match_pattern.clone(),
+            description: rule.description.clone(),
         }
     }
-    Ok(0)
+}
+
+impl crate::output::TableRow for RuleRow {
+    const HEADERS: &'static [&'static str] = &["VERDICT", "PATTERN", "DESCRIPTION"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.verdict.to_string(),
+            self.pattern.clone(),
+            self.description.clone().unwrap_or_default(),
+        ]
+    }
 }
 
 fn remove_rule(args: &PolicyRemoveArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -287,19 +305,26 @@ mod tests {
         });
         policy.save_atomic(&path).unwrap();
         let mut out = Vec::new();
-        list_rules(&PolicyScopeArgs { policy: None }, dir.path(), &mut out).unwrap();
+        list_rules(&scope_args(), dir.path(), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.contains("ask  ask.example  (undecided)"),
-            "got: {text}"
-        );
+        assert!(text.contains("VERDICT  PATTERN"), "got: {text}");
+        assert!(text.contains("ask      ask.example  undecided"), "got: {text}");
+    }
+
+    fn scope_args() -> PolicyScopeArgs {
+        PolicyScopeArgs {
+            policy: None,
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
     }
 
     #[test]
     fn list_reports_no_rules_for_an_empty_policy() {
         let dir = TempDir::new().unwrap();
         let mut out = Vec::new();
-        list_rules(&PolicyScopeArgs { policy: None }, dir.path(), &mut out).unwrap();
+        list_rules(&scope_args(), dir.path(), &mut out).unwrap();
         assert!(String::from_utf8(out).unwrap().starts_with("No rules in "));
     }
 
