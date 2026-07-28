@@ -61,7 +61,22 @@ pub fn compose_workload_env(
     }
 }
 
-const GUEST_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The PATH lns-init hands the guest; the workload inherits the same one so declared tools never silently drop the guest-tools dir the kernel PATH carries.
+pub const GUEST_DEFAULT_PATH: &str =
+    "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// An empty PATH segment is the current directory to `execvp`, so a blank entry — from `PATH=` in the image config, or a stray `::` — must never survive into the workload's PATH.
+fn join_path(tool_bin_paths: &[String], existing: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    tool_bin_paths
+        .iter()
+        .map(String::as_str)
+        .chain(existing.split(':'))
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| seen.insert(*segment))
+        .collect::<Vec<&str>>()
+        .join(":")
+}
 
 pub fn run_workload_env(
     image_env: Option<&[String]>,
@@ -79,9 +94,10 @@ pub fn run_workload_env(
             .env
             .iter()
             .find_map(|kv| kv.strip_prefix("PATH="))
+            .filter(|path| !path.is_empty())
             .unwrap_or(GUEST_DEFAULT_PATH)
             .to_string();
-        let value = format!("PATH={}:{existing}", tool_bin_paths.join(":"));
+        let value = format!("PATH={}", join_path(tool_bin_paths, &existing));
         match composed.env.iter_mut().find(|kv| kv.starts_with("PATH=")) {
             Some(slot) => *slot = value,
             None => composed.env.push(value),
@@ -328,6 +344,41 @@ mod tests {
     fn tool_bin_paths_extend_the_guest_default_when_the_image_sets_no_path() {
         let c = run_workload_env(None, &[], None, None, &[], &["/t/bin".into()]);
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
+    }
+
+    #[test]
+    fn an_empty_image_path_never_leaves_the_current_directory_on_the_workload_path() {
+        // A blank PATH segment is the cwd to execvp, and the workdir is usually a writable project bind.
+        let c = run_workload_env(
+            Some(&["PATH=".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &["/t/bin".into()],
+        );
+        assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
+    }
+
+    #[test]
+    fn blank_and_duplicate_path_segments_are_dropped() {
+        let c = run_workload_env(
+            Some(&["PATH=/usr/bin::/t/bin:/usr/bin".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &["/t/bin".into()],
+        );
+        assert_eq!(c.env, ["PATH=/t/bin:/usr/bin"]);
+    }
+
+    #[test]
+    fn the_guest_default_path_carries_the_guest_tools_dir() {
+        // The workload inherits the kernel PATH, so declaring a tool must not drop /.lens/bin as a side effect.
+        assert!(GUEST_DEFAULT_PATH.starts_with("/.lens/bin:"));
+        let c = run_workload_env(None, &[], None, None, &[], &["/t/bin".into()]);
+        assert!(c.env[0].contains("/.lens/bin"), "got: {:?}", c.env[0]);
     }
 
     #[test]

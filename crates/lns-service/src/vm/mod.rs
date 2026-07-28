@@ -140,7 +140,7 @@ impl ExecSpec {
         ));
         kernel_env.push((
             "PATH".into(),
-            "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            crate::workload_env::GUEST_DEFAULT_PATH.into(),
         ));
 
         ExecSpec { kernel_env }
