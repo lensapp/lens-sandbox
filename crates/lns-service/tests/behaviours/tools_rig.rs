@@ -129,7 +129,7 @@ impl ToolProvisioner for ScriptedProvisioner {
                 };
                 StagedTool {
                     name: request.name.clone(),
-                    resolved,
+                    resolved: resolved.parse().expect("a usable version"),
                     backend: format!("core:{}", request.name),
                     source_host: "upstream.example.test".into(),
                     tar: StagedTar::Bytes(Vec::new()),
