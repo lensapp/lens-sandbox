@@ -5,6 +5,16 @@ use anyhow::{Result, bail};
 /// The one version keyword the spec accepts: it re-resolves on every run rather than pinning.
 pub const LATEST: &str = "latest";
 
+/// Whether a resolved version is safe to use as a path component. Both the version index and the provisioner driver answer with strings that become directories in the host cache and the guest layer, and neither is more trusted than the other.
+pub fn is_safe_version(version: &str) -> bool {
+    !version.is_empty()
+        && version != "."
+        && version != ".."
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
 /// A portable declared tool: `name@version`, where version may be fuzzy (`22`) or `latest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRef {
@@ -72,7 +82,10 @@ pub fn resolve_from_index(name: &str, version: &str, index_body: &str) -> Result
             .rfind(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
     };
     match resolved {
-        Some(exact) => Ok(exact.to_string()),
+        Some(exact) if is_safe_version(exact) => Ok(exact.to_string()),
+        Some(unusable) => bail!(
+            "the version index answered {unusable:?} for {name}, which is not a usable version"
+        ),
         None => bail!(
             "no published version of {name} matches {version:?}; newest in the index is {}",
             lines.last().unwrap_or(&"")
@@ -238,6 +251,22 @@ mod tests {
         let body = "22.9.0\n22.11.0\n";
         assert_eq!(
             resolve_from_index("node", "22.11.0", body).unwrap(),
+            "22.11.0"
+        );
+    }
+
+    #[test]
+    fn an_index_answer_that_could_escape_the_cache_tree_is_refused() {
+        // The body is third-party and `latest` only skips alphabetic lines, so a traversal answer passes that filter.
+        for body in ["../..\n", "22./../..\n", "..\n", "22/11\n"] {
+            let err = resolve_from_index("node", LATEST, body).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a usable version"),
+                "body {body:?}: got: {err:#}"
+            );
+        }
+        assert_eq!(
+            resolve_from_index("node", LATEST, "22.11.0\n").unwrap(),
             "22.11.0"
         );
     }
