@@ -28,6 +28,16 @@ it, so a bump never re-provisions installed tools.
 
 2. Review the snapshot diff: renamed tools or backend changes surface here, and
    this review is the only control on the tarball the snapshot came from.
+
+   **Also re-check `core_source_host`** in
+   `crates/lns-artifact/src/tools/registry.rs`. It is a hand-maintained table of
+   where each `core:` tool's bytes come from, and it is emitted as `lns_source`
+   in the audit chain — an attestation. Nothing links it to the engine's actual
+   download hosts and it does not appear in the snapshot diff, so a release that
+   moves one (say `java` off `api.adoptium.net`) would leave the chain asserting
+   the old origin indefinitely. For each entry in that table, confirm the pinned
+   engine still fetches that tool from that host; drop the entry rather than
+   guess, since `None` means "not claimed" and is always safe.
    `crates/lns-artifact/src/tools/registry.rs` pins the spike-validated names in
    its unit tests, so a vanished mainline tool fails `make test`.
 
