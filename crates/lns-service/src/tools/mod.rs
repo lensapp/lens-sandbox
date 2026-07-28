@@ -113,8 +113,22 @@ pub struct EnsuredTools {
     pub provisioned: Vec<ProvisionOutcome>,
 }
 
-/// Provision-or-reuse for a declared tool set: a bounded request pins to the version it first resolved to, `@latest` re-asks the index every run, cache hits contribute specs without booting anything, and every miss goes to the provisioner in one call.
-pub async fn ensure_tools<R, C, P>(
+/// What a declared tool set needs before it can be injected: the trees already cached, the requests that still have to be installed, and the record as the plan left it.
+struct ToolPlan {
+    record: record::ResolvedRecord,
+    hits: HashMap<String, cache::ToolManifest>,
+    misses: Vec<ToolRef>,
+    record_changed: bool,
+}
+
+impl ToolPlan {
+    fn is_fully_warm(&self) -> bool {
+        self.misses.is_empty() && !self.record_changed
+    }
+}
+
+/// The read-only half: consult the record and the cache for each request, re-asking the index for `@latest`. Nothing is written and no guest boots, so this is safe to run without holding the provision lock.
+async fn plan_tools<R, C, P>(
     records: &R,
     cache: &C,
     provisioner: &P,
@@ -122,7 +136,7 @@ pub async fn ensure_tools<R, C, P>(
     target: &ProvisionTarget,
     engine_version: &str,
     now_unix_secs: u64,
-) -> Result<EnsuredTools, ProvisionError>
+) -> Result<ToolPlan, ProvisionError>
 where
     R: ToolRecordStore,
     C: ToolCache,
@@ -132,12 +146,13 @@ where
         .load()
         .map_err(|e| ProvisionError::Engine(format!("loading the tool record: {e:#}")))?
         .unwrap_or_default();
+    let mut record_changed = record.schema_version != record::RECORD_SCHEMA_VERSION
+        || record.engine_version != engine_version;
     record.schema_version = record::RECORD_SCHEMA_VERSION;
     record.engine_version = engine_version.to_string();
 
     let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
     let mut misses: Vec<ToolRef> = Vec::new();
-    let mut record_refreshed = false;
     for request in requests {
         let recorded = record
             .recorded(&request.to_string())
@@ -145,7 +160,7 @@ where
         let pinned = match request.version.as_str() {
             LATEST => match provisioner.newest_version(&request.name).await {
                 Ok(newest) => {
-                    record_refreshed |= recorded.as_deref() != Some(newest.as_str());
+                    record_changed |= recorded.as_deref() != Some(newest.as_str());
                     Some(newest)
                 }
                 Err(e) => {
@@ -190,6 +205,100 @@ where
             }),
         }
     }
+    Ok(ToolPlan {
+        record,
+        hits,
+        misses,
+        record_changed,
+    })
+}
+
+fn compose(
+    requests: &[ToolRef],
+    hits: &HashMap<String, cache::ToolManifest>,
+    provisioned: Vec<ProvisionOutcome>,
+) -> Result<EnsuredTools, ProvisionError> {
+    let mut specs = Vec::new();
+    let mut bin_paths = Vec::new();
+    for request in requests {
+        let manifest = hits
+            .get(&request.name)
+            .ok_or_else(|| ProvisionError::Engine(format!("no manifest for {request}")))?;
+        specs.extend(
+            manifest
+                .runtime_specs()
+                .map_err(|e| ProvisionError::Engine(format!("composing {request}: {e:#}")))?,
+        );
+        bin_paths.extend(manifest.guest_bin_paths());
+    }
+    Ok(EnsuredTools {
+        specs,
+        bin_paths,
+        provisioned,
+    })
+}
+
+/// A run whose tools are all cached and whose record needs no update: `Some` means it can be injected without touching the provisioner, so the caller never has to queue behind another run's install.
+pub async fn ensure_warm_tools<R, C, P>(
+    records: &R,
+    cache: &C,
+    provisioner: &P,
+    requests: &[ToolRef],
+    target: &ProvisionTarget,
+    engine_version: &str,
+    now_unix_secs: u64,
+) -> Result<Option<EnsuredTools>, ProvisionError>
+where
+    R: ToolRecordStore,
+    C: ToolCache,
+    P: ToolProvisioner,
+{
+    let plan = plan_tools(
+        records,
+        cache,
+        provisioner,
+        requests,
+        target,
+        engine_version,
+        now_unix_secs,
+    )
+    .await?;
+    if !plan.is_fully_warm() {
+        return Ok(None);
+    }
+    compose(requests, &plan.hits, Vec::new()).map(Some)
+}
+
+/// Provision-or-reuse for a declared tool set: a bounded request pins to the version it first resolved to, `@latest` re-asks the index every run, cache hits contribute specs without booting anything, and every miss goes to the provisioner in one call.
+pub async fn ensure_tools<R, C, P>(
+    records: &R,
+    cache: &C,
+    provisioner: &P,
+    requests: &[ToolRef],
+    target: &ProvisionTarget,
+    engine_version: &str,
+    now_unix_secs: u64,
+) -> Result<EnsuredTools, ProvisionError>
+where
+    R: ToolRecordStore,
+    C: ToolCache,
+    P: ToolProvisioner,
+{
+    let ToolPlan {
+        mut record,
+        mut hits,
+        misses,
+        mut record_changed,
+    } = plan_tools(
+        records,
+        cache,
+        provisioner,
+        requests,
+        target,
+        engine_version,
+        now_unix_secs,
+    )
+    .await?;
 
     let mut provisioned = Vec::new();
     if !misses.is_empty() {
@@ -235,32 +344,14 @@ where
             });
             hits.insert(tool.name.clone(), manifest);
         }
-        record_refreshed = true;
+        record_changed = true;
     }
-    if record_refreshed {
+    if record_changed {
         records
             .save(&record)
             .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
     }
-
-    let mut specs = Vec::new();
-    let mut bin_paths = Vec::new();
-    for request in requests {
-        let manifest = hits
-            .get(&request.name)
-            .ok_or_else(|| ProvisionError::Engine(format!("no manifest for {request}")))?;
-        specs.extend(
-            manifest
-                .runtime_specs()
-                .map_err(|e| ProvisionError::Engine(format!("composing {request}: {e:#}")))?,
-        );
-        bin_paths.extend(manifest.guest_bin_paths());
-    }
-    Ok(EnsuredTools {
-        specs,
-        bin_paths,
-        provisioned,
-    })
+    compose(requests, &hits, provisioned)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -488,6 +579,106 @@ mod tests {
             ]
         );
         assert_eq!(*records.saves.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_fully_cached_set_is_injectable_without_the_provisioner_or_the_install_queue() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &refs(&["some-tool@1"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let warm = Scripted::default();
+        let ensured = ensure_warm_tools(
+            &records,
+            &cache,
+            &warm,
+            &refs(&["some-tool@1"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap()
+        .expect("a cached set needs no install");
+        assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/1.2.3/bin"]);
+        assert!(ensured.provisioned.is_empty(), "nothing was fetched");
+        assert!(warm.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            *records.saves.lock().unwrap(),
+            1,
+            "the warm pass writes nothing, so it needs no lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_set_with_anything_missing_defers_to_the_serialized_install() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        assert!(
+            ensure_warm_tools(
+                &records,
+                &cache,
+                &cold,
+                &refs(&["some-tool@1"]),
+                &target(),
+                "2026.7.14",
+                1_700_000_000,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "an uncached tool is not warm"
+        );
+        assert!(
+            cold.calls.lock().unwrap().is_empty(),
+            "the warm pass never provisions — it reports that it cannot"
+        );
+        assert_eq!(*records.saves.lock().unwrap(), 0, "and never writes");
+    }
+
+    #[tokio::test]
+    async fn a_cached_set_whose_engine_moved_on_is_not_warm() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &refs(&["some-tool@1"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert!(
+            ensure_warm_tools(
+                &records,
+                &cache,
+                &Scripted::default(),
+                &refs(&["some-tool@1"]),
+                &target(),
+                "2026.8.01",
+                1_700_000_009,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the record still names the old engine, so the write has to happen under the lock"
+        );
     }
 
     #[tokio::test]
