@@ -493,19 +493,60 @@ pub async fn prune() -> Result<PruneReport> {
 
 #[cfg(test)]
 mod tests {
+    fn warnings_from(body: impl FnOnce()) -> String {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0.lock().unwrap().push(message.0);
+            }
+        }
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, body);
+        capture.0.lock().unwrap().join("\n")
+    }
+
     #[test]
-    fn a_failed_tool_pre_provision_warns_and_keeps_the_pull() {
-        let subscriber = tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(std::io::sink)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(()));
+    fn a_failed_tool_pre_provision_warns_with_the_image_and_the_cause() {
+        let warned = warnings_from(|| {
             warn_if_tools_unprovisioned(
                 "ghcr.io/team/hermes:1.4.0",
                 Err(anyhow::anyhow!("the version index is unreachable")),
             );
         });
+        assert!(
+            warned.contains("ghcr.io/team/hermes:1.4.0")
+                && warned.contains("the version index is unreachable")
+                && warned.contains("first run needs the network"),
+            "the operator learns which sandbox and why: {warned}"
+        );
+    }
+
+    #[test]
+    fn a_provisioned_pull_says_nothing() {
+        let quiet =
+            warnings_from(|| warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(())));
+        assert!(quiet.is_empty(), "got: {quiet}");
     }
 
     use super::*;

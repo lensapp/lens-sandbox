@@ -22,7 +22,7 @@ impl ToolProvisioner for MiseProvisioner {
     fn newest_version(&self, name: &str) -> impl Future<Output = Result<String>> + Send {
         let name = name.to_string();
         async move {
-            let url = mise::version_index_url(&name);
+            let url = lns_artifact::tools::version_index_url(&name);
             let body = RealFetcher {
                 max_bytes: MAX_INDEX_BYTES,
             }

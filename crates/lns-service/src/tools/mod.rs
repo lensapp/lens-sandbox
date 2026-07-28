@@ -127,14 +127,6 @@ impl ToolPlan {
     }
 }
 
-/// A version that names every component of a release needs no resolution, so its cache key is fully determined by the request.
-fn is_exact(version: &str) -> bool {
-    version.split('.').count() >= 3
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
-}
-
 /// A blackholing proxy or captive portal answers neither way, so the index query is bounded: the documented fallback to the last version resolved here only holds if a stalled query becomes an error instead of a hung launch.
 const INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -206,7 +198,9 @@ where
                 }
             },
             // An exact request is its own pin, so a pulled sandbox starts from the cache even when the record was lost.
-            version if is_exact(version) => recorded.or_else(|| version.parse().ok()),
+            version if lns_artifact::tools::is_exact_version(version) => {
+                recorded.or_else(|| version.parse().ok())
+            }
             _ => recorded,
         };
         let manifest = match &pinned {

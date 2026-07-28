@@ -65,6 +65,24 @@ impl AsRef<std::path::Path> for SafeVersion {
     }
 }
 
+/// A version already names every component of a release, so nothing is left for the index to resolve and its cache key is fully determined by the request. `push` uses it to skip the index; the run path uses it to address the cache without a record — they are two halves of one contract and must not drift.
+pub fn is_exact_version(version: &str) -> bool {
+    version != LATEST
+        && version.split('.').count() >= 3
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
+}
+
+const VERSION_INDEX_URL: &str = "https://mise-versions.jdx.dev";
+
+/// The public index a fuzzy version resolves against; the override is what the e2e suite points at a local fixture.
+pub fn version_index_url(name: &str) -> String {
+    let base =
+        std::env::var("LNS_TOOL_INDEX_URL").unwrap_or_else(|_| VERSION_INDEX_URL.to_string());
+    format!("{}/{name}", base.trim_end_matches('/'))
+}
+
 /// A portable declared tool: `name@version`, where version may be fuzzy (`22`) or `latest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRef {
@@ -162,6 +180,33 @@ pub fn parse_all(entries: &[String]) -> Result<Vec<ToolRef>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_version_index_url_names_the_tool_and_honors_the_override() {
+        // SAFETY: #[serial(env)] is the whole-process lock for env mutation, and this test owns this key.
+        unsafe { std::env::remove_var("LNS_TOOL_INDEX_URL") };
+        assert_eq!(
+            version_index_url("node"),
+            "https://mise-versions.jdx.dev/node"
+        );
+        // SAFETY: as above.
+        unsafe { std::env::set_var("LNS_TOOL_INDEX_URL", "http://localhost:9/") };
+        assert_eq!(version_index_url("node"), "http://localhost:9/node");
+        // SAFETY: as above; leaves the key as this test found it.
+        unsafe { std::env::remove_var("LNS_TOOL_INDEX_URL") };
+    }
+
+    #[test]
+    fn an_exact_version_is_the_pin_both_sides_recognize() {
+        // push skips the index on these and the run path addresses the cache with them, so the two halves must agree.
+        for exact in ["22.11.0", "3.12.6", "1.0.0.1"] {
+            assert!(is_exact_version(exact), "{exact}");
+        }
+        for fuzzy in ["22", "22.11", LATEST, "", "22.x.0", "22..0"] {
+            assert!(!is_exact_version(fuzzy), "{fuzzy}");
+        }
+    }
 
     #[test]
     fn parse_reads_name_and_version() {
