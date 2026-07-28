@@ -18,6 +18,8 @@ sha2            = "0.10"
 # Verifies upstream's SHASUMS256.txt.minisig against mise's published minisign key before any pin lands.
 minisign-verify = "0.2"
 flate2          = "1"
+# The one definition of "download-only backend", shared with the gate that reads the snapshot.
+lns-artifact    = { path = "../lns-artifact" }
 tar             = "0.4"
 
 [dev-dependencies]
