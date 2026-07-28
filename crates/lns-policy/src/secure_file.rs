@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Atomically installs `contents` at a `.json` `path` with mode 0600 via a NOFOLLOW create-new tmp + rename, so a stale tmp or planted symlink cannot leak the secret through broader perms.
 pub fn write_json_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -32,8 +33,16 @@ pub struct SidecarLock {
     _file: fs::File,
 }
 
+/// How long a contended sidecar lock is waited out: far longer than any real read-modify-write of a small JSON file, but bounded, because the service takes this lock from async tasks where a live-but-wedged holder would otherwise park a runtime worker indefinitely.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
 /// Takes the exclusive advisory lock that serializes a sidecar's read-modify-write across processes, on a companion file (never the sidecar itself, whose inode a rename-install replaces); the lock is the kernel's, so it releases when the guard drops and a crashed holder can never wedge later writers.
 pub fn lock_sidecar_exclusive(path: &Path) -> io::Result<SidecarLock> {
+    lock_sidecar_exclusive_within(path, LOCK_WAIT)
+}
+
+fn lock_sidecar_exclusive_within(path: &Path, wait: Duration) -> io::Result<SidecarLock> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -44,8 +53,22 @@ pub fn lock_sidecar_exclusive(path: &Path) -> io::Result<SidecarLock> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
-    file.lock()?;
-    Ok(SidecarLock { _file: file })
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(SidecarLock { _file: file }),
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+            Err(fs::TryLockError::WouldBlock) => {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("{} is still held", path.display()),
+                    ));
+                };
+                std::thread::sleep(LOCK_POLL.min(remaining));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +228,23 @@ mod tests {
         assert!(
             lock_sidecar_exclusive(&path).is_err(),
             "an unopenable lock path must fail closed rather than yield an unlocked guard"
+        );
+    }
+
+    #[test]
+    fn lock_gives_up_on_a_holder_that_never_releases_rather_than_parking_the_caller() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sidecar.json.lock");
+        let _wedged = lock_sidecar_exclusive(&path).unwrap();
+
+        let outcome = lock_sidecar_exclusive_within(&path, Duration::from_millis(50))
+            .err()
+            .map(|e| e.kind());
+
+        assert_eq!(
+            outcome,
+            Some(io::ErrorKind::WouldBlock),
+            "a wedged holder must surface as an error the caller can report, never a second guard over the same lock nor an unbounded wait on a thread the service needs back"
         );
     }
 
