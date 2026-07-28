@@ -38,7 +38,10 @@ scopes it to one run (by run id or unique id prefix). See the
 Provisioning a run's [declared tools](running-workloads.md#tools--declared-toolchains)
 is recorded in that run's chain: what was fetched, from where, and the exact
 version it resolved to. Warm runs reuse the machine cache and fetch nothing, so
-they add no provisioning events.
+they add no provisioning events. `lns pull` provisions a published sandbox's
+pinned tools ahead of its first run, before any run exists — those fetches are
+recorded on the same durable chain as approvals and sign-ins, with the pull in
+place of a sandbox name, so nothing is acquired without a record.
 
 Integrity is verified **as the log is read** — there is no separate verify step. As
 `lns audit` reads each chain it compares it against its anchor, and if anything is

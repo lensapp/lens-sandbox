@@ -12,6 +12,25 @@ pub fn now_rfc3339(clock: &dyn Clock) -> String {
 }
 
 pub fn append_ledger_record(record: &LedgerRecord) -> Result<()> {
+    append_machine_event(crate::ocsf_audit::ledger_event(record))
+}
+
+/// Tools fetched while pulling a sandbox belong to no run, so their disclosure lands on the machine-level chain instead of a run chain.
+pub fn append_tool_provisioned(
+    cx: &crate::ocsf_audit::OcsfCtx,
+    outcome: &crate::tools::ProvisionOutcome,
+) -> Result<()> {
+    append_machine_event(crate::ocsf_audit::tool_event(
+        cx,
+        &outcome.tool,
+        &outcome.requested,
+        &outcome.resolved,
+        &outcome.source_host,
+        &outcome.backend,
+    ))
+}
+
+fn append_machine_event(event: serde_json::Map<String, serde_json::Value>) -> Result<()> {
     // The machine-global ledger is written by every concurrent run; serialize so the hash chain can't interleave.
     static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = WRITE_LOCK
@@ -19,7 +38,7 @@ pub fn append_ledger_record(record: &LedgerRecord) -> Result<()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = lns_ipc::connection_ledger()?;
     let anchor_path = lns_ipc::connection_ledger_anchor()?;
-    append_ledger_record_at(&path, &anchor_path, record)
+    append_machine_event_at(&path, &anchor_path, event)
 }
 
 pub fn append_ledger_record_at(
@@ -27,14 +46,17 @@ pub fn append_ledger_record_at(
     anchor_path: &Path,
     record: &LedgerRecord,
 ) -> Result<()> {
+    append_machine_event_at(path, anchor_path, crate::ocsf_audit::ledger_event(record))
+}
+
+pub fn append_machine_event_at(
+    path: &Path,
+    anchor_path: &Path,
+    event: serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
     let anchor = crate::audit::read_anchor(anchor_path);
     let mut sink = crate::audit::FileAnchorSink::new(anchor_path.to_path_buf());
-    crate::audit::append_event_with_sink(
-        path,
-        anchor,
-        crate::ocsf_audit::ledger_event(record),
-        &mut sink,
-    )
+    crate::audit::append_event_with_sink(path, anchor, event, &mut sink)
 }
 
 pub trait LedgerSink: Send + Sync {
@@ -231,6 +253,47 @@ mod tests {
         append_ledger_record_at(&path, &anchor_path, &sample("aa02")).unwrap();
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 2);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_pulled_sandboxs_tool_acquisition_is_readable_off_the_machine_chain() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
+        let cx = crate::ocsf_audit::OcsfCtx::at_unix(
+            "pull-1a2b3c4d5e6f".into(),
+            String::new(),
+            1_780_000_000,
+        );
+        append_tool_provisioned(
+            &cx,
+            &crate::tools::ProvisionOutcome {
+                tool: "node".into(),
+                requested: "node@22".into(),
+                resolved: "22.11.0".into(),
+                backend: "core:node".into(),
+                source_host: "nodejs.org".into(),
+            },
+        )
+        .unwrap();
+
+        let path = lns_ipc::connection_ledger().unwrap();
+        let events: Vec<_> = lns_audit::stream_ledger(&path)
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        let row = lns_audit::read(&events[0]).unwrap();
+        assert_eq!(row.run, "pull-1a2b3c4d5e6f");
+        assert_eq!(row.kind, "tool");
+        assert_eq!(row.detail, "provisioned node@22 → 22.11.0 from nodejs.org");
+        assert_eq!(
+            crate::audit::read_anchor(&lns_ipc::connection_ledger_anchor().unwrap())
+                .expect("anchor written")
+                .line_count,
+            1,
+            "the machine chain's anchor advances so the entry can't be dropped unnoticed"
+        );
     }
 
     #[test]

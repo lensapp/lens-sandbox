@@ -98,12 +98,10 @@ fn resolve_scope(sandbox: &str, runs_root: &Path, ledger_path: &Path) -> Result<
         let Ok(row) = lns_audit::read(&event) else {
             continue;
         };
-        index_newest(
-            &mut names,
-            lns_audit::microvm(&event),
-            row.run.clone(),
-            row.ts,
-        );
+        let microvm = lns_audit::microvm(&event);
+        if !microvm.is_empty() {
+            index_newest(&mut names, microvm, row.run.clone(), row.ts);
+        }
         ids.push(row.run);
     }
     ids.sort();
@@ -311,6 +309,36 @@ mod tests {
         assert!(
             text.contains("use some-provider fp 9c2f1a3d → api.some-provider.example"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_pulls_tool_acquisition_shows_on_the_timeline_without_claiming_a_sandbox() {
+        let fix = Fixture::new();
+        let pull = "pull-1a2b3c4d5e6f";
+        fix.write_ledger(&[lns_ocsf::tool_provision(
+            &lns_ocsf::Context {
+                time_unix_secs: 1_780_000_000,
+                ts_rfc3339: "2026-06-29T14:00:00Z",
+                run: pull,
+                microvm: "",
+            },
+            "node",
+            "node@22",
+            "22.11.0",
+            "nodejs.org",
+            "core:node",
+        )
+        .to_string()]);
+        let text = fix.render(&args());
+        assert!(
+            text.contains("provisioned node@22 → 22.11.0 from nodejs.org"),
+            "{text}"
+        );
+        assert_eq!(
+            resolve_scope(pull, &fix.runs_root, &fix.ledger_path).unwrap(),
+            Some(pull.to_string()),
+            "the pull's own id still scopes to it"
         );
     }
 
