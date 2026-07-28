@@ -1,4 +1,3 @@
-mod table;
 mod timeline;
 
 use clap::FromArgMatches;

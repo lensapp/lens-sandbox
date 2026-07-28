@@ -7,6 +7,7 @@ pub mod config;
 pub mod connector;
 pub mod log;
 pub mod login;
+pub mod output;
 pub mod policy;
 pub mod raw_mode;
 pub mod run;
