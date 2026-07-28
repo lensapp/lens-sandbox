@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use lns_audit::{TimelineRow, collect_timeline};
 
 use super::AuditArgs;
-use super::table::render_table;
 use crate::log;
+use crate::output::render_table;
 
 pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
     let runs_root = lns_ipc::audit_runs_root().context("locating the audit runs root")?;
