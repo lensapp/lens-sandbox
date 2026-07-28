@@ -134,11 +134,6 @@ pub fn provision_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// Hosts the provisioner guest reaches beyond the tool backends themselves: the version index mise consults and the sigstore TUF repo that attests python-build-standalone downloads.
-pub fn baseline_egress_hosts() -> &'static [&'static str] {
-    &["mise-versions.jdx.dev", "tuf-repo-cdn.sigstore.dev"]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,11 +235,5 @@ mod tests {
         assert_eq!(get("CI"), "1");
         assert_eq!(get("HOME"), "/tmp/mise/home");
         assert_eq!(get("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt");
-    }
-
-    #[test]
-    fn the_baseline_egress_set_names_the_version_index_and_sigstore() {
-        assert!(baseline_egress_hosts().contains(&"mise-versions.jdx.dev"));
-        assert!(baseline_egress_hosts().contains(&"tuf-repo-cdn.sigstore.dev"));
     }
 }
