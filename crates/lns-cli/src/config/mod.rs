@@ -238,6 +238,7 @@ fn rows_for(key: ConfigKey, values: &[String]) -> Vec<ConfigRow> {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConfigRow {
     key: &'static str,
     value: String,
