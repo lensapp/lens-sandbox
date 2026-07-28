@@ -122,7 +122,7 @@ pub fn version_index_url(name: &str) -> String {
     format!("{}/{name}", base.trim_end_matches('/'))
 }
 
-/// The fail-loud engine environment: a missing precompiled archive otherwise silently falls back to compiling from source, which cannot work on a bare guest and buries the real error; `CI=1` is the switch mise's version phone-home checks before announcing updates, and every mise path is pinned under /tmp so nothing depends on the guest's HOME layout.
+/// The fail-loud engine environment: a missing precompiled archive otherwise silently falls back to compiling from source, which cannot work on a bare guest and buries the real error; `CI=1` is the switch mise's version phone-home checks before announcing updates, and every mise path is pinned under /tmp so nothing depends on the guest's HOME layout. The per-tool data and cache dirs are set by the driver, not here.
 pub fn provision_env() -> Vec<(String, String)> {
     [
         ("MISE_PYTHON_COMPILE", "0"),
@@ -131,8 +131,6 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("MISE_DISABLE_BACKENDS", "asdf,vfox"),
         ("CI", "1"),
         ("HOME", "/tmp/mise/home"),
-        ("MISE_DATA_DIR", "/tmp/mise/data"),
-        ("MISE_CACHE_DIR", "/tmp/mise/cache"),
         ("MISE_STATE_DIR", "/tmp/mise/state"),
         ("MISE_CONFIG_DIR", "/tmp/mise/config"),
         ("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"),
