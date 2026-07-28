@@ -69,3 +69,9 @@ Feature: connecting connectors from the CLI
     Given a user catalog declares the "some-pkce" pkce connector
     When the developer runs "lns connector list"
     Then "some-pkce" is listed as authenticating by oauth
+
+  Scenario: The catalog listing as JSON labels each connector's source and auth kind
+    Given a user catalog declares the "some-provider" credential connector
+    When the user runs connector command "list --format json"
+    Then the JSON row for "some-provider" has "source" set to "user"
+    And the JSON row for "some-provider" has "authKind" set to "credential"

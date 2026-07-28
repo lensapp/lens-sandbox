@@ -308,7 +308,10 @@ mod tests {
         list_rules(&scope_args(), dir.path(), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("VERDICT  PATTERN"), "got: {text}");
-        assert!(text.contains("ask      ask.example  undecided"), "got: {text}");
+        assert!(
+            text.contains("ask      ask.example  undecided"),
+            "got: {text}"
+        );
     }
 
     fn scope_args() -> PolicyScopeArgs {
