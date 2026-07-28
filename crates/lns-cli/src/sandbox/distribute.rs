@@ -30,19 +30,27 @@ pub trait ToolResolver {
     ) -> LocalBoxFuture<'a, Result<String>>;
 }
 
+/// What a declared entry was published as, so the publisher sees the version they shipped rather than having to read it back out of the registry.
+#[derive(Debug)]
+pub struct PinnedTool {
+    pub declared: String,
+    pub published: String,
+}
+
 /// Rewrite `spec.tools` so every entry carries the exact version the index resolves today — the tool analogue of digest-pinning path filesets at push.
 pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
     resolver: &R,
     doc: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<PinnedTool>)> {
     let mut value: serde_json::Value =
         serde_json::from_slice(doc).context("re-reading the definition for tool pinning")?;
     let Some(entries) = value["spec"]["tools"].as_array_mut() else {
-        return Ok(doc.to_vec());
+        return Ok((doc.to_vec(), Vec::new()));
     };
     if entries.is_empty() {
-        return Ok(doc.to_vec());
+        return Ok((doc.to_vec(), Vec::new()));
     }
+    let mut pinned = Vec::with_capacity(entries.len());
     for entry in entries {
         let declared = entry.as_str().context("spec.tools entry is not a string")?;
         let tool = lns_artifact::tools::parse(declared)?;
@@ -50,9 +58,15 @@ pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
             .resolve(&tool)
             .await
             .with_context(|| format!("resolving {declared} for publishing"))?;
-        *entry = serde_json::Value::String(format!("{}@{exact}", tool.name));
+        let published = format!("{}@{exact}", tool.name);
+        pinned.push(PinnedTool {
+            declared: declared.to_string(),
+            published: published.clone(),
+        });
+        *entry = serde_json::Value::String(published);
     }
-    serde_json::to_vec(&value).context("serializing the tool-pinned definition")
+    let doc = serde_json::to_vec(&value).context("serializing the tool-pinned definition")?;
+    Ok((doc, pinned))
 }
 
 #[derive(Debug)]
@@ -162,12 +176,15 @@ where
     W: Write,
 {
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
-    let doc = pin_declared_tools(resolver, &doc).await?;
+    let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     for fileset in &packed {
         producer
             .push_prebuilt(&fileset.built, &fileset.reference)
             .await?;
         writeln!(out, "pushed fileset {}", fileset.reference)?;
+    }
+    for tool in &pinned_tools {
+        writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
     let digest = producer.build_and_push(&doc, reference).await?;
     writeln!(out, "built and pushed {reference}@{digest}")?;
@@ -508,6 +525,12 @@ mod tests {
             serde_json::json!(["node@22.11.0", "python@3.12.6"])
         );
         assert_eq!(published["spec"]["image"], "ghcr.io/team/base:1");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("pinned node@22 → node@22.11.0")
+                && text.contains("pinned python@latest → python@3.12.6"),
+            "the publisher sees the versions they shipped: {text}"
+        );
     }
 
     #[tokio::test]
@@ -583,8 +606,9 @@ mod tests {
     #[tokio::test]
     async fn pin_declared_tools_leaves_an_empty_tool_list_untouched() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[]}}"#;
-        let pinned = pin_declared_tools(&unconsultable(), doc).await.unwrap();
+        let (pinned, reported) = pin_declared_tools(&unconsultable(), doc).await.unwrap();
         assert_eq!(pinned, doc.to_vec());
+        assert!(reported.is_empty());
     }
 
     #[tokio::test]
