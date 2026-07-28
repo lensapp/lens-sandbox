@@ -458,8 +458,10 @@ spec:
   the workload's writable layer — the per-machine tool cache is a host-side
   input, not guest state.
 - Declared tools are always disclosed: `lns inspect` lists each entry, and the
-  run summary shows them at launch. Provisioning is recorded in the run's
-  [audit chain](audit.md).
+  run summary shows them at launch. Provisioning is recorded in the
+  [audit chain](audit.md) — in the run's own chain when a run does the
+  fetching, and on the machine-level chain when `lns pull` provisions a
+  published sandbox's tools before its first run.
 
 Tools stack on top of `spec.image` — the image stays required and still decides
 the OS userland; matching builds are selected for its libc flavor (musl or

@@ -423,6 +423,16 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_marker_registers_nothing_rather_than_half_a_tool() {
+        let err =
+            parse_driver_output("LNS_TOOL node\nLNS_DONE\n", 0, &[tool("node@22")]).unwrap_err();
+        assert!(
+            err.to_string().contains("no result for node@22"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn a_second_marker_for_one_tool_fails_the_whole_provision() {
         // A tool's own install code runs in this guest, so it can forge a sibling's marker — but it cannot suppress the genuine one, and two markers is the tell.
         let stdout =

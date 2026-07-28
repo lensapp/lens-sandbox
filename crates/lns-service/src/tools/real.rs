@@ -82,6 +82,7 @@ pub async fn pre_provision_for_pull(
             .unwrap_or("tools")
     );
     let ensured = ensure_for_run(&scratch_id, &content_store, &requests, &target).await?;
+    let cx = crate::ocsf_audit::OcsfCtx::at_unix(scratch_id, String::new(), now_unix_secs());
     for outcome in &ensured.provisioned {
         crate::log::info!(
             "Provisioned",
@@ -89,6 +90,8 @@ pub async fn pre_provision_for_pull(
             outcome.requested,
             outcome.resolved
         );
+        crate::ledger::append_tool_provisioned(&cx, outcome)
+            .context("recording the provisioned tool in the machine ledger")?;
     }
     Ok(())
 }
