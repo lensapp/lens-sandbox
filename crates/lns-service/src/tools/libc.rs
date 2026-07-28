@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
@@ -30,19 +31,20 @@ pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) ->
     Ok(verdict)
 }
 
-/// Decide the image's libc flavor from its layer tars so installed tool builds match the workload: the dynamic loader's file name is definitive, later layers override earlier ones (overlay semantics), and a static/distroless image with no loader defaults to gnu.
+/// Decide the image's libc flavor from its layer tars so tool builds match the workload: musl wins wherever it appears (overlay semantics are per-path, so a later gcompat-style shim never removes the base loader), and a loaderless image is gnu.
 pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
     let mut verdict = None;
     for (idx, layer) in layers.iter().enumerate() {
-        if let Some(found) =
-            scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))?
-        {
-            verdict = Some(found);
+        match scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))? {
+            Some(Libc::Musl) => return Ok(Libc::Musl),
+            Some(Libc::Gnu) => verdict = Some(Libc::Gnu),
+            None => {}
         }
     }
     Ok(verdict.unwrap_or(Libc::Gnu))
 }
 
+/// Only the loader at a path a loader actually lives at counts; a tool tree or source checkout that merely mentions one must not decide the flavor.
 fn scan_layer(bytes: &[u8]) -> Result<Option<Libc>> {
     let reader: Box<dyn Read> = if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         Box::new(GzDecoder::new(Cursor::new(bytes)))
@@ -54,15 +56,32 @@ fn scan_layer(bytes: &[u8]) -> Result<Option<Libc>> {
     for entry in archive.entries().context("reading layer tar")? {
         let entry = entry.context("reading layer entry")?;
         let path = entry.path().context("reading layer entry path")?;
-        let name = path.to_string_lossy().trim_start_matches("./").to_string();
-        if name.contains("ld-musl-") {
-            return Ok(Some(Libc::Musl));
-        }
-        if name.contains("ld-linux-") || name.ends_with("libc.so.6") {
-            found = Some(Libc::Gnu);
+        match loader_flavor(path.as_ref()) {
+            Some(Libc::Musl) => return Ok(Some(Libc::Musl)),
+            Some(Libc::Gnu) => found = Some(Libc::Gnu),
+            None => {}
         }
     }
     Ok(found)
+}
+
+const LOADER_DIRS: &[&str] = &["lib", "lib64", "usr/lib", "usr/lib64"];
+
+fn loader_flavor(path: &Path) -> Option<Libc> {
+    let rel = path.to_string_lossy();
+    let rel = rel.trim_start_matches("./").trim_start_matches('/');
+    let (dir, name) = rel.rsplit_once('/')?;
+    let dir = dir.trim_start_matches("./");
+    if !LOADER_DIRS.contains(&dir) && !dir.starts_with("usr/lib/") {
+        return None;
+    }
+    if name.starts_with("ld-musl-") {
+        return Some(Libc::Musl);
+    }
+    if name.starts_with("ld-linux") || name == "libc.so.6" {
+        return Some(Libc::Gnu);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -98,7 +117,8 @@ mod tests {
 
     #[test]
     fn a_loaderless_image_defaults_to_gnu() {
-        let layer = layer_with(&["app/server"]);
+        // Every image fills lib/ with things that are not loaders.
+        let layer = layer_with(&["app/server", "lib/libz.so.1", "usr/lib/libssl.so.3"]);
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu);
         let empty: [Vec<u8>; 0] = [];
         assert_eq!(detect_libc(&empty).unwrap(), Libc::Gnu);
@@ -157,15 +177,33 @@ mod tests {
     }
 
     #[test]
-    fn a_later_layer_overrides_the_base_flavor() {
-        let base = layer_with(&["lib/ld-linux-aarch64.so.1"]);
-        let overlay = layer_with(&["lib/ld-musl-aarch64.so.1"]);
-        assert_eq!(detect_libc(&[base, overlay]).unwrap(), Libc::Musl);
+    fn a_later_compat_shim_cannot_overturn_the_base_images_musl_loader() {
+        // `alpine + apk add gcompat` adds a gnu loader without removing the musl one; reading that as glibc installs tool builds that cannot run.
+        let alpine = layer_with(&["lib/ld-musl-x86_64.so.1", "bin/busybox"]);
+        let gcompat = layer_with(&["lib/ld-linux-x86-64.so.2", "usr/lib/libgcompat.so.0"]);
+        assert_eq!(detect_libc(&[alpine, gcompat]).unwrap(), Libc::Musl);
     }
 
     #[test]
-    fn a_layer_carrying_both_markers_counts_as_musl() {
-        let layer = layer_with(&["lib/ld-musl-x86_64.so.1", "opt/glibc/libc.so.6"]);
+    fn a_later_layer_can_still_add_the_only_loader_in_the_image() {
+        let scratch = layer_with(&["app/server"]);
+        let runtime = layer_with(&["lib/ld-musl-aarch64.so.1"]);
+        assert_eq!(detect_libc(&[scratch, runtime]).unwrap(), Libc::Musl);
+    }
+
+    #[test]
+    fn a_loader_name_outside_a_loader_directory_decides_nothing() {
+        // A tool tree or source checkout that merely carries the name is not the image's loader.
+        let layer = layer_with(&[
+            "opt/toolchain/sysroot/ld-musl-x86_64.so.1",
+            "src/musl/ld-linux-x86-64.so.2",
+        ]);
+        assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu, "no loader found");
+    }
+
+    #[test]
+    fn a_layer_carrying_both_loaders_counts_as_musl() {
+        let layer = layer_with(&["lib/ld-musl-x86_64.so.1", "usr/lib64/libc.so.6"]);
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Musl);
     }
 
