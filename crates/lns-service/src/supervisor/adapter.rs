@@ -2116,15 +2116,26 @@ mod tests {
         assert!(allowed, "the held request is released on the token paste");
     }
 
-    #[tokio::test]
-    async fn credential_delivery_loop_grants_an_existing_oauth_token_without_signing_in_again() {
+    fn bound_oauth_entry() -> crate::credential_flow::store::CredentialEntry {
+        crate::credential_flow::store::CredentialEntry::Oauth {
+            access_token: "already-signed-in".into(),
+            refresh_token: "some-refresh".into(),
+            expires_at: u64::MAX,
+            scopes: vec![],
+            account: None,
+        }
+    }
+
+    /// An oauth session with a token already bound on this machine and a card held for it, so the two ways of accepting that card — granting the binding or signing in again — can be told apart by what the token becomes.
+    fn oauth_session_with_bound_token(
+        bound: &crate::credential_flow::store::CredentialEntry,
+    ) -> Arc<CredentialSession> {
         use crate::approval_flow::protocol::CredentialPending;
-        use crate::credential_flow::session::CredentialDecisionRequest;
-        use crate::credential_flow::store::CredentialEntry;
         use std::collections::HashMap;
-        let (store, _dir) = tempfile_credential_store();
-        Box::leak(Box::new(_dir));
-        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let (store, dir) = tempfile_credential_store();
+        Box::leak(Box::new(dir));
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        Box::leak(Box::new(frame_rx));
         let configs = HashMap::from([(
             "acme".to_string(),
             crate::oauth::OauthConfig {
@@ -2137,13 +2148,6 @@ mod tests {
                 token_endpoint: "https://example.com/oauth/token".into(),
             },
         )]);
-        let bound = CredentialEntry::Oauth {
-            access_token: "already-signed-in".into(),
-            refresh_token: "some-refresh".into(),
-            expires_at: u64::MAX,
-            scopes: vec![],
-            account: None,
-        };
         let mut state = CredentialStateFile::new();
         state.insert("acme".to_string(), bound.clone());
         let session = Arc::new(
@@ -2165,14 +2169,30 @@ mod tests {
             },
             std::time::Instant::now(),
         );
+        session
+    }
+
+    async fn deliver_to(
+        session: &Arc<CredentialSession>,
+        request: crate::credential_flow::session::CredentialDecisionRequest,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
         tx.send(CredentialDecisionDelivery {
             id: "c1".into(),
-            request: CredentialDecisionRequest::AllowBound,
+            request,
         })
-        .unwrap();
+        .expect("the loop's receiver is alive");
         drop(tx);
-        credential_delivery_loop(Arc::downgrade(&session), rx).await;
+        credential_delivery_loop(Arc::downgrade(session), rx).await;
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_grants_an_existing_oauth_token_without_signing_in_again() {
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        let bound = bound_oauth_entry();
+        let session = oauth_session_with_bound_token(&bound);
+
+        deliver_to(&session, CredentialDecisionRequest::AllowBound).await;
 
         assert_eq!(
             session.current_state().get("acme"),
@@ -2182,6 +2202,29 @@ mod tests {
         assert!(
             session.armed_ids().contains("acme"),
             "the grant arms the token already bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_signs_in_again_when_the_card_asks_to_reconnect() {
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        let bound = bound_oauth_entry();
+        let session = oauth_session_with_bound_token(&bound);
+
+        deliver_to(
+            &session,
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                session.current_state().get("acme"),
+                Some(CredentialEntry::Oauth { access_token, .. }) if access_token == "some-access"
+            ),
+            "the reconnect choice must drive a fresh device sign-in even though a token is already bound — a wrong-account or server-revoked connection is only escapable by signing in again; got {:?}",
+            session.current_state().get("acme")
         );
     }
 
