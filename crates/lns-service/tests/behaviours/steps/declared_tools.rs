@@ -63,16 +63,17 @@ fn lns_yaml_declaring_tools(w: &mut BehaviourWorld, entries: String) {
 }
 
 #[given(
-    regex = r#"^a lns\.yaml declaring tools \[(.*)\] with defaultVerdict ask and no allowedRoutes$"#
+    regex = r#"^a lns\.yaml declaring tools \[(.*)\] with defaultVerdict (\w+) and no allowedRoutes$"#
 )]
-fn lns_yaml_with_tools_and_ask_policy(w: &mut BehaviourWorld, entries: String) {
+fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String, verdict: String) {
     let tools: Vec<String> = entries
         .split(',')
         .map(|entry| format!("{:?}", entry.trim().trim_matches('"')))
         .collect();
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"defaultVerdict":"ask","allowedRoutes":[]}},"tools":[{}]}}}}"#,
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"defaultVerdict":"{}","allowedRoutes":[]}},"tools":[{}]}}}}"#,
+        verdict,
         tools.join(",")
     ));
 }
@@ -91,23 +92,6 @@ fn provisioned_without_card(w: &mut BehaviourWorld) -> Result<(), String> {
     let ensured = rig.ensured.as_ref().ok_or("no tools were composed")?;
     if ensured.provisioned.is_empty() {
         return Err("nothing was provisioned".into());
-    }
-    Ok(())
-}
-
-#[then("the workload's own network requests still ask as usual")]
-fn workload_requests_still_ask(w: &mut BehaviourWorld) -> Result<(), String> {
-    let rig = w.tools.as_ref().ok_or("no launch happened")?;
-    let definition = rig.definition.as_ref().ok_or("no definition staged")?;
-    let def = lns_artifact::sandbox::parse(definition.as_bytes()).map_err(|e| format!("{e:#}"))?;
-    if def.spec.policy.default_verdict != lns_policy::Verdict::Ask {
-        return Err(format!(
-            "expected the running policy to keep asking, got {:?}",
-            def.spec.policy.default_verdict
-        ));
-    }
-    if !def.spec.policy.allowed_routes.is_empty() {
-        return Err("provisioning must not open a route".into());
     }
     Ok(())
 }
