@@ -14,6 +14,7 @@ const ALPINE_BRANCH: &str = "v3.20";
 pub struct Manifest {
     pub engine: Engine,
     pub provisioner_rootfs: ProvisionerRootfs,
+    pub ca_bundle: CaBundle,
     pub static_curl: StaticCurl,
     #[serde(default)]
     pub companion: Vec<Companion>,
@@ -29,6 +30,12 @@ pub struct Engine {
 pub struct ProvisionerRootfs {
     pub gnu: BTreeMap<String, String>,
     pub musl: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaBundle {
+    pub date: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +93,13 @@ impl Manifest {
 
     pub fn curl_sha256(&self, arch: Arch) -> Result<&str> {
         pinned(&self.static_curl.sha256, arch, "static curl sha256")
+    }
+}
+
+impl CaBundle {
+    /// curl.se keeps every dated snapshot, so this URL stays fetchable for the life of the pin.
+    pub fn url(&self) -> String {
+        format!("https://curl.se/ca/cacert-{}.pem", self.date)
     }
 }
 
@@ -194,24 +208,39 @@ mod tests {
     }
 
     #[test]
-    fn the_companions_carry_the_ca_bundle_and_the_musl_node_runtime_deps() {
+    fn the_companions_carry_the_musl_node_runtime_deps() {
         let names: Vec<&str> = manifest()
             .companion
             .iter()
             .map(|companion| companion.name.as_str())
             .collect();
-        for required in ["ca-certificates-bundle", "libstdc++", "libgcc", "bash"] {
+        for required in ["libstdc++", "libgcc", "bash"] {
             assert!(names.contains(&required), "missing companion {required}");
         }
-        let ca = &manifest().companion[0];
+        assert!(
+            !names.contains(&"ca-certificates-bundle"),
+            "the CA store comes from a source that keeps superseded versions, not the apk branch head"
+        );
+        let lib = &manifest().companion[0];
         assert_eq!(
-            companion_url(ca, Arch::X86_64),
+            companion_url(lib, Arch::X86_64),
             format!(
                 "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/{}-{}.apk",
-                ca.name, ca.version
+                lib.name, lib.version
             )
         );
-        assert_eq!(companion_sha256(ca, Arch::Aarch64).unwrap().len(), 64);
+        assert_eq!(companion_sha256(lib, Arch::Aarch64).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn the_ca_bundle_is_pinned_to_a_dated_snapshot_that_upstream_retains() {
+        let ca = &manifest().ca_bundle;
+        assert_eq!(
+            ca.url(),
+            format!("https://curl.se/ca/cacert-{}.pem", ca.date),
+            "a dated snapshot never moves, so the pin cannot 404 when upstream refreshes"
+        );
+        assert_eq!(ca.sha256.len(), 64);
     }
 
     #[test]
@@ -244,6 +273,9 @@ mod tests {
             aarch64 = "debian@sha256:aa"
             [provisioner_rootfs.musl]
             aarch64 = "alpine@sha256:bb"
+            [ca_bundle]
+            date = "2026-07-16"
+            sha256 = "aa"
             [static_curl]
             version = "8.0.0"
             [static_curl.sha256]

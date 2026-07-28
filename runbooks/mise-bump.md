@@ -31,10 +31,16 @@ it, so a bump never re-provisions installed tools.
    `crates/lns-artifact/src/tools/registry.rs` pins the spike-validated names in
    its unit tests, so a vanished mainline tool fails `make test`.
 
-3. Companions (`[provisioner_rootfs]`, `[static_curl]`, `[[companion]]` apks)
-   are bumped by hand when needed — re-download the artifact, re-hash it, and
-   update the pin. Alpine apk pins go stale when the `v3.20` branch rotates a
-   package; the failed sha256 check names the artifact.
+3. Companions (`[provisioner_rootfs]`, `[ca_bundle]`, `[static_curl]`,
+   `[[companion]]` apks) are bumped by hand when needed — re-download the
+   artifact, re-hash it, and update the pin.
+
+   Alpine's mirror keeps only the current version of each package in a branch, so
+   when `v3.20` rotates one of the `[[companion]]` apks the pinned filename stops
+   existing: the fetch **404s before any hash is compared**, and the error names
+   the URL. Re-pin to the version the branch now carries. `[ca_bundle]` is
+   deliberately not an apk for this reason — curl.se keeps every dated snapshot,
+   so that pin only moves when we choose to move it.
 
 4. Gate the bump PR on the real e2e scenarios — registry semantics can drift
    between mise versions:

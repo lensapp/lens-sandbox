@@ -38,15 +38,20 @@ version = "8.11.0"
 aarch64 = "1b050abd1669f9a2ac29b34eb022cdeafb271dce5a4fb57d8ef8fadff6d7be1f"
 x86_64 = "d18aa1f4e03b50b649491ca2c401cd8c5e89e72be91ff758952ad2ab5a83135d"
 
-# Alpine v3.20 main apks. ca-certificates-bundle supplies the CA store at the
-# canonical /etc/ssl/certs path every slim image lacks (mise ignores
-# SSL_CERT_FILE); the rest are the musl companions node/bun need at run time
-# (libstdc++/libgcc) and npm's wrapper script needs (bash + its libs).
-[[companion]]
-name = "ca-certificates-bundle"
-version = "20260413-r0"
-sha256 = { aarch64 = "52974163f51f4292491578a709b505e0c1ab095ced5eb9398e9303a0aa476cf7", x86_64 = "05965b5144feb571c15d075797a48b19c37f8d06296c639f812569836545f402" }
+# The CA store the provisioner guest needs at the canonical /etc/ssl/certs path
+# that every slim image lacks (mise ignores SSL_CERT_FILE). Pinned to curl.se's
+# dated Mozilla snapshot, which is retained indefinitely and arch-independent —
+# Alpine's apk mirror keeps only the branch head, so an apk pin 404s the day
+# upstream refreshes it and breaks every cold provision.
+[ca_bundle]
+date = "2026-07-16"
+sha256 = "3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 
+# Alpine v3.20 main apks: the musl companions node/bun need at run time
+# (libstdc++/libgcc) and npm's wrapper script needs inside the provisioner guest
+# (bash + its libs). Fetched only for a musl target. These pins carry the same
+# branch-head risk as any apk — the failure names the artifact and the fix is to
+# re-pin the current version.
 [[companion]]
 name = "libstdc++"
 version = "13.2.1_git20240309-r1"
