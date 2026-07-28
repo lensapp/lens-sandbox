@@ -148,6 +148,18 @@ impl ToolCache for RealToolCache {
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
             return Ok(None);
         }
+        // These two pick the guest root the tree is injected at and the dirs it puts on the workload's PATH, so a tree may only ever speak for the slot it was read from.
+        if manifest.tool != key.name || manifest.resolved != key.resolved {
+            crate::log::warn!(
+                "ignoring the cached tool tree at {}: it describes {}@{} rather than {}@{}",
+                dir.display(),
+                manifest.tool,
+                manifest.resolved,
+                key.name,
+                key.resolved
+            );
+            return Ok(None);
+        }
         if !manifest
             .co_installed
             .iter()
@@ -325,13 +337,24 @@ fn validate_tree(entries: &[ManifestEntry], bin_paths: &[String]) -> Result<()> 
     }
     for entry in entries {
         let path = Path::new(&entry.path);
-        if path.is_absolute()
+        // Every guard below measures a path by splitting the stored spelling, while injection collapses it first: a padded `bin//////esc` counts six levels here and one there, which is exactly the budget a link's `..` chain needs to climb out. Ingest stores the collapsed form, so anything else was not written by us.
+        if entry.path.is_empty()
+            || path.is_absolute()
             || path
                 .components()
                 .any(|c| !matches!(c, Component::Normal(_)))
             || entry.path.chars().any(char::is_control)
+            || entry.path != normalized(path)
         {
             bail!("tool entry {} escapes the tool tree", entry.path);
+        }
+        // The workload rootfs is mounted suid-permissive and injection writes every entry st_uid 0, so the mask ingest applies to the tar has to hold for a file read back off disk too.
+        if entry.mode & !0o777 != 0 {
+            bail!(
+                "tool entry {} carries mode {:o}, which ingest would have stripped",
+                entry.path,
+                entry.mode
+            );
         }
         if let EntryKind::Symlink { target } = &entry.kind
             && !target_stays_in_tree(&entry.path, Path::new(target))
@@ -877,6 +900,64 @@ mod tests {
                  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                  "size": 1},
             ]);
+        });
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_cached_manifest_padding_a_link_path_with_empty_segments_is_a_miss() {
+        // Injection collapses `bin//////esc` to `bin/esc`, so a guard that counts the padded spelling's levels hands the target that many extra `..` — the escape ingest already refuses, arriving through the warm read instead.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let manifest = cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        // A blob the store really holds, so the lookup reaches the tree guard rather than missing on a dangling digest.
+        let (digest, size) = manifest
+            .entries
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                EntryKind::Regular { digest, size } => Some((digest.clone(), *size)),
+                EntryKind::Symlink { .. } => None,
+            })
+            .unwrap();
+        for link in ["bin//////esc", "bin/./././././esc"] {
+            tamper_manifest(dir.path(), |raw| {
+                raw["entries"] = serde_json::json!([
+                    {"path": link, "mode": 511, "kind": "symlink",
+                     "target": "../../../../../.lens/bin"},
+                    {"path": "bin/esc/lns-supervisor", "mode": 493, "kind": "regular",
+                     "digest": digest, "size": size},
+                ]);
+            });
+            assert_eq!(cache.lookup(&key(), &[]).unwrap(), None, "link {link}");
+        }
+    }
+
+    #[test]
+    fn a_cached_manifest_asking_for_setuid_is_a_miss() {
+        // The workload rootfs is mounted suid-permissive, and injection writes entries st_uid 0, so the mask ingest applies has to hold on the way back out too.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        tamper_manifest(dir.path(), |raw| {
+            raw["entries"][1]["mode"] = serde_json::json!(0o4755);
+        });
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_cached_manifest_naming_a_tool_other_than_its_slot_is_a_miss() {
+        // manifest.tool and manifest.resolved pick the guest root the tree is injected at and the dirs it puts on PATH, so a tree may only speak for the slot it was read from.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        tamper_manifest(dir.path(), |raw| {
+            raw["tool"] = serde_json::json!("some-other-tool");
+        });
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
+
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        tamper_manifest(dir.path(), |raw| {
+            raw["resolved"] = serde_json::json!("9.9.9");
         });
         assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
