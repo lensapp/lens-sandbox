@@ -92,12 +92,18 @@ async fn orchestrate(
         sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
     )?;
     let mut signed_in = Vec::new();
+    let mut revocations_at_gate = std::collections::HashMap::new();
     if let Some(plan) = &sandbox_plan {
         crate::artifact::real::refuse_unknown_connectors(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,
         )?;
         crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
+        // Read before the gate opens: a device flow can hold it for minutes, and a disconnect landing inside that window must win over the grant the sign-in earns.
+        revocations_at_gate = policy
+            .as_deref()
+            .map(supervisor::revocations_before_gate)
+            .unwrap_or_default();
         signed_in = gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
     let launch = sandbox_plan
@@ -135,6 +141,7 @@ async fn orchestrate(
                         .unwrap_or_default(),
                     workload: workload.clone(),
                     signed_in: signed_in.clone(),
+                    revocations_at_gate: revocations_at_gate.clone(),
                 },
                 guest_tools.root.clone(),
                 env.clone(),
