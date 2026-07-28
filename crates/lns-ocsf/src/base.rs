@@ -24,6 +24,7 @@ pub mod activity {
     pub const LOGON: u16 = 1;
     pub const FINDING_CREATE: u16 = 1;
     pub const PROCESS_LAUNCH: u16 = 1;
+    pub const FILE_CREATE: u16 = 1;
     pub const FILE_MOUNT: u16 = 12;
 }
 
@@ -91,6 +92,7 @@ fn activity_name(class_uid: u32, activity_id: u16) -> &'static str {
         (class::AUTHENTICATION, activity::LOGON) => "Logon",
         (class::DETECTION_FINDING, activity::FINDING_CREATE) => "Create",
         (class::PROCESS_ACTIVITY, activity::PROCESS_LAUNCH) => "Launch",
+        (class::FILE_ACTIVITY, activity::FILE_CREATE) => "Create",
         (class::FILE_ACTIVITY, activity::FILE_MOUNT) => "Mount",
         (class::HTTP_ACTIVITY, id) => http_activity_name(id),
         _ => "Unknown",

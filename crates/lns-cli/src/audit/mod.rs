@@ -54,6 +54,7 @@ pub enum KindArg {
     Approval,
     Connection,
     Credential,
+    Tool,
 }
 
 impl KindArg {
@@ -67,6 +68,7 @@ impl KindArg {
             KindArg::Approval => "approval",
             KindArg::Connection => "connection",
             KindArg::Credential => "credential",
+            KindArg::Tool => "tool",
         }
     }
 }
