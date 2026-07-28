@@ -52,3 +52,18 @@ Feature: machine-readable output from the list verbs
     When the user runs sandbox command "ls --format json"
     Then the exit code is 0
     And the output is an empty JSON array
+
+  Scenario: volume ls json carries raw byte counts, not humanized sizes
+    Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
+    When the user runs volume command "ls --format json"
+    Then the exit code is 0
+    And the output is a JSON array of 1 rows
+    And JSON row 0 has "name" set to "prism-data"
+    And JSON row 0 has "diskBytes" set to 33554432
+    And JSON row 0 has a null "inUseBy"
+
+  Scenario: volume ls with no volumes is an empty array
+    Given the service reports no volumes
+    When the user runs volume command "ls --format json"
+    Then the exit code is 0
+    And the output is an empty JSON array
