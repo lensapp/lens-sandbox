@@ -1627,18 +1627,23 @@ fn render_oauth_consent_card(
         },
         |ui| {
             let mut chosen: Option<CredentialDecisionRequest> = None;
-            // An existing sign-in is granted outright; signing in again would only replace a token that already works.
-            let accept = if prompt.bound_value_available {
-                ("Use connection", CredentialDecisionRequest::AllowBound)
+            // Granting the existing sign-in is offered alongside a fresh one, never instead of it: the bound connection can be the wrong account or one the service has since revoked, and denying is a standing no for this workload rather than a way to re-authenticate.
+            if prompt.bound_value_available {
+                if primary_button(ui, "Use connection").clicked() {
+                    chosen = Some(CredentialDecisionRequest::AllowBound);
+                }
+                ui.add_space(BTN_GAP);
+            }
+            let connect_label = if prompt.bound_value_available {
+                "Reconnect"
             } else {
-                (
-                    "Connect",
-                    CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
-                )
+                "Connect"
             };
             ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], accept.0).clicked() {
-                    chosen = Some(accept.1.clone());
+                if primary_button(&mut cols[0], connect_label).clicked() {
+                    chosen = Some(CredentialDecisionRequest::Allow(
+                        CredentialEntry::HostDetect,
+                    ));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
                     chosen = Some(CredentialDecisionRequest::Deny);

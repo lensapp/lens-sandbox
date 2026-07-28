@@ -107,6 +107,11 @@ refreshed; a pkce connector yields a **durable key** captured through your brows
 with no refresh or expiry. Either way it lives in the same per-machine file and is
 never written to `lns-policy.yaml`.
 
+When a workload asks for an `oauth` connector you are already signed in to, the
+card offers both: grant the connection you have, or **reconnect** — sign in
+again, which replaces it. Reconnecting is how you switch the account a workload
+uses, or recover from a connection the service has revoked at its end.
+
 ## Injection kinds
 
 A connector's injection `kind` decides how the real value reaches the destination:
