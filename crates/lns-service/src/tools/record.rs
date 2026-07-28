@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
 
-/// The machine-level memory of what each requested spec resolved to, so `node@22` never drifts between runs on this machine even when upstream releases a newer 22.x.
+/// The machine-level memory of what each requested spec resolved to, so `node@22` never drifts between runs on this machine even when upstream releases a newer 22.x; a `@latest` entry is instead the fallback for a run that cannot reach the index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRecord {
     pub schema_version: u32,
@@ -29,7 +29,12 @@ impl ResolvedRecord {
         self.tools.get(spec)
     }
 
-    /// Existing resolutions are never overwritten — the first resolution on a machine wins.
+    /// `@latest` re-resolves every run, so its entry is a last-known-good fallback for an unreachable index rather than a pin.
+    pub fn replace(&mut self, spec: &str, entry: ResolvedEntry) {
+        self.tools.insert(spec.to_string(), entry);
+    }
+
+    /// A bounded request's resolution is never overwritten — the first resolution on a machine wins.
     pub fn merge_new(&mut self, spec: &str, entry: ResolvedEntry) -> bool {
         if self.tools.contains_key(spec) {
             return false;

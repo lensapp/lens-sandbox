@@ -106,6 +106,11 @@ impl Default for ScriptedProvisioner {
 }
 
 impl ToolProvisioner for ScriptedProvisioner {
+    fn newest_version(&self, _name: &str) -> impl Future<Output = anyhow::Result<String>> + Send {
+        let newest = format!("22.{}", self.upstream_patch.lock().unwrap());
+        async move { Ok(newest) }
+    }
+
     fn provision(
         &self,
         requests: &[ToolRef],

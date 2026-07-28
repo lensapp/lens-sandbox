@@ -5,18 +5,35 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use super::{DRIVER, EngineArtifacts};
-use crate::download::{RealFetcher, RealFs};
+use crate::download::{Fetcher, RealFetcher, RealFs};
 use crate::tools::{ProvisionError, ProvisionTarget, StagedTool, ToolProvisioner, ToolRef, mise};
 use crate::{cache, composefs, guest_tools, image, ingest, initramfs, kernel, upperfs, vm};
 
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DRIVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct MiseProvisioner {
     pub scratch_id: String,
 }
 
 impl ToolProvisioner for MiseProvisioner {
+    fn newest_version(&self, name: &str) -> impl Future<Output = Result<String>> + Send {
+        let name = name.to_string();
+        async move {
+            let url = mise::version_index_url(&name);
+            let body = RealFetcher {
+                max_bytes: MAX_INDEX_BYTES,
+            }
+            .fetch(&url)
+            .await
+            .with_context(|| format!("querying the tool version index at {url}"))?;
+            let body = String::from_utf8(body)
+                .with_context(|| format!("the version index at {url} is not text"))?;
+            lns_artifact::tools::resolve_from_index(&name, lns_artifact::tools::LATEST, &body)
+        }
+    }
+
     fn provision(
         &self,
         requests: &[ToolRef],

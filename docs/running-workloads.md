@@ -443,12 +443,22 @@ spec:
   pins a major line, `node@latest` says so explicitly, and a bare `node` is a
   validation error. Engine syntax (`aqua:`, `ubi:`, `npm:` prefixes) never
   appears in a definition.
+- A bounded line resolves **once per machine** and stays there: the first run of
+  `node@22` here records the exact version it picked (say 22.11.0) and every
+  later run reuses it, even after upstream publishes 22.12.0. That is what makes
+  a warm run reproducible and offline-capable. `node@latest` is the opposite by
+  definition — it re-checks the version index on every run, so a new release is
+  picked up the next time you start. To move a bounded line, edit the version you
+  declared.
 - `lns sandbox validate` checks the shape offline; the version resolves when
   the tools are provisioned.
 - The service provisions declared tools **before the microVM boots** and caches
   them per machine: the first run of a tool set downloads it, and every later
   run — including rebuilt microVMs — reuses the cache without touching the
-  network. Acquisition is a system fetch with the same trust shape as pulling
+  network. The one exception is a `@latest` entry, which asks the version index
+  each run; when the index is unreachable it falls back to the last version
+  resolved here, so an offline start still works. Acquisition is a system fetch
+  with the same trust shape as pulling
   `spec.image`: declaring the tool is the consent, so it needs no approval card
   and no policy route. What the tools *do* at runtime (npm, pip, go traffic)
   stays inside the normal policy cage.

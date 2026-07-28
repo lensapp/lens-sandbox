@@ -113,6 +113,15 @@ fn mise_release_arch(arch: Arch) -> &'static str {
     }
 }
 
+const VERSION_INDEX_URL: &str = "https://mise-versions.jdx.dev";
+
+/// The public index `@latest` is re-checked against every run; the override is what the e2e suite points at a local fixture.
+pub fn version_index_url(name: &str) -> String {
+    let base =
+        std::env::var("LNS_TOOL_INDEX_URL").unwrap_or_else(|_| VERSION_INDEX_URL.to_string());
+    format!("{}/{name}", base.trim_end_matches('/'))
+}
+
 /// The fail-loud engine environment: a missing precompiled archive otherwise silently falls back to compiling from source, which cannot work on a bare guest and buries the real error; `CI=1` is the switch mise's version phone-home checks before announcing updates, and every mise path is pinned under /tmp so nothing depends on the guest's HOME layout.
 pub fn provision_env() -> Vec<(String, String)> {
     [
@@ -217,6 +226,17 @@ mod tests {
                     .starts_with("docker.io/library/debian@sha256:")
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_version_index_url_names_the_tool_and_honors_the_override() {
+        assert_eq!(
+            version_index_url("node"),
+            "https://mise-versions.jdx.dev/node"
+        );
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_TOOL_INDEX_URL", "http://localhost:9/");
+        assert_eq!(version_index_url("node"), "http://localhost:9/node");
     }
 
     #[test]

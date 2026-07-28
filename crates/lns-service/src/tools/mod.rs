@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 pub use cache::ToolCache;
-pub use lns_artifact::tools::ToolRef;
+pub use lns_artifact::tools::{LATEST, ToolRef};
 pub use record::ToolRecordStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,13 +85,15 @@ pub enum StagedTar {
     Bytes(Vec<u8>),
 }
 
-/// The expensive half of provisioning: boot the disposable guest and run the pinned engine for every requested tool, returning one staged tree per request.
+/// How we talk to the tool engine: `provision` is the expensive half — boot the disposable guest and install every requested tool — while `newest_version` is a host-side index query with no guest at all.
 pub trait ToolProvisioner {
     fn provision(
         &self,
         requests: &[ToolRef],
         target: &ProvisionTarget,
     ) -> impl Future<Output = Result<Vec<StagedTool>, ProvisionError>> + Send;
+
+    fn newest_version(&self, name: &str) -> impl Future<Output = anyhow::Result<String>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +113,7 @@ pub struct EnsuredTools {
     pub provisioned: Vec<ProvisionOutcome>,
 }
 
-/// Provision-or-reuse for a declared tool set: recorded requests pin to their exact versions, cache hits contribute specs with zero network, and every miss goes to the provisioner in one call before the record learns the new resolutions (first resolution wins forever).
+/// Provision-or-reuse for a declared tool set: a bounded request pins to the version it first resolved to, `@latest` re-asks the index every run, cache hits contribute specs without booting anything, and every miss goes to the provisioner in one call.
 pub async fn ensure_tools<R, C, P>(
     records: &R,
     cache: &C,
@@ -135,10 +137,27 @@ where
 
     let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
     let mut misses: Vec<ToolRef> = Vec::new();
+    let mut record_refreshed = false;
     for request in requests {
-        let pinned = record
+        let recorded = record
             .recorded(&request.to_string())
             .map(|entry| entry.resolved.clone());
+        let pinned = match request.version.as_str() {
+            LATEST => match provisioner.newest_version(&request.name).await {
+                Ok(newest) => {
+                    record_refreshed |= recorded.as_deref() != Some(newest.as_str());
+                    Some(newest)
+                }
+                Err(e) => {
+                    crate::log::warn!(
+                        "could not re-check the newest {} ({e:#}); using the last version resolved here",
+                        request.name
+                    );
+                    recorded
+                }
+            },
+            _ => recorded,
+        };
         let manifest = match &pinned {
             Some(resolved) => cache
                 .lookup(&ToolCacheKey {
@@ -152,6 +171,17 @@ where
         };
         match manifest {
             Some(manifest) => {
+                if request.version == LATEST {
+                    record.replace(
+                        &request.to_string(),
+                        record::ResolvedEntry {
+                            resolved: manifest.resolved.clone(),
+                            backend: manifest.backend.clone(),
+                            source_host: manifest.source_host.clone(),
+                            resolved_at_unix: now_unix_secs,
+                        },
+                    );
+                }
                 hits.insert(request.name.clone(), manifest);
             }
             None => misses.push(ToolRef {
@@ -184,15 +214,18 @@ where
                     tool,
                 )
                 .map_err(|e| ProvisionError::Engine(format!("ingesting {}: {e:#}", tool.name)))?;
-            record.merge_new(
-                &request.to_string(),
-                record::ResolvedEntry {
-                    resolved: tool.resolved.clone(),
-                    backend: tool.backend.clone(),
-                    source_host: tool.source_host.clone(),
-                    resolved_at_unix: now_unix_secs,
-                },
-            );
+            let entry = record::ResolvedEntry {
+                resolved: tool.resolved.clone(),
+                backend: tool.backend.clone(),
+                source_host: tool.source_host.clone(),
+                resolved_at_unix: now_unix_secs,
+            };
+            let spec = request.to_string();
+            if request.version == LATEST {
+                record.replace(&spec, entry);
+            } else {
+                record.merge_new(&spec, entry);
+            }
             provisioned.push(ProvisionOutcome {
                 tool: tool.name.clone(),
                 requested: request.to_string(),
@@ -202,6 +235,9 @@ where
             });
             hits.insert(tool.name.clone(), manifest);
         }
+        record_refreshed = true;
+    }
+    if record_refreshed {
         records
             .save(&record)
             .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
@@ -331,6 +367,9 @@ mod tests {
         resolves_to: Mutex<HashMap<String, String>>,
         fail: Mutex<Option<(String, String)>>,
         calls: Mutex<Vec<Vec<ToolRef>>>,
+        index: Mutex<Option<String>>,
+        index_calls: Mutex<u32>,
+        drops_everything: Mutex<bool>,
     }
 
     impl Scripted {
@@ -347,7 +386,28 @@ mod tests {
         }
     }
 
+    impl Scripted {
+        fn index_says(self, newest: &str) -> Self {
+            *self.index.lock().unwrap() = Some(newest.to_string());
+            self
+        }
+
+        fn dropping_every_request(self) -> Self {
+            *self.drops_everything.lock().unwrap() = true;
+            self
+        }
+    }
+
     impl ToolProvisioner for Scripted {
+        fn newest_version(
+            &self,
+            _name: &str,
+        ) -> impl Future<Output = anyhow::Result<String>> + Send {
+            *self.index_calls.lock().unwrap() += 1;
+            let scripted = self.index.lock().unwrap().clone();
+            async move { scripted.ok_or_else(|| anyhow::anyhow!("the version index is unreachable")) }
+        }
+
         fn provision(
             &self,
             requests: &[ToolRef],
@@ -355,7 +415,9 @@ mod tests {
         ) -> impl Future<Output = Result<Vec<StagedTool>, ProvisionError>> + Send {
             self.calls.lock().unwrap().push(requests.to_vec());
             let fail = self.fail.lock().unwrap().clone();
-            let staged: Vec<StagedTool> = {
+            let staged: Vec<StagedTool> = if *self.drops_everything.lock().unwrap() {
+                Vec::new()
+            } else {
                 let map = self.resolves_to.lock().unwrap();
                 requests
                     .iter()
@@ -426,6 +488,148 @@ mod tests {
             ]
         );
         assert_eq!(*records.saves.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_latest_request_re_asks_the_index_every_run_and_installs_a_newer_release() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let first = Scripted::resolving(&[("some-tool", "1.2.3")]).index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &first,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recorded(&records, "some-tool@latest"), "1.2.3");
+
+        let moved_on = Scripted::resolving(&[("some-tool", "1.9.9")]).index_says("1.9.9");
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &moved_on,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            moved_on.calls.lock().unwrap()[0][0].version,
+            "1.9.9",
+            "the exact version the index named is what gets installed, not the keyword"
+        );
+        assert_eq!(ensured.provisioned[0].resolved, "1.9.9");
+        assert_eq!(
+            recorded(&records, "some-tool@latest"),
+            "1.9.9",
+            "the record follows the index instead of freezing the first answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_latest_request_the_cache_already_holds_needs_no_provisioner() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let first = Scripted::resolving(&[("some-tool", "1.2.3")]).index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &first,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        let unchanged = Scripted::resolving(&[("some-tool", "1.2.3")]).index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &unchanged,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *unchanged.index_calls.lock().unwrap(),
+            1,
+            "the index is asked"
+        );
+        assert!(
+            unchanged.calls.lock().unwrap().is_empty(),
+            "an unchanged @latest is a cache hit — no guest boots"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_index_falls_back_to_the_last_version_resolved_here() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let online = Scripted::resolving(&[("some-tool", "1.2.3")]).index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &online,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let offline = Scripted::resolving(&[("some-tool", "9.9.9")]);
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_009,
+        )
+        .await
+        .unwrap();
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "offline start reuses the cached tree instead of failing the launch"
+        );
+        assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/1.2.3/bin"]);
+    }
+
+    #[tokio::test]
+    async fn a_first_ever_latest_request_with_no_index_and_no_record_still_reaches_the_engine() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let offline = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &refs(&["some-tool@latest"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offline.calls.lock().unwrap()[0][0].version,
+            "latest",
+            "with nothing recorded the keyword goes to the engine, which resolves it in-guest"
+        );
+        assert_eq!(ensured.provisioned[0].resolved, "1.2.3");
     }
 
     #[tokio::test]
@@ -573,20 +777,11 @@ mod tests {
     async fn a_provisioner_that_drops_a_request_is_an_engine_fault() {
         let records = MemRecords::default();
         let cache = MemCache::default();
-        struct Dropper;
-        impl ToolProvisioner for Dropper {
-            async fn provision(
-                &self,
-                _requests: &[ToolRef],
-                _target: &ProvisionTarget,
-            ) -> Result<Vec<StagedTool>, ProvisionError> {
-                Ok(Vec::new())
-            }
-        }
+        let dropper = Scripted::default().dropping_every_request();
         let err = ensure_tools(
             &records,
             &cache,
-            &Dropper,
+            &dropper,
             &refs(&["some-tool@1"]),
             &target(),
             "2026.7.14",
