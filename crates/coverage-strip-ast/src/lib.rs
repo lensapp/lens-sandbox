@@ -205,6 +205,8 @@ fn line_has_marker(line: &str, keywords: &[&str]) -> bool {
 struct ExecutableLineCollector<'a> {
     lines: BTreeSet<usize>,
     phantom_entry_lines: BTreeSet<usize>,
+    inert_macro_arg_lines: BTreeSet<usize>,
+    macro_expression_lines: BTreeSet<usize>,
     source_lines: Vec<&'a str>,
 }
 
@@ -213,6 +215,8 @@ impl<'a> ExecutableLineCollector<'a> {
         Self {
             lines: BTreeSet::new(),
             phantom_entry_lines: BTreeSet::new(),
+            inert_macro_arg_lines: BTreeSet::new(),
+            macro_expression_lines: BTreeSet::new(),
             source_lines: source.lines().collect(),
         }
     }
@@ -268,10 +272,7 @@ impl<'a> ExecutableLineCollector<'a> {
         if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
             return;
         }
-        if trimmed
-            .chars()
-            .all(|c| matches!(c, '}' | ')' | ']' | ';' | ',' | '?' | ' ' | '\t'))
-        {
+        if is_scaffolding_only(trimmed) {
             return;
         }
         self.lines.insert(line);
@@ -282,6 +283,62 @@ impl<'a> ExecutableLineCollector<'a> {
             self.mark_line(line);
         }
     }
+
+    /// Notes which of a macro invocation's argument lines carry nothing evaluable — only literals and punctuation, as a format string on its own line does. An enclosing expression's span marks every line it covers, so these are collected here and dropped once the walk is done.
+    fn note_inert_macro_arg_lines(&mut self, m: &syn::Macro) {
+        let mut expression_lines = BTreeSet::new();
+        collect_expression_token_lines(m.tokens.clone(), &mut expression_lines);
+        let Some(arg_lines) = token_span_lines(&m.tokens) else {
+            return;
+        };
+        let path_line = m.path.span().start().line;
+        for line in arg_lines {
+            if line != path_line && !expression_lines.contains(&line) {
+                self.inert_macro_arg_lines.insert(line);
+            }
+        }
+        self.macro_expression_lines.extend(expression_lines);
+    }
+}
+
+/// The lines a macro's argument tokens span, first token to last; `None` for an invocation with no arguments.
+fn token_span_lines(tokens: &proc_macro2::TokenStream) -> Option<std::ops::RangeInclusive<usize>> {
+    let mut iter = tokens.clone().into_iter();
+    let first = iter.next()?;
+    let last = iter.last().unwrap_or_else(|| first.clone());
+    Some(first.span().start().line..=last.span().end().line)
+}
+
+/// The lines of a macro's arguments bearing a token that can evaluate to something — anything but a literal or punctuation, descending into groups so a nested call is not missed.
+fn collect_expression_token_lines(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<usize>) {
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                collect_expression_token_lines(group.stream(), out);
+            }
+            proc_macro2::TokenTree::Literal(_) | proc_macro2::TokenTree::Punct(_) => {}
+            other => {
+                let span = other.span();
+                for line in span.start().line..=span.end().line {
+                    out.insert(line);
+                }
+            }
+        }
+    }
+}
+
+/// True when a line carries only block and call scaffolding — closers, openers, separators, or the `else` keyword — so no expression sits on it to execute. An `else` branch that is never taken still leaves its body uncovered, so dropping the `} else {` line costs no signal.
+fn is_scaffolding_only(trimmed: &str) -> bool {
+    let residue: String = trimmed
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '{' | '}' | '(' | ')' | '[' | ']' | ';' | ',' | '?' | ' ' | '\t'
+            )
+        })
+        .collect();
+    residue.is_empty() || residue == "else"
 }
 
 impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
@@ -289,6 +346,12 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
         syn::visit::visit_file(self, file);
         for line in std::mem::take(&mut self.phantom_entry_lines) {
             self.lines.remove(&line);
+        }
+        // Another invocation on the same line may have put an expression there, so only a line inert everywhere goes.
+        for line in std::mem::take(&mut self.inert_macro_arg_lines) {
+            if !self.macro_expression_lines.contains(&line) {
+                self.lines.remove(&line);
+            }
         }
     }
 
@@ -336,7 +399,6 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
         if is_macro_rules_path(&m.path) {
             return;
         }
-        let path_start = m.path.span().start();
         let tail_end = m
             .tokens
             .clone()
@@ -344,7 +406,8 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
             .last()
             .map(|t| t.span().end())
             .unwrap_or_else(|| m.path.span().end());
-        self.mark_span(path_start, tail_end);
+        self.mark_span(m.path.span().start(), tail_end);
+        self.note_inert_macro_arg_lines(m);
         syn::visit::visit_macro(self, m);
     }
 
@@ -721,6 +784,82 @@ mod tests {
         assert!(c.lines.contains(&3), "arg line");
         assert!(c.lines.contains(&4), "arg line");
         assert!(!c.lines.contains(&5), "`    )?;` is pure punctuation");
+    }
+
+    #[test]
+    fn collector_skips_a_macro_argument_line_holding_only_a_format_string() {
+        // LLVM maps an expansion region onto the format-string line and reports it uncovered while the `bail!(` line above it counts the calls, so demanding coverage there demands the impossible.
+        let src = "fn f(name: &str) -> Result<(), String> {\n    if name.is_empty() {\n        bail!(\n            \"credential {:?} must name its env var\",\n            name\n        );\n    }\n    Ok(())\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&3),
+            "the `bail!(` invocation line executes"
+        );
+        assert!(
+            !c.lines.contains(&4),
+            "a line carrying only a format string has no expression on it to execute"
+        );
+        assert!(
+            c.lines.contains(&5),
+            "an argument line carrying an expression is still demanded"
+        );
+    }
+
+    #[test]
+    fn collector_marks_expressions_nested_in_a_macro_argument_group() {
+        let src = "fn f() {\n    println!(\n        \"{}\",\n        compute(\n            input()\n        )\n    );\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(!c.lines.contains(&3), "format-string-only line");
+        assert!(c.lines.contains(&4), "call inside the macro arguments");
+        assert!(
+            c.lines.contains(&5),
+            "a call nested in a parenthesised group is reached by descending into it"
+        );
+    }
+
+    #[test]
+    fn collector_marks_an_argument_less_macro_invocation() {
+        let src = "fn f() {\n    unreachable!();\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(
+            c.lines.contains(&2),
+            "an invocation with no arguments has no argument line to judge, and the call itself still executes"
+        );
+    }
+
+    #[test]
+    fn collector_skips_an_else_scaffolding_line() {
+        // LLVM sometimes maps the else branch's region onto `} else {`, which holds no expression; an else that is never taken still leaves its body uncovered, so the signal survives.
+        let src =
+            "fn f(c: bool) -> u32 {\n    if c {\n        1\n    } else {\n        2\n    }\n}\n";
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+        assert!(c.lines.contains(&2), "the `if` line branches");
+        assert!(c.lines.contains(&3), "the then value");
+        assert!(!c.lines.contains(&4), "`}} else {{` is scaffolding");
+        assert!(
+            c.lines.contains(&5),
+            "the else value still carries the branch's coverage"
+        );
+    }
+
+    #[test]
+    fn scaffolding_only_keeps_an_else_if_condition() {
+        assert!(is_scaffolding_only("} else {"));
+        assert!(is_scaffolding_only("    }"));
+        assert!(is_scaffolding_only("{"));
+        assert!(
+            !is_scaffolding_only("} else if c.is_ready() {"),
+            "an `else if` line carries a condition that is evaluated, so it stays measured"
+        );
+        assert!(!is_scaffolding_only("let x = 1;"));
     }
 
     #[test]
