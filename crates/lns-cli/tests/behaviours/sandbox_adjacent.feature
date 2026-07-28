@@ -30,12 +30,12 @@ Feature: adjacent commands reshaped around the sandbox
       | run.volume  | v:/data      |
       | run.publish | 8080:80      |
 
-  Scenario: a hand-edited legacy config key warns and is ignored
+  Scenario: a hand-edited legacy config key is ignored, and warns off stdout
     Given a config file that still carries a run.env entry
     When the user runs config command "list"
     Then the exit code is 0
-    And the output warns that "run.env" is no longer supported
     And the output does not list "run.env" as an active default
+    And the output does not contain "no longer supported"
 
   Scenario: volume rm refuses a volume a running sandbox holds
     Given the volume "claude-home" is held by a running sandbox
