@@ -191,7 +191,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
                 .text()
                 .await
                 .with_context(|| format!("reading the version index at {url}"))?;
-            super::distribute::resolve_from_index(&tool.name, &tool.version, &body)
+            lns_artifact::tools::resolve_from_index(&tool.name, &tool.version, &body)
         })
     }
 }

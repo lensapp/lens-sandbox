@@ -1,5 +1,8 @@
 use anyhow::{Result, bail};
 
+/// The one version keyword the spec accepts: it re-resolves on every run rather than pinning.
+pub const LATEST: &str = "latest";
+
 /// A portable declared tool: `name@version`, where version may be fuzzy (`22`) or `latest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRef {
@@ -42,6 +45,37 @@ pub fn parse(entry: &str) -> Result<ToolRef> {
         name: name.to_string(),
         version: version.to_string(),
     })
+}
+
+/// Pick the exact version a fuzzy request pins from an ascending newline-separated version index; `latest` takes the newest stable line, `22` the newest `22.*` line.
+pub fn resolve_from_index(name: &str, version: &str, index_body: &str) -> Result<String> {
+    let stable = |line: &str| !line.chars().any(|c| c.is_ascii_alphabetic());
+    let lines: Vec<&str> = index_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        bail!(
+            "tool {name:?} is unknown to the version index; check the name against mise's registry"
+        );
+    }
+    let resolved = if version == LATEST {
+        lines.iter().copied().rfind(|line| stable(line))
+    } else {
+        let prefix = format!("{version}.");
+        lines
+            .iter()
+            .copied()
+            .rfind(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
+    };
+    match resolved {
+        Some(exact) => Ok(exact.to_string()),
+        None => bail!(
+            "no published version of {name} matches {version:?}; newest in the index is {}",
+            lines.last().unwrap_or(&"")
+        ),
+    }
 }
 
 /// Parse every entry, refusing duplicate tool names — `node@22` and `node@latest` contradict.
@@ -180,5 +214,48 @@ mod tests {
         let refs = parse_all(&entries).unwrap();
         assert_eq!(refs[0].to_string(), "node@22");
         assert_eq!(refs[1].to_string(), "python@3.12");
+    }
+
+    #[test]
+    fn resolve_from_index_picks_the_newest_dot_boundary_match() {
+        let body = "20.1.0\n22.9.0\n22.11.0\n220.1.0\n23.0.0\n";
+        assert_eq!(resolve_from_index("node", "22", body).unwrap(), "22.11.0");
+    }
+
+    #[test]
+    fn resolve_from_index_latest_skips_prerelease_lines() {
+        let body = "3.11.9\n3.12.6\n3.13.0rc1\n";
+        assert_eq!(
+            resolve_from_index("python", "latest", body).unwrap(),
+            "3.12.6"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_accepts_an_exact_version_verbatim() {
+        let body = "22.9.0\n22.11.0\n";
+        assert_eq!(
+            resolve_from_index("node", "22.11.0", body).unwrap(),
+            "22.11.0"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_treats_an_empty_index_as_unknown() {
+        let err = resolve_from_index("nodde", "22", "\n").unwrap_err();
+        assert!(
+            format!("{err:#}").contains(r#"tool "nodde" is unknown to the version index"#),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_from_index_names_the_newest_when_nothing_matches() {
+        let err = resolve_from_index("node", "99", "22.9.0\n23.0.0\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(r#"no published version of node matches "99""#) && msg.contains("23.0.0"),
+            "got: {msg}"
+        );
     }
 }
