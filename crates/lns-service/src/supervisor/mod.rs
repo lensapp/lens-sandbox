@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::relay::Relay;
 
 mod adapter;
+pub(crate) use adapter::revocations_before_gate;
 mod real;
 mod traits;
 
@@ -69,11 +70,12 @@ pub struct SupervisorSession {
     pub managed_env_vars: Vec<String>,
 }
 
-/// The run's consent inputs: the definition's credential slots, the identity its grants key against, and the slot ids whose boot-gate sign-in the user completed this launch.
+/// The run's consent inputs: the definition's credential slots, the identity its grants key against, the slot ids whose boot-gate sign-in the user completed this launch, and each connector's forget count as the gate found it.
 pub struct RunConsent<'a> {
     pub credentials: &'a [lns_artifact::spec::CredentialSlot],
     pub workload: lns_policy::grants::WorkloadIdentity,
     pub signed_in: Vec<String>,
+    pub revocations_at_gate: std::collections::HashMap<String, u64>,
 }
 
 impl SupervisorSession {
@@ -567,6 +569,7 @@ mod tests {
                 dir: "/proj".into(),
             },
             signed_in: vec![],
+            revocations_at_gate: std::collections::HashMap::new(),
         }
     }
 
@@ -654,6 +657,7 @@ mod tests {
                 credentials: std::slice::from_ref(&fixture.slot),
                 workload: workload.clone(),
                 signed_in: vec!["some-oauth".into()],
+                revocations_at_gate: std::collections::HashMap::new(),
             },
             fixture.dir.path().to_path_buf(),
             vec![],

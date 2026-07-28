@@ -241,16 +241,29 @@ fn load_grants_or_warn(store: &dyn GrantStore, path: &Path) -> WorkloadGrantFile
     }
 }
 
-/// Records the boot-gate sign-ins the user completed this launch as allow grants — into the run's snapshot so the gate below arms them, and into the sidecar so the next run skips the sign-in; a failed persist still arms this run and tells the user, who otherwise repeats a browser device flow every launch with nothing explaining why.
+/// The sign-ins one launch's boot gate collected, against the identity they are recorded for and the forget counts the gate read before it opened.
+struct BootSignIns<'a> {
+    signed_in: &'a [String],
+    providers: &'a [DefProvider],
+    project: &'a str,
+    workload: &'a WorkloadIdentity,
+    at_gate: &'a HashMap<String, u64>,
+}
+
+/// Records the boot-gate sign-ins the user completed this launch as allow grants — into the run's snapshot so the gate below arms them, and into the sidecar so the next run skips the sign-in; a failed persist, or a disconnect that landed while the developer was signing in, still arms this run and tells them, who otherwise repeats a browser device flow every launch with nothing explaining why.
 fn record_boot_sign_in_grants(
-    signed_in: &[String],
-    providers: &[DefProvider],
-    project: &str,
-    workload: &WorkloadIdentity,
+    gate: BootSignIns<'_>,
     grants: &mut WorkloadGrantFile,
     store: &dyn GrantStore,
     inform: &dyn Fn(String),
 ) {
+    let BootSignIns {
+        signed_in,
+        providers,
+        project,
+        workload,
+        at_gate,
+    } = gate;
     let records = boot_sign_in_grants(signed_in, providers, project, workload);
     if records.is_empty() {
         return;
@@ -258,18 +271,48 @@ fn record_boot_sign_in_grants(
     for r in &records {
         grants.upsert(r.clone());
     }
-    if let Err(e) = store.update(&mut |file| {
+    let mut forgotten_since = Vec::new();
+    let outcome = store.update(&mut |file| {
+        forgotten_since.clear();
+        let mut changed = false;
         for r in &records {
-            file.upsert(r.clone());
+            let seen = at_gate.get(&r.connector).copied().unwrap_or(0);
+            if file.revocations_of(&r.project, &r.connector) == seen {
+                file.upsert(r.clone());
+                changed = true;
+            } else {
+                forgotten_since.push(r.connector.clone());
+            }
         }
-        true
-    }) {
+        changed
+    });
+    for connector in &forgotten_since {
+        let msg = format!(
+            "{connector} was disconnected while you were signing in, so this sign-in was not remembered; the next run will ask again"
+        );
+        log::warn!("{msg}");
+        inform(msg);
+    }
+    if let Err(e) = outcome {
         let msg = format!(
             "signed in for this run but the grant was not persisted; the next run will ask you to sign in again: {e}"
         );
         log::warn!("{msg}");
         inform(msg);
     }
+}
+
+/// Each connector's forget count as it stands before a run's boot sign-in gate opens, so a `lns connector disconnect` landing during a browser device flow — minutes, not milliseconds — still wins over the grant that sign-in would earn.
+pub(crate) fn revocations_before_gate(policy_path: &Path) -> HashMap<String, u64> {
+    let project = project_key(policy_path);
+    JsonFileGrantStore::new(default_workload_grants_path())
+        .load()
+        .unwrap_or_default()
+        .revocations
+        .iter()
+        .filter(|r| r.project == project)
+        .map(|r| (r.connector.clone(), r.count))
+        .collect()
 }
 
 /// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-connectors.yaml` doesn't break a run — the bundled catalog still applies.
@@ -622,10 +665,13 @@ pub(super) async fn start(
     let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
     let project = project_key(policy_path);
     record_boot_sign_in_grants(
-        &consent.signed_in,
-        &run.providers,
-        &project,
-        &workload,
+        BootSignIns {
+            signed_in: &consent.signed_in,
+            providers: &run.providers,
+            project: &project,
+            workload: &workload,
+            at_gate: &consent.revocations_at_gate,
+        },
         &mut grants,
         grant_store.as_ref(),
         &|msg| notifier.inform(&msg),
@@ -1167,17 +1213,156 @@ mod tests {
         grants: &mut WorkloadGrantFile,
         store: &dyn GrantStore,
     ) -> Vec<String> {
+        boot_sign_in_informs_since(signed_in, providers, grants, store, &HashMap::new())
+    }
+
+    fn boot_sign_in_informs_since(
+        signed_in: &[String],
+        providers: &[DefProvider],
+        grants: &mut WorkloadGrantFile,
+        store: &dyn GrantStore,
+        at_gate: &HashMap<String, u64>,
+    ) -> Vec<String> {
         let informed = std::sync::Mutex::new(Vec::<String>::new());
         record_boot_sign_in_grants(
-            signed_in,
-            providers,
-            "proj",
-            &acme_workload(),
+            BootSignIns {
+                signed_in,
+                providers,
+                project: "proj",
+                workload: &acme_workload(),
+                at_gate,
+            },
             grants,
             store,
             &|msg| informed.lock().expect("inform sink poisoned").push(msg),
         );
         informed.into_inner().expect("inform sink poisoned")
+    }
+
+    fn seeded_sidecar(dir: &std::path::Path, policy_path: &Path) -> JsonFileGrantStore {
+        std::fs::write(policy_path, "network: {}\n").expect("policy");
+        let store = JsonFileGrantStore::new(dir.join("grants.json"));
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector(&project_key(policy_path), "acme");
+                file.revoke_project_connector(&project_key(policy_path), "acme");
+                file.revoke_project_connector("/some/other/project", "acme");
+                true
+            })
+            .expect("seed the sidecar");
+        store
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn revocations_before_gate_reads_only_this_projects_counts() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let policy_path = dir.path().join("lns-policy.yaml");
+        seeded_sidecar(dir.path(), &policy_path);
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_WORKLOAD_GRANTS_PATH",
+            dir.path().join("grants.json"),
+        );
+
+        let counts = revocations_before_gate(&policy_path);
+
+        assert_eq!(
+            counts,
+            HashMap::from([("acme".to_string(), 2)]),
+            "the baseline is compared against this project's count at persist time, so folding in another project's forgets would drop grants this project never revoked"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn revocations_before_gate_reads_nothing_from_an_unreadable_sidecar() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sidecar = dir.path().join("grants.json");
+        std::fs::write(&sidecar, "{ not json").expect("corrupt sidecar");
+        let _g = crate::test_env::EnvVarGuard::set("LNS_WORKLOAD_GRANTS_PATH", &sidecar);
+
+        assert!(
+            revocations_before_gate(&dir.path().join("lns-policy.yaml")).is_empty(),
+            "a corrupt sidecar must not stop a launch here; the write that follows surfaces the same corruption with something the developer can act on"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_during_the_sign_in_drops_the_grant_it_would_have_earned() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+        // `lns connector disconnect acme` while the developer was still in the browser: the gate read 0 forgets, the sidecar now records 1.
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "acme");
+                true
+            })
+            .expect("forget the grants mid-sign-in");
+
+        let informed = boot_sign_in_informs_since(
+            &["acme".to_string()],
+            &providers,
+            &mut grants,
+            &store,
+            &HashMap::new(),
+        );
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "acme")
+                .is_none(),
+            "a device flow can hold the gate for minutes, and the disconnect that landed inside that window must not be undone by the sign-in completing"
+        );
+        assert!(
+            informed.iter().any(|m| m.contains("not remembered")),
+            "the developer who just walked a browser flow must be told it will not stick, got: {informed:?}"
+        );
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the sign-in still happened, so the run in front of the developer keeps what they signed in for"
+        );
+    }
+
+    #[test]
+    fn a_forget_from_before_the_sign_in_gate_does_not_drop_the_grant() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let mut grants = WorkloadGrantFile::default();
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "acme");
+                true
+            })
+            .expect("an older revoke");
+        let at_gate = HashMap::from([("acme".to_string(), 1)]);
+
+        let informed = boot_sign_in_informs_since(
+            &["acme".to_string()],
+            &acme_custom(),
+            &mut grants,
+            &store,
+            &at_gate,
+        );
+
+        assert!(
+            informed.is_empty(),
+            "the gate already saw this forget, so the sign-in that followed it answers it; got: {informed:?}"
+        );
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &acme_workload(), "acme")
+                .is_some()
+        );
     }
 
     #[test]
