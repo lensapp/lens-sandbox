@@ -119,6 +119,14 @@ struct GrantBinding {
     project: String,
     workload: WorkloadIdentity,
     store: Arc<dyn GrantStore>,
+    /// Each connector's forget count as this run found it, so a `lns connector disconnect` landing mid-run is not undone by a decision this run was still holding.
+    revocations: HashMap<String, u64>,
+}
+
+impl GrantBinding {
+    fn revocations_at_start(&self, connector: &str) -> u64 {
+        self.revocations.get(connector).copied().unwrap_or(0)
+    }
 }
 
 pub struct CredentialSession {
@@ -304,9 +312,14 @@ impl CredentialSession {
         store: Arc<dyn GrantStore>,
     ) -> Self {
         let key = workload.key();
-        let seeded = store
-            .load()
-            .unwrap_or_default()
+        let loaded = store.load().unwrap_or_default();
+        let revocations = loaded
+            .revocations
+            .iter()
+            .filter(|r| r.project == project)
+            .map(|r| (r.connector.clone(), r.count))
+            .collect();
+        let seeded = loaded
             .grants
             .into_iter()
             .filter(|g| g.project == project && g.workload == key)
@@ -317,6 +330,7 @@ impl CredentialSession {
             project,
             workload,
             store,
+            revocations,
         });
         self
     }
@@ -395,15 +409,29 @@ impl CredentialSession {
         Some(record)
     }
 
-    /// Writes a remembered grant to the machine-local sidecar so a later run skips the offer; callers whose decision also writes a value hold this back until that write lands, or the grant would outlive the value it was given for.
+    /// Writes a remembered grant to the sidecar unless a forget landed since this run read it, decided inside the store's update so the disconnect and this write cannot interleave.
     fn persist_grant(&self, record: Option<GrantRecord>) {
         let (Some(record), Some(binding)) = (record, &self.grant_binding) else {
             return;
         };
-        if let Err(e) = binding.store.update(&mut |file| {
+        let at_start = binding.revocations_at_start(&record.connector);
+        let mut forgotten_since = false;
+        let outcome = binding.store.update(&mut |file| {
+            if file.revocations_of(&record.project, &record.connector) != at_start {
+                forgotten_since = true;
+                return false;
+            }
             file.upsert(record.clone());
             true
-        }) {
+        });
+        if forgotten_since {
+            self.notifier.inform(&format!(
+                "{} was disconnected during this run, so this decision was not remembered; the next run will ask again",
+                record.connector
+            ));
+            return;
+        }
+        if let Err(e) = outcome {
             self.notifier.inform(&format!(
                 "credential decision applied but its grant was not persisted; the next run will ask again: {e}"
             ));
@@ -1500,6 +1528,35 @@ mod tests {
         assert_eq!(grant.verdict, lns_policy::grants::GrantVerdict::Allow);
         assert_eq!(grant.env_var, "SOME_TOKEN");
         assert_eq!(grant.injection_domains, ["api.some-provider.example"]);
+    }
+
+    #[test]
+    fn a_forget_from_before_this_run_does_not_block_the_grant_it_consents_to_now() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.revoke_project_connector("proj", "some-provider");
+        store.save(&prior).unwrap();
+
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "the run compares the forget count against what it started with, so a revoke the developer did before launching is already answered by the card they just accepted — only a forget landing mid-run may drop it"
+        );
     }
 
     #[test]

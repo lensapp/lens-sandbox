@@ -109,10 +109,20 @@ impl GrantRecord {
     }
 }
 
+/// How many times a project's grants for one connector have been forgotten, so a decision taken before the latest forget can be told from one taken after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revocation {
+    pub project: String,
+    pub connector: String,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct WorkloadGrantFile {
+    #[serde(default)]
     pub grants: Vec<GrantRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocations: Vec<Revocation>,
 }
 
 impl WorkloadGrantFile {
@@ -159,11 +169,31 @@ impl WorkloadGrantFile {
         before != self.grants.len()
     }
 
-    pub fn clear_project_connector(&mut self, project: &str, connector: &str) -> usize {
+    /// Forgets a project's grants for one connector and counts the forget, so a grant decided before it — by a run that is still deciding when the forget lands — can be recognized as stale and dropped instead of resurrecting what was just forgotten.
+    pub fn revoke_project_connector(&mut self, project: &str, connector: &str) -> usize {
         let before = self.grants.len();
         self.grants
             .retain(|g| !(g.project == project && g.connector == connector));
+        match self
+            .revocations
+            .iter_mut()
+            .find(|r| r.project == project && r.connector == connector)
+        {
+            Some(r) => r.count += 1,
+            None => self.revocations.push(Revocation {
+                project: project.to_string(),
+                connector: connector.to_string(),
+                count: 1,
+            }),
+        }
         before - self.grants.len()
+    }
+
+    pub fn revocations_of(&self, project: &str, connector: &str) -> u64 {
+        self.revocations
+            .iter()
+            .find(|r| r.project == project && r.connector == connector)
+            .map_or(0, |r| r.count)
     }
 
     pub fn for_project<'a>(&'a self, project: &'a str) -> impl Iterator<Item = &'a GrantRecord> {
@@ -430,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn file_serializes_transparently_as_a_bare_array() {
+    fn file_keeps_grants_and_revocations_in_named_lists() {
         let mut file = WorkloadGrantFile::default();
         file.upsert(GrantRecord::allow(
             "/proj",
@@ -440,8 +470,22 @@ mod tests {
             vec![],
         ));
         let v = serde_json::to_value(&file).unwrap();
-        assert!(v.is_array(), "expected a bare array, got: {v}");
-        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v["grants"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            v.get("revocations"),
+            None,
+            "a sidecar nobody has revoked from carries no revocation noise"
+        );
+
+        file.revoke_project_connector("/proj", "some-provider");
+        let v = serde_json::to_value(&file).unwrap();
+        assert_eq!(v["grants"].as_array().map(Vec::len), Some(0));
+        assert_eq!(v["revocations"][0]["count"], json!(1));
+        assert_eq!(
+            serde_json::from_value::<WorkloadGrantFile>(v).unwrap(),
+            file,
+            "both lists round-trip, or a forget cannot outlive the process that recorded it"
+        );
     }
 
     #[test]
@@ -543,6 +587,7 @@ mod tests {
         let dup = GrantRecord::allow("/proj", &workload, "some-provider", "T", vec![]);
         let mut file = WorkloadGrantFile {
             grants: vec![dup.clone(), dup],
+            ..WorkloadGrantFile::default()
         };
 
         assert!(file.remove("/proj", &workload, "some-provider"));
@@ -553,7 +598,56 @@ mod tests {
     }
 
     #[test]
-    fn clear_project_connector_drops_all_workloads_for_that_pair_only() {
+    fn revoking_counts_the_forget_so_a_decision_taken_before_it_can_be_told_apart() {
+        let mut file = WorkloadGrantFile::default();
+        assert_eq!(
+            file.revocations_of("/proj", "some-provider"),
+            0,
+            "a connector nobody has forgotten starts at zero"
+        );
+
+        file.revoke_project_connector("/proj", "some-provider");
+        file.revoke_project_connector("/proj", "some-provider");
+
+        assert_eq!(
+            file.revocations_of("/proj", "some-provider"),
+            2,
+            "a run that read 1 must be able to see that a second forget has landed since"
+        );
+        assert_eq!(file.revocations_of("/proj", "some-oauth"), 0);
+        assert_eq!(file.revocations_of("/other", "some-provider"), 0);
+    }
+
+    #[test]
+    fn revoking_counts_the_forget_even_when_there_was_no_grant_to_drop() {
+        let mut file = WorkloadGrantFile::default();
+        assert_eq!(file.revoke_project_connector("/proj", "some-provider"), 0);
+        assert_eq!(
+            file.revocations_of("/proj", "some-provider"),
+            1,
+            "the run whose grant has not landed yet is exactly the one the count has to cancel, and it has left nothing to drop"
+        );
+    }
+
+    #[test]
+    fn revocations_survive_a_save_and_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let mut file = WorkloadGrantFile::default();
+        file.revoke_project_connector("/proj", "some-provider");
+        store.save(&file).unwrap();
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .revocations_of("/proj", "some-provider"),
+            1,
+            "the count outlives the process that wrote it, or a `lns connector disconnect` cannot cancel a service still deciding"
+        );
+    }
+
+    #[test]
+    fn revoke_project_connector_drops_all_workloads_for_that_pair_only() {
         let mut file = WorkloadGrantFile::default();
         file.upsert(GrantRecord::allow(
             "/proj",
@@ -584,7 +678,7 @@ mod tests {
             vec![],
         ));
 
-        let removed = file.clear_project_connector("/proj", "some-provider");
+        let removed = file.revoke_project_connector("/proj", "some-provider");
         assert_eq!(removed, 2, "both /proj workloads for some-provider go");
         assert!(file.lookup("/proj", &def("/proj"), "some-oauth").is_some());
         assert!(

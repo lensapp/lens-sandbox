@@ -426,14 +426,14 @@ pub fn disconnect(
     Ok(0)
 }
 
-/// Drop every per-workload grant for one connector in a project from the sidecar, returning how many were removed; leaves the file untouched when there were none.
+/// Drop every per-workload grant for one connector in a project from the sidecar, returning how many were removed; the forget is always recorded, even with nothing to remove, because a run still deciding is exactly the one whose grant this has to cancel.
 fn clear_project_grants(grants_path: &Path, project: &str, connector: &str) -> Result<usize> {
     let store = JsonFileGrantStore::new(grants_path.to_path_buf());
     let mut cleared = 0;
     store
         .update(&mut |file| {
-            cleared = file.clear_project_connector(project, connector);
-            cleared > 0
+            cleared = file.revoke_project_connector(project, connector);
+            true
         })
         .with_context(|| format!("updating grants at {}", grants_path.display()))?;
     Ok(cleared)
@@ -487,7 +487,10 @@ fn revoke(
     let project = project_key(&policy_path(args.policy.as_deref(), cwd));
     let cleared = clear_project_grants(grants_path, &project, &args.id)?;
     if cleared == 0 {
-        bail!("no grants for {:?} in this project", args.id);
+        bail!(
+            "no grants for {:?} in this project; a decision a running sandbox was still holding for it is cancelled all the same",
+            args.id
+        );
     }
     writeln!(
         writer,

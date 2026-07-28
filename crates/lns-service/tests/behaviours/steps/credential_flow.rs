@@ -525,6 +525,36 @@ fn then_card_says_fresh_needed(world: &mut BehaviourWorld) -> Result<(), String>
     Ok(())
 }
 
+#[given(regex = r#"^"([^"]+)" is disconnected from this project while the card is open$"#)]
+fn given_disconnected_while_card_open(world: &mut BehaviourWorld, credential_id: String) {
+    world.credential().forget_project_grants(&credential_id);
+}
+
+#[then(regex = r#"^the workload grant sidecar records no grant for "([^"]+)"$"#)]
+fn then_grant_sidecar_records_nothing(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    if world.credential().workload_grant_recorded(&credential_id) {
+        return Err(format!(
+            "the disconnect reported that it forgot {credential_id}'s grants, so a decision this run was already holding must not put one back — a later reconnect would inherit it with no card"
+        ));
+    }
+    Ok(())
+}
+
+#[then("the approval window says the decision was not remembered")]
+fn then_window_says_not_remembered(world: &mut BehaviourWorld) -> Result<(), String> {
+    let informs = world.credential().window_state.snapshot().informs;
+    if informs.iter().any(|m| m.contains("not remembered")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the developer answered a card and the answer was dropped; silence would make the next run's fresh card look like a bug. Informs: {informs:?}"
+        ))
+    }
+}
+
 #[then(regex = r#"^the workload grant sidecar records a deny for "([^"]+)"$"#)]
 fn then_grant_sidecar_records_deny(
     world: &mut BehaviourWorld,
