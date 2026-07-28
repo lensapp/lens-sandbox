@@ -2298,6 +2298,7 @@ mod tests {
                 env_var: Some("SOME_TOKEN".into()),
                 injection_domains: vec!["api.some-provider.example".into()],
                 is_project_defined: false,
+                bound_value_available: true,
             },
             true,
             tx,
