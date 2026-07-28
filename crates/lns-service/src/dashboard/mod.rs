@@ -1,22 +1,23 @@
+mod commands;
 mod credentials;
 mod filter;
 mod format;
 pub mod live;
 mod sandboxes;
 mod snapshot;
+mod state;
 mod unified;
 
 pub use credentials::{
-    CredentialBinding, CredentialDashboardState, CredentialFilter, CredentialOperation,
-    CredentialSandbox, CredentialSection, CredentialStatus, CredentialSummary,
+    CredentialBinding, CredentialOperation, CredentialStatus, CredentialSummary,
     PendingCredentialRequest, SandboxAccess,
 };
 pub use filter::{Filters, KINDS, visible_indices};
-pub use unified::{
+pub use state::{
     CredentialReviewChoice, DashboardCommand, DashboardCredential, DashboardSandbox, DashboardView,
-    UnifiedDashboardAction, UnifiedDashboardState, render_unified_dashboard,
-    unified_viewport_builder,
+    UnifiedDashboardAction, UnifiedDashboardState,
 };
+pub use unified::{render_unified_dashboard, unified_viewport_builder};
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Layout, Margin,
@@ -29,8 +30,10 @@ use crate::approval_flow::window::{
     ACCENT_GREEN, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER, CATEGORY, STATUS_CRITICAL,
     STATUS_WARNING, TEXT_MUTED, TEXT_PRIMARY,
 };
-use crate::ui::button::{Button, ButtonKind};
 use crate::ui::theme;
+
+/// Distinguishes a sign-in card's request id from a credential prompt's, so a decision reaches the flow that raised it.
+const SIGN_IN_REQUEST_PREFIX: &str = "sign-in:";
 
 const TRAFFIC_LIGHT_INSET: f32 = 80.0;
 const SIDEBAR_WIDTH: f32 = 216.0;
@@ -104,14 +107,6 @@ pub enum DashboardAction {
     Refresh,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CredentialDashboardAction {
-    None,
-    Refresh,
-    ReviewRequest(String),
-    Confirm(CredentialOperation),
-}
-
 pub fn background() -> Color32 {
     CONTENT_FILL
 }
@@ -168,29 +163,6 @@ fn dashboard_visuals() -> egui::Visuals {
     v
 }
 
-pub fn load(state: &mut DashboardState) {
-    let runs = match lns_ipc::audit_runs_root() {
-        Ok(path) => path,
-        Err(e) => return set_error(state, e),
-    };
-    let ledger = match lns_ipc::connection_ledger() {
-        Ok(path) => path,
-        Err(e) => return set_error(state, e),
-    };
-    match lns_audit::collect_timeline(&runs, &ledger, None) {
-        Ok(timeline) => {
-            state.sandboxes = sandboxes::merge_sandboxes(&active_sandboxes(), &timeline.rows);
-            state.rows = timeline.rows;
-            state.warnings = timeline.warnings;
-            state.last_error = None;
-            if state.selected.is_some_and(|i| i >= state.rows.len()) {
-                state.selected = None;
-            }
-        }
-        Err(e) => state.last_error = Some(format!("{e:#}")),
-    }
-}
-
 pub fn load_unified(
     window_state: &crate::approval_flow::window::WindowState,
 ) -> UnifiedDashboardState {
@@ -201,6 +173,17 @@ pub fn load_unified(
         data.rows,
         data.warnings,
         data.last_error,
+    )
+}
+
+pub fn execute_unified_command(
+    command: &DashboardCommand,
+    window_state: &crate::approval_flow::window::WindowState,
+) -> anyhow::Result<String> {
+    commands::execute(
+        command,
+        window_state,
+        &commands::CommandStores::default_paths(),
     )
 }
 
@@ -216,154 +199,6 @@ pub fn reload_unified(
         data.warnings,
         data.last_error,
     );
-}
-
-pub fn execute_unified_command(
-    command: &DashboardCommand,
-    window_state: &crate::approval_flow::window::WindowState,
-) -> anyhow::Result<String> {
-    use anyhow::{Context, bail};
-    use lns_policy::credentials::{CredentialEntry, CredentialStore};
-
-    let notice = match command {
-        DashboardCommand::ReviewCredential { request_id, choice } => {
-            if let Some(connector_id) = request_id.strip_prefix("sign-in:") {
-                let (resolved, notice) = match choice {
-                    CredentialReviewChoice::Deny => (
-                        window_state.cancel_sign_in(connector_id),
-                        format!("Sign-in to {connector_id} was cancelled."),
-                    ),
-                    CredentialReviewChoice::UseValue(value) => (
-                        window_state.pivot_sign_in(connector_id, value.clone()),
-                        format!("{connector_id} will use the supplied token."),
-                    ),
-                    CredentialReviewChoice::UseHost | CredentialReviewChoice::Connect => {
-                        bail!("sign-in for {connector_id} is already in progress")
-                    }
-                };
-                if !resolved {
-                    bail!("credential request is no longer pending");
-                }
-                notice
-            } else {
-                let request = match choice {
-                    CredentialReviewChoice::UseHost | CredentialReviewChoice::Connect => {
-                        crate::credential_flow::session::CredentialDecisionRequest::Allow(
-                            CredentialEntry::HostDetect,
-                        )
-                    }
-                    CredentialReviewChoice::UseValue(value) => {
-                        crate::credential_flow::session::CredentialDecisionRequest::Allow(
-                            CredentialEntry::Stored {
-                                value: value.clone(),
-                            },
-                        )
-                    }
-                    CredentialReviewChoice::Deny => {
-                        crate::credential_flow::session::CredentialDecisionRequest::Deny
-                    }
-                };
-                if !window_state.decide_credential(request_id, request) {
-                    bail!("credential request is no longer pending");
-                }
-                match choice {
-                    CredentialReviewChoice::Deny => "Credential request denied.".to_string(),
-                    CredentialReviewChoice::Connect => "Sign-in started.".to_string(),
-                    CredentialReviewChoice::UseHost | CredentialReviewChoice::UseValue(_) => {
-                        "Credential request allowed.".to_string()
-                    }
-                }
-            }
-        }
-        DashboardCommand::ReplaceCredential {
-            connector_id,
-            value,
-        } => {
-            let path = lns_policy::credentials::default_credentials_path();
-            let store = lns_policy::credentials::JsonFileCredentialStore::new(path.clone());
-            let mut state = store
-                .load()
-                .with_context(|| format!("reading credential state {}", path.display()))?;
-            replace_saved_credential(&mut state, connector_id, value)?;
-            store
-                .save(&state)
-                .with_context(|| format!("saving credential state {}", path.display()))?;
-            crate::dashboard::live::note_write();
-            format!("{connector_id} was replaced.")
-        }
-        DashboardCommand::RemoveCredential { connector_id } => {
-            let path = lns_policy::credentials::default_credentials_path();
-            let store = lns_policy::credentials::JsonFileCredentialStore::new(path.clone());
-            let mut state = store
-                .load()
-                .with_context(|| format!("reading credential state {}", path.display()))?;
-            remove_saved_credential(&mut state, connector_id)?;
-            store
-                .save(&state)
-                .with_context(|| format!("saving credential state {}", path.display()))?;
-            crate::dashboard::live::note_write();
-            format!("{connector_id} was removed from this machine.")
-        }
-        DashboardCommand::RevokeSandbox {
-            connector_id,
-            sandbox_id,
-        } => {
-            if crate::run_registry::credential_slots(sandbox_id)
-                .iter()
-                .any(|slot| slot.name == *connector_id)
-            {
-                bail!("{connector_id} is declared by the sandbox definition and cannot be revoked");
-            }
-            let details = crate::run_registry::inspect(sandbox_id)
-                .with_context(|| format!("sandbox {sandbox_id} is no longer available"))?;
-            let policy_path = details
-                .config
-                .policy_path
-                .map(std::path::PathBuf::from)
-                .context("sandbox has no project policy")?;
-            let mut policy = lns_policy::Policy::load_or_default(&policy_path)
-                .with_context(|| format!("reading policy {}", policy_path.display()))?;
-            if !policy.disconnect(connector_id) {
-                bail!("{connector_id} is no longer connected to this project");
-            }
-            policy
-                .save_atomic(&policy_path)
-                .with_context(|| format!("saving policy {}", policy_path.display()))?;
-            crate::dashboard::live::note_write();
-            format!(
-                "{connector_id} was disconnected from {}.",
-                project_label(&policy_path)
-            )
-        }
-    };
-    Ok(notice)
-}
-
-fn replace_saved_credential(
-    state: &mut lns_policy::credentials::CredentialStateFile,
-    connector_id: &str,
-    value: &str,
-) -> anyhow::Result<()> {
-    use anyhow::bail;
-    use lns_policy::credentials::CredentialEntry;
-
-    match state.get_mut(connector_id) {
-        Some(CredentialEntry::Stored { value: stored }) => stored.replace_range(.., value),
-        Some(_) => bail!("{connector_id} is not a replaceable stored credential"),
-        None => bail!("{connector_id} is no longer stored on this machine"),
-    }
-    Ok(())
-}
-
-fn remove_saved_credential(
-    state: &mut lns_policy::credentials::CredentialStateFile,
-    connector_id: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        state.remove(connector_id).is_some(),
-        "{connector_id} is no longer stored on this machine"
-    );
-    Ok(())
 }
 
 struct UnifiedData {
@@ -436,6 +271,7 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
                 sandbox_name: origin.sandbox_name,
                 project: display_project(&origin.project),
                 host_value_available: prompt.host_value_available,
+                bound_value_available: prompt.bound_value_available,
                 oauth: prompt.oauth_display_name.is_some(),
                 token_fallback: prompt.token_fallback.is_some(),
                 verification_uri: None,
@@ -445,13 +281,14 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
         .chain(window_snapshot.sign_ins.into_iter().map(|sign_in| {
             let origin = sign_in.origin.unwrap_or_else(unknown_prompt_origin);
             snapshot::PendingCredential {
-                id: format!("sign-in:{}", sign_in.credential_id),
+                id: format!("{SIGN_IN_REQUEST_PREFIX}{}", sign_in.credential_id),
                 connector_id: sign_in.credential_id,
                 action: "complete sign-in".to_string(),
                 sandbox_id: origin.sandbox_id,
                 sandbox_name: origin.sandbox_name,
                 project: display_project(&origin.project),
                 host_value_available: false,
+                bound_value_available: false,
                 oauth: true,
                 token_fallback: sign_in.token_fallback.is_some(),
                 verification_uri: Some(sign_in.verification_uri),
@@ -459,37 +296,13 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
             }
         }))
         .collect();
-    let host_values = catalog
-        .iter()
-        .filter(|connector| {
-            matches!(
-                credential_state.get(&connector.id),
-                Some(lns_policy::credentials::CredentialEntry::HostDetect)
-            )
-        })
-        .filter_map(|connector| {
-            let env_var = match connector.auth_kind {
-                lns_policy::connectors::AuthKind::Credential => connector
-                    .credential
-                    .as_ref()
-                    .map(|credential| credential.env_var.as_str()),
-                lns_policy::connectors::AuthKind::Oauth => {
-                    connector.oauth.as_ref().map(|oauth| oauth.env_var.as_str())
-                }
-            }?;
-            std::env::var(env_var)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|value| (connector.id.clone(), value))
-        })
-        .collect();
     let credentials = snapshot::build_credentials(snapshot::SnapshotInput {
         catalog: &catalog,
         credential_state: &credential_state,
         sandboxes: sandboxes.clone(),
         run_access,
         pending,
-        host_values,
+        host_value_ids: host_detected_ids(&catalog, &credential_state),
         rows: &rows,
         now: now_unix_secs().max(0) as u64,
     });
@@ -500,6 +313,37 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
         warnings,
         last_error,
     }
+}
+
+/// Answers whether a host-detect binding currently resolves, through the same detector the boundary uses, without holding on to the value it found.
+fn host_detected_ids(
+    catalog: &[lns_policy::connectors::Connector],
+    credential_state: &lns_policy::credentials::CredentialStateFile,
+) -> std::collections::HashSet<String> {
+    use crate::credential_flow::detection::{EnvVarDetector, HostDetector};
+
+    catalog
+        .iter()
+        .filter(|connector| {
+            matches!(
+                credential_state.get(&connector.id),
+                Some(lns_policy::credentials::CredentialEntry::HostDetect)
+            )
+        })
+        .filter(|connector| {
+            let env_var = match connector.auth_kind {
+                lns_policy::connectors::AuthKind::Credential => connector
+                    .credential
+                    .as_ref()
+                    .map(|credential| credential.env_var.as_str()),
+                lns_policy::connectors::AuthKind::Oauth => {
+                    connector.oauth.as_ref().map(|oauth| oauth.env_var.as_str())
+                }
+            };
+            env_var.is_some_and(|env_var| EnvVarDetector::new(env_var).detect().is_some())
+        })
+        .map(|connector| connector.id.clone())
+        .collect()
 }
 
 fn collect_audit_rows() -> (Vec<TimelineRow>, Vec<String>, Option<String>) {
@@ -611,18 +455,6 @@ fn unknown_prompt_origin() -> crate::approval_flow::window::CredentialPromptOrig
     }
 }
 
-fn active_sandboxes() -> Vec<Sandbox> {
-    crate::run_registry::snapshot()
-        .into_iter()
-        .map(|s| Sandbox {
-            id: s.id,
-            name: s.name,
-            image: s.image,
-            status: status_word(&s.status),
-        })
-        .collect()
-}
-
 fn status_word(status: &lns_ipc::RunStatus) -> String {
     match status {
         lns_ipc::RunStatus::Running => "running".to_string(),
@@ -645,14 +477,6 @@ pub fn viewport_builder() -> egui::ViewportBuilder {
         .with_resizable(true)
         .with_inner_size([960.0, 640.0])
         .with_min_inner_size([640.0, 400.0])
-}
-
-pub fn credential_viewport_builder() -> egui::ViewportBuilder {
-    viewport_builder().with_title("Lens Sandbox — Credential access")
-}
-
-fn set_error(state: &mut DashboardState, e: impl std::fmt::Display) {
-    state.last_error = Some(e.to_string());
 }
 
 pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction {
@@ -1502,279 +1326,6 @@ fn kind_color(kind: &str) -> Color32 {
     }
 }
 
-pub fn render_credentials(
-    ui: &mut egui::Ui,
-    state: &mut CredentialDashboardState,
-) -> CredentialDashboardAction {
-    ui.ctx().set_visuals(dashboard_visuals());
-    credential_sidebar_toggle(ui, state);
-    let detail_reveal = ui.ctx().animate_bool_with_time(
-        egui::Id::new("credential-dashboard-detail-anim"),
-        state.selected_connector.is_some(),
-        0.16,
-    );
-    let detail_open = state.selected_connector.is_some() || detail_reveal > 0.002;
-    let mut action = if detail_open {
-        CredentialDashboardAction::None
-    } else {
-        credential_refresh_button(ui)
-    };
-    if state.sidebar_open {
-        credential_sidebar(ui, state);
-    }
-    if detail_open {
-        credential_detail_panel(ui, state, detail_reveal, &mut action);
-    }
-    credential_central(ui, state);
-    if state.confirmation.is_some() {
-        credential_confirmation(ui, state, &mut action);
-    }
-    action
-}
-
-fn credential_refresh_button(ui: &mut egui::Ui) -> CredentialDashboardAction {
-    let clicked = egui::Area::new(egui::Id::new("credential-dashboard-refresh"))
-        .anchor(Align2::RIGHT_TOP, vec2(-6.0, 5.0))
-        .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
-            icon_button(ui, icons::ICON_REFRESH)
-                .on_hover_text("Refresh")
-                .clicked()
-        })
-        .inner;
-    if clicked {
-        CredentialDashboardAction::Refresh
-    } else {
-        CredentialDashboardAction::None
-    }
-}
-
-fn credential_sidebar_toggle(ui: &mut egui::Ui, state: &mut CredentialDashboardState) {
-    let icon = if state.sidebar_open {
-        icons::ICON_LEFT_PANEL_CLOSE
-    } else {
-        icons::ICON_LEFT_PANEL_OPEN
-    };
-    let clicked = egui::Area::new(egui::Id::new("credential-dashboard-sidebar-toggle"))
-        .fixed_pos(egui::pos2(TRAFFIC_LIGHT_INSET, 5.0))
-        .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
-            icon_button(ui, icon)
-                .on_hover_text("Toggle sidebar")
-                .clicked()
-        })
-        .inner;
-    if clicked {
-        state.sidebar_open = !state.sidebar_open;
-    }
-}
-
-fn credential_sidebar(ui: &mut egui::Ui, state: &mut CredentialDashboardState) {
-    let sandboxes = state.sandboxes.clone();
-    egui::Panel::left("credential-dashboard-sidebar")
-        .resizable(true)
-        .default_size(SIDEBAR_WIDTH)
-        .min_size(170.0)
-        .max_size(360.0)
-        .show_separator_line(true)
-        .frame(Frame::new().fill(CHROME_FILL).inner_margin(Margin::same(8)))
-        .show_inside(ui, |ui| {
-            ui.add_space(26.0);
-            if credential_filter_item(
-                ui,
-                "All credentials",
-                state.count(CredentialFilter::All),
-                state.selected_filter == CredentialFilter::All,
-            )
-            .clicked()
-            {
-                state.selected_filter = CredentialFilter::All;
-                state.selected_connector = None;
-            }
-            if credential_filter_item(
-                ui,
-                "Pending",
-                state.count(CredentialFilter::Pending),
-                state.selected_filter == CredentialFilter::Pending,
-            )
-            .clicked()
-            {
-                state.selected_filter = CredentialFilter::Pending;
-                state.selected_connector = None;
-            }
-            if credential_filter_item(
-                ui,
-                "Denied",
-                state.count(CredentialFilter::Denied),
-                state.selected_filter == CredentialFilter::Denied,
-            )
-            .clicked()
-            {
-                state.selected_filter = CredentialFilter::Denied;
-                state.selected_connector = None;
-            }
-            if !sandboxes.is_empty() {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("SANDBOXES").size(FS_LABEL).color(TEXT_MUTED));
-                });
-                ui.add_space(2.0);
-                let all_selected = state.selected_sandbox.is_none();
-                if credential_sandbox_item(ui, "All sandboxes", "Every project", "", all_selected)
-                    .clicked()
-                {
-                    state.selected_sandbox = None;
-                    state.selected_connector = None;
-                }
-                for sandbox in sandboxes {
-                    let selected = state.selected_sandbox.as_deref() == Some(&sandbox.id);
-                    if credential_sandbox_item(
-                        ui,
-                        &sandbox.name,
-                        &sandbox.project,
-                        &sandbox.status,
-                        selected,
-                    )
-                    .clicked()
-                    {
-                        state.selected_sandbox = Some(sandbox.id);
-                        state.selected_connector = None;
-                    }
-                }
-            }
-        });
-}
-
-fn credential_filter_item(
-    ui: &mut egui::Ui,
-    label: &str,
-    count: usize,
-    selected: bool,
-) -> egui::Response {
-    let fill = if selected {
-        SELECT_FILL
-    } else {
-        Color32::TRANSPARENT
-    };
-    let response = Frame::new()
-        .fill(fill)
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(8, 7))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                glyph(ui, icons::ICON_KEY, TEXT_MUTED, 18.0);
-                ui.add_space(8.0);
-                ui.label(RichText::new(label).size(FS_BODY).color(TEXT_PRIMARY));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(count.to_string())
-                            .size(FS_LABEL)
-                            .color(TEXT_MUTED),
-                    );
-                });
-            });
-        })
-        .response
-        .interact(Sense::click());
-    row_click(&response);
-    response
-}
-
-fn credential_sandbox_item(
-    ui: &mut egui::Ui,
-    name: &str,
-    project: &str,
-    status: &str,
-    selected: bool,
-) -> egui::Response {
-    let fill = if selected {
-        SELECT_FILL
-    } else {
-        Color32::TRANSPARENT
-    };
-    let response = Frame::new()
-        .fill(fill)
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(8, 6))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                if !status.is_empty() {
-                    status_dot(ui, status);
-                }
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(name).size(FS_BODY).color(TEXT_PRIMARY));
-                    ui.add(
-                        egui::Label::new(RichText::new(project).size(FS_LABEL).color(TEXT_MUTED))
-                            .truncate(),
-                    );
-                });
-            });
-        })
-        .response
-        .interact(Sense::click());
-    row_click(&response);
-    response
-}
-
-fn credential_central(ui: &mut egui::Ui, state: &mut CredentialDashboardState) {
-    egui::CentralPanel::default()
-        .frame(
-            Frame::new()
-                .fill(CONTENT_FILL)
-                .inner_margin(Margin::same(theme::STACK_MARGIN)),
-        )
-        .show_inside(ui, |ui| {
-            ui.add_space(12.0);
-            dashboard_page_header(
-                ui,
-                "Credential access",
-                "See what sandboxes can use. Credential values are never shown.",
-            );
-            if let Some(notice) = state.notice.as_deref() {
-                ui.add_space(10.0);
-                dashboard_banner(ui, notice, STATUS_WARNING);
-            }
-            ui.add_space(14.0);
-            let visible = credentials::visible_indices(state);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if visible.is_empty() {
-                        ui.add_space(8.0);
-                        ui.colored_label(TEXT_MUTED, credential_empty_message(state));
-                        return;
-                    }
-                    for section in [
-                        CredentialSection::NeedsAttention,
-                        CredentialSection::Active,
-                        CredentialSection::Denied,
-                    ] {
-                        let section_rows: Vec<usize> = visible
-                            .iter()
-                            .copied()
-                            .filter(|index| state.credentials[*index].status.section() == section)
-                            .collect();
-                        if section_rows.is_empty() {
-                            continue;
-                        }
-                        ui.label(
-                            RichText::new(section.label())
-                                .size(FS_LABEL)
-                                .color(TEXT_MUTED),
-                        );
-                        ui.add_space(3.0);
-                        for index in section_rows {
-                            credential_row(ui, state, index);
-                        }
-                        ui.add_space(14.0);
-                    }
-                });
-        });
-}
-
 fn dashboard_page_header(ui: &mut egui::Ui, title: &str, description: &str) {
     ui.label(RichText::new(title).size(20.0).color(TEXT_PRIMARY));
     ui.label(
@@ -1799,116 +1350,6 @@ fn dashboard_banner(ui: &mut egui::Ui, text: &str, color: Color32) {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(text).size(FS_SECONDARY).color(TEXT_PRIMARY));
         });
-}
-
-fn credential_empty_message(state: &CredentialDashboardState) -> &'static str {
-    if state.selected_sandbox.is_some() {
-        "No credential access matches this sandbox."
-    } else {
-        match state.selected_filter {
-            CredentialFilter::All => "No credential access has been recorded.",
-            CredentialFilter::Pending => "No credential requests are waiting for you.",
-            CredentialFilter::Denied => "No credentials are denied or unavailable.",
-        }
-    }
-}
-
-fn credential_row(ui: &mut egui::Ui, state: &mut CredentialDashboardState, index: usize) {
-    let credential = state.credentials[index].clone();
-    let selected = state.selected_connector.as_deref() == Some(&credential.connector_id);
-    let show_activity = ui.available_width() >= 620.0;
-    let activity_width = if show_activity { 166.0 } else { 0.0 };
-    let body_width =
-        (ui.available_width() - ICON_COL - activity_width - if show_activity { 20.0 } else { 8.0 })
-            .max(120.0);
-    let fill = if selected {
-        SELECT_FILL
-    } else {
-        Color32::TRANSPARENT
-    };
-    let response = Frame::new()
-        .fill(fill)
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(6, 7))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    vec2(ICON_COL, 38.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        glyph(
-                            ui,
-                            icons::ICON_KEY,
-                            credential_status_color(credential.status),
-                            17.0,
-                        );
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    vec2(body_width, 38.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&credential.display_name)
-                                        .size(FS_BODY)
-                                        .color(TEXT_PRIMARY),
-                                )
-                                .truncate(),
-                            );
-                            credential_status_badge(ui, credential.status);
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(credential_row_detail(&credential))
-                                    .size(FS_SECONDARY)
-                                    .color(TEXT_MUTED),
-                            )
-                            .truncate(),
-                        );
-                    },
-                );
-                if show_activity {
-                    ui.allocate_ui_with_layout(
-                        vec2(activity_width, 38.0),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            if let Some(activity) = credential.recent_activity.as_deref() {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(activity)
-                                            .size(FS_SECONDARY)
-                                            .color(TEXT_MUTED),
-                                    )
-                                    .truncate(),
-                                );
-                            }
-                        },
-                    );
-                }
-            });
-        })
-        .response
-        .interact(Sense::click());
-    row_click(&response);
-    if response.clicked() {
-        state.selected_connector = Some(credential.connector_id);
-    }
-}
-
-fn credential_row_detail(credential: &CredentialSummary) -> String {
-    if let Some(request) = credential.pending.as_ref() {
-        return format!("{} · {}", request.sandbox_name, request.requested_at);
-    }
-    let count = credential.active_sandbox_count();
-    let sandboxes = if count == 1 {
-        "1 active sandbox".to_string()
-    } else {
-        format!("{count} active sandboxes")
-    };
-    format!("{} · {sandboxes}", credential.binding.label())
 }
 
 fn credential_status_badge(ui: &mut egui::Ui, status: CredentialStatus) {
@@ -1937,183 +1378,9 @@ fn credential_status_color(status: CredentialStatus) -> Color32 {
     }
 }
 
-fn credential_detail_panel(
-    ui: &mut egui::Ui,
-    state: &mut CredentialDashboardState,
-    reveal: f32,
-    action: &mut CredentialDashboardAction,
-) {
-    let Some(credential) = state.selected_credential().cloned() else {
-        return;
-    };
-    egui::Panel::right("credential-dashboard-detail")
-        .resizable(false)
-        .exact_size(DETAIL_WIDTH * reveal)
-        .show_separator_line(true)
-        .frame(Frame::new().fill(CHROME_FILL))
-        .show_inside(ui, |ui| {
-            ui.set_opacity(reveal);
-            Frame::new()
-                .inner_margin(Margin::same(theme::STACK_MARGIN))
-                .show(ui, |ui| {
-                    ui.set_width(DETAIL_WIDTH - 2.0 * theme::STACK_MARGIN as f32);
-                    credential_detail_body(ui, state, &credential, action);
-                });
-        });
-}
-
-fn credential_detail_body(
-    ui: &mut egui::Ui,
-    state: &mut CredentialDashboardState,
-    credential: &CredentialSummary,
-    action: &mut CredentialDashboardAction,
-) {
-    ui.horizontal(|ui| {
-        glyph(
-            ui,
-            icons::ICON_KEY,
-            credential_status_color(credential.status),
-            18.0,
-        );
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(&credential.display_name)
-                    .size(FS_BODY)
-                    .color(TEXT_PRIMARY),
-            );
-            ui.label(
-                RichText::new(&credential.connector_id)
-                    .size(FS_LABEL)
-                    .monospace()
-                    .color(TEXT_MUTED),
-            );
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, icons::ICON_CLOSE)
-                .on_hover_text("Close")
-                .clicked()
-            {
-                state.selected_connector = None;
-            }
-        });
-    });
-    ui.add_space(10.0);
-    credential_status_badge(ui, credential.status);
-    ui.add_space(14.0);
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if let Some(request) = credential.pending.as_ref() {
-                credential_pending_card(ui, request, action);
-                ui.add_space(16.0);
-            }
-            dashboard_section_label(ui, "ACCESS ON THIS MACHINE");
-            credential_detail_field(ui, "Binding", credential.binding.label());
-            if let Some(account) = credential.account.as_deref() {
-                credential_detail_field(ui, "Account", account);
-            }
-            if !credential.scopes.is_empty() {
-                credential_detail_field(ui, "Scopes", &credential.scopes.join(", "));
-            }
-            if let Some(expires_at) = credential.expires_at.as_deref() {
-                credential_detail_field(ui, "Expires", expires_at);
-            }
-            if let Some(env_var) = credential.environment_variable.as_deref() {
-                credential_detail_field(ui, "Environment", env_var);
-            }
-
-            if !credential.sandboxes.is_empty() {
-                ui.add_space(6.0);
-                dashboard_section_label(ui, "SANDBOX ACCESS");
-                for access in &credential.sandboxes {
-                    let _ = credential_access_row(ui, access, false);
-                }
-            }
-
-            if !credential.destinations.is_empty() {
-                ui.add_space(10.0);
-                dashboard_section_label(ui, "DESTINATIONS");
-                crate::ui::badge::badges(ui, &credential.destinations);
-                ui.add_space(10.0);
-            }
-
-            if let Some(activity) = credential.recent_activity.as_deref() {
-                ui.add_space(6.0);
-                dashboard_section_label(ui, "RECENT ACTIVITY");
-                ui.label(
-                    RichText::new(activity)
-                        .size(FS_SECONDARY)
-                        .color(TEXT_PRIMARY),
-                );
-                ui.add_space(10.0);
-            }
-
-            credential_actions(ui, state, credential);
-        });
-}
-
-fn credential_pending_card(
-    ui: &mut egui::Ui,
-    request: &PendingCredentialRequest,
-    action: &mut CredentialDashboardAction,
-) {
-    Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(
-            STATUS_WARNING.r(),
-            STATUS_WARNING.g(),
-            STATUS_WARNING.b(),
-            18,
-        ))
-        .stroke(Stroke::new(1.0, STATUS_WARNING))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                RichText::new("Waiting for you")
-                    .size(FS_BODY)
-                    .color(STATUS_WARNING),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(format!(
-                    "{} in {} wants to {}.",
-                    request.sandbox_name, request.project, request.action
-                ))
-                .size(FS_SECONDARY)
-                .color(TEXT_PRIMARY),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "{} · {} held request{}",
-                    request.requested_at,
-                    request.held_requests,
-                    if request.held_requests == 1 { "" } else { "s" }
-                ))
-                .size(FS_LABEL)
-                .color(TEXT_MUTED),
-            );
-            ui.add_space(10.0);
-            if Button::new("Review request", ButtonKind::Primary)
-                .show(ui)
-                .clicked()
-            {
-                *action = CredentialDashboardAction::ReviewRequest(request.id.clone());
-            }
-        });
-}
-
 fn dashboard_section_label(ui: &mut egui::Ui, label: &str) {
     ui.label(RichText::new(label).size(FS_LABEL).color(TEXT_MUTED));
     ui.add_space(5.0);
-}
-
-fn credential_detail_field(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.label(RichText::new(label).size(FS_LABEL).color(TEXT_MUTED));
-    ui.label(RichText::new(value).size(FS_BODY).color(TEXT_PRIMARY));
-    ui.add_space(9.0);
 }
 
 fn credential_access_row(
@@ -2166,223 +1433,4 @@ fn credential_access_row(
     };
     ui.add_space(6.0);
     response
-}
-
-fn credential_actions(
-    ui: &mut egui::Ui,
-    state: &mut CredentialDashboardState,
-    credential: &CredentialSummary,
-) {
-    if credential.pending.is_some() {
-        return;
-    }
-    ui.add_space(4.0);
-    dashboard_section_label(ui, "ACTIONS");
-    let selected_access = state
-        .selected_sandbox
-        .as_ref()
-        .and_then(|id| {
-            credential
-                .sandboxes
-                .iter()
-                .find(|access| &access.sandbox_id == id)
-        })
-        .or_else(|| credential.sandboxes.first());
-    if let Some(access) = selected_access {
-        if Button::new("Revoke access", ButtonKind::Danger)
-            .min_size(vec2(ui.available_width(), theme::BUTTON_MIN_HEIGHT))
-            .show(ui)
-            .clicked()
-        {
-            state.confirmation = Some(CredentialOperation::RevokeSandbox {
-                connector_id: credential.connector_id.clone(),
-                sandbox_id: access.sandbox_id.clone(),
-                sandbox_name: access.sandbox_name.clone(),
-                project: access.project.clone(),
-            });
-        }
-        ui.add_space(6.0);
-        if Button::new("Disconnect", ButtonKind::Secondary)
-            .min_size(vec2(ui.available_width(), theme::BUTTON_MIN_HEIGHT))
-            .show(ui)
-            .clicked()
-        {
-            state.confirmation = Some(CredentialOperation::DisconnectProject {
-                connector_id: credential.connector_id.clone(),
-                project: access.project.clone(),
-            });
-        }
-        ui.add_space(6.0);
-    }
-    if credential.binding != CredentialBinding::Unbound
-        && Button::new("Remove credential", ButtonKind::Danger)
-            .min_size(vec2(ui.available_width(), theme::BUTTON_MIN_HEIGHT))
-            .show(ui)
-            .clicked()
-    {
-        state.confirmation = Some(CredentialOperation::ForgetEverywhere {
-            connector_id: credential.connector_id.clone(),
-        });
-    }
-}
-
-fn credential_confirmation(
-    ui: &mut egui::Ui,
-    state: &mut CredentialDashboardState,
-    action: &mut CredentialDashboardAction,
-) {
-    let Some(operation) = state.confirmation.clone() else {
-        return;
-    };
-    let modal = egui::Modal::new(egui::Id::new("credential-dashboard-confirmation"))
-        .backdrop_color(Color32::from_black_alpha(80))
-        .frame(
-            Frame::new()
-                .fill(MODAL_FILL)
-                .stroke(Stroke::new(1.0, BORDER))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(Margin::same(18)),
-        )
-        .show(ui.ctx(), |ui| {
-            ui.set_width(380.0);
-            ui.label(
-                RichText::new(operation.title())
-                    .size(18.0)
-                    .color(TEXT_PRIMARY),
-            );
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(operation.description())
-                    .size(FS_BODY)
-                    .color(TEXT_MUTED),
-            );
-            ui.add_space(16.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if Button::new(operation.confirm_label(), ButtonKind::Danger)
-                    .show(ui)
-                    .clicked()
-                {
-                    state.confirmation = None;
-                    *action = CredentialDashboardAction::Confirm(operation.clone());
-                }
-                if Button::new("Cancel", ButtonKind::Secondary)
-                    .show(ui)
-                    .clicked()
-                {
-                    state.confirmation = None;
-                }
-            });
-        });
-    if modal.should_close() {
-        state.confirmation = None;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::approval_flow::window::{CredentialDecisionDelivery, SignInCard, WindowState};
-    use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
-    use crate::credential_flow::store::CredentialEntry;
-    use tokio::sync::mpsc;
-
-    fn pending(state: &WindowState) -> mpsc::UnboundedReceiver<CredentialDecisionDelivery> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        state.insert_credential_pending(
-            CredentialPendingPrompt {
-                id: "request-1".into(),
-                credential_id: "some-provider".into(),
-                action: "use of some-provider placeholder".into(),
-                oauth_display_name: None,
-                token_fallback: None,
-                env_var: Some("SOME_TOKEN".into()),
-                injection_domains: vec!["api.some-provider.example".into()],
-                is_project_defined: false,
-                bound_value_available: true,
-            },
-            true,
-            tx,
-        );
-        rx
-    }
-
-    #[test]
-    fn dashboard_review_uses_the_pending_requests_delivery_channel() {
-        let state = WindowState::new();
-        let mut rx = pending(&state);
-        let command = DashboardCommand::ReviewCredential {
-            request_id: "request-1".into(),
-            choice: CredentialReviewChoice::UseHost,
-        };
-        let notice = execute_unified_command(&command, &state).expect("review succeeds");
-        assert_eq!(notice, "Credential request allowed.");
-        assert_eq!(
-            rx.try_recv().expect("decision").request,
-            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
-        );
-    }
-
-    #[test]
-    fn dashboard_review_rejects_a_stale_request() {
-        let state = WindowState::new();
-        let command = DashboardCommand::ReviewCredential {
-            request_id: "missing".into(),
-            choice: CredentialReviewChoice::Deny,
-        };
-        let error = execute_unified_command(&command, &state).expect_err("stale request");
-        assert!(error.to_string().contains("no longer pending"));
-    }
-
-    #[test]
-    fn dashboard_can_cancel_an_in_progress_sign_in() {
-        let state = WindowState::new();
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        state.insert_sign_in(
-            SignInCard {
-                credential_id: "some-oauth".into(),
-                display_name: "Some OAuth".into(),
-                user_code: Some("SOME-CODE".into()),
-                verification_uri: "https://api.some-oauth.example/device".into(),
-                token_fallback: None,
-                env_var: Some("SOME_OAUTH_TOKEN".into()),
-                injection_domains: vec!["api.some-oauth.example".into()],
-                is_project_defined: false,
-                origin: None,
-            },
-            cancel_tx,
-        );
-        let command = DashboardCommand::ReviewCredential {
-            request_id: "sign-in:some-oauth".into(),
-            choice: CredentialReviewChoice::Deny,
-        };
-        execute_unified_command(&command, &state).expect("cancel succeeds");
-        assert!(matches!(
-            cancel_rx.try_recv(),
-            Ok(crate::oauth::SignInPivot::Cancel)
-        ));
-    }
-
-    #[test]
-    fn stored_credential_mutations_reject_stale_or_incompatible_state() {
-        let mut state = lns_policy::credentials::CredentialStateFile::from([
-            (
-                "stored".into(),
-                CredentialEntry::Stored {
-                    value: "old-value".into(),
-                },
-            ),
-            ("host".into(), CredentialEntry::HostDetect),
-        ]);
-        replace_saved_credential(&mut state, "stored", "new-value").expect("replace");
-        assert_eq!(
-            state.get("stored"),
-            Some(&CredentialEntry::Stored {
-                value: "new-value".into()
-            })
-        );
-        assert!(replace_saved_credential(&mut state, "host", "value").is_err());
-        assert!(replace_saved_credential(&mut state, "missing", "value").is_err());
-        remove_saved_credential(&mut state, "stored").expect("remove");
-        assert!(remove_saved_credential(&mut state, "stored").is_err());
-    }
 }

@@ -97,6 +97,10 @@ lns connector grants --all        # every project on this machine
 lns connector revoke <id>         # forget this project's grants for one connector
 ```
 
+The tray's [dashboard](service.md#the-dashboard) shows the same picture per
+credential — which sandboxes can spend it and why — and its **Disconnect** action
+is `lns connector disconnect` for that sandbox's project.
+
 `lns connector disconnect <id>` forgets them too, as part of removing the
 connector from the directory's policy. A revoke applies to the next run — a
 sandbox already running keeps the arming it was granted at launch — but it does
