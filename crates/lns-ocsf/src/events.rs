@@ -311,7 +311,7 @@ pub fn tool_provision(
     tool: &str,
     requested: &str,
     resolved: &str,
-    source_host: &str,
+    source_host: Option<&str>,
     backend: &str,
 ) -> Value {
     // Acquisition creates a tree in the host cache; nothing is mounted yet, and a SIEM rule on Mount would read a download as a filesystem mount.
@@ -325,7 +325,11 @@ pub fn tool_provision(
     )
     .set(
         "message",
-        format!("provisioned {requested} → {resolved} from {source_host}").into(),
+        match source_host {
+            Some(host) => format!("provisioned {requested} → {resolved} from {host}"),
+            None => format!("provisioned {requested} → {resolved}"),
+        }
+        .into(),
     )
     .set(
         "file",
@@ -336,8 +340,11 @@ pub fn tool_provision(
     .note("lns_tool", tool.into())
     .note("lns_requested", requested.into())
     .note("lns_resolved", resolved.into())
-    .note("lns_source", source_host.into())
     .note("lns_backend", backend.into());
+    // A guessed host is a false attestation; the backend reference is what we actually know.
+    if let Some(host) = source_host {
+        event = event.note("lns_source", host.into());
+    }
     // A pull provisions before any microVM exists, so there is no device to name.
     if !ctx.microvm.is_empty() {
         event = event.set("device", microvm_device(ctx));
@@ -496,7 +503,7 @@ mod tests {
             "node",
             "node@22",
             "22.11.0",
-            "nodejs.org",
+            Some("nodejs.org"),
             "core:node",
         );
         assert_schema_valid(&ev);
@@ -520,6 +527,26 @@ mod tests {
     }
 
     #[test]
+    fn a_backend_that_names_no_host_attests_none() {
+        // The shipped snapshot carries `core:elixir` and `http:dart`, which say nothing about where the bytes come from.
+        let ev = tool_provision(
+            &ctx(),
+            "elixir",
+            "elixir@1.18",
+            "1.18.1",
+            None,
+            "core:elixir",
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["message"], "provisioned elixir@1.18 → 1.18.1");
+        assert!(
+            ev["unmapped"].get("lns_source").is_none(),
+            "a guessed host would be a false attestation: {ev}"
+        );
+        assert_eq!(ev["unmapped"]["lns_backend"], "core:elixir");
+    }
+
+    #[test]
     fn a_tool_provisioned_by_a_pull_names_no_device() {
         // `lns pull` provisions before any microVM exists, so claiming a virtual device named "" would be a lie to a SIEM.
         let pull = Context {
@@ -533,7 +560,7 @@ mod tests {
             "node",
             "node@22",
             "22.11.0",
-            "nodejs.org",
+            Some("nodejs.org"),
             "core:node",
         );
         assert_schema_valid(&ev);

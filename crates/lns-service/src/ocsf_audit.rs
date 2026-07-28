@@ -101,7 +101,7 @@ pub fn tool_event(
     tool: &str,
     requested: &str,
     resolved: &str,
-    source_host: &str,
+    source_host: Option<&str>,
     backend: &str,
 ) -> Map<String, Value> {
     into_object(lns_ocsf::tool_provision(

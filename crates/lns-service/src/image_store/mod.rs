@@ -421,11 +421,18 @@ pub async fn pull_with<F: Fs>(
     Ok(info_from(record, active))
 }
 
-/// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a transient index or provisioner failure must not throw away a pull whose layers already landed.
-fn warn_if_tools_unprovisioned(image: &str, outcome: anyhow::Result<()>) {
-    if let Err(e) = outcome {
+/// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a failure must not throw away a pull whose layers already landed — but a refusal no network will fix must not read as an offline-readiness note either.
+fn warn_if_tools_unprovisioned(image: &str, outcome: Result<(), crate::tools::ProvisionError>) {
+    let Err(e) = outcome else {
+        return;
+    };
+    if e.is_transient() {
         crate::log::warn!(
-            "could not provision the declared tools of {image} ({e:#}); the sandbox is cached, but its first run needs the network"
+            "could not provision the declared tools of {image} ({e}); the sandbox is cached, but its first run needs the network"
+        );
+    } else {
+        crate::log::warn!(
+            "the declared tools of {image} cannot be provisioned on this machine: {e}"
         );
     }
 }
@@ -527,11 +534,37 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_no_network_can_fix_does_not_read_as_an_offline_note() {
+        let warned = warnings_from(|| {
+            warn_if_tools_unprovisioned(
+                "ghcr.io/team/hermes:1.4.0",
+                Err(crate::tools::ProvisionError::LibcUnsupported {
+                    tool: "deno@2".into(),
+                    name: "deno".into(),
+                    image: "alpine:3.20".into(),
+                    reason: "Deno publishes no musl builds".into(),
+                }),
+            );
+        });
+        assert!(
+            warned.contains("cannot be provisioned on this machine")
+                && warned.contains("no musl builds"),
+            "the operator is told the real answer: {warned}"
+        );
+        assert!(
+            !warned.contains("needs the network"),
+            "no network will fix it: {warned}"
+        );
+    }
+
+    #[test]
     fn a_failed_tool_pre_provision_warns_with_the_image_and_the_cause() {
         let warned = warnings_from(|| {
             warn_if_tools_unprovisioned(
                 "ghcr.io/team/hermes:1.4.0",
-                Err(anyhow::anyhow!("the version index is unreachable")),
+                Err(crate::tools::ProvisionError::Engine(
+                    "the version index is unreachable".into(),
+                )),
             );
         });
         assert!(

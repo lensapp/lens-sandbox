@@ -17,7 +17,8 @@ pub struct ToolManifest {
     pub tool: String,
     pub resolved: lns_artifact::tools::SafeVersion,
     pub backend: String,
-    pub source_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
     /// Debugging metadata only — never part of the cache key.
     pub engine_version: String,
     pub entries: Vec<ManifestEntry>,
@@ -355,7 +356,7 @@ mod tests {
             name: "some-tool".into(),
             resolved: version("1.2.3"),
             backend: "core:some-tool".into(),
-            source_host: "upstream.example.test".into(),
+            source_host: Some("upstream.example.test".into()),
             tar: StagedTar::Bytes(tar),
             bin_paths: vec!["bin".into()],
         }
@@ -598,7 +599,7 @@ mod tests {
                     name: "some-tool".into(),
                     resolved: version("1.2.3"),
                     backend: "core:some-tool".into(),
-                    source_host: "upstream.example.test".into(),
+                    source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
                     bin_paths: vec!["bin".into()],
                 },
@@ -626,7 +627,7 @@ mod tests {
                     name: "some-tool".into(),
                     resolved: version("1.2.3"),
                     backend: "core:some-tool".into(),
-                    source_host: "upstream.example.test".into(),
+                    source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
                     bin_paths: vec!["bin".into()],
                 },

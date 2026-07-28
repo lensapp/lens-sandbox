@@ -131,7 +131,7 @@ impl ToolProvisioner for ScriptedProvisioner {
                     name: request.name.clone(),
                     resolved: resolved.parse().expect("a usable version"),
                     backend: format!("core:{}", request.name),
-                    source_host: "upstream.example.test".into(),
+                    source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::Bytes(Vec::new()),
                     bin_paths: vec!["bin".into()],
                 }

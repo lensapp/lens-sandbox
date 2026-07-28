@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(staged[0].name, "node", "declaration order wins");
         assert_eq!(staged[0].resolved.as_str(), "22.11.0");
         assert_eq!(staged[0].backend, "core:node");
-        assert_eq!(staged[0].source_host, "nodejs.org");
+        assert_eq!(staged[0].source_host.as_deref(), Some("nodejs.org"));
         assert!(
             matches!(&staged[0].tar, StagedTar::File(path) if path == Path::new("/staging/node.tar"))
         );

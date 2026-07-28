@@ -227,6 +227,11 @@ pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, 
         .collect()
 }
 
+/// The declared tools a published sandbox discloses at launch; the local-definition case reads them off the definition instead.
+pub fn tools_from_view(view: &lns_ipc::SandboxView) -> Vec<String> {
+    view.tools.clone()
+}
+
 fn fileset_display(path: Option<&str>, reference: Option<&str>, inline: bool) -> String {
     if let Some(path) = path {
         return path.to_string();
