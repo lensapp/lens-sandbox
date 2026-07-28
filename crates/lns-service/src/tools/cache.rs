@@ -502,33 +502,37 @@ mod tests {
     }
 
     #[test]
-    fn a_double_slash_in_the_link_path_buys_no_level_back() {
-        // A crafted tar can carry `bin//esc`; the empty segment would otherwise absorb one `..`.
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Symlink);
-        header.set_path("placeholder").unwrap();
-        {
-            let name = header.as_gnu_mut().unwrap();
-            let raw = b"bin//esc";
-            name.name[..raw.len()].copy_from_slice(raw);
-            name.name[raw.len()] = 0;
-        }
-        header.set_link_name("../..").unwrap();
-        header.set_size(0);
-        header.set_mode(0o777);
-        header.set_cksum();
-        builder.append(&header, std::io::empty()).unwrap();
-        let tar = builder.into_inner().unwrap();
+    fn repeated_slashes_in_the_link_path_buy_no_levels_back() {
+        // Injection collapses these, so every empty segment would otherwise hand the target another `..` of budget.
+        for (raw_link, target) in [
+            (&b"bin//esc"[..], "../.."),
+            (b"bin//////esc", "../../../../../.lens/bin"),
+            (b"a//b//c", "../../.."),
+        ] {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_path("placeholder").unwrap();
+            {
+                let name = header.as_gnu_mut().unwrap();
+                name.name[..raw_link.len()].copy_from_slice(raw_link);
+                name.name[raw_link.len()] = 0;
+            }
+            header.set_link_name(target).unwrap();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+            let tar = builder.into_inner().unwrap();
 
-        let dir = tempfile::TempDir::new().unwrap();
-        let err = cache(dir.path())
-            .ingest(&key(), &staged(tar))
-            .expect_err("bin//esc -> ../.. resolves above the tool root");
-        assert!(
-            format!("{err:#}").contains("escapes the tool tree"),
-            "got: {err:#}"
-        );
+            let label = String::from_utf8_lossy(raw_link);
+            let dir = tempfile::TempDir::new().unwrap();
+            let err = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("escapes the tool tree"),
+                "{label} -> {target}: got {err:#}"
+            );
+        }
     }
 
     #[test]

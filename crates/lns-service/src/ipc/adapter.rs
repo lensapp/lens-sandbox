@@ -665,7 +665,7 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
 
-    let params = build_session_params(args);
+    let params = build_session_params(args, &target_run_id);
 
     let session_frame_tx = frame_tx.clone();
     let session_task = tokio::spawn(async move {

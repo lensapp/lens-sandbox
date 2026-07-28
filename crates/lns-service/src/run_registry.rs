@@ -385,31 +385,37 @@ fn is_exited(h: &RunHandle) -> bool {
     matches!(h.status.lock().map(|s| *s), Ok(RunStatus::Exited { .. }))
 }
 
+/// A registered-but-idle run, for tests in this crate that need one to exist.
+#[cfg(test)]
+pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
+    let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
+    let task = tokio::spawn(std::future::pending::<()>());
+    (
+        RunHandle {
+            cancel_tx,
+            detach_tx: Mutex::new(None),
+            task,
+            input_tx: None,
+            connector: None,
+            name: String::new(),
+            image: String::new(),
+            command: String::new(),
+            started: String::new(),
+            status: std::sync::Mutex::new(RunStatus::Running),
+            logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
+            config: lns_ipc::RunConfig::default(),
+            tool_bin_paths: Vec::new(),
+        },
+        cancel_rx,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn make_handle() -> (RunHandle, oneshot::Receiver<i32>) {
-        let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
-        let task = tokio::spawn(std::future::pending::<()>());
-        (
-            RunHandle {
-                cancel_tx,
-                detach_tx: Mutex::new(None),
-                task,
-                input_tx: None,
-                connector: None,
-                name: String::new(),
-                image: String::new(),
-                command: String::new(),
-                started: String::new(),
-                status: std::sync::Mutex::new(RunStatus::Running),
-                logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
-                config: lns_ipc::RunConfig::default(),
-                tool_bin_paths: Vec::new(),
-            },
-            cancel_rx,
-        )
+        super::test_handle()
     }
 
     fn gen_amber() -> String {
