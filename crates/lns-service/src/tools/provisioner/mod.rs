@@ -24,8 +24,6 @@ pub(crate) struct EngineArtifacts {
     pub curl: PathBuf,
     pub ca_bundle_pem: Vec<u8>,
     pub companion_specs: Vec<RuntimeFileSpec>,
-    /// The subset a provisioned musl binary itself links; the rest of the companion set exists for the engine's own wrapper scripts and must not reach the workload's userland.
-    pub workload_companion_specs: Vec<RuntimeFileSpec>,
 }
 
 const WORKLOAD_COMPANIONS: &[&str] = &["libstdc++", "libgcc"];
@@ -187,6 +185,59 @@ fn failure_cause(stdout: &str, stderr: &str) -> String {
     }
 }
 
+/// The libs a provisioned musl binary links, without touching the engine, curl, or the CA store: a warm run needs these two apks and nothing else, and a bump to any other pin must not re-download — let alone refuse — a launch whose tools are already cached.
+pub(crate) async fn ensure_workload_companions_with<F: Fetcher, S: Fs>(
+    fetcher: &F,
+    fs: &S,
+    manifest: &mise::Manifest,
+    cache_dir: &Path,
+    target: &ProvisionTarget,
+) -> Result<Vec<RuntimeFileSpec>> {
+    let mut specs = Vec::new();
+    for companion in manifest
+        .companion
+        .iter()
+        .filter(|companion| WORKLOAD_COMPANIONS.contains(&companion.name.as_str()))
+    {
+        let apk = ensure_companion_apk(fetcher, fs, companion, cache_dir, target.arch).await?;
+        specs.extend(apk_runtime_specs(&apk)?);
+    }
+    Ok(specs)
+}
+
+async fn ensure_companion_apk<F: Fetcher, S: Fs>(
+    fetcher: &F,
+    fs: &S,
+    companion: &mise::Companion,
+    cache_dir: &Path,
+    arch: super::Arch,
+) -> Result<Vec<u8>> {
+    let filename = format!("{}-{}.apk", companion.name, companion.version);
+    let apk_path = ensure_pinned(
+        fetcher,
+        fs,
+        &companions_root(cache_dir, arch).join("apks"),
+        &PinnedArtifact {
+            filename: &filename,
+            url: &mise::companion_url(companion, arch),
+            sha256: mise::companion_sha256(companion, arch)?,
+            mode: None,
+            label: &companion.name,
+        },
+    )
+    .await?;
+    fs.read(&apk_path)
+        .await
+        .with_context(|| format!("reading {}", apk_path.display()))
+}
+
+fn companions_root(cache_dir: &Path, arch: super::Arch) -> PathBuf {
+    cache_dir
+        .join("tools")
+        .join("companions")
+        .join(arch.to_string())
+}
+
 /// Ensure the pinned engine, static curl, CA bundle, and (musl) companion apks are cached and expanded — every byte sha-verified against the injected manifest before it can reach a guest.
 pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
     fetcher: &F,
@@ -196,10 +247,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
     target: &ProvisionTarget,
 ) -> Result<EngineArtifacts> {
     let arch = target.arch;
-    let root = cache_dir
-        .join("tools")
-        .join("companions")
-        .join(arch.to_string());
+    let root = companions_root(cache_dir, arch);
     let mise_bin = ensure_pinned(
         fetcher,
         fs,
@@ -246,41 +294,18 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
         .with_context(|| format!("reading {}", ca_path.display()))?;
 
     let mut companion_specs = Vec::new();
-    let mut workload_companion_specs = Vec::new();
     for companion in &manifest.companion {
         if target.libc != Libc::Musl {
             continue;
         }
-        let filename = format!("{}-{}.apk", companion.name, companion.version);
-        let apk_path = ensure_pinned(
-            fetcher,
-            fs,
-            &root.join("apks"),
-            &PinnedArtifact {
-                filename: &filename,
-                url: &mise::companion_url(companion, arch),
-                sha256: mise::companion_sha256(companion, arch)?,
-                mode: None,
-                label: &companion.name,
-            },
-        )
-        .await?;
-        let bytes = fs
-            .read(&apk_path)
-            .await
-            .with_context(|| format!("reading {}", apk_path.display()))?;
-        let specs = apk_runtime_specs(&bytes)?;
-        if WORKLOAD_COMPANIONS.contains(&companion.name.as_str()) {
-            workload_companion_specs.extend(specs.iter().cloned());
-        }
-        companion_specs.extend(specs);
+        let bytes = ensure_companion_apk(fetcher, fs, companion, cache_dir, arch).await?;
+        companion_specs.extend(apk_runtime_specs(&bytes)?);
     }
     Ok(EngineArtifacts {
         mise: mise_bin,
         curl: curl_bin,
         ca_bundle_pem: ca_pem,
         companion_specs,
-        workload_companion_specs,
     })
 }
 
@@ -914,10 +939,42 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn only_the_libs_a_tool_links_reach_the_workload() {
+        async fn the_workload_companions_need_neither_the_engine_nor_the_ca_store() {
+            // A warm musl run took this path; fetching the engine there re-downloaded ~40 MB after a pin bump and refused the launch offline.
+            let (manifest, _) = fixture();
+            let apks_only = FakeFetcher {
+                responses: HashMap::from([(
+                    mise::companion_url(&manifest.companion[0], crate::tools::Arch::Aarch64),
+                    build_apk(&[(
+                        "usr/lib/libstdc++.so.6.0.32",
+                        tar::EntryType::Regular,
+                        "elf",
+                    )]),
+                )]),
+            };
+            let specs = ensure_workload_companions_with(
+                &apks_only,
+                &FakeFs::default(),
+                &manifest,
+                Path::new("/cache"),
+                &target(Libc::Musl),
+            )
+            .await
+            .expect("an engine that cannot be fetched is not needed here");
+            assert_eq!(
+                specs
+                    .iter()
+                    .map(|s| s.guest_path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["/usr/lib/libstdc++.so.6.0.32"]
+            );
+        }
+
+        #[tokio::test]
+        async fn only_the_libs_a_tool_links_reach_the_workload_not_the_engines_wrapper_deps() {
             // bash and its libs exist for the engine's own wrapper scripts; injecting them would replace the image's /bin/bash.
             let (manifest, fetcher) = fixture();
-            let artifacts = ensure_engine_artifacts_with(
+            let specs = ensure_workload_companions_with(
                 &fetcher,
                 &FakeFs::default(),
                 &manifest,
@@ -926,11 +983,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let paths: Vec<&str> = artifacts
-                .workload_companion_specs
-                .iter()
-                .map(|spec| spec.guest_path.as_str())
-                .collect();
+            let paths: Vec<&str> = specs.iter().map(|spec| spec.guest_path.as_str()).collect();
             assert_eq!(paths, vec!["/usr/lib/libstdc++.so.6.0.32"]);
         }
 
@@ -962,7 +1015,6 @@ mod tests {
                 mode: 0o644,
                 source: RuntimeSource::Symlink("libstdc++.so.6.0.32".into()),
             }],
-            workload_companion_specs: Vec::new(),
         };
         let specs = provisioner_runtime_specs(&artifacts, "#!/bin/sh\n".into());
         let paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();

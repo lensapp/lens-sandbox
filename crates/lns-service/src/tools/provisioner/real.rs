@@ -269,6 +269,14 @@ pub(crate) async fn workload_companion_specs(
     cache_dir: &Path,
     target: &ProvisionTarget,
 ) -> Result<Vec<crate::runtime_layer::RuntimeFileSpec>> {
-    let artifacts = ensure_engine_artifacts(cache_dir, target).await?;
-    Ok(artifacts.workload_companion_specs)
+    super::ensure_workload_companions_with(
+        &RealFetcher {
+            max_bytes: MAX_ARTIFACT_BYTES,
+        },
+        &RealFs,
+        mise::manifest(),
+        cache_dir,
+        target,
+    )
+    .await
 }
