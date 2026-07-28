@@ -227,12 +227,28 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
     )
     .await?;
 
-    let mut ca_pem = Vec::new();
+    let ca_path = ensure_pinned(
+        fetcher,
+        fs,
+        &root.join("ca"),
+        &PinnedArtifact {
+            filename: &format!("cacert-{}.pem", manifest.ca_bundle.date),
+            url: &manifest.ca_bundle.url(),
+            sha256: &manifest.ca_bundle.sha256,
+            mode: None,
+            label: "CA bundle",
+        },
+    )
+    .await?;
+    let ca_pem = fs
+        .read(&ca_path)
+        .await
+        .with_context(|| format!("reading {}", ca_path.display()))?;
+
     let mut companion_specs = Vec::new();
     let mut workload_companion_specs = Vec::new();
     for companion in &manifest.companion {
-        let is_ca = companion.name == "ca-certificates-bundle";
-        if !is_ca && target.libc != Libc::Musl {
+        if target.libc != Libc::Musl {
             continue;
         }
         let filename = format!("{}-{}.apk", companion.name, companion.version);
@@ -253,20 +269,12 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
             .read(&apk_path)
             .await
             .with_context(|| format!("reading {}", apk_path.display()))?;
-        if is_ca {
-            ca_pem = ca_bundle_pem(&bytes)?;
-            continue;
-        }
         let specs = apk_runtime_specs(&bytes)?;
         if WORKLOAD_COMPANIONS.contains(&companion.name.as_str()) {
             workload_companion_specs.extend(specs.iter().cloned());
         }
         companion_specs.extend(specs);
     }
-    anyhow::ensure!(
-        !ca_pem.is_empty(),
-        "the pinned companion set carries no ca-certificates-bundle"
-    );
     Ok(EngineArtifacts {
         mise: mise_bin,
         curl: curl_bin,
@@ -356,20 +364,6 @@ pub(crate) fn apk_runtime_specs(apk_bytes: &[u8]) -> Result<Vec<RuntimeFileSpec>
         });
     }
     Ok(specs)
-}
-
-/// The CA bundle PEM from the pinned ca-certificates apk, for injection at the canonical path.
-pub(crate) fn ca_bundle_pem(apk_bytes: &[u8]) -> Result<Vec<u8>> {
-    let specs = apk_runtime_specs(apk_bytes)?;
-    for spec in specs {
-        if spec.guest_path != CA_BUNDLE {
-            continue;
-        }
-        if let RuntimeSource::Bytes(bytes) = spec.source {
-            return Ok(bytes);
-        }
-    }
-    bail!("the ca-certificates apk carries no {CA_BUNDLE}")
 }
 
 #[cfg(test)]
@@ -670,44 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ca_bundle_pem_is_extracted_from_its_canonical_member() {
-        let apk = build_apk(&[
-            (
-                "usr/share/ca-certificates/other.crt",
-                tar::EntryType::Regular,
-                "other",
-            ),
-            (
-                "etc/ssl/certs/ca-certificates.crt",
-                tar::EntryType::Regular,
-                "PEM",
-            ),
-        ]);
-        assert_eq!(
-            ca_bundle_pem(&apk).unwrap(),
-            b"PEM",
-            "the bundle is found past the apk's other members"
-        );
-        let empty = build_apk(&[(".PKGINFO", tar::EntryType::Regular, "x")]);
-        assert!(ca_bundle_pem(&empty).is_err());
-    }
-
-    #[test]
-    fn a_ca_path_that_is_only_a_symlink_carries_no_bundle() {
-        // Alpine ships symlinks in this tree; a link is not the PEM we inject.
-        let apk = build_apk(&[(
-            "etc/ssl/certs/ca-certificates.crt",
-            tar::EntryType::Symlink,
-            "../../../usr/share/ca-certificates/bundle.crt",
-        )]);
-        let err = ca_bundle_pem(&apk).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("carries no /etc/ssl/certs/ca-certificates.crt"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
     fn staged_tools_marry_results_to_requests_with_registry_provenance() {
         let requests = [tool("node@22"), tool("jq@latest")];
         let results = vec![
@@ -852,11 +808,7 @@ mod tests {
         fn fixture() -> (mise::Manifest, FakeFetcher) {
             let engine = b"engine-elf".to_vec();
             let curl = b"curl-elf".to_vec();
-            let ca_apk = build_apk(&[(
-                "etc/ssl/certs/ca-certificates.crt",
-                tar::EntryType::Regular,
-                "PEM",
-            )]);
+            let ca_pem = b"PEM".to_vec();
             let lib_apk = build_apk(&[(
                 "usr/lib/libstdc++.so.6.0.32",
                 tar::EntryType::Regular,
@@ -868,6 +820,10 @@ mod tests {
                     version: "1.0.0".into(),
                     sha256: shas(&engine),
                 },
+                ca_bundle: mise::CaBundle {
+                    date: "2026-07-16".into(),
+                    sha256: sha(&ca_pem),
+                },
                 provisioner_rootfs: mise::ProvisionerRootfs {
                     gnu: per_arch("docker.io/library/debian@sha256:aaaa"),
                     musl: per_arch("docker.io/library/alpine@sha256:bbbb"),
@@ -877,11 +833,6 @@ mod tests {
                     sha256: shas(&curl),
                 },
                 companion: vec![
-                    mise::Companion {
-                        name: "ca-certificates-bundle".into(),
-                        version: "1-r0".into(),
-                        sha256: shas(&ca_apk),
-                    },
                     mise::Companion {
                         name: "libstdc++".into(),
                         version: "13-r1".into(),
@@ -898,9 +849,9 @@ mod tests {
             let responses = HashMap::from([
                 (manifest.engine_url(arch), engine),
                 (manifest.curl_url(arch), curl),
-                (mise::companion_url(&manifest.companion[0], arch), ca_apk),
-                (mise::companion_url(&manifest.companion[1], arch), lib_apk),
-                (mise::companion_url(&manifest.companion[2], arch), bash_apk),
+                (manifest.ca_bundle.url(), ca_pem),
+                (mise::companion_url(&manifest.companion[0], arch), lib_apk),
+                (mise::companion_url(&manifest.companion[1], arch), bash_apk),
             ]);
             (manifest, FakeFetcher { responses })
         }
@@ -984,9 +935,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_companion_set_without_the_ca_bundle_is_refused() {
+        async fn a_ca_bundle_whose_bytes_do_not_match_the_pin_is_refused() {
             let (mut manifest, fetcher) = fixture();
-            manifest.companion.remove(0);
+            manifest.ca_bundle.sha256 = "a".repeat(64);
             let err = ensure_engine_artifacts_with(
                 &fetcher,
                 &FakeFs::default(),
@@ -996,10 +947,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert!(
-                format!("{err:#}").contains("no ca-certificates-bundle"),
-                "got: {err:#}"
-            );
+            assert!(format!("{err:#}").contains("sha256"), "got: {err:#}");
         }
     }
 
