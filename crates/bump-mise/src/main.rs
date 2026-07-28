@@ -82,18 +82,16 @@ fn bump(version: &str) -> Result<()> {
         manifest_path.display()
     );
     let manifest = std::fs::read_to_string(&manifest_path)?;
-    std::fs::write(
-        &manifest_path,
-        operations::bump_engine_pin(&manifest, version, &shas)?,
-    )?;
+    // Both files land together or neither does: a bumped pin against last release's snapshot is worse than no bump.
+    let bumped = operations::bump_engine_pin(&manifest, version, &shas)?;
 
     println!("==> regenerating the registry snapshot from the release source");
     let tarball = curl_bytes(&operations::source_tarball_url(version))?;
     let entries = operations::registry_entries_from_tarball(&tarball)?;
-    std::fs::write(
-        &snapshot_path,
-        operations::render_registry_snapshot(&entries)?,
-    )?;
+    let snapshot = operations::render_registry_snapshot(&entries)?;
+
+    std::fs::write(&manifest_path, bumped)?;
+    std::fs::write(&snapshot_path, snapshot)?;
 
     println!(
         "==> done. Next: re-validate the companion pins in mise.toml if the alpine branch moved,\n\
