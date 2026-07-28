@@ -238,7 +238,7 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
                 .link_name()
                 .context("reading symlink target")?
                 .with_context(|| format!("tool symlink {} has no target", path.display()))?;
-            if !target_stays_in_tree(&path, &target) {
+            if !target_stays_in_tree(&rel, &target) {
                 bail!(
                     "tool symlink {} -> {} escapes the tool tree",
                     path.display(),
@@ -301,22 +301,14 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
 }
 
 /// Injection resolves a path's parent segments *through* symlinks, so a link out of the tree makes every entry "under" it land wherever the link points — over the supervisor's own files, which are injected first. Only a target that still resolves inside the tool's own root may be preserved.
-fn target_stays_in_tree(link: &Path, target: &Path) -> bool {
-    let mut resolved: Vec<&std::ffi::OsStr> = link
-        .parent()
-        .map(|parent| {
-            parent
-                .components()
-                .filter_map(|c| match c {
-                    Component::Normal(seg) => Some(seg),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+fn target_stays_in_tree(link_rel: &str, target: &Path) -> bool {
+    let mut resolved: Vec<&str> = match link_rel.rsplit_once('/') {
+        Some((parent, _)) => parent.split('/').collect(),
+        None => Vec::new(),
+    };
     for component in target.components() {
         match component {
-            Component::Normal(seg) => resolved.push(seg),
+            Component::Normal(seg) => resolved.push(seg.to_str().unwrap_or_default()),
             Component::CurDir => {}
             Component::ParentDir => {
                 if resolved.pop().is_none() {
