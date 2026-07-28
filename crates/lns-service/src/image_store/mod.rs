@@ -493,19 +493,55 @@ pub async fn prune() -> Result<PruneReport> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_failed_tool_pre_provision_warns_and_keeps_the_pull() {
+    fn warnings_from(body: impl FnOnce()) -> String {
+        use std::fmt::Write as _;
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<Mutex<String>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let _ = write!(self.0.lock().unwrap(), "{}", String::from_utf8_lossy(bytes));
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::WARN)
-            .with_writer(std::io::sink)
+            .with_writer(buf.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(()));
+        tracing::subscriber::with_default(subscriber, body);
+        buf.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_failed_tool_pre_provision_warns_with_the_image_and_the_cause() {
+        let warned = warnings_from(|| {
             warn_if_tools_unprovisioned(
                 "ghcr.io/team/hermes:1.4.0",
                 Err(anyhow::anyhow!("the version index is unreachable")),
             );
         });
+        assert!(
+            warned.contains("ghcr.io/team/hermes:1.4.0")
+                && warned.contains("the version index is unreachable")
+                && warned.contains("first run needs the network"),
+            "the operator learns which sandbox and why: {warned}"
+        );
+    }
+
+    #[test]
+    fn a_provisioned_pull_says_nothing() {
+        let quiet =
+            warnings_from(|| warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(())));
+        assert!(quiet.is_empty(), "got: {quiet}");
     }
 
     use super::*;
