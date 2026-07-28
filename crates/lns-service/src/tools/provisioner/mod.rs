@@ -14,6 +14,7 @@ pub const CURL_BIN: &str = "/.lens/tools-engine/bin/curl";
 pub const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 pub const DRIVER: &str = "/.lens/tools-engine/provision.sh";
 pub const STAGING: &str = "/staging";
+pub const ENGINE_STATE: &str = "/tmp/mise/tools";
 
 #[derive(Debug)]
 pub(crate) struct EngineArtifacts {
@@ -55,6 +56,8 @@ pub(crate) fn provisioner_runtime_specs(
 }
 
 /// One shell driver per provision: install each tool with the fail-loud engine, tar its tree into the staging share, and emit one `LNS_TOOL <name> <resolved> <binpath>` marker per success — any failure names its tool with `LNS_FAIL` and stops.
+///
+/// Each tool gets its own engine state and download cache: a tool's install code runs as root in this guest, and against shared state it could plant `installs/<other-tool>/<version>/` so the engine reports a genuine install of a tree it wrote — which would then be cached machine-wide under the other tool's provenance.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
     let mut script = String::from(
         "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
@@ -63,7 +66,11 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
         let spec = request.to_string();
         let name = &request.name;
         script.push_str(&format!(
-            "if ! mise install '{spec}'; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
+            "mkdir -p '{ENGINE_STATE}/{name}/data' '{ENGINE_STATE}/{name}/cache'\n\
+             MISE_DATA_DIR='{ENGINE_STATE}/{name}/data'\n\
+             MISE_CACHE_DIR='{ENGINE_STATE}/{name}/cache'\n\
+             export MISE_DATA_DIR MISE_CACHE_DIR\n\
+             if ! mise install '{spec}'; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              path=\"$(mise where '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              resolved=\"$(basename \"$path\")\"\n\
              if [ -d \"$path/bin\" ]; then bp=bin; else bp=.; fi\n\
@@ -362,6 +369,36 @@ mod tests {
 
     fn tool(spec: &str) -> ToolRef {
         lns_artifact::tools::parse(spec).expect("valid tool spec")
+    }
+
+    #[test]
+    fn each_tool_installs_against_its_own_engine_state() {
+        // A tool's install code runs as root here; against a shared data dir it could plant a sibling's installs/<version>/ and have the engine report a genuine install of it.
+        let script = render_driver(&[tool("node@22"), tool("jq@latest")]);
+        assert!(
+            script.contains("MISE_DATA_DIR='/tmp/mise/tools/node/data'")
+                && script.contains("MISE_CACHE_DIR='/tmp/mise/tools/node/cache'"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("MISE_DATA_DIR='/tmp/mise/tools/jq/data'")
+                && script.contains("MISE_CACHE_DIR='/tmp/mise/tools/jq/cache'"),
+            "got: {script}"
+        );
+        let node_install = script.find("mise install 'node@22'").unwrap();
+        let jq_state = script
+            .find("MISE_DATA_DIR='/tmp/mise/tools/jq/data'")
+            .unwrap();
+        assert!(
+            jq_state > node_install,
+            "each tool's state is set before its own install, not shared up front"
+        );
+        assert!(
+            !mise::provision_env()
+                .iter()
+                .any(|(key, _)| key == "MISE_DATA_DIR" || key == "MISE_CACHE_DIR"),
+            "no shared data or cache dir survives in the session env"
+        );
     }
 
     #[test]
