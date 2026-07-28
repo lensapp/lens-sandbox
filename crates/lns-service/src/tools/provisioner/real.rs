@@ -177,6 +177,7 @@ async fn run_provisioner(
         connector.as_ref(),
         argv,
         env,
+        vm::session_client::Captured::StdoutAndStderr,
         std::time::Duration::from_secs(timeout),
         MAX_DRIVER_OUTPUT_BYTES,
     )

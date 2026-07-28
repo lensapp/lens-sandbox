@@ -88,6 +88,7 @@ pub async fn capture_session_output(
         connector,
         argv,
         Vec::new(),
+        super::Captured::StdoutOnly,
         CAPTURE_TIMEOUT,
         MAX_CAPTURE_BYTES,
     )
@@ -96,11 +97,12 @@ pub async fn capture_session_output(
     Ok(out)
 }
 
-/// Run argv in the guest and collect combined stdout with the exit code — the long-form capture the tool provisioner drives its install script through.
+/// Run argv in the guest and collect the requested streams with the exit code — the long-form capture the tool provisioner drives its install script through.
 pub async fn capture_session_exec(
     connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
     env: Vec<String>,
+    captured: super::Captured,
     timeout: std::time::Duration,
     max_bytes: usize,
 ) -> Result<(String, i32)> {
@@ -124,12 +126,12 @@ pub async fn capture_session_exec(
     let collect = async {
         let mut out: Vec<u8> = Vec::new();
         while let Some(frame) = frame_rx.recv().await {
-            if let WireFrame::Stdout(bytes) | WireFrame::Stderr(bytes) = frame {
+            if let Some(bytes) = captured.bytes_of(&frame) {
                 anyhow::ensure!(
                     out.len() + bytes.len() <= max_bytes,
                     "capture output exceeded {max_bytes} bytes"
                 );
-                out.extend_from_slice(&bytes);
+                out.extend_from_slice(bytes);
             }
         }
         Ok(out)
