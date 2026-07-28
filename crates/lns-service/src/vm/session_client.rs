@@ -17,6 +17,23 @@ pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
 
+/// Which of a captured session's output streams the caller wants; a machine-parsed probe must not have diagnostics spliced into its payload, while a human-facing failure tail needs both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Captured {
+    StdoutOnly,
+    StdoutAndStderr,
+}
+
+impl Captured {
+    pub(super) fn bytes_of(self, frame: &WireFrame) -> Option<&[u8]> {
+        match frame {
+            WireFrame::Stdout(bytes) => Some(bytes),
+            WireFrame::Stderr(bytes) if self == Captured::StdoutAndStderr => Some(bytes),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SessionInput {
     StdinBytes(Vec<u8>),
@@ -107,6 +124,33 @@ mod tests {
 
     fn framed(frame: &ServerFrame) -> Vec<u8> {
         encode_frame(frame).unwrap()
+    }
+
+    #[test]
+    fn a_stdout_only_capture_drops_stderr_so_a_parsed_probe_cannot_be_spliced() {
+        let out = WireFrame::Stdout(b"cpu 1 2 3 4 5".to_vec());
+        let err = WireFrame::Stderr(b"cat: warning".to_vec());
+        assert_eq!(
+            Captured::StdoutOnly.bytes_of(&out),
+            Some(&b"cpu 1 2 3 4 5"[..])
+        );
+        assert_eq!(Captured::StdoutOnly.bytes_of(&err), None);
+    }
+
+    #[test]
+    fn a_merged_capture_keeps_stderr_for_the_failure_tail() {
+        let err = WireFrame::Stderr(b"mise ERROR timeout".to_vec());
+        assert_eq!(
+            Captured::StdoutAndStderr.bytes_of(&err),
+            Some(&b"mise ERROR timeout"[..])
+        );
+    }
+
+    #[test]
+    fn neither_capture_mode_collects_a_json_frame() {
+        let json = WireFrame::Json(lns_ipc::Response::Pong);
+        assert_eq!(Captured::StdoutOnly.bytes_of(&json), None);
+        assert_eq!(Captured::StdoutAndStderr.bytes_of(&json), None);
     }
 
     #[test]

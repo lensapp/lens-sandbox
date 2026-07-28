@@ -7,12 +7,6 @@ pub struct ToolRef {
     pub version: String,
 }
 
-impl ToolRef {
-    pub fn is_latest(&self) -> bool {
-        self.version == "latest"
-    }
-}
-
 impl std::fmt::Display for ToolRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{}", self.name, self.version)
@@ -82,14 +76,12 @@ mod tests {
         let tool = parse("node@22").unwrap();
         assert_eq!(tool.name, "node");
         assert_eq!(tool.version, "22");
-        assert!(!tool.is_latest());
         assert_eq!(tool.to_string(), "node@22");
     }
 
     #[test]
     fn parse_accepts_latest() {
-        let tool = parse("node@latest").unwrap();
-        assert!(tool.is_latest());
+        assert_eq!(parse("node@latest").unwrap().version, "latest");
     }
 
     #[test]
