@@ -23,13 +23,17 @@ pub struct ToolsRig {
 }
 
 impl ToolsRig {
-    pub fn audit_file(&mut self) -> std::path::PathBuf {
+    /// Disclosure happens as each tool commits, so the chain has to exist before the launch, not after it.
+    pub fn stage_audit_chain(&mut self) {
         if self.audit.is_none() {
             let dir = tempfile::TempDir::new().expect("audit tempdir");
             let file = dir.path().join("audit.jsonl");
             self.audit = Some((dir, file));
         }
-        self.audit.as_ref().expect("audit staged").1.clone()
+    }
+
+    pub fn audit_path(&self) -> Option<std::path::PathBuf> {
+        self.audit.as_ref().map(|(_, file)| file.clone())
     }
 }
 

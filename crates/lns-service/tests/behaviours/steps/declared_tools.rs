@@ -40,14 +40,29 @@ async fn launch(w: &mut BehaviourWorld) {
         arch: Arch::Aarch64,
         libc: Libc::Gnu,
     };
+    let audit_path = rig.audit_path();
+    let cx = lns_service::ocsf_audit::OcsfCtx::at_unix(
+        "test-run".into(),
+        "calm-finch".into(),
+        1_700_000_000,
+    );
+    let disclose = move |outcome: &lns_service::tools::ProvisionOutcome| {
+        if let Some(path) = &audit_path {
+            lns_service::audit::record_tool_provisioned_at(path, &cx, outcome)
+                .expect("record tool audit event");
+        }
+    };
     match lns_service::tools::ensure_tools(
         &rig.records,
         &rig.cache,
         &rig.provisioner,
-        &requests,
-        &target,
-        "2026.7.14",
-        1_700_000_000,
+        &lns_service::tools::EnsureRequest {
+            requests: &requests,
+            target: &target,
+            engine_version: "2026.7.14",
+            now_unix_secs: 1_700_000_000,
+            disclose: &disclose,
+        },
     )
     .await
     {
@@ -207,27 +222,19 @@ async fn tools_provisioned_for_a_run(w: &mut BehaviourWorld) {
         if rig.definition.is_none() {
             rig.definition = Some(definition_with_tools(r#""node@22""#));
         }
+        rig.stage_audit_chain();
     }
     launch(w).await;
     let rig = w.tools.as_mut().expect("rig");
     assert!(rig.error.is_none(), "provisioning failed: {:?}", rig.error);
-    let outcomes = rig
-        .ensured
-        .as_ref()
-        .expect("provisioning composed tools")
-        .provisioned
-        .clone();
-    assert!(!outcomes.is_empty(), "nothing was provisioned");
-    let path = rig.audit_file();
-    let cx = lns_service::ocsf_audit::OcsfCtx::at_unix(
-        "test-run".into(),
-        "calm-finch".into(),
-        1_700_000_000,
+    assert!(
+        !rig.ensured
+            .as_ref()
+            .expect("provisioning composed tools")
+            .provisioned
+            .is_empty(),
+        "nothing was provisioned"
     );
-    for outcome in &outcomes {
-        lns_service::audit::record_tool_provisioned_at(&path, &cx, outcome)
-            .expect("record tool audit event");
-    }
 }
 
 #[then("the audit chain records what was fetched, from where, and its resolved version")]
