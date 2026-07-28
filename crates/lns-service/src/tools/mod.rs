@@ -142,10 +142,21 @@ where
     C: ToolCache,
     P: ToolProvisioner,
 {
-    let mut record = records
+    let loaded = records
         .load()
-        .map_err(|e| ProvisionError::Engine(format!("loading the tool record: {e:#}")))?
-        .unwrap_or_default();
+        .map_err(|e| ProvisionError::Engine(format!("loading the tool record: {e:#}")))?;
+    let mut record = match loaded {
+        Some(record) if record.schema_version == record::RECORD_SCHEMA_VERSION => record,
+        Some(other) => {
+            crate::log::warn!(
+                "the tool record was written by schema v{} and this build speaks v{}; re-resolving every declared tool",
+                other.schema_version,
+                record::RECORD_SCHEMA_VERSION
+            );
+            record::ResolvedRecord::default()
+        }
+        None => record::ResolvedRecord::default(),
+    };
     let mut record_changed = record.schema_version != record::RECORD_SCHEMA_VERSION
         || record.engine_version != engine_version;
     record.schema_version = record::RECORD_SCHEMA_VERSION;
@@ -646,6 +657,54 @@ mod tests {
             "the warm pass never provisions — it reports that it cannot"
         );
         assert_eq!(*records.saves.lock().unwrap(), 0, "and never writes");
+    }
+
+    #[tokio::test]
+    async fn a_record_from_another_schema_is_discarded_rather_than_restamped() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        *records.record.lock().unwrap() = Some(record::ResolvedRecord {
+            schema_version: record::RECORD_SCHEMA_VERSION + 1,
+            engine_version: "2026.7.14".into(),
+            tools: std::collections::BTreeMap::from([(
+                "some-tool@1".to_string(),
+                record::ResolvedEntry {
+                    resolved: "1.0.0-from-the-future".into(),
+                    backend: "core:some-tool".into(),
+                    source_host: "upstream.example.test".into(),
+                    resolved_at_unix: 1_600_000_000,
+                },
+            )]),
+        });
+        let provisioner = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &provisioner,
+            &refs(&["some-tool@1"]),
+            &target(),
+            "2026.7.14",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            provisioner.calls.lock().unwrap()[0][0].version,
+            "1",
+            "the unreadable pin is not handed to the engine as if it were ours"
+        );
+        assert_eq!(ensured.provisioned[0].resolved, "1.2.3");
+        assert_eq!(recorded(&records, "some-tool@1"), "1.2.3");
+        assert_eq!(
+            records
+                .record
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .schema_version,
+            record::RECORD_SCHEMA_VERSION
+        );
     }
 
     #[tokio::test]
