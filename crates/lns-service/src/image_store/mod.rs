@@ -494,31 +494,36 @@ pub async fn prune() -> Result<PruneReport> {
 #[cfg(test)]
 mod tests {
     fn warnings_from(body: impl FnOnce()) -> String {
-        use std::fmt::Write as _;
+        use tracing_subscriber::layer::SubscriberExt;
         #[derive(Clone, Default)]
-        struct Buf(std::sync::Arc<Mutex<String>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                let _ = write!(self.0.lock().unwrap(), "{}", String::from_utf8_lossy(bytes));
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
+        struct Capture(std::sync::Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0.lock().unwrap().push(message.0);
             }
         }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-        let buf = Buf::default();
-        let subscriber = tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(buf.clone())
-            .finish();
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
         tracing::subscriber::with_default(subscriber, body);
-        buf.0.lock().unwrap().clone()
+        capture.0.lock().unwrap().join("\n")
     }
 
     #[test]

@@ -181,38 +181,20 @@ pub fn parse_all(entries: &[String]) -> Result<Vec<ToolRef>> {
 mod tests {
     use super::*;
 
-    struct EnvVarGuard(Option<std::ffi::OsString>);
-
-    impl EnvVarGuard {
-        fn set(value: &str) -> Self {
-            let guard = Self(std::env::var_os("LNS_TOOL_INDEX_URL"));
-            // SAFETY: the only caller is #[serial(env)] and Drop restores the previous value.
-            unsafe { std::env::set_var("LNS_TOOL_INDEX_URL", value) };
-            guard
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: same serialized caller; restores exactly what was captured.
-            unsafe {
-                match self.0.take() {
-                    Some(previous) => std::env::set_var("LNS_TOOL_INDEX_URL", previous),
-                    None => std::env::remove_var("LNS_TOOL_INDEX_URL"),
-                }
-            }
-        }
-    }
-
     #[test]
     #[serial_test::serial(env)]
     fn the_version_index_url_names_the_tool_and_honors_the_override() {
+        // SAFETY: #[serial(env)] is the whole-process lock for env mutation, and this test owns this key.
+        unsafe { std::env::remove_var("LNS_TOOL_INDEX_URL") };
         assert_eq!(
             version_index_url("node"),
             "https://mise-versions.jdx.dev/node"
         );
-        let _guard = EnvVarGuard::set("http://localhost:9/");
+        // SAFETY: as above.
+        unsafe { std::env::set_var("LNS_TOOL_INDEX_URL", "http://localhost:9/") };
         assert_eq!(version_index_url("node"), "http://localhost:9/node");
+        // SAFETY: as above; leaves the key as this test found it.
+        unsafe { std::env::remove_var("LNS_TOOL_INDEX_URL") };
     }
 
     #[test]
