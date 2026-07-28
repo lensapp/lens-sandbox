@@ -481,7 +481,8 @@ impl CredentialSession {
         };
         let (env_var, injection_domains, is_project_defined) =
             self.provider_disclosure(&req.credential_id);
-        let bound_value_available = self.has_resolvable_value(&req.credential_id);
+        // Only a value bound in the store counts: a host-detect entry resolves to the very value the card's detected-value offer already spends.
+        let bound_value_available = self.has_armed_value(&req.credential_id);
         self.notifier.present(&CredentialPendingPrompt {
             id: req.id,
             credential_id: req.credential_id,
@@ -3786,6 +3787,34 @@ mod tests {
                 Box::new(|_| {}),
             );
         (session, notifier, rx)
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_host_detect_binding_is_not_also_offered_as_a_bound_value() {
+        let _g = crate::test_env::EnvVarGuard::set("SOME_TOKEN", "host-real");
+        let (session, notifier, _rx) =
+            unconsented_session_with(vec![("some-provider", CredentialEntry::HostDetect)]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            !notifier.presented.lock().unwrap()[0].bound_value_available,
+            "a host-detect entry is the same host value the card's own detected-value offer spends, so offering it a second time would put two primary buttons with one effect on the consent card"
+        );
+    }
+
+    #[test]
+    fn a_stored_binding_is_offered_as_a_bound_value() {
+        let (session, notifier, _rx) = unconsented_session_with(vec![(
+            "some-provider",
+            CredentialEntry::Stored {
+                value: "some-already-bound".into(),
+            },
+        )]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap()[0].bound_value_available,
+            "a value bound on this machine is the card's whole reason to offer a grant instead of demanding the secret again"
+        );
     }
 
     #[tokio::test]
