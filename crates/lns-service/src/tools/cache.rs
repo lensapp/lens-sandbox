@@ -296,7 +296,30 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
             kind,
         });
     }
+    refuse_entries_under_a_symlink(&entries)?;
     Ok(entries)
+}
+
+/// Injection resolves a path's parent segments *through* symlinks, so an entry under a link lands wherever the link points — and a chain of them climbs out of the tree however innocent each link's own target looks (`s1 -> "."`, `s1/s2 -> ".."`, …), which no per-link textual check can see. Nothing legitimate needs the shape: a tool tar carries real directories and its links are leaves. Refusing it is also what makes the per-link target check sound, because every entry's real parent is then the parent its path spells.
+fn refuse_entries_under_a_symlink(entries: &[ManifestEntry]) -> Result<()> {
+    let links: std::collections::HashSet<&str> = entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::Symlink { .. }))
+        .map(|entry| entry.path.as_str())
+        .collect();
+    for entry in entries {
+        let mut ancestor = entry.path.as_str();
+        while let Some((parent, _)) = ancestor.rsplit_once('/') {
+            if links.contains(parent) {
+                bail!(
+                    "tool entry {} lives under the symlink {parent}, which would place it outside the tool tree",
+                    entry.path
+                );
+            }
+            ancestor = parent;
+        }
+    }
+    Ok(())
 }
 
 /// Injection resolves a path's parent segments *through* symlinks, so a link out of the tree makes every entry "under" it land wherever the link points — over the supervisor's own files, which are injected first. Only a target that still resolves inside the tool's own root may be preserved.
@@ -549,6 +572,44 @@ mod tests {
                 "{label} -> {target}: got {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn a_chain_of_links_cannot_climb_out_of_the_tool_tree() {
+        // Every link's own target looks in-tree, but injection resolves parents through links, so each one sits a level shallower than its path says and the chain reaches /.lens/bin.
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, target) in [
+            ("s1", "."),
+            ("s1/s2", ".."),
+            ("s1/s2/s3", ".."),
+            ("s1/s2/s3/s4", ".."),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_path(path).unwrap();
+            header.set_link_name(target).unwrap();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+        }
+        let payload = b"attacker bytes";
+        let mut file = tar::Header::new_gnu();
+        file.set_path("s1/s2/s3/s4/bin/lns-supervisor").unwrap();
+        file.set_size(payload.len() as u64);
+        file.set_mode(0o755);
+        file.set_cksum();
+        builder.append(&file, &payload[..]).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = cache(dir.path())
+            .ingest(&key(), &staged(tar))
+            .expect_err("a tool tree must not be able to reach the supervisor");
+        assert!(
+            format!("{err:#}").contains("lives under the symlink"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
