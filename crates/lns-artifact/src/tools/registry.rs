@@ -6,7 +6,8 @@ use super::ToolRef;
 /// Regenerated from the pinned mise release's registry by bump-mise; each line is `name<TAB>backend`, preferring the first download-only backend.
 const SNAPSHOT: &str = include_str!("registry.snapshot");
 
-const SUPPORTED_BACKEND_KINDS: &[&str] = &["core", "aqua", "ubi", "github", "http", "gitlab"];
+/// The download-only backends: a tool installs by fetching a published artifact, with no build step and no second package manager in the guest.
+pub const SUPPORTED_BACKEND_KINDS: &[&str] = &["core", "aqua", "ubi", "github", "http", "gitlab"];
 
 /// Tools with no musl build; the launch that knows the image's libc flavor is what refuses them.
 pub const MUSL_UNSUPPORTED: &[(&str, &str)] = &[("deno", "Deno publishes no musl builds")];

@@ -5,8 +5,21 @@ use anyhow::{Context, Result, bail};
 /// mise's published minisign key (checked into the mise repo as minisign.pub); every SHASUMS256.txt must verify against it before a pin lands.
 pub const MISE_MINISIGN_PUBKEY: &str = "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ";
 
-pub const SUPPORTED_BACKEND_PREFIXES: &[&str] =
-    &["core:", "aqua:", "ubi:", "github:", "http:", "gitlab:"];
+fn is_download_only(backend: &str) -> bool {
+    let kind = backend.split(':').next().unwrap_or(backend);
+    lns_artifact::tools::registry::SUPPORTED_BACKEND_KINDS.contains(&kind)
+}
+
+/// A tool the guest cannot run is not provisionable, and letting it validate and push only to burn a provisioner boot before mise refuses the OS is worse than refusing it by name.
+fn runs_on_linux(values: Option<&toml::Value>) -> bool {
+    let Some(array) = values.and_then(toml::Value::as_array) else {
+        return true;
+    };
+    array
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .any(|value| value == "linux" || value.starts_with("linux-"))
+}
 
 pub fn verify_shasums_signature(shasums: &[u8], minisig: &str) -> Result<()> {
     let key = minisign_verify::PublicKey::from_base64(MISE_MINISIGN_PUBKEY)
@@ -58,6 +71,9 @@ pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> 
         let table: toml::Table = contents
             .parse()
             .with_context(|| format!("parsing registry entry {stem}"))?;
+        if !runs_on_linux(table.get("os")) {
+            continue;
+        }
         let backends: Vec<String> = table
             .get("backends")
             .and_then(|value| value.as_array())
@@ -66,9 +82,9 @@ pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> 
                     .iter()
                     .filter_map(|backend| match backend {
                         toml::Value::String(full) => Some(full.clone()),
-                        toml::Value::Table(t) => {
-                            t.get("full").and_then(|v| v.as_str()).map(str::to_string)
-                        }
+                        toml::Value::Table(t) => runs_on_linux(t.get("platforms"))
+                            .then(|| t.get("full").and_then(|v| v.as_str()).map(str::to_string))
+                            .flatten(),
                         _ => None,
                     })
                     .collect()
@@ -79,11 +95,7 @@ pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> 
         };
         let pick = backends
             .iter()
-            .find(|backend| {
-                SUPPORTED_BACKEND_PREFIXES
-                    .iter()
-                    .any(|prefix| backend.starts_with(prefix))
-            })
+            .find(|backend| is_download_only(backend))
             .unwrap_or(first)
             .clone();
         let mut names = vec![stem.clone()];
@@ -286,6 +298,39 @@ musl = "docker.io/library/alpine@sha256:dddd"
         )];
         let snapshot = render_registry_snapshot(&entries).unwrap();
         assert!(snapshot.contains("tabular\taqua:owner/tabular\n"));
+    }
+
+    #[test]
+    fn a_tool_the_guest_cannot_run_is_left_out_of_the_snapshot() {
+        // Otherwise it validates, pushes, and burns a provisioner boot before mise refuses the OS.
+        let entries = vec![
+            (
+                "xcodegen".to_string(),
+                "os = [\"macos\"]\nbackends = [\"aqua:owner/xcodegen\"]\n".to_string(),
+            ),
+            (
+                "portable".to_string(),
+                "os = [\"linux\", \"macos\"]\nbackends = [\"aqua:owner/portable\"]\n".to_string(),
+            ),
+        ];
+        let snapshot = render_registry_snapshot(&entries).unwrap();
+        assert!(!snapshot.contains("xcodegen"), "got: {snapshot}");
+        assert!(snapshot.contains("portable\taqua:owner/portable\n"));
+    }
+
+    #[test]
+    fn a_backend_that_does_not_build_for_linux_is_not_the_recorded_pick() {
+        // imagemagick ships its aqua package for windows only; recording it would gate and audit against a backend the guest never uses.
+        let entries = vec![(
+            "imagemagick".to_string(),
+            "backends = [{ full = \"aqua:owner/im\", platforms = [\"windows-x64\"] }, \"conda:imagemagick\"]\n"
+                .to_string(),
+        )];
+        let snapshot = render_registry_snapshot(&entries).unwrap();
+        assert!(
+            snapshot.contains("imagemagick\tconda:imagemagick\n"),
+            "the unusable backend is skipped and the tool is refused by name instead: {snapshot}"
+        );
     }
 
     #[test]
