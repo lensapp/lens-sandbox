@@ -1931,9 +1931,9 @@ mod tests {
             .expect("the workload gets a PATH");
 
         let run_id = crate::run_registry::allocate_run_id();
-        let (handle, _cancel) = crate::run_registry::test_handle();
+        let (mut handle, _cancel) = crate::run_registry::test_handle();
+        handle.tool_bin_paths = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
-        crate::run_registry::set_tool_bin_paths(&run_id, tools.clone());
         let mut args = exec_args(vec!["node".into()], false, false);
         args.env = vec!["PATH=/usr/bin".into()];
         let params = build_session_params(args, &run_id);
@@ -1952,9 +1952,9 @@ mod tests {
         // What `lns exec` actually sends is an empty env, so the composed PATH has to hold up on that input and not just on a hand-supplied one.
         let tools = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
         let run_id = crate::run_registry::allocate_run_id();
-        let (handle, _cancel) = crate::run_registry::test_handle();
+        let (mut handle, _cancel) = crate::run_registry::test_handle();
+        handle.tool_bin_paths = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
-        crate::run_registry::set_tool_bin_paths(&run_id, tools.clone());
         let args = exec_args(vec!["node".into()], false, false);
         assert!(args.env.is_empty(), "the CLI sends no env for exec");
         let params = build_session_params(args, &run_id);
@@ -1976,13 +1976,10 @@ mod tests {
     async fn exec_by_name_sees_the_same_tools_as_exec_by_id() {
         // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
         let run_id = crate::run_registry::allocate_run_id();
-        let (handle, _cancel) = crate::run_registry::test_handle();
+        let (mut handle, _cancel) = crate::run_registry::test_handle();
+        handle.tool_bin_paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
         crate::run_registry::register_named(run_id.clone(), Some("calm-finch".into()), handle)
             .expect("register the run");
-        crate::run_registry::set_tool_bin_paths(
-            &run_id,
-            vec!["/.lens/tools/node/22.11.0/bin".to_string()],
-        );
 
         let by_name = crate::run_registry::resolve("calm-finch").expect("name resolves");
         let params = build_session_params(exec_args(vec!["node".into()], false, false), &by_name);

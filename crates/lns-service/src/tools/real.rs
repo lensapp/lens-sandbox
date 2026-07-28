@@ -60,6 +60,8 @@ pub async fn ensure_for_run(
             .iter()
             .any(|request| super::registry::needs_musl_companions(&request.name, target.libc))
     {
+        // The companion fetch writes the shared cache through a fixed temp name, so it belongs behind the same lock the installs take — a warm run reaches here without ever having held it.
+        let _serialized = serialized_install().await;
         let companions = super::provisioner::real::workload_companion_specs(&cache_dir, target)
             .await
             .map_err(|e| ProvisionError::Engine(format!("staging musl companions: {e:#}")))?;

@@ -150,14 +150,10 @@ impl ToolCache for RealToolCache {
         }
         // These two pick the guest root the tree is injected at and the dirs it puts on the workload's PATH, so a tree may only ever speak for the slot it was read from.
         if manifest.tool != key.name || manifest.resolved != key.resolved {
-            crate::log::warn!(
-                "ignoring the cached tool tree at {}: it describes {}@{} rather than {}@{}",
-                dir.display(),
-                manifest.tool,
-                manifest.resolved,
-                key.name,
-                key.resolved
-            );
+            let at = dir.display();
+            let got = format!("{}@{}", manifest.tool, manifest.resolved);
+            let want = format!("{}@{}", key.name, key.resolved);
+            crate::log::warn!("ignoring the cached tool tree at {at}: it is {got}, not {want}");
             return Ok(None);
         }
         if !manifest
@@ -949,17 +945,24 @@ mod tests {
         // manifest.tool and manifest.resolved pick the guest root the tree is injected at and the dirs it puts on PATH, so a tree may only speak for the slot it was read from.
         let dir = tempfile::TempDir::new().unwrap();
         let cache = cache(dir.path());
-        cache.ingest(&key(), &staged(tool_tar())).unwrap();
-        tamper_manifest(dir.path(), |raw| {
-            raw["tool"] = serde_json::json!("some-other-tool");
-        });
-        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
+        // The warning naming both slots is the operator's only signal, so it is emitted under a live subscriber rather than dropped.
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            cache.ingest(&key(), &staged(tool_tar())).unwrap();
+            tamper_manifest(dir.path(), |raw| {
+                raw["tool"] = serde_json::json!("some-other-tool");
+            });
+            assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
 
-        cache.ingest(&key(), &staged(tool_tar())).unwrap();
-        tamper_manifest(dir.path(), |raw| {
-            raw["resolved"] = serde_json::json!("9.9.9");
+            cache.ingest(&key(), &staged(tool_tar())).unwrap();
+            tamper_manifest(dir.path(), |raw| {
+                raw["resolved"] = serde_json::json!("9.9.9");
+            });
+            assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
         });
-        assert_eq!(cache.lookup(&key(), &[]).unwrap(), None);
     }
 
     #[test]
