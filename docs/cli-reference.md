@@ -13,6 +13,38 @@ information at the terminal.
 
 Log levels: `error`, `warn`, `info`, `debug`.
 
+## Machine-readable output
+
+The list and status verbs take `--format <table|json>`, so a script doesn't have to
+parse the human table:
+
+`lns ps`, `lns sandbox ls`, `lns volume ls`, `lns policy list`, `lns connector list`,
+`lns connector grants`, `lns config list`, `lns config get`, `lns service status`.
+
+`lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
+its machine-readable form is one JSON event per line. The older `--json` spelling still
+works as an alias for `--format jsonl`.
+
+What the JSON gives you:
+
+- **A bare array of objects** for the list verbs, pretty-printed. `lns service status`,
+  `lns inspect`, and `lns volume inspect` emit a single object instead.
+- **camelCase keys**, always present — a key with no value is `null`, never omitted, so
+  `jq .inUseBy` needs no guard.
+- **Raw numbers**, so nothing has to be un-humanized: `sizeBytes: 92274688`, not
+  `"88.0 MiB"`. Timestamps pass through as the service reports them.
+- **The same exit code as the table.** `--format` changes the shape and nothing else:
+  `lns config get` on an unset key still exits 1, emitting `[]`.
+- Some verbs report more in JSON than the table has room for. `lns sandbox ls` is the
+  clearest case: the table shows a reference and a state, the JSON adds digest, size,
+  layer count, pull time, and holder.
+- The empty-list sentences (`No rules in …`) become `[]`. Warnings go to stderr in both
+  formats, so stdout stays parseable either way.
+
+> **The JSON shape is experimental until v1.0.** Field names and shapes may change in a
+> minor release, so pin your `lns` version in scripts that depend on them. Table output
+> is for humans and carries no stability promise at all.
+
 ## The sandbox surface
 
 Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
@@ -203,7 +235,7 @@ Show one chronological timeline of every audit event across all sandboxes — or
 ```bash
 lns audit                                   # every event, every sandbox, newest first
 lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
-lns audit [--connector <id>] [--kind <kind>] [--json]
+lns audit [--connector <id>] [--kind <kind>] [--format <table|jsonl>]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
@@ -219,7 +251,8 @@ Filters compose:
   events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
   `connection`, `credential`.
-- `--json` — one raw JSON event per line instead of the table.
+- `--format jsonl` — one raw JSON event per line instead of the table. (`--json` is the
+  older spelling of the same thing and still works.)
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline
