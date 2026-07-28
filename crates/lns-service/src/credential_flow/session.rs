@@ -119,13 +119,25 @@ struct GrantBinding {
     project: String,
     workload: WorkloadIdentity,
     store: Arc<dyn GrantStore>,
-    /// Each connector's forget count as this run found it, so a `lns connector disconnect` landing mid-run is not undone by a decision this run was still holding.
-    revocations: HashMap<String, u64>,
+    /// Each connector's forget count as of the question this run is currently asking about it, so a `lns connector disconnect` landing after the card went up cancels the decision it interrupted, while one that landed before is a question the card is answering.
+    revocations: Mutex<HashMap<String, u64>>,
 }
 
 impl GrantBinding {
-    fn revocations_at_start(&self, connector: &str) -> u64 {
-        self.revocations.get(connector).copied().unwrap_or(0)
+    fn revocations_asked_against(&self, connector: &str) -> u64 {
+        self.revocations
+            .lock()
+            .expect("revocations mutex poisoned")
+            .get(connector)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn ask_against_revocations(&self, connector: &str, count: u64) {
+        self.revocations
+            .lock()
+            .expect("revocations mutex poisoned")
+            .insert(connector.to_string(), count);
     }
 }
 
@@ -313,7 +325,7 @@ impl CredentialSession {
     ) -> Self {
         let key = workload.key();
         let loaded = store.load().unwrap_or_default();
-        let revocations = loaded
+        let revocations: HashMap<String, u64> = loaded
             .revocations
             .iter()
             .filter(|r| r.project == project)
@@ -330,7 +342,7 @@ impl CredentialSession {
             project,
             workload,
             store,
-            revocations,
+            revocations: Mutex::new(revocations),
         });
         self
     }
@@ -409,15 +421,29 @@ impl CredentialSession {
         Some(record)
     }
 
-    /// Writes a remembered grant to the sidecar unless a forget landed since this run read it, decided inside the store's update so the disconnect and this write cannot interleave.
+    /// Pins the forget count a freshly-raised card is asked against, so a `lns connector disconnect` the developer did before it went up is a question this card answers rather than a cancellation of it; an unreadable sidecar leaves the previous count in place, which can only cancel.
+    fn ask_against_current_revocations(&self, credential_id: &str) {
+        let Some(binding) = &self.grant_binding else {
+            return;
+        };
+        let Ok(file) = binding.store.load() else {
+            return;
+        };
+        binding.ask_against_revocations(
+            credential_id,
+            file.revocations_of(&binding.project, credential_id),
+        );
+    }
+
+    /// Writes a remembered grant to the sidecar unless a forget landed since the card was raised, decided inside the store's update so the disconnect and this write cannot interleave.
     fn persist_grant(&self, record: Option<GrantRecord>) {
         let (Some(record), Some(binding)) = (record, &self.grant_binding) else {
             return;
         };
-        let at_start = binding.revocations_at_start(&record.connector);
+        let asked_against = binding.revocations_asked_against(&record.connector);
         let mut forgotten_since = false;
         let outcome = binding.store.update(&mut |file| {
-            if file.revocations_of(&record.project, &record.connector) != at_start {
+            if file.revocations_of(&record.project, &record.connector) != asked_against {
                 forgotten_since = true;
                 return false;
             }
@@ -498,6 +524,8 @@ impl CredentialSession {
             },
         );
         drop(pending);
+        // Only a newly-raised card asks a new question: a request joining a card already up must not move the count its decision is judged against.
+        self.ask_against_current_revocations(&req.credential_id);
         let oauth_display_name = self
             .is_signin(&req.credential_id)
             .then(|| self.display_name_for(&req.credential_id));
@@ -1556,6 +1584,81 @@ mod tests {
                 .lookup("proj", &workload, "some-provider")
                 .is_some(),
             "the run compares the forget count against what it started with, so a revoke the developer did before launching is already answered by the card they just accepted — only a forget landing mid-run may drop it"
+        );
+    }
+
+    /// `lns connector disconnect` landing from its own process while this run is live.
+    fn forget_from_another_process(store: &dyn GrantStore) {
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "some-provider");
+                true
+            })
+            .unwrap();
+    }
+
+    fn allow_stored(session: &CredentialSession, prompt_id: &str) {
+        session.record_decision(
+            prompt_id,
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_forget_landing_while_the_card_is_open_cancels_that_decision_and_no_later_one() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        forget_from_another_process(store.as_ref());
+        allow_stored(&session, "c1");
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "the forget interrupted this card, so it wins over the decision the run was still holding"
+        );
+
+        // The developer reconnects, and the next request raises a card they answer knowing about the disconnect.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        allow_stored(&session, "c2");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "a card raised after the forget is a new question, so answering it must land — otherwise one disconnect makes every later consent in this run un-rememberable, and the next run re-asks citing a disconnect the developer already undid"
+        );
+    }
+
+    #[test]
+    fn a_forget_that_landed_before_the_card_went_up_is_answered_by_it() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+
+        forget_from_another_process(store.as_ref());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        allow_stored(&session, "c1");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "the card postdates the forget, so the developer is answering it, not being overruled by it — a run started before the disconnect must not hold that against every card it raises afterwards"
         );
     }
 
