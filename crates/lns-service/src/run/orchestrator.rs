@@ -229,7 +229,7 @@ async fn orchestrate(
     } else {
         let target = crate::tools::ProvisionTarget {
             arch: crate::tools::host_arch(),
-            libc: crate::tools::libc::detect_libc(&image.bytes)?,
+            libc: crate::tools::libc::detect_libc_for(&image.digests, &image.bytes)?,
         };
         crate::tools::registry::refuse_libc_unsupported(
             &tool_requests,
