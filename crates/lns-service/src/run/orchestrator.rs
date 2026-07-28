@@ -482,9 +482,9 @@ async fn orchestrate(
         "microVM   ({:.2}s)",
         boot_start.elapsed().as_secs_f64()
     );
-    crate::run_registry::set_connector(&run_id, connector.clone());
-    crate::run_registry::set_tool_bin_paths(
+    crate::run_registry::set_connector_with_tool_bin_paths(
         &run_id,
+        connector.clone(),
         ensured_tools
             .as_ref()
             .map(|ensured| ensured.bin_paths.clone())
