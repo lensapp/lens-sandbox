@@ -5,17 +5,44 @@ use anyhow::{Context, Result, bail};
 /// mise's published minisign key (checked into the mise repo as minisign.pub); every SHASUMS256.txt must verify against it before a pin lands.
 pub const MISE_MINISIGN_PUBKEY: &str = "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ";
 
-/// A half-written pin is worse than no bump and the operator's only recovery signal is `git status`, so each file is either the old one or the new one — and a failure leaves no temp file to puzzle over.
-pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("bump-tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e).with_context(|| format!("replacing {}", path.display()))
+/// Stage every payload before moving any live file: the failure that actually happens is a full disk on the larger write, and a bumped engine pin against last release's snapshot is the one state worse than no bump.
+pub fn write_all_atomically(files: &[(&std::path::Path, Vec<u8>)]) -> Result<()> {
+    let mut staged = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        let tmp = path.with_extension("bump-tmp");
+        if let Err(e) = std::fs::write(&tmp, bytes) {
+            for (tmp, _) in &staged {
+                let _ = std::fs::remove_file(tmp);
+            }
+            return Err(e).with_context(|| format!("writing {}", tmp.display()));
+        }
+        staged.push((tmp, *path));
+    }
+    for (tmp, path) in &staged {
+        if let Err(e) = std::fs::rename(tmp, path) {
+            for (tmp, _) in &staged {
+                let _ = std::fs::remove_file(tmp);
+            }
+            return Err(e).with_context(|| format!("replacing {}", path.display()));
         }
     }
+    Ok(())
+}
+
+/// The engine pin as `show` reports it, so a hand-edited manifest missing the section is named rather than indexed into.
+pub fn engine_summary(manifest: &str) -> Result<(String, String)> {
+    let table: toml::Table = manifest.parse().context("parsing mise.toml")?;
+    let engine = table
+        .get("engine")
+        .context("mise.toml carries no [engine] section")?;
+    let version = engine
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .context("mise.toml carries no engine version")?;
+    let shas = engine
+        .get("sha256")
+        .context("mise.toml carries no engine sha256 pins")?;
+    Ok((version.to_string(), shas.to_string()))
 }
 
 fn is_download_only(backend: &str) -> bool {
@@ -80,6 +107,7 @@ pub fn bump_engine_pin(
 /// Regenerate the registry snapshot from a release's `registry/*.toml` entries: every name (and alias) maps to its first download-only backend, falling back to the literal first so unsupported-backend tools are refused by name.
 pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> {
     let mut rows: BTreeMap<String, String> = BTreeMap::new();
+    let mut aliased: Vec<(String, String)> = Vec::new();
     for (stem, contents) in entries {
         let table: toml::Table = contents
             .parse()
@@ -111,17 +139,19 @@ pub fn render_registry_snapshot(entries: &[(String, String)]) -> Result<String> 
             .find(|backend| is_download_only(backend))
             .unwrap_or(first)
             .clone();
-        let mut names = vec![stem.clone()];
+        rows.insert(stem.clone(), pick.clone());
         if let Some(aliases) = table.get("aliases").and_then(|value| value.as_array()) {
-            names.extend(
+            aliased.extend(
                 aliases
                     .iter()
-                    .filter_map(|alias| alias.as_str().map(str::to_string)),
+                    .filter_map(|alias| alias.as_str())
+                    .map(|alias| (alias.to_string(), pick.clone())),
             );
         }
-        for name in names {
-            rows.entry(name).or_insert_with(|| pick.clone());
-        }
+    }
+    // A tool always owns its own name: an alias only fills a row no entry claimed, or an alphabetically earlier tool's alias would decide what a later tool's own name installs.
+    for (alias, backend) in aliased {
+        rows.entry(alias).or_insert(backend);
     }
     if rows.is_empty() {
         bail!("the release carried no registry entries — refusing to write an empty snapshot");
@@ -248,6 +278,95 @@ musl = "docker.io/library/alpine@sha256:dddd"
     }
 
     #[test]
+    fn a_tools_own_name_beats_an_alias_another_tool_claims_for_it() {
+        // Entries arrive in tar order, so an alphabetically earlier tool's alias would otherwise take the row a later tool's own entry needs — and `node@22` would silently provision bun.
+        let entries = vec![
+            (
+                "bun".to_string(),
+                "backends = [\"aqua:oven-sh/bun\"]\naliases = [\"node\"]\n".to_string(),
+            ),
+            (
+                "node".to_string(),
+                "backends = [\"core:node\"]\n".to_string(),
+            ),
+        ];
+        let snapshot = render_registry_snapshot(&entries).unwrap();
+        assert!(snapshot.contains("node\tcore:node\n"), "got: {snapshot}");
+        assert!(
+            snapshot.contains("bun\taqua:oven-sh/bun\n"),
+            "got: {snapshot}"
+        );
+    }
+
+    #[test]
+    fn an_alias_still_lands_when_no_tool_owns_that_name() {
+        let entries = vec![(
+            "github-cli".to_string(),
+            "backends = [\"aqua:cli/cli\"]\naliases = [\"gh\"]\n".to_string(),
+        )];
+        let snapshot = render_registry_snapshot(&entries).unwrap();
+        assert!(snapshot.contains("gh\taqua:cli/cli\n"), "got: {snapshot}");
+    }
+
+    #[test]
+    fn the_engine_summary_names_a_manifest_missing_its_section_instead_of_panicking() {
+        let err = engine_summary("[companion]\nalpine = \"3.21\"\n").unwrap_err();
+        assert!(format!("{err:#}").contains("engine"), "got: {err:#}");
+        let (version, shas) = engine_summary(
+            "[engine]\nversion = \"2026.7.14\"\n[engine.sha256]\naarch64 = \"ab\"\n",
+        )
+        .unwrap();
+        assert_eq!(version, "2026.7.14");
+        assert!(shas.contains("ab"), "got: {shas}");
+    }
+
+    #[test]
+    fn a_bump_that_cannot_stage_every_file_moves_none_of_them() {
+        // The failure that actually happens is a full disk while writing the larger snapshot; a bumped engine pin against last release's snapshot is the one state worse than no bump.
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = dir.path().join("mise.toml");
+        let snapshot = dir.path().join("registry.snapshot");
+        std::fs::write(&manifest, b"old-manifest").unwrap();
+        std::fs::write(&snapshot, b"old-snapshot").unwrap();
+        // A directory where the second temp file has to go makes staging it fail without touching the first.
+        std::fs::create_dir(snapshot.with_extension("bump-tmp")).unwrap();
+
+        let err = write_all_atomically(&[
+            (manifest.as_path(), b"new-manifest".to_vec()),
+            (snapshot.as_path(), b"new-snapshot".to_vec()),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("registry"), "got: {err:#}");
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"old-manifest");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"old-snapshot");
+        assert!(
+            !manifest.with_extension("bump-tmp").exists(),
+            "a failed bump leaves no temp to puzzle over"
+        );
+    }
+
+    #[test]
+    fn a_bump_that_stages_every_file_replaces_them_all() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = dir.path().join("mise.toml");
+        let snapshot = dir.path().join("registry.snapshot");
+        std::fs::write(&manifest, b"old-manifest").unwrap();
+        std::fs::write(&snapshot, b"old-snapshot").unwrap();
+
+        write_all_atomically(&[
+            (manifest.as_path(), b"new-manifest".to_vec()),
+            (snapshot.as_path(), b"new-snapshot".to_vec()),
+        ])
+        .unwrap();
+
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"new-manifest");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"new-snapshot");
+        assert!(!manifest.with_extension("bump-tmp").exists());
+        assert!(!snapshot.with_extension("bump-tmp").exists());
+    }
+
+    #[test]
     fn the_tarball_walk_extracts_only_registry_entries() {
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -314,31 +433,14 @@ musl = "docker.io/library/alpine@sha256:dddd"
     }
 
     #[test]
-    fn an_atomic_write_replaces_the_file_and_leaves_no_temp_behind() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let pin = dir.path().join("mise.toml");
-        std::fs::write(&pin, b"old").unwrap();
-
-        write_atomically(&pin, b"new").unwrap();
-
-        assert_eq!(std::fs::read(&pin).unwrap(), b"new");
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name != "mise.toml")
-            .collect();
-        assert!(leftovers.is_empty(), "got: {leftovers:?}");
-    }
-
-    #[test]
-    fn a_failed_atomic_write_leaves_the_previous_pin_and_no_temp() {
+    fn a_rename_that_cannot_land_leaves_the_previous_pin_and_no_temp() {
         // The operator's only recovery signal is `git status`, so a half-finished bump must not leave a stray file to puzzle over.
         let dir = tempfile::TempDir::new().unwrap();
         let occupied = dir.path().join("snapshot");
         std::fs::create_dir(&occupied).unwrap();
         std::fs::write(occupied.join("keep"), b"in the way").unwrap();
 
-        let err = write_atomically(&occupied, b"new").unwrap_err();
+        let err = write_all_atomically(&[(occupied.as_path(), b"new".to_vec())]).unwrap_err();
 
         assert!(
             format!("{err:#}").contains("snapshot"),

@@ -49,15 +49,9 @@ fn workspace_paths() -> Result<(PathBuf, PathBuf)> {
 
 fn show() -> Result<()> {
     let (manifest_path, snapshot_path) = workspace_paths()?;
-    let manifest: toml::Table = std::fs::read_to_string(&manifest_path)?
-        .parse()
-        .context("parsing mise.toml")?;
-    let engine = &manifest["engine"];
-    println!(
-        "engine version: {}",
-        engine["version"].as_str().unwrap_or("?")
-    );
-    println!("engine sha256: {}", engine["sha256"]);
+    let (version, shas) = operations::engine_summary(&std::fs::read_to_string(&manifest_path)?)?;
+    println!("engine version: {version}");
+    println!("engine sha256: {shas}");
     let entries = std::fs::read_to_string(&snapshot_path)?.lines().count();
     println!("registry snapshot: {entries} entries");
     Ok(())
@@ -82,7 +76,6 @@ fn bump(version: &str) -> Result<()> {
         manifest_path.display()
     );
     let manifest = std::fs::read_to_string(&manifest_path)?;
-    // Both files land together or neither does: a bumped pin against last release's snapshot is worse than no bump.
     let bumped = operations::bump_engine_pin(&manifest, version, &shas)?;
 
     println!("==> regenerating the registry snapshot from the release source");
@@ -90,8 +83,10 @@ fn bump(version: &str) -> Result<()> {
     let entries = operations::registry_entries_from_tarball(&tarball)?;
     let snapshot = operations::render_registry_snapshot(&entries)?;
 
-    operations::write_atomically(&manifest_path, bumped.as_bytes())?;
-    operations::write_atomically(&snapshot_path, snapshot.as_bytes())?;
+    operations::write_all_atomically(&[
+        (manifest_path.as_path(), bumped.into_bytes()),
+        (snapshot_path.as_path(), snapshot.into_bytes()),
+    ])?;
 
     println!(
         "==> done. Next: re-validate the companion pins in mise.toml if the alpine branch moved,\n\
