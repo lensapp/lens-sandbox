@@ -2,15 +2,19 @@ Feature: declared developer tools are provisioned once per machine, outside work
   A sandbox definition lists under `spec.tools` the developer tools its
   workload needs. The service provisions them before the microVM boots, in a
   disposable guest of its own: declaration is consent, so it raises no approval
-  card and needs no policy route — not even the strictest policy gates it.
+  card and needs no policy route — not even the strictest policy gates it. That
+  no card is raised is structural rather than checked here: provisioning runs in
+  a separate guest with no supervisor and no policy gate, so there is no path
+  from this pre-boot work to an approval session for a scenario to observe. What
+  this feature pins is that the policy does not *refuse* the install.
   Provisioned tool sets are cached per machine and reused without network; the
   workload receives them read-only, and its own traffic stays inside the normal
   policy cage (covered against a live guest by the @microvm suite).
 
-  Scenario: The strictest policy neither gates provisioning nor raises a card
+  Scenario: The strictest policy does not gate provisioning
     Given a lns.yaml declaring tools ["node@22"] with defaultVerdict deny and no allowedRoutes
     When I run the sandbox for the first time
-    Then the tools are provisioned without any approval card
+    Then the tools are provisioned under it anyway
 
   Scenario: A provisioned tool set is reused without network
     Given tools ["node@22"] were provisioned by an earlier run on this machine
