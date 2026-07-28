@@ -99,7 +99,6 @@ fn decode_sha256(digest: &str) -> Result<[u8; 32]> {
 pub trait ToolCache {
     fn lookup(&self, key: &ToolCacheKey) -> Result<Option<ToolManifest>>;
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest>;
-    fn evict(&self, key: &ToolCacheKey) -> Result<()>;
 }
 
 pub struct RealToolCache {
@@ -157,8 +156,7 @@ impl ToolCache for RealToolCache {
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest> {
         let entries = match &staged.tar {
             StagedTar::File(path) => {
-                let file = std::fs::File::open(path)
-                    .with_context(|| format!("opening staged tool tar {}", path.display()))?;
+                let file = open_staged_tar(path)?;
                 ingest_tar_entries(file, &self.store)?
             }
             StagedTar::Bytes(bytes) => ingest_tar_entries(&bytes[..], &self.store)?,
@@ -184,14 +182,26 @@ impl ToolCache for RealToolCache {
             .with_context(|| format!("marking {} ready", dir.display()))?;
         Ok(manifest)
     }
+}
 
-    fn evict(&self, key: &ToolCacheKey) -> Result<()> {
-        match std::fs::remove_dir_all(self.key_dir(key)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("evicting {:?}", key.name)),
-        }
-    }
+/// The provisioner guest runs as root on a writable bind of this directory, so between the driver's `tar -cf` and this read it can replace the tar with a link to any host path — or a fifo that would block the service. Only a regular file opened without following links is the tar we asked for.
+fn open_staged_tar(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("opening staged tool tar {}", path.display()))?;
+    let kind = file
+        .metadata()
+        .with_context(|| format!("inspecting staged tool tar {}", path.display()))?
+        .file_type();
+    anyhow::ensure!(
+        kind.is_file(),
+        "staged tool tar {} is not a regular file",
+        path.display()
+    );
+    Ok(file)
 }
 
 /// Expand a staged tool tar into content-store entries. Fail-closed like fileset ingestion — escaping paths and exotic entry types are refused — but tool trees legitimately carry symlinks (`bin/node -> ../lib/...`) and hardlinks (JDK layouts), so those are preserved as manifest entries.
@@ -342,6 +352,13 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    fn tree_dir(root: &Path) -> PathBuf {
+        root.join("trees")
+            .join(&key().name)
+            .join(key().resolved.as_str())
+            .join(format!("{}-{}", key().arch, key().libc))
+    }
+
     fn cache(dir: &Path) -> RealToolCache {
         RealToolCache::new(dir, ContentStore::new(dir.join("content")), "2026.7.14")
     }
@@ -357,14 +374,13 @@ mod tests {
     }
 
     #[test]
-    fn lookup_misses_before_ingest_and_after_evict() {
+    fn lookup_misses_before_ingest_and_after_the_tree_is_removed() {
         let dir = tempfile::TempDir::new().unwrap();
         let cache = cache(dir.path());
         assert_eq!(cache.lookup(&key()).unwrap(), None);
         cache.ingest(&key(), &staged(tool_tar())).unwrap();
-        cache.evict(&key()).unwrap();
+        std::fs::remove_dir_all(tree_dir(dir.path())).unwrap();
         assert_eq!(cache.lookup(&key()).unwrap(), None);
-        cache.evict(&key()).unwrap();
     }
 
     #[test]
@@ -396,20 +412,6 @@ mod tests {
         from_file.tar = StagedTar::File(tar_path);
         let manifest = cache.ingest(&key(), &from_file).unwrap();
         assert_eq!(manifest.entries.len(), 2);
-    }
-
-    #[test]
-    fn evicting_an_unremovable_key_surfaces_the_error() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let cache = cache(dir.path());
-        let key_dir = dir.path().join("trees/some-tool/1.2.3").join(format!(
-            "{}-{}",
-            Arch::Aarch64,
-            Libc::Musl
-        ));
-        std::fs::create_dir_all(key_dir.parent().unwrap()).unwrap();
-        std::fs::write(&key_dir, b"a file where the tree dir belongs").unwrap();
-        assert!(cache.evict(&key()).is_err());
     }
 
     #[test]
@@ -486,6 +488,34 @@ mod tests {
         assert!(
             format!("{err:#}").contains("not in the tree"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_staged_tar_swapped_for_a_symlink_is_refused_instead_of_read() {
+        // The provisioner guest is root on a writable bind of the staging dir and can win the race between its tar and this read.
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret = dir.path().join("id_ed25519");
+        std::fs::write(&secret, b"PRIVATE KEY").unwrap();
+        let staged_path = dir.path().join("node.tar");
+        std::os::unix::fs::symlink(&secret, &staged_path).unwrap();
+
+        let err = cache(dir.path())
+            .ingest(
+                &key(),
+                &StagedTool {
+                    name: "some-tool".into(),
+                    resolved: version("1.2.3"),
+                    backend: "core:some-tool".into(),
+                    source_host: "upstream.example.test".into(),
+                    tar: StagedTar::File(staged_path),
+                    bin_paths: vec!["bin".into()],
+                },
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("opening staged tool tar"),
+            "the host never follows the link: {err:#}"
         );
     }
 
