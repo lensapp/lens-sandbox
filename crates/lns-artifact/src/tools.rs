@@ -66,10 +66,11 @@ pub fn parse_all(entries: &[String]) -> Result<Vec<ToolRef>> {
     Ok(refs)
 }
 
+/// An allowlist, not a denylist: the version reaches the provisioner's shell driver, so anything a shell reads specially must never parse in the first place.
 fn is_valid_version(version: &str) -> bool {
-    !version
+    version
         .chars()
-        .any(|c| c == '@' || c == ':' || c.is_whitespace() || c.is_control())
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
 }
 
 #[cfg(test)]
@@ -111,6 +112,36 @@ mod tests {
                 msg.contains(&format!("{entry:?}")) && msg.contains(r#""name@version""#),
                 "entry {entry:?}: got: {msg}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_version_carrying_shell_metacharacters() {
+        for entry in [
+            "node@1';id;'",
+            "node@$(id)",
+            "node@`id`",
+            "node@1|id",
+            "node@../../escape",
+            "node@1&id",
+        ] {
+            let err = parse(entry).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&format!("{entry:?}")),
+                "entry {entry:?} must not reach the provisioner driver"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_the_version_shapes_upstream_publishes() {
+        for entry in [
+            "node@22",
+            "python@3.12.6",
+            "go@1.22.0-rc1",
+            "java@temurin_21",
+        ] {
+            parse(entry).unwrap_or_else(|e| panic!("entry {entry:?}: {e:#}"));
         }
     }
 
