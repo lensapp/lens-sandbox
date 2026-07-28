@@ -483,6 +483,13 @@ async fn orchestrate(
         boot_start.elapsed().as_secs_f64()
     );
     crate::run_registry::set_connector(&run_id, connector.clone());
+    crate::run_registry::set_tool_bin_paths(
+        &run_id,
+        ensured_tools
+            .as_ref()
+            .map(|ensured| ensured.bin_paths.clone())
+            .unwrap_or_default(),
+    );
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
     log::progress("Connecting", "session", 0, 0);
