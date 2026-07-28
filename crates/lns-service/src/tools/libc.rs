@@ -10,6 +10,10 @@ use super::Libc;
 /// The flavor is a pure function of the layer set, so a warm run re-answers it from the digests instead of gunzipping every layer body again.
 pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
     static MEMO: OnceLock<Mutex<HashMap<String, Libc>>> = OnceLock::new();
+    // Without digests there is nothing identifying to key on, and every such image would share one entry.
+    if layer_digests.is_empty() {
+        return detect_libc(layers);
+    }
     let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
     let key = layer_digests.join(" ");
     if let Some(hit) = memo
@@ -113,6 +117,18 @@ mod tests {
             detect_libc_for(&digests, &corrupt).unwrap(),
             Libc::Musl,
             "bodies that would fail to scan are never opened on a hit"
+        );
+    }
+
+    #[test]
+    fn an_undigested_layer_set_is_scanned_every_time_rather_than_sharing_one_entry() {
+        let musl = vec![layer_with(&["lib/ld-musl-aarch64.so.1"])];
+        assert_eq!(detect_libc_for(&[], &musl).unwrap(), Libc::Musl);
+        let gnu = vec![layer_with(&["lib/ld-linux-aarch64.so.1"])];
+        assert_eq!(
+            detect_libc_for(&[], &gnu).unwrap(),
+            Libc::Gnu,
+            "a second undigested image gets its own verdict, not the first one's"
         );
     }
 
