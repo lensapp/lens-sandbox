@@ -272,7 +272,6 @@ mod tests {
     fn staged(tar: Vec<u8>) -> StagedTool {
         StagedTool {
             name: "some-tool".into(),
-            requested: "1".into(),
             resolved: "1.2.3".into(),
             backend: "core:some-tool".into(),
             source_host: "upstream.example.test".into(),

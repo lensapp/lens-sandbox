@@ -1,9 +1,30 @@
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 
 use super::Libc;
+
+/// The flavor is a pure function of the layer set, so a warm run re-answers it from the digests instead of gunzipping every layer body again.
+pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
+    static MEMO: OnceLock<Mutex<HashMap<String, Libc>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = layer_digests.join(" ");
+    if let Some(hit) = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(*hit);
+    }
+    let verdict = detect_libc(layers)?;
+    memo.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, verdict);
+    Ok(verdict)
+}
 
 /// Decide the image's libc flavor from its layer tars so installed tool builds match the workload: the dynamic loader's file name is definitive, later layers override earlier ones (overlay semantics), and a static/distroless image with no loader defaults to gnu.
 pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
@@ -31,10 +52,9 @@ fn scan_layer(bytes: &[u8]) -> Result<Option<Libc>> {
         let path = entry.path().context("reading layer entry path")?;
         let name = path.to_string_lossy().trim_start_matches("./").to_string();
         if name.contains("ld-musl-") {
-            found = Some(Libc::Musl);
-        } else if found != Some(Libc::Musl)
-            && (name.contains("ld-linux-") || name.ends_with("libc.so.6"))
-        {
+            return Ok(Some(Libc::Musl));
+        }
+        if name.contains("ld-linux-") || name.ends_with("libc.so.6") {
             found = Some(Libc::Gnu);
         }
     }
@@ -78,6 +98,39 @@ mod tests {
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu);
         let empty: [Vec<u8>; 0] = [];
         assert_eq!(detect_libc(&empty).unwrap(), Libc::Gnu);
+    }
+
+    #[test]
+    fn a_second_run_on_the_same_layer_set_answers_from_the_digests_without_rescanning() {
+        let digests = vec!["sha256:aaaa".to_string(), "sha256:bbbb".to_string()];
+        let layers = vec![
+            layer_with(&["bin/sh"]),
+            layer_with(&["lib/ld-musl-x86_64.so.1"]),
+        ];
+        assert_eq!(detect_libc_for(&digests, &layers).unwrap(), Libc::Musl);
+        let corrupt = vec![b"\x1f\x8bnot really gzip".to_vec(), Vec::new()];
+        assert_eq!(
+            detect_libc_for(&digests, &corrupt).unwrap(),
+            Libc::Musl,
+            "bodies that would fail to scan are never opened on a hit"
+        );
+    }
+
+    #[test]
+    fn a_musl_layer_stops_scanning_at_the_loader() {
+        // Nothing later in the layer can change a musl verdict, so a big rootfs tar is not walked to the end.
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in ["lib/ld-musl-aarch64.so.1", "usr/lib/libc.so.6"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(1);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, &b"x"[..]).unwrap();
+        }
+        let mut layer = builder.into_inner().unwrap();
+        layer.extend_from_slice(b"trailing garbage that would fail a full walk");
+        assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Musl);
     }
 
     #[test]
