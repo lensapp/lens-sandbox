@@ -128,7 +128,11 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("MISE_PYTHON_COMPILE", "0"),
         ("MISE_NODE_COMPILE", "0"),
         ("MISE_YES", "1"),
-        ("MISE_DISABLE_BACKENDS", "asdf,vfox"),
+        // Every backend that is not download-only: the snapshot records the download backend a tool is gated and audited against, so mise must not silently pick a different one (oxlint via npm, tokei via cargo, imagemagick via conda).
+        (
+            "MISE_DISABLE_BACKENDS",
+            "asdf,vfox,npm,cargo,pipx,gem,go,dotnet,conda,spm",
+        ),
         ("CI", "1"),
         ("HOME", "/tmp/mise/home"),
         ("MISE_STATE_DIR", "/tmp/mise/state"),
@@ -268,7 +272,21 @@ mod tests {
         };
         assert_eq!(get("MISE_PYTHON_COMPILE"), "0");
         assert_eq!(get("MISE_NODE_COMPILE"), "0");
-        assert_eq!(get("MISE_DISABLE_BACKENDS"), "asdf,vfox");
+        let disabled = get("MISE_DISABLE_BACKENDS");
+        for backend in [
+            "asdf", "vfox", "npm", "cargo", "pipx", "gem", "go", "dotnet", "conda", "spm",
+        ] {
+            assert!(
+                disabled.split(',').any(|off| off == backend),
+                "{backend} can install a tool the snapshot gated against another backend: {disabled}"
+            );
+        }
+        for download_only in lns_artifact::tools::registry::SUPPORTED_BACKEND_KINDS {
+            assert!(
+                !disabled.split(',').any(|off| off == *download_only),
+                "{download_only} is how tools are meant to install"
+            );
+        }
         assert_eq!(get("CI"), "1");
         assert_eq!(get("HOME"), "/tmp/mise/home");
         assert_eq!(get("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt");

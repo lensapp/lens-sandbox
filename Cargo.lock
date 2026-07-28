@@ -543,6 +543,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "lns-artifact",
  "minisign-verify",
  "sha2 0.10.9",
  "tar",

@@ -30,8 +30,6 @@ ant	vfox:mise-plugins/vfox-ant
 antigravity-cli	aqua:google-antigravity/antigravity-cli
 apko	aqua:chainguard-dev/apko
 apm	github:microsoft/apm
-apollo-ios	github:apollographql/apollo-ios
-apollo-ios-cli	github:apollographql/apollo-ios
 apollo-router	github:apollographql/router
 apollo-rover	github:apollographql/rover
 aqua	github:aquaproj/aqua
@@ -121,7 +119,6 @@ cargo-insta	aqua:mitsuhiko/insta
 cargo-make	aqua:sagiegurari/cargo-make
 cargo-msrv	aqua:foresterre/cargo-msrv
 cargo-release	github:crate-ci/cargo-release
-carthage	vfox:mise-plugins/vfox-carthage
 ccache	github:ccache/ccache
 certstrap	github:square/certstrap
 cf	github:cloudfoundry/cli
@@ -164,7 +161,6 @@ cmake	aqua:Kitware/CMake
 cmctl	aqua:cert-manager/cmctl
 cmdx	aqua:suzuki-shunsuke/cmdx
 cockroach	aqua:cockroachdb/cockroach
-cocoapods	gem:cocoapods
 cocogitto	aqua:cocogitto/cocogitto
 code	aqua:just-every/code
 code-review-graph	pipx:code-review-graph
@@ -181,7 +177,6 @@ conan	pipx:conan
 conform	aqua:siderolabs/conform
 conftest	aqua:open-policy-agent/conftest
 consul	aqua:hashicorp/consul
-container	aqua:apple/container
 container-structure-test	aqua:GoogleContainerTools/container-structure-test
 container-use	aqua:dagger/container-use
 cookiecutter	pipx:cookiecutter
@@ -281,7 +276,6 @@ eza	aqua:eza-community/eza
 fastfetch	aqua:fastfetch-cli/fastfetch
 fd	aqua:sharkdp/fd
 ffmpeg	conda:ffmpeg
-figma-export	github:RedMadRobot/figma-export
 fillin	aqua:itchyny/fillin
 firebase	aqua:firebase/firebase-tools
 fission	aqua:fission/fission
@@ -372,7 +366,6 @@ groovy	vfox:jdx/vfox-groovy
 grpc-health-probe	aqua:grpc-ecosystem/grpc-health-probe
 grpcurl	aqua:fullstorydev/grpcurl
 grype	aqua:anchore/grype
-gsudo	github:gerardog/gsudo
 gum	aqua:charmbracelet/gum
 gup	aqua:nao1215/gup
 gwvault	aqua:GoodwayGroup/gwvault
@@ -420,7 +413,7 @@ hyperfine	aqua:sharkdp/hyperfine
 iam-policy-json-to-terraform	aqua:flosell/iam-policy-json-to-terraform
 iamlive	aqua:iann0036/iamlive
 ibmcloud	aqua:IBM-Cloud/ibm-cloud-cli-release
-imagemagick	aqua:ImageMagick/ImageMagick
+imagemagick	conda:imagemagick
 imgpkg	aqua:carvel-dev/imgpkg
 infisical	github:Infisical/cli
 infracost	aqua:infracost/infracost
@@ -523,7 +516,6 @@ ldc	github:ldc-developers/ldc
 lefthook	aqua:evilmartians/lefthook
 leiningen	vfox:mise-plugins/vfox-leiningen
 libsql-server	github:tursodatabase/libsql
-license-plist	aqua:mono0926/LicensePlist
 lima	aqua:lima-vm/lima
 linkerd	aqua:linkerd/linkerd2
 liquibase	github:liquibase/liquibase
@@ -553,7 +545,6 @@ mark	aqua:kovetskiy/mark
 markdownlint-cli2	npm:markdownlint-cli2
 marksman	aqua:artempyanykh/marksman
 marp-cli	aqua:marp-team/marp-cli
-mas	aqua:mas-cli/mas
 mask	aqua:jacobdeichert/mask
 maturin	github:PyO3/maturin
 maven	aqua:apache/maven
@@ -841,7 +832,6 @@ talosctl	aqua:siderolabs/talos
 tanka	aqua:grafana/tanka
 tanzu	github:vmware-tanzu/tanzu-cli
 taplo	aqua:tamasfe/taplo
-tart	aqua:cirruslabs/tart
 task	aqua:go-task/task
 tbls	aqua:k1LoW/tbls
 tctl	aqua:temporalio/tctl
@@ -962,11 +952,6 @@ wrangler	npm:wrangler
 wtfutil	aqua:wtfutil/wtf
 xc	aqua:joerdav/xc
 xcbeautify	aqua:cpisciotta/xcbeautify
-xchtmlreport	github:XCTestHTMLReport/XCTestHTMLReport
-xcodegen	aqua:yonaskolb/XcodeGen
-xcodes	aqua:XcodesOrg/xcodes
-xcresultparser	github:a7ex/xcresultparser
-xcsift	github:ldomaradzki/xcsift
 xh	aqua:ducaale/xh
 xxh	pipx:xxh-xxh
 yamlfmt	aqua:google/yamlfmt
