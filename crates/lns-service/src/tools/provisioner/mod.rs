@@ -154,12 +154,7 @@ pub(crate) fn parse_driver_output(
 
 /// The driver's output is guest-supplied and both fields become path components on the host cache and in the guest layer, so they are allowlisted before anything joins them.
 fn is_safe_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment != "."
-        && segment != ".."
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    lns_artifact::tools::is_safe_version(segment)
 }
 
 fn is_safe_bin_path(bin_path: &str) -> bool {
@@ -354,9 +349,10 @@ pub(crate) fn apk_runtime_specs(apk_bytes: &[u8]) -> Result<Vec<RuntimeFileSpec>
 pub(crate) fn ca_bundle_pem(apk_bytes: &[u8]) -> Result<Vec<u8>> {
     let specs = apk_runtime_specs(apk_bytes)?;
     for spec in specs {
-        if spec.guest_path == CA_BUNDLE
-            && let RuntimeSource::Bytes(bytes) = spec.source
-        {
+        if spec.guest_path != CA_BUNDLE {
+            continue;
+        }
+        if let RuntimeSource::Bytes(bytes) = spec.source {
             return Ok(bytes);
         }
     }
@@ -650,14 +646,40 @@ mod tests {
 
     #[test]
     fn the_ca_bundle_pem_is_extracted_from_its_canonical_member() {
-        let apk = build_apk(&[(
-            "etc/ssl/certs/ca-certificates.crt",
-            tar::EntryType::Regular,
-            "PEM",
-        )]);
-        assert_eq!(ca_bundle_pem(&apk).unwrap(), b"PEM");
+        let apk = build_apk(&[
+            (
+                "usr/share/ca-certificates/other.crt",
+                tar::EntryType::Regular,
+                "other",
+            ),
+            (
+                "etc/ssl/certs/ca-certificates.crt",
+                tar::EntryType::Regular,
+                "PEM",
+            ),
+        ]);
+        assert_eq!(
+            ca_bundle_pem(&apk).unwrap(),
+            b"PEM",
+            "the bundle is found past the apk's other members"
+        );
         let empty = build_apk(&[(".PKGINFO", tar::EntryType::Regular, "x")]);
         assert!(ca_bundle_pem(&empty).is_err());
+    }
+
+    #[test]
+    fn a_ca_path_that_is_only_a_symlink_carries_no_bundle() {
+        // Alpine ships symlinks in this tree; a link is not the PEM we inject.
+        let apk = build_apk(&[(
+            "etc/ssl/certs/ca-certificates.crt",
+            tar::EntryType::Symlink,
+            "../../../usr/share/ca-certificates/bundle.crt",
+        )]);
+        let err = ca_bundle_pem(&apk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("carries no /etc/ssl/certs/ca-certificates.crt"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
