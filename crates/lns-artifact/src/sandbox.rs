@@ -232,7 +232,7 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             );
         }
     }
-    crate::tools::parse_all(&doc.spec.tools)?;
+    crate::tools::registry::refuse_unprovisionable(&crate::tools::parse_all(&doc.spec.tools)?)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
         if !targets.insert(&fileset.mount_path) {
@@ -512,6 +512,27 @@ mod tests {
         assert!(
             msg.contains(r#""node@""#) && msg.contains(r#""name@version""#),
             "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_refuses_a_tool_no_build_can_provision() {
+        // The gate runs here so an author is refused at validate and push, not by a consumer's failed launch.
+        let unknown = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{unknown:#}").contains("not a tool lns can provision"),
+            "got: {unknown:#}"
+        );
+        let plugin_backed = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","tools":["prettier@3"]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{plugin_backed:#}").contains("bring it via spec.image"),
+            "got: {plugin_backed:#}"
         );
     }
 
