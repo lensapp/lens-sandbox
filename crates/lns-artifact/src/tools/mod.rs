@@ -140,14 +140,15 @@ pub fn resolve_from_index(name: &str, version: &str, index_body: &str) -> Result
             "tool {name:?} is unknown to the version index; check the name against mise's registry"
         );
     }
+    // The stable filter exists so a letter-free request never lands on a prerelease line. A request that already carries a token (`temurin-21`) is asking for exactly those lines, so applying it there matches nothing at all.
+    let skip_prereleases = version == LATEST || !version.chars().any(|c| c.is_ascii_alphabetic());
     let resolved = if version == LATEST {
         lines.iter().copied().rfind(|line| stable(line))
     } else {
         let prefix = format!("{version}.");
-        lines
-            .iter()
-            .copied()
-            .rfind(|line| *line == version || (line.starts_with(&prefix) && stable(line)))
+        lines.iter().copied().rfind(|line| {
+            *line == version || (line.starts_with(&prefix) && (!skip_prereleases || stable(line)))
+        })
     };
     match resolved {
         Some(exact) if is_safe_version(exact) => Ok(exact.to_string()),
@@ -268,7 +269,8 @@ mod tests {
             "node@22",
             "python@3.12.6",
             "go@1.22.0-rc1",
-            "java@temurin_21",
+            // The spelling upstream actually publishes; an underscore matches nothing in the index.
+            "java@temurin-21",
         ] {
             parse(entry).unwrap_or_else(|e| panic!("entry {entry:?}: {e:#}"));
         }
@@ -341,6 +343,22 @@ mod tests {
             resolve_from_index("node", "22.11.0", body).unwrap(),
             "22.11.0"
         );
+    }
+
+    #[test]
+    fn a_vendor_prefixed_request_resolves_against_the_lines_that_carry_that_vendor() {
+        // mise ships java as `temurin-21.0.5+11.0.LTS`; treating every letter as a prerelease left such a request publishable-never, while the offline gate accepted it.
+        let body = "21.0.2\ntemurin-21.0.4+7\ntemurin-21.0.5+11.0.LTS\ntemurin-26.0.1+8\n";
+        assert_eq!(
+            resolve_from_index("java", "temurin-21", body).unwrap(),
+            "temurin-21.0.5+11.0.LTS"
+        );
+        assert_eq!(
+            resolve_from_index("java", LATEST, body).unwrap(),
+            "21.0.2",
+            "a letter-free request still refuses vendor and prerelease lines"
+        );
+        assert_eq!(resolve_from_index("java", "21", body).unwrap(), "21.0.2");
     }
 
     #[test]
