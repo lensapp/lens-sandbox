@@ -56,6 +56,16 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     When the sandbox is launched
     Then the boundary injection for "some-provider" is armed with the stored value
 
+  Scenario: A committed overlay this workload never granted does not arm the machine-stored value
+    Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the sandbox definition declares connector "some-provider"
+    And the directory's lns-policy.yaml connects "some-provider"
+    And the per-machine credential store has a stored value for "some-provider"
+    And this workload has no grant for "some-provider"
+    When the sandbox is launched
+    Then the workload's environment contains the "SOME_TOKEN" placeholder
+    And the boundary injection for "some-provider" stays unarmed
+
   Scenario: A declared connector's machine-stored value stays unarmed until connected
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider" and allows the "api.some-provider.example" route

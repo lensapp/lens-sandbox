@@ -11,13 +11,14 @@ use tokio::sync::mpsc;
 use crate::approval_flow::notification::WindowNotifier;
 use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::protocol::PolicyMessage;
-use crate::approval_flow::session::ApprovalSession;
+use crate::approval_flow::session::{ApprovalSession, Notifier};
 use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::connectors::{
-    applied_connector_routes, resolve_applied_with_slots, resolve_connectable_with_slots,
+    applied_connector_routes, boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_slots,
+    resolve_connectable_with_slots,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -29,6 +30,10 @@ use crate::credential_flow::store::{
 use crate::credential_flow::watcher::CredentialWatcher;
 use crate::log;
 use crate::relay;
+use lns_policy::grants::{
+    GrantStore, JsonFileGrantStore, WorkloadGrantFile, WorkloadIdentity,
+    default_workload_grants_path, project_key,
+};
 use lns_policy::{FilePolicyStore, Policy, RouteRule};
 
 use super::real::RealFs;
@@ -151,20 +156,21 @@ async fn credential_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        // A pasted token is an Allow(Stored) — it arms the slot directly via record_decision; only the browser-consent Allow drives the device sign-in.
-        let pasted_token = matches!(
+        // A pasted token is an Allow(Stored) and a grant of the token already bound is an AllowBound — both arm the slot directly via record_decision; only the browser-consent Allow drives a fresh device sign-in.
+        let needs_no_sign_in = matches!(
             delivery.request,
             crate::credential_flow::session::CredentialDecisionRequest::Allow(
                 crate::credential_flow::store::CredentialEntry::Stored { .. }
-            )
+            ) | crate::credential_flow::session::CredentialDecisionRequest::AllowBound
         );
         // Accepting an oauth prompt via the browser consent drives a device sign-in (async) instead of arming a static value.
         if session.is_oauth_prompt(&delivery.id)
             && matches!(
                 delivery.request,
                 crate::credential_flow::session::CredentialDecisionRequest::Allow(_)
+                    | crate::credential_flow::session::CredentialDecisionRequest::AllowBound
             )
-            && !pasted_token
+            && !needs_no_sign_in
         {
             session.connect_oauth(&delivery.id).await;
         } else {
@@ -223,6 +229,92 @@ fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> Credent
     }
 }
 
+/// Defaults to an empty grant set and warns on load error, so a malformed `~/.lns-workload-grants.json` fails safe: every connector re-offers at first use rather than silently arming.
+fn load_grants_or_warn(store: &dyn GrantStore, path: &Path) -> WorkloadGrantFile {
+    match store.load() {
+        Ok(grants) => grants,
+        Err(e) => {
+            let path_str = path.display();
+            log::warn!("could not load {path_str} ({e}); no connector grants apply this run");
+            WorkloadGrantFile::default()
+        }
+    }
+}
+
+/// The sign-ins one launch's boot gate collected, against the identity they are recorded for and the forget counts the gate read before it opened.
+struct BootSignIns<'a> {
+    signed_in: &'a [String],
+    providers: &'a [DefProvider],
+    project: &'a str,
+    workload: &'a WorkloadIdentity,
+    at_gate: &'a HashMap<String, u64>,
+}
+
+/// Records the boot-gate sign-ins the user completed this launch as allow grants — into the run's snapshot so the gate below arms them, and into the sidecar so the next run skips the sign-in; a failed persist, or a disconnect that landed while the developer was signing in, still arms this run and tells them, who otherwise repeats a browser device flow every launch with nothing explaining why.
+fn record_boot_sign_in_grants(
+    gate: BootSignIns<'_>,
+    grants: &mut WorkloadGrantFile,
+    store: &dyn GrantStore,
+    inform: &dyn Fn(String),
+) {
+    let BootSignIns {
+        signed_in,
+        providers,
+        project,
+        workload,
+        at_gate,
+    } = gate;
+    let records = boot_sign_in_grants(signed_in, providers, project, workload);
+    if records.is_empty() {
+        return;
+    }
+    for r in &records {
+        grants.upsert(r.clone());
+    }
+    let mut forgotten_since = Vec::new();
+    let outcome = store.update(&mut |file| {
+        forgotten_since.clear();
+        let mut changed = false;
+        for r in &records {
+            let seen = at_gate.get(&r.connector).copied().unwrap_or(0);
+            if file.revocations_of(&r.project, &r.connector) == seen {
+                file.upsert(r.clone());
+                changed = true;
+            } else {
+                forgotten_since.push(r.connector.clone());
+            }
+        }
+        changed
+    });
+    for connector in &forgotten_since {
+        let msg = format!(
+            "{connector} was disconnected while you were signing in, so this sign-in was not remembered; the next run will ask again"
+        );
+        log::warn!("{msg}");
+        inform(msg);
+    }
+    if let Err(e) = outcome {
+        let msg = format!(
+            "signed in for this run but the grant was not persisted; the next run will ask you to sign in again: {e}"
+        );
+        log::warn!("{msg}");
+        inform(msg);
+    }
+}
+
+/// Each connector's forget count as it stands before a run's boot sign-in gate opens, so a `lns connector disconnect` landing during a browser device flow — minutes, not milliseconds — still wins over the grant that sign-in would earn.
+pub(crate) fn revocations_before_gate(policy_path: &Path) -> HashMap<String, u64> {
+    let project = project_key(policy_path);
+    JsonFileGrantStore::new(default_workload_grants_path())
+        .load()
+        .unwrap_or_default()
+        .revocations
+        .iter()
+        .filter(|r| r.project == project)
+        .map(|r| (r.connector.clone(), r.count))
+        .collect()
+}
+
 /// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-connectors.yaml` doesn't break a run — the bundled catalog still applies.
 fn load_user_catalog_or_warn(path: &Path) -> lns_policy::connectors::Catalog {
     match lns_policy::connectors::Catalog::load_or_default(path) {
@@ -258,14 +350,22 @@ fn make_credentials_provider(
     })
 }
 
-/// `Weak` so the reconciler doesn't keep the credential session alive past the run; a dropped session is a no-op.
+/// `Weak` so the reconciler doesn't keep the credential session alive past the run; a dropped session is a no-op. Each reload re-reads the sidecar before re-gating the reconnected connectors, so a policy edit can't re-arm a connector this workload never granted — nor one whose grant a `lns connector disconnect` forgot earlier in the same run.
 fn make_armed_reconciler(
     credential_session: &Arc<CredentialSession>,
+    project: String,
+    workload: WorkloadIdentity,
+    grant_store: Arc<dyn GrantStore>,
+    providers: Arc<Vec<DefProvider>>,
 ) -> crate::approval_flow::session::ArmedReconciler {
     let weak = Arc::downgrade(credential_session);
     Box::new(move |connectors| {
         if let Some(cs) = weak.upgrade() {
-            cs.reconcile_armed(connectors);
+            let reloaded: HashSet<String> = connectors.iter().cloned().collect();
+            // An unreadable sidecar arms nothing rather than falling back to a snapshot a revoke may since have invalidated.
+            let grants = grant_store.load().unwrap_or_default();
+            let granted = gate_armed_by_grant(&reloaded, &providers, &project, &workload, &grants);
+            cs.reconcile_armed(&granted.into_iter().collect::<Vec<_>>(), connectors);
         }
     })
 }
@@ -383,11 +483,14 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The run's consent boundary at boot: which ids may arm a resolved value (`armed`), which of those survive a policy reload (`reload_grants` — the credential slots), and which are offered for a live connect (`connectable_ids`).
+/// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), and the grant identity (`project`/`workload`) plus sidecar (`grant_store`) that a live consent persists to and a reload re-gates a reconnected connector against.
 struct CredentialConsent {
     armed: HashSet<String>,
-    reload_grants: HashSet<String>,
+    slot_ids: HashSet<String>,
     connectable_ids: HashSet<String>,
+    project: String,
+    workload: WorkloadIdentity,
+    grant_store: Arc<dyn GrantStore>,
 }
 
 /// The per-connector oauth wiring a run hands to its credential subsystem: device-flow configs, display names, and token fallbacks, all keyed by connector id.
@@ -435,6 +538,7 @@ async fn start_credential_subsystem(
         custom_providers.clone(),
     );
     let connect_emitter = make_connect_emitter(session.clone(), connectable_routes);
+    let reconciler_providers = custom_providers.clone();
     let credential_session = Arc::new(
         CredentialSession::with_policy_emitter(
             initial_credential_state,
@@ -446,7 +550,12 @@ async fn start_credential_subsystem(
         )
         .with_custom_providers(custom_providers)
         .with_armed_ids(consent.armed)
-        .with_reload_grants(consent.reload_grants)
+        .with_slot_ids(consent.slot_ids)
+        .with_grants(
+            consent.project.clone(),
+            consent.workload.clone(),
+            consent.grant_store.clone(),
+        )
         .with_bundled_ids(
             lns_policy::connectors::bundled_connectors()
                 .iter()
@@ -482,8 +591,14 @@ async fn start_credential_subsystem(
 
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
-    // A policy reload revokes a disconnected connector's arming; slot grants survive because they don't derive from the policy file.
-    session.set_armed_reconciler(make_armed_reconciler(&credential_session));
+    // A policy reload re-gates the reconnected connectors through the grant snapshot, so a disconnected — or never-granted — connector's arming is revoked; granted slots survive because they don't derive from the policy file.
+    session.set_armed_reconciler(make_armed_reconciler(
+        &credential_session,
+        consent.project,
+        consent.workload,
+        consent.grant_store,
+        reconciler_providers,
+    ));
 
     let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
         .context("watching credentials file")?;
@@ -506,10 +621,12 @@ pub(super) async fn start(
     microvm_name: String,
     policy_path: &Path,
     sandbox_policy: Option<&Policy>,
-    sandbox_credentials: &[lns_artifact::spec::CredentialSlot],
+    consent: super::RunConsent<'_>,
     guest_tools_root: PathBuf,
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
+    let sandbox_credentials = consent.credentials;
+    let workload = consent.workload;
     let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
@@ -532,15 +649,6 @@ pub(super) async fn start(
     let run =
         crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
     let connectable_ids = run.connectable_ids;
-    let armed_ids = run.armed;
-    // Slot grants survive a policy reload; overlay-connected ids are re-derived from the reloaded file.
-    let reload_grants: HashSet<String> = sandbox_credentials
-        .iter()
-        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
-        .map(|slot| slot.name.clone())
-        .collect();
-    let custom_providers = Arc::new(run.providers);
-    let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
     let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
@@ -550,6 +658,34 @@ pub(super) async fn start(
         window::ctx(),
     ));
     log::info!("Approvals", "window ready");
+
+    // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
+    let grants_path = default_workload_grants_path();
+    let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
+    let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
+    let project = project_key(policy_path);
+    record_boot_sign_in_grants(
+        BootSignIns {
+            signed_in: &consent.signed_in,
+            providers: &run.providers,
+            project: &project,
+            workload: &workload,
+            at_gate: &consent.revocations_at_gate,
+        },
+        &mut grants,
+        grant_store.as_ref(),
+        &|msg| notifier.inform(&msg),
+    );
+    let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
+    // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
+    let slot_ids: HashSet<String> = sandbox_credentials
+        .iter()
+        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
+        .map(|slot| slot.name.clone())
+        .collect();
+    let custom_providers = Arc::new(run.providers);
+    let managed_env_vars = collect_managed_env_vars(&custom_providers);
+
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
     let credential_frame_tx = frame_tx.clone();
@@ -597,8 +733,11 @@ pub(super) async fn start(
         custom_providers,
         CredentialConsent {
             armed: armed_ids,
-            reload_grants,
+            slot_ids,
             connectable_ids,
+            project,
+            workload,
+            grant_store,
         },
         connectable_routes,
         OauthWiring {
@@ -658,6 +797,7 @@ pub(super) async fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::grants::GrantRecord;
     use std::io;
 
     fn fixture_session() -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
@@ -965,7 +1105,7 @@ mod tests {
     fn fixture_credential_session_armed(
         custom: Arc<Vec<DefProvider>>,
         armed: HashSet<String>,
-        reload_grants: HashSet<String>,
+        slot_ids: HashSet<String>,
     ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         let (store, _dir) = tempfile_credential_store();
@@ -982,7 +1122,7 @@ mod tests {
             )
             .with_custom_providers(custom)
             .with_armed_ids(armed)
-            .with_reload_grants(reload_grants),
+            .with_slot_ids(slot_ids),
         );
         (session, frame_rx)
     }
@@ -1024,6 +1164,278 @@ mod tests {
         assert!(
             state.is_empty(),
             "malformed credentials file must surface as empty in-memory state, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn load_grants_or_warn_returns_stored_grants_on_ok() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        let store = JsonFileGrantStore::new(path.clone());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut file = WorkloadGrantFile::default();
+        file.upsert(GrantRecord::allow(
+            "proj",
+            &workload,
+            "acme",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+        store.save(&file).expect("save grants");
+        let loaded = load_grants_or_warn(&store, &path);
+        assert!(
+            loaded.lookup("proj", &workload, "acme").is_some(),
+            "a readable sidecar's grants must load"
+        );
+    }
+
+    #[test]
+    fn load_grants_or_warn_defaults_to_empty_and_warns_on_store_error() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+        let store = JsonFileGrantStore::new(path.clone());
+        let grants = load_grants_or_warn(&store, &path);
+        assert!(
+            grants.grants.is_empty(),
+            "a malformed grant sidecar must fail safe to no grants so nothing arms without consent, got {:?}",
+            grants.grants
+        );
+    }
+
+    /// One inform sink for every boot-sign-in test, so what the user is told is asserted the same way whether the persist succeeded or failed.
+    fn boot_sign_in_informs(
+        signed_in: &[String],
+        providers: &[DefProvider],
+        grants: &mut WorkloadGrantFile,
+        store: &dyn GrantStore,
+    ) -> Vec<String> {
+        boot_sign_in_informs_since(signed_in, providers, grants, store, &HashMap::new())
+    }
+
+    fn boot_sign_in_informs_since(
+        signed_in: &[String],
+        providers: &[DefProvider],
+        grants: &mut WorkloadGrantFile,
+        store: &dyn GrantStore,
+        at_gate: &HashMap<String, u64>,
+    ) -> Vec<String> {
+        let informed = std::sync::Mutex::new(Vec::<String>::new());
+        record_boot_sign_in_grants(
+            BootSignIns {
+                signed_in,
+                providers,
+                project: "proj",
+                workload: &acme_workload(),
+                at_gate,
+            },
+            grants,
+            store,
+            &|msg| informed.lock().expect("inform sink poisoned").push(msg),
+        );
+        informed.into_inner().expect("inform sink poisoned")
+    }
+
+    fn seeded_sidecar(dir: &std::path::Path, policy_path: &Path) -> JsonFileGrantStore {
+        std::fs::write(policy_path, "network: {}\n").expect("policy");
+        let store = JsonFileGrantStore::new(dir.join("grants.json"));
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector(&project_key(policy_path), "acme");
+                file.revoke_project_connector(&project_key(policy_path), "acme");
+                file.revoke_project_connector("/some/other/project", "acme");
+                true
+            })
+            .expect("seed the sidecar");
+        store
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn revocations_before_gate_reads_only_this_projects_counts() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let policy_path = dir.path().join("lns-policy.yaml");
+        seeded_sidecar(dir.path(), &policy_path);
+        let _g = crate::test_env::EnvVarGuard::set(
+            "LNS_WORKLOAD_GRANTS_PATH",
+            dir.path().join("grants.json"),
+        );
+
+        let counts = revocations_before_gate(&policy_path);
+
+        assert_eq!(
+            counts,
+            HashMap::from([("acme".to_string(), 2)]),
+            "the baseline is compared against this project's count at persist time, so folding in another project's forgets would drop grants this project never revoked"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn revocations_before_gate_reads_nothing_from_an_unreadable_sidecar() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sidecar = dir.path().join("grants.json");
+        std::fs::write(&sidecar, "{ not json").expect("corrupt sidecar");
+        let _g = crate::test_env::EnvVarGuard::set("LNS_WORKLOAD_GRANTS_PATH", &sidecar);
+
+        assert!(
+            revocations_before_gate(&dir.path().join("lns-policy.yaml")).is_empty(),
+            "a corrupt sidecar must not stop a launch here; the write that follows surfaces the same corruption with something the developer can act on"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_during_the_sign_in_drops_the_grant_it_would_have_earned() {
+        init_tracing_capture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+        // `lns connector disconnect acme` while the developer was still in the browser: the gate read 0 forgets, the sidecar now records 1.
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "acme");
+                true
+            })
+            .expect("forget the grants mid-sign-in");
+
+        let informed = boot_sign_in_informs_since(
+            &["acme".to_string()],
+            &providers,
+            &mut grants,
+            &store,
+            &HashMap::new(),
+        );
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "acme")
+                .is_none(),
+            "a device flow can hold the gate for minutes, and the disconnect that landed inside that window must not be undone by the sign-in completing"
+        );
+        assert!(
+            informed.iter().any(|m| m.contains("not remembered")),
+            "the developer who just walked a browser flow must be told it will not stick, got: {informed:?}"
+        );
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the sign-in still happened, so the run in front of the developer keeps what they signed in for"
+        );
+    }
+
+    #[test]
+    fn a_forget_from_before_the_sign_in_gate_does_not_drop_the_grant() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let mut grants = WorkloadGrantFile::default();
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "acme");
+                true
+            })
+            .expect("an older revoke");
+        let at_gate = HashMap::from([("acme".to_string(), 1)]);
+
+        let informed = boot_sign_in_informs_since(
+            &["acme".to_string()],
+            &acme_custom(),
+            &mut grants,
+            &store,
+            &at_gate,
+        );
+
+        assert!(
+            informed.is_empty(),
+            "the gate already saw this forget, so the sign-in that followed it answers it; got: {informed:?}"
+        );
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &acme_workload(), "acme")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn record_boot_sign_in_grants_arms_this_run_and_persists_to_the_sidecar() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+
+        let informed = boot_sign_in_informs(&["acme".to_string()], &providers, &mut grants, &store);
+
+        assert!(
+            informed.is_empty(),
+            "a grant that persisted has nothing to tell the user, got: {informed:?}"
+        );
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the just-recorded grant must arm through the same gate that admits the next run"
+        );
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "acme")
+                .is_some(),
+            "the grant persists so the next run skips the sign-in"
+        );
+    }
+
+    #[test]
+    fn record_boot_sign_in_grants_without_sign_ins_touches_nothing() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = JsonFileGrantStore::new(dir.path().join("grants.json"));
+        let mut grants = WorkloadGrantFile::default();
+        let informed = boot_sign_in_informs(&[], &acme_custom(), &mut grants, &store);
+        assert!(
+            informed.is_empty(),
+            "nothing was attempted, so there is nothing to tell the user, got: {informed:?}"
+        );
+        assert!(grants.grants.is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no sign-ins means the sidecar (and its lockfile) are never touched"
+        );
+    }
+
+    #[test]
+    fn a_boot_sign_in_grant_that_cannot_persist_still_arms_this_run_and_tells_the_user() {
+        init_tracing_capture();
+        let providers = acme_custom();
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+
+        let informed = boot_sign_in_informs(
+            &["acme".to_string()],
+            &providers,
+            &mut grants,
+            &MemoryGrantStore::unwritable(),
+        );
+
+        let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
+        assert_eq!(
+            gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants),
+            applied,
+            "the sign-in the user just completed must arm this run even when the sidecar can't be written"
+        );
+        assert!(
+            informed.iter().any(|m| m.contains("sign in again")),
+            "the user who just walked a browser device flow must be told it will not stick, not only the service log; got: {informed:?}"
         );
     }
 
@@ -1125,6 +1537,69 @@ mod tests {
         assert!(provider().is_empty());
     }
 
+    fn acme_workload() -> WorkloadIdentity {
+        WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        }
+    }
+
+    fn acme_grants(workload: &WorkloadIdentity) -> WorkloadGrantFile {
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            workload,
+            "acme",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+        grants
+    }
+
+    #[derive(Default)]
+    struct MemoryGrantStore {
+        file: std::sync::Mutex<WorkloadGrantFile>,
+        unreadable: bool,
+        unwritable: bool,
+    }
+
+    impl MemoryGrantStore {
+        fn unreadable() -> Self {
+            Self {
+                unreadable: true,
+                ..Self::default()
+            }
+        }
+
+        fn unwritable() -> Self {
+            Self {
+                unwritable: true,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl GrantStore for MemoryGrantStore {
+        fn load(&self) -> std::io::Result<WorkloadGrantFile> {
+            if self.unreadable {
+                return Err(std::io::Error::other("sidecar unreadable"));
+            }
+            Ok(self.file.lock().expect("grant fake poisoned").clone())
+        }
+        fn save(&self, state: &WorkloadGrantFile) -> std::io::Result<()> {
+            if self.unwritable {
+                return Err(std::io::Error::other("sidecar unwritable"));
+            }
+            *self.file.lock().expect("grant fake poisoned") = state.clone();
+            Ok(())
+        }
+    }
+
+    fn grant_store_holding(file: WorkloadGrantFile) -> Arc<MemoryGrantStore> {
+        let store = Arc::new(MemoryGrantStore::default());
+        store.save(&file).expect("seed the fake");
+        store
+    }
+
     #[test]
     fn make_armed_reconciler_reconciles_a_live_session_preserving_slot_grants() {
         let (session, _frame_rx) = fixture_credential_session_armed(
@@ -1132,12 +1607,19 @@ mod tests {
             HashSet::from(["acme".to_string(), "some-slot".to_string()]),
             HashSet::from(["some-slot".to_string()]),
         );
-        let reconcile = make_armed_reconciler(&session);
+        let workload = acme_workload();
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            workload.clone(),
+            grant_store_holding(acme_grants(&workload)),
+            acme_custom(),
+        );
         reconcile(&["acme".to_string()]);
         assert_eq!(
             session.armed_ids(),
             HashSet::from(["acme".to_string(), "some-slot".to_string()]),
-            "the reloaded connector and the independent slot grant both hold"
+            "a reloaded connector with a matching grant arms, and the independent slot grant holds"
         );
         reconcile(&[]);
         assert_eq!(
@@ -1148,9 +1630,102 @@ mod tests {
     }
 
     #[test]
+    fn make_armed_reconciler_does_not_arm_an_unconsented_reloaded_connector() {
+        let (session, _frame_rx) =
+            fixture_credential_session_armed(acme_custom(), HashSet::new(), HashSet::new());
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            grant_store_holding(WorkloadGrantFile::default()),
+            acme_custom(),
+        );
+        reconcile(&["acme".to_string()]);
+        assert!(
+            session.armed_ids().is_empty(),
+            "a reload must not arm a connector this workload never consented to, even when the reloaded policy lists it"
+        );
+    }
+
+    #[test]
+    fn make_armed_reconciler_does_not_re_arm_from_a_grant_revoked_since_boot() {
+        let (session, _frame_rx) =
+            fixture_credential_session_armed(acme_custom(), HashSet::new(), HashSet::new());
+        let workload = acme_workload();
+        let store = grant_store_holding(acme_grants(&workload));
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            workload,
+            store.clone(),
+            acme_custom(),
+        );
+        // `lns connector disconnect acme` forgets the grants and drops the id; the reload its write triggers disarms it.
+        store
+            .save(&WorkloadGrantFile::default())
+            .expect("forget the grants");
+        reconcile(&[]);
+
+        // Reconnecting acme in the same run must meet a fresh first-use card, not the grant the disconnect just forgot.
+        reconcile(&["acme".to_string()]);
+
+        assert!(
+            session.armed_ids().is_empty(),
+            "a reconnect must read the sidecar as it stands now, not the snapshot taken at boot, or disconnect's grant clearing is silently undone"
+        );
+    }
+
+    #[test]
+    fn make_armed_reconciler_arms_nothing_when_the_sidecar_cannot_be_read() {
+        let (session, _frame_rx) =
+            fixture_credential_session_armed(acme_custom(), HashSet::new(), HashSet::new());
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            Arc::new(MemoryGrantStore::unreadable()),
+            acme_custom(),
+        );
+        reconcile(&["acme".to_string()]);
+        assert!(
+            session.armed_ids().is_empty(),
+            "an unreadable sidecar must fail closed, arming nothing, rather than fall back to a snapshot that might be stale"
+        );
+    }
+
+    #[test]
+    fn make_armed_reconciler_preserves_an_in_session_connect_across_the_reload_its_write_triggers()
+    {
+        let (session, _frame_rx) = fixture_credential_session_armed(
+            acme_custom(),
+            HashSet::from(["acme".to_string()]),
+            HashSet::new(),
+        );
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            grant_store_holding(WorkloadGrantFile::default()),
+            acme_custom(),
+        );
+        // A live connect persists "acme" into the policy, which the watcher reloads; the arming just granted must not self-revoke even though no grant is recorded to disk yet.
+        reconcile(&["acme".to_string()]);
+        assert!(
+            session.armed_ids().contains("acme"),
+            "a live connect's arming must survive the watcher reload its own policy-write triggers"
+        );
+    }
+
+    #[test]
     fn make_armed_reconciler_is_a_noop_when_session_dropped() {
         let (session, _frame_rx) = fixture_credential_session();
-        let reconcile = make_armed_reconciler(&session);
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            acme_workload(),
+            grant_store_holding(WorkloadGrantFile::default()),
+            acme_custom(),
+        );
         drop(session);
         reconcile(&["acme".to_string()]);
     }
@@ -1164,8 +1739,15 @@ mod tests {
             HashSet::from(["some-slot".to_string()]),
         );
         let (session, _srx) = fixture_session();
+        let workload = acme_workload();
         // The same bridge start() installs, so this pins the wiring a disconnect-during-init relies on.
-        session.set_armed_reconciler(make_armed_reconciler(&cred));
+        session.set_armed_reconciler(make_armed_reconciler(
+            &cred,
+            "proj".into(),
+            workload.clone(),
+            grant_store_holding(acme_grants(&workload)),
+            acme_custom(),
+        ));
         // A reload whose policy no longer lists "acme" (a disconnect) must revoke its arming.
         session.apply_external_policy(Policy::default());
         assert_eq!(
@@ -1719,11 +2301,122 @@ mod tests {
         assert!(allowed, "the held request is released on the token paste");
     }
 
+    fn bound_oauth_entry() -> crate::credential_flow::store::CredentialEntry {
+        crate::credential_flow::store::CredentialEntry::Oauth {
+            access_token: "already-signed-in".into(),
+            refresh_token: "some-refresh".into(),
+            expires_at: u64::MAX,
+            scopes: vec![],
+            account: None,
+        }
+    }
+
+    /// An oauth session with a token already bound on this machine and a card held for it, so the two ways of accepting that card — granting the binding or signing in again — can be told apart by what the token becomes.
+    fn oauth_session_with_bound_token(
+        bound: &crate::credential_flow::store::CredentialEntry,
+    ) -> Arc<CredentialSession> {
+        use crate::approval_flow::protocol::CredentialPending;
+        use std::collections::HashMap;
+        let (store, dir) = tempfile_credential_store();
+        Box::leak(Box::new(dir));
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        Box::leak(Box::new(frame_rx));
+        let configs = HashMap::from([(
+            "acme".to_string(),
+            crate::oauth::OauthConfig {
+                userinfo_endpoint: None,
+                account_field: None,
+                client_id: "Iv1.acme".into(),
+                client_secret: String::new(),
+                scopes: vec![],
+                device_authorization_endpoint: "https://example.com/device/code".into(),
+                token_endpoint: "https://example.com/oauth/token".into(),
+            },
+        )]);
+        let mut state = CredentialStateFile::new();
+        state.insert("acme".to_string(), bound.clone());
+        let session = Arc::new(
+            CredentialSession::new(
+                state,
+                Arc::new(crate::credential_flow::notification::NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_oauth(configs, Arc::new(LoopFakeFlow), Arc::new(LoopClock)),
+        );
+        session.submit_pending(
+            CredentialPending {
+                id: "c1".into(),
+                credential_id: "acme".into(),
+                action: "use of acme placeholder".into(),
+                reason: "placeholder-unauthorized".into(),
+            },
+            std::time::Instant::now(),
+        );
+        session
+    }
+
+    async fn deliver_to(
+        session: &Arc<CredentialSession>,
+        request: crate::credential_flow::session::CredentialDecisionRequest,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel::<CredentialDecisionDelivery>();
+        tx.send(CredentialDecisionDelivery {
+            id: "c1".into(),
+            request,
+        })
+        .expect("the loop's receiver is alive");
+        drop(tx);
+        credential_delivery_loop(Arc::downgrade(session), rx).await;
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_grants_an_existing_oauth_token_without_signing_in_again() {
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        let bound = bound_oauth_entry();
+        let session = oauth_session_with_bound_token(&bound);
+
+        deliver_to(&session, CredentialDecisionRequest::AllowBound).await;
+
+        assert_eq!(
+            session.current_state().get("acme"),
+            Some(&bound),
+            "granting the existing sign-in must route to record_decision, not connect_oauth — a fresh device flow would replace a token that already works"
+        );
+        assert!(
+            session.armed_ids().contains("acme"),
+            "the grant arms the token already bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_delivery_loop_signs_in_again_when_the_card_asks_to_reconnect() {
+        use crate::credential_flow::session::CredentialDecisionRequest;
+        use crate::credential_flow::store::CredentialEntry;
+        let bound = bound_oauth_entry();
+        let session = oauth_session_with_bound_token(&bound);
+
+        deliver_to(
+            &session,
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                session.current_state().get("acme"),
+                Some(CredentialEntry::Oauth { access_token, .. }) if access_token == "some-access"
+            ),
+            "the reconnect choice must drive a fresh device sign-in even though a token is already bound — a wrong-account or server-revoked connection is only escapable by signing in again; got {:?}",
+            session.current_state().get("acme")
+        );
+    }
+
     #[tokio::test]
     async fn credential_delivery_loop_denying_an_oauth_prompt_fails_it_closed_without_a_sign_in() {
         use crate::approval_flow::protocol::{CredentialDecisionKind, CredentialPending};
         use crate::credential_flow::session::CredentialDecisionRequest;
-        use crate::credential_flow::store::CredentialEntry;
         use std::collections::HashMap;
         let (store, _dir) = tempfile_credential_store();
         Box::leak(Box::new(_dir));
@@ -1767,11 +2460,6 @@ mod tests {
         .unwrap();
         drop(tx);
         credential_delivery_loop(Arc::downgrade(&session), rx).await;
-        assert_eq!(
-            session.current_state().get("acme"),
-            Some(&CredentialEntry::Deny),
-            "denying an oauth prompt persists a deny rather than driving a device sign-in"
-        );
         let mut denied = false;
         while let Ok(frame) = frame_rx.try_recv() {
             if let HostFrame::CredentialDecision(d) = frame {

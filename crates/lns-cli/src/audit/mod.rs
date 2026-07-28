@@ -1,4 +1,3 @@
-mod table;
 mod timeline;
 
 use clap::FromArgMatches;
@@ -15,8 +14,33 @@ pub struct AuditArgs {
     pub connector: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
-    #[arg(long, help = "Emit one raw JSON event per line instead of the table.")]
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with = "json",
+        help = "Output format. jsonl emits one raw JSON event per line; its shape may change before v1.0."
+    )]
+    pub format: Option<AuditFormat>,
+    #[arg(long, hide = true)]
     pub json: bool,
+}
+
+/// An audit timeline is an event stream, so its machine-readable form is JSONL rather than a document.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum AuditFormat {
+    Table,
+    Jsonl,
+}
+
+impl AuditArgs {
+    pub(super) fn format(&self) -> AuditFormat {
+        self.format.unwrap_or(if self.json {
+            AuditFormat::Jsonl
+        } else {
+            AuditFormat::Table
+        })
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -301,6 +325,55 @@ mod tests {
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.trim(), "No audit events for sandbox nope.");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_jsonl_format_emits_exactly_what_the_deprecated_json_flag_emitted() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_ledger(home.path());
+        let _env = home_env(home.path());
+        let mut legacy = Vec::new();
+        dispatch_argv(&["lns", "audit", "--json"], &mut legacy)
+            .await
+            .unwrap();
+        let mut current = Vec::new();
+        dispatch_argv(&["lns", "audit", "--format", "jsonl"], &mut current)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(current).unwrap(),
+            String::from_utf8(legacy).unwrap(),
+            "the alias must not change a single byte for existing scripts"
+        );
+    }
+
+    #[test]
+    fn asking_for_both_the_alias_and_a_conflicting_format_is_rejected() {
+        let err = crate::command::build_cli()
+            .try_get_matches_from(["lns", "audit", "--json", "--format", "table"])
+            .expect_err("--json means jsonl, so --format table contradicts it");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn the_deprecated_json_flag_still_parses_but_is_hidden_from_help() {
+        crate::command::build_cli()
+            .try_get_matches_from(["lns", "audit", "--json"])
+            .expect("existing scripts keep working");
+        let help = crate::command::build_cli()
+            .find_subcommand_mut("audit")
+            .expect("audit is registered")
+            .render_help()
+            .to_string();
+        assert!(
+            help.contains("--format"),
+            "the supported flag is advertised: {help}"
+        );
+        assert!(
+            !help.contains("--json"),
+            "the deprecated alias is not advertised: {help}"
+        );
     }
 
     #[tokio::test]

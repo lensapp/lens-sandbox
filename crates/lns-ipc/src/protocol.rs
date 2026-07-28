@@ -487,6 +487,9 @@ pub struct RunImageArgs {
     /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, connectors, and resources apply.
     #[serde(default)]
     pub definition: Option<String>,
+    /// The local definition's absolute directory, keying its per-workload connector grants; absent for a published reference (which keys by repo@digest instead).
+    #[serde(default)]
+    pub definition_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +807,7 @@ mod tests {
             auto_remove: false,
             verify_sandbox: false,
             definition: None,
+            definition_dir: None,
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -849,6 +853,7 @@ mod tests {
             auto_remove: false,
             verify_sandbox: false,
             definition: None,
+            definition_dir: None,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -982,6 +987,7 @@ mod tests {
             auto_remove: true,
             verify_sandbox: false,
             definition: Some(r#"{"kind":"Sandbox"}"#.into()),
+            definition_dir: Some("/work/proj".into()),
         }
     }
 

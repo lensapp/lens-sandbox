@@ -15,9 +15,18 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         let args = super::ConnectorArgs::from_arg_matches(matches)?;
         let cwd = ctx.cwd()?;
         let catalog_path = lns_policy::connectors::default_connectors_path();
+        let grants_path = lns_policy::grants::default_workload_grants_path();
         let signin = RealConnectorSignIn::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        crate::connector::run(&args.command, &cwd, &catalog_path, &signin, &mut out).await
+        crate::connector::run(
+            &args.command,
+            &cwd,
+            &catalog_path,
+            &grants_path,
+            &signin,
+            &mut out,
+        )
+        .await
     })
 }
 

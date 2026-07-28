@@ -1,5 +1,6 @@
 use anyhow::Result;
 use lns_ipc::{Response, WireFrame};
+use lns_policy::grants::WorkloadIdentity;
 use tokio::sync::mpsc::Sender;
 
 mod orchestrator;
@@ -171,6 +172,44 @@ pub(super) fn connector_never_arrived() -> anyhow::Error {
     anyhow::anyhow!("VM backend never produced a VsockConnector")
 }
 
+/// A published reference reduced to its bare `registry/repository`, so `:tag` and `@digest` of one repo share a workload identity; an unparseable reference is keyed verbatim.
+fn normalize_repo(reference: &str) -> String {
+    match reference.parse::<oci_client::Reference>() {
+        Ok(r) => format!("{}/{}", r.registry(), r.repository()),
+        Err(_) => reference.to_string(),
+    }
+}
+
+/// Canonicalizes a definition directory for identity purposes, falling back to the raw string when canonicalization can't resolve it (e.g. it no longer exists) — mirrors `lns_policy::grants::project_key`, so a project reached through a symlink or a differently-cased path keys identically either way.
+fn canonical_dir_key(dir: &str) -> String {
+    std::path::Path::new(dir)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dir.to_string())
+}
+
+/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers). A run resolving neither refuses — plain-image runs are retired, and a shared fallback bucket would let one run's grant arm another's without a card.
+pub(super) fn workload_identity(
+    definition_dir: Option<&str>,
+    resolved_ref: Option<&str>,
+    digest: Option<&str>,
+) -> Result<WorkloadIdentity> {
+    if let Some(dir) = definition_dir {
+        Ok(WorkloadIdentity::Definition {
+            dir: canonical_dir_key(dir),
+        })
+    } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
+        Ok(WorkloadIdentity::Reference {
+            repo: normalize_repo(reference),
+            digest: digest.to_string(),
+        })
+    } else {
+        anyhow::bail!(
+            "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference, and if `lns` was upgraded while this service kept running, restart it (`lns service stop` then `lns service start`) so the two match"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +227,99 @@ mod tests {
     fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
         assert_eq!(sandbox_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
+    }
+
+    #[test]
+    fn workload_identity_keys_a_local_definition_by_its_directory() {
+        let id = workload_identity(Some("/Users/me/app"), Some("ghcr.io/team/base:1"), None)
+            .expect("a definition dir identifies the run");
+        assert_eq!(
+            id,
+            WorkloadIdentity::Definition {
+                dir: "/Users/me/app".into()
+            },
+            "a local definition keys by its dir even though it carries a base image"
+        );
+    }
+
+    #[test]
+    fn workload_identity_canonicalizes_a_symlinked_definition_directory_to_the_same_key() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        let via_link = workload_identity(Some(link.to_str().unwrap()), None, None)
+            .expect("a definition dir identifies the run");
+        let via_real = workload_identity(Some(real.to_str().unwrap()), None, None)
+            .expect("a definition dir identifies the run");
+        assert_eq!(
+            via_link, via_real,
+            "the same project reached through a symlink must key identically, or a grant made through one path silently misses through the other"
+        );
+    }
+
+    #[test]
+    fn workload_identity_falls_back_to_the_raw_dir_when_it_cannot_be_canonicalized() {
+        assert_eq!(
+            workload_identity(Some("/no/such/project/dir"), None, None)
+                .expect("a definition dir identifies the run"),
+            WorkloadIdentity::Definition {
+                dir: "/no/such/project/dir".into()
+            }
+        );
+    }
+
+    #[test]
+    fn workload_identity_keys_a_published_reference_by_repo_and_digest() {
+        let id = workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), Some("sha256:abc"))
+            .expect("a resolved digest identifies the run");
+        assert_eq!(
+            id,
+            WorkloadIdentity::Reference {
+                repo: "ghcr.io/acme/agent".into(),
+                digest: "sha256:abc".into()
+            }
+        );
+    }
+
+    #[test]
+    fn workload_identity_refuses_a_run_without_a_definition_or_a_resolved_digest() {
+        for (definition_dir, resolved_ref) in [(None, None), (None, Some("ghcr.io/acme/agent:1"))] {
+            let err = workload_identity(definition_dir, resolved_ref, None)
+                .expect_err("an unidentifiable run must refuse, never share a grant bucket");
+            assert!(
+                format!("{err:#}").contains("cannot hold connector grants"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn workload_identity_refusal_names_the_service_restart_a_stale_service_needs() {
+        let err = workload_identity(None, None, None).expect_err("an unidentifiable run refuses");
+        assert!(
+            format!("{err:#}").contains("lns service stop"),
+            "a matching CLI always resolves an identity, so the developer who sees this is most likely running an upgraded `lns` against a service left running from before; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_strips_a_tag_and_a_digest_to_the_bare_repo() {
+        assert_eq!(
+            normalize_repo("ghcr.io/acme/agent:1.4.0"),
+            "ghcr.io/acme/agent"
+        );
+        assert_eq!(
+            normalize_repo(&format!("ghcr.io/acme/agent@sha256:{}", "a".repeat(64))),
+            "ghcr.io/acme/agent"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_keeps_an_unparseable_reference_verbatim() {
+        assert_eq!(normalize_repo("not a valid ref"), "not a valid ref");
     }
 
     #[test]

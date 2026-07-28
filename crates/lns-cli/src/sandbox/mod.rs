@@ -39,12 +39,12 @@ pub enum SandboxCommand {
     #[command(about = "Add a tag to a cached sandbox within its current repository.")]
     Tag(SandboxTagArgs),
     #[command(about = "List running sandboxes with their CPU and memory (`docker ps`-style).")]
-    Ps,
+    Ps(PsArgs),
     #[command(
         visible_alias = "list",
         about = "List cached sandboxes (pulled or built) in the local store."
     )]
-    Ls,
+    Ls(LsArgs),
     #[command(about = "Run a sandbox in a microVM (the top-level `lns run`).")]
     Run(Box<RunArgs>),
     #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
@@ -67,6 +67,18 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
     Prune(SandboxPruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct PsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct LsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -244,7 +256,7 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
 
 pub fn augment_ps(app: clap::Command) -> clap::Command {
     app.subcommand(
-        clap::Command::new("ps").about(
+        subcommand::<PsArgs>("ps").about(
             "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
         ),
     )
@@ -388,8 +400,8 @@ where
         }
         SandboxCommand::Pull(args) => pull(svc, args, out).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
-        SandboxCommand::Ps => ps(svc, out).await,
-        SandboxCommand::Ls => ls(svc, out).await,
+        SandboxCommand::Ps(args) => ps(svc, args, out).await,
+        SandboxCommand::Ls(args) => ls(svc, args, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
@@ -453,7 +465,11 @@ async fn tag<W: std::io::Write>(
     }
 }
 
-async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+async fn ps<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &PsArgs,
+    out: &mut W,
+) -> Result<i32> {
     let running = match svc.one_shot(Request::ListRuns).await? {
         Response::RunList { runs } => runs
             .into_iter()
@@ -474,54 +490,70 @@ async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result
             Response::Error { message } => bail!("daemon error: {message}"),
             other => bail!("unexpected response from daemon: {other:?}"),
         };
-        rows.push((run, stats));
+        rows.push(PsRow::new(run, stats));
     }
-    render_ps_table(&running, &rows, out)
-}
-
-fn render_ps_table<W: std::io::Write>(
-    running: &[lns_ipc::RunSummary],
-    rows: &[(&lns_ipc::RunSummary, RunStatsInfo)],
-    out: &mut W,
-) -> Result<i32> {
-    let id_w = "ID".len().max(
-        running
-            .iter()
-            .map(|r| lns_ipc::short_run_id(&r.id).len())
-            .max()
-            .unwrap_or(0),
-    );
-    let name_w = "NAME"
-        .len()
-        .max(running.iter().map(|r| r.name.len()).max().unwrap_or(0));
-    let image_w = "IMAGE"
-        .len()
-        .max(running.iter().map(|r| r.image.len()).max().unwrap_or(0));
-    writeln!(
-        out,
-        "{:<id_w$}  {:<name_w$}  {:<image_w$}  CPU %   MEM",
-        "ID", "NAME", "IMAGE",
-    )?;
-    for (run, stats) in rows {
-        writeln!(
-            out,
-            "{:<id_w$}  {:<name_w$}  {:<image_w$}  {:<6}  {} / {}",
-            lns_ipc::short_run_id(&run.id),
-            run.name,
-            run.image,
-            format_permille(stats.cpu_permille),
-            format_bytes(stats.mem_used_bytes),
-            format_bytes(stats.mem_total_bytes),
-        )?;
-    }
+    crate::output::emit(args.output.format, &rows, out)?;
     Ok(0)
 }
 
-async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PsRow {
+    id: String,
+    name: String,
+    image: String,
+    command: String,
+    status: lns_ipc::RunStatus,
+    started: String,
+    cpu_permille: u32,
+    mem_used_bytes: u64,
+    mem_total_bytes: u64,
+}
+
+impl PsRow {
+    fn new(run: &lns_ipc::RunSummary, stats: RunStatsInfo) -> Self {
+        Self {
+            id: run.id.clone(),
+            name: run.name.clone(),
+            image: run.image.clone(),
+            command: run.command.clone(),
+            status: run.status,
+            started: run.started.clone(),
+            cpu_permille: stats.cpu_permille,
+            mem_used_bytes: stats.mem_used_bytes,
+            mem_total_bytes: stats.mem_total_bytes,
+        }
+    }
+}
+
+impl crate::output::TableRow for PsRow {
+    const HEADERS: &'static [&'static str] = &["ID", "NAME", "IMAGE", "CPU %", "MEM"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            lns_ipc::short_run_id(&self.id).to_string(),
+            self.name.clone(),
+            self.image.clone(),
+            format_permille(self.cpu_permille),
+            format!(
+                "{} / {}",
+                format_bytes(self.mem_used_bytes),
+                format_bytes(self.mem_total_bytes)
+            ),
+        ]
+    }
+}
+
+async fn ls<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &LsArgs,
+    out: &mut W,
+) -> Result<i32> {
     match svc.one_shot(Request::ListImages).await? {
         Response::ImageList { mut images } => {
             images.sort_by(|a, b| a.reference.cmp(&b.reference));
-            render_cached_table(out, &images)?;
+            let rows: Vec<SandboxRow> = images.iter().map(SandboxRow::new).collect();
+            crate::output::emit(args.output.format, &rows, out)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -529,18 +561,36 @@ async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result
     }
 }
 
-fn render_cached_table<W: std::io::Write>(
-    out: &mut W,
-    images: &[lns_ipc::ImageInfo],
-) -> Result<()> {
-    let ref_w = "SANDBOX"
-        .len()
-        .max(images.iter().map(|i| i.reference.len()).max().unwrap_or(0));
-    writeln!(out, "{:<ref_w$}  STATE", "SANDBOX")?;
-    for image in images {
-        writeln!(out, "{:<ref_w$}  cached", image.reference)?;
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxRow {
+    reference: String,
+    digest: String,
+    size_bytes: u64,
+    layers: u32,
+    pulled: String,
+    in_use_by: Option<String>,
+}
+
+impl SandboxRow {
+    fn new(image: &lns_ipc::ImageInfo) -> Self {
+        Self {
+            reference: image.reference.clone(),
+            digest: image.digest.clone(),
+            size_bytes: image.size_bytes,
+            layers: image.layers,
+            pulled: image.pulled.clone(),
+            in_use_by: image.in_use_by.clone(),
+        }
     }
-    Ok(())
+}
+
+impl crate::output::TableRow for SandboxRow {
+    const HEADERS: &'static [&'static str] = &["SANDBOX", "STATE"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![self.reference.clone(), "cached".to_string()]
+    }
 }
 
 async fn kill<W: std::io::Write>(
@@ -1344,7 +1394,7 @@ mod tests {
             message: "registry poisoned".into(),
         });
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
     }
 
@@ -1352,8 +1402,24 @@ mod tests {
     async fn ls_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = ls(&svc, &mut out).await.unwrap_err();
+        let err = ls(&svc, &ls_args(), &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    fn ls_args() -> LsArgs {
+        LsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
+    }
+
+    fn ps_args() -> PsArgs {
+        PsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
     }
 
     fn running_run() -> lns_ipc::RunSummary {
@@ -1382,7 +1448,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = ps(&svc, &mut out).await.unwrap();
+        let code = ps(&svc, &ps_args(), &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("CPU") && text.contains("MEM"), "got: {text}");
@@ -1399,7 +1465,7 @@ mod tests {
             }],
         });
         let mut out = Vec::new();
-        let code = ps(&svc, &mut out).await.unwrap();
+        let code = ps(&svc, &ps_args(), &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("CPU"), "got: {text}");
@@ -1415,15 +1481,20 @@ mod tests {
             &CannedService::new(Response::Error {
                 message: "registry poisoned".into(),
             }),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
 
-        let err = ps(&CannedService::new(Response::Pong), &mut Vec::new())
-            .await
-            .unwrap_err();
+        let err = ps(
+            &CannedService::new(Response::Pong),
+            &ps_args(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -1438,6 +1509,7 @@ mod tests {
                     message: "stats probe failed".into(),
                 },
             ),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await
@@ -1451,6 +1523,7 @@ mod tests {
                 },
                 Response::Pong,
             ),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await

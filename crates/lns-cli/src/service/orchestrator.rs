@@ -56,20 +56,21 @@ pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
     })
 }
 
-pub fn service_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn service_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::ServiceArgs::from_arg_matches(matches)?;
-        dispatch(&args.command).await?;
+        let mut out = ctx.out;
+        dispatch(&args.command, &mut out).await?;
         Ok(0)
     })
 }
 
-pub async fn dispatch(cmd: &super::ServiceCommand) -> Result<()> {
+pub async fn dispatch(cmd: &super::ServiceCommand, writer: &mut dyn std::io::Write) -> Result<()> {
     let client = real_client()?;
     match cmd {
         super::ServiceCommand::Start => super::cmd_start(&client).await,
         super::ServiceCommand::Stop => super::cmd_stop(&client).await,
-        super::ServiceCommand::Status => super::cmd_status(&client).await,
+        super::ServiceCommand::Status(args) => super::cmd_status(&client, args, writer).await,
         super::ServiceCommand::Enable => super::cmd_enable(&client).await,
         super::ServiceCommand::Disable => super::cmd_disable(&client).await,
     }
@@ -337,6 +338,9 @@ pub async fn run_image(
         auto_remove: args.auto_remove,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),
+        definition_dir: target
+            .project_dir()
+            .map(|p| p.to_string_lossy().into_owned()),
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

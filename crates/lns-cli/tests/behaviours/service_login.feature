@@ -24,3 +24,9 @@ Feature: users discover and parse the service login-agent subcommands
     Then the exit code is 0
     And the output contains "Usage: lns service disable"
     And the output contains "login agent"
+
+  Scenario: service status --help offers the machine-readable format
+    When I run "lns service status --help"
+    Then the exit code is 0
+    And the output contains "--format"
+    And the output contains "experimental"

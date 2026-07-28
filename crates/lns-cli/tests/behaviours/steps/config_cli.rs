@@ -2,7 +2,9 @@ use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::config::{self, ConfigArgs, ConfigCommand, ConfigKey, ConfigKeyArgs, ConfigSetArgs};
+use lns_cli::config::{
+    self, ConfigArgs, ConfigCommand, ConfigKey, ConfigKeyArgs, ConfigSetArgs, ConfigUnsetArgs,
+};
 use std::path::PathBuf;
 
 fn config_path(world: &mut BehaviourWorld) -> PathBuf {
@@ -39,7 +41,12 @@ fn set_cmd(name: &str, values: &str) -> ConfigCommand {
 }
 
 fn get_cmd(name: &str) -> ConfigCommand {
-    ConfigCommand::Get(ConfigKeyArgs { key: key(name) })
+    ConfigCommand::Get(ConfigKeyArgs {
+        key: key(name),
+        output: lns_cli::output::OutputArgs {
+            format: lns_cli::output::Format::Table,
+        },
+    })
 }
 
 #[given(regex = r#"^the default "([^"]+)" is "([^"]+)"$"#)]
@@ -85,18 +92,6 @@ fn run_config_command(world: &mut BehaviourWorld, tail: String) {
     });
 }
 
-#[then(regex = r#"^the output warns that "([^"]+)" is no longer supported$"#)]
-fn output_warns_legacy(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
-    let out = &world.result.as_ref().ok_or("no CLI run captured")?.output;
-    if out.contains(&key) && out.contains("no longer supported") {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected a legacy warning for {key:?}, got: {out:?}"
-        ))
-    }
-}
-
 #[then(regex = r#"^the output does not list "([^"]+)" as an active default$"#)]
 fn output_no_active_default(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
     let out = &world.result.as_ref().ok_or("no CLI run captured")?.output;
@@ -117,13 +112,38 @@ fn gets_default(world: &mut BehaviourWorld, name: String) {
 
 #[when(regex = r#"^the developer unsets the default "([^"]+)"$"#)]
 fn unsets_default(world: &mut BehaviourWorld, name: String) {
-    let cmd = ConfigCommand::Unset(ConfigKeyArgs { key: key(&name) });
+    let cmd = ConfigCommand::Unset(ConfigUnsetArgs { key: key(&name) });
     world.result = Some(run_config(world, cmd));
 }
 
 #[when(regex = r"^the developer lists the configured defaults$")]
 fn lists_defaults(world: &mut BehaviourWorld) {
-    world.result = Some(run_config(world, ConfigCommand::List));
+    world.result = Some(run_config(
+        world,
+        ConfigCommand::List(lns_cli::output::OutputArgs {
+            format: lns_cli::output::Format::Table,
+        }),
+    ));
+}
+
+#[when(regex = r"^the developer lists the configured defaults as JSON$")]
+fn lists_defaults_as_json(world: &mut BehaviourWorld) {
+    world.result = Some(run_config(world, ConfigCommand::List(json_args())));
+}
+
+#[when(regex = r#"^the developer gets the default "([^"]+)" as JSON$"#)]
+fn gets_default_as_json(world: &mut BehaviourWorld, name: String) {
+    let cmd = ConfigCommand::Get(ConfigKeyArgs {
+        key: key(&name),
+        output: json_args(),
+    });
+    world.result = Some(run_config(world, cmd));
+}
+
+fn json_args() -> lns_cli::output::OutputArgs {
+    lns_cli::output::OutputArgs {
+        format: lns_cli::output::Format::Json,
+    }
 }
 
 #[then(regex = r"^the command reports the default was set$")]

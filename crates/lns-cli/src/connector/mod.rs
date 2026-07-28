@@ -7,6 +7,7 @@ use lns_policy::connectors::{
     AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, bundled_connectors,
     effective_connectors,
 };
+use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, JsonFileGrantStore, project_key};
 use lns_policy::providers::is_self_identifying;
 
 use crate::command::{CommandSpec, subcommand};
@@ -29,15 +30,21 @@ pub enum ConnectorCommand {
     #[command(about = "Declare a credential connector in your machine-global catalog.")]
     Add(ConnectorAddArgs),
     #[command(about = "List the bundled and user-declared connectors.")]
-    List,
+    List(ConnectorListArgs),
     #[command(about = "Remove a user-declared connector; bundled ones cannot be removed.")]
     Remove(ConnectorRemoveArgs),
     #[command(
         about = "Bind a connector's per-machine value decision (oauth connectors sign in); records the id in this directory's policy."
     )]
     Connect(ConnectArgs),
-    #[command(about = "Disconnect a connector from this directory's policy.")]
+    #[command(
+        about = "Disconnect a connector from this directory's policy and forget its per-workload grants here."
+    )]
     Disconnect(DisconnectArgs),
+    #[command(about = "List the per-workload connector grants remembered for this project.")]
+    Grants(GrantsArgs),
+    #[command(about = "Forget a connector's per-workload grants in this project.")]
+    Revoke(RevokeArgs),
 }
 
 #[derive(clap::Args)]
@@ -89,6 +96,39 @@ pub struct DisconnectArgs {
     #[arg(
         long,
         help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct ConnectorListArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct GrantsArgs {
+    #[arg(
+        long,
+        help = "Policy file path whose project the grants are listed for; defaults to `lns-policy.yaml` in the current directory."
+    )]
+    pub policy: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "List grants for every project on this machine, not just this one."
+    )]
+    pub all: bool,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct RevokeArgs {
+    #[arg(help = "Connector id whose per-workload grants to forget in this project.")]
+    pub id: String,
+    #[arg(
+        long,
+        help = "Policy file path whose project the grant is revoked from; defaults to `lns-policy.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -161,15 +201,20 @@ pub async fn run(
     cmd: &ConnectorCommand,
     cwd: &Path,
     catalog_path: &Path,
+    grants_path: &Path,
     signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
         ConnectorCommand::Add(args) => add(args, catalog_path, writer),
-        ConnectorCommand::List => list(catalog_path, writer),
+        ConnectorCommand::List(args) => list(args, catalog_path, writer),
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
-        ConnectorCommand::Connect(args) => connect(args, cwd, catalog_path, signin, writer).await,
-        ConnectorCommand::Disconnect(args) => disconnect(args, cwd, writer),
+        ConnectorCommand::Connect(args) => {
+            connect(args, cwd, catalog_path, grants_path, signin, writer).await
+        }
+        ConnectorCommand::Disconnect(args) => disconnect(args, cwd, grants_path, writer),
+        ConnectorCommand::Grants(args) => grants(args, cwd, grants_path, writer),
+        ConnectorCommand::Revoke(args) => revoke(args, cwd, grants_path, writer),
     }
 }
 
@@ -247,19 +292,51 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     Ok(0)
 }
 
-fn list(catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+fn list(args: &ConnectorListArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
-    for i in bundled_connectors() {
-        writeln!(writer, "{}  (bundled)  {}", i.id, kind_word(i.auth_kind))?;
-    }
-    for i in &user.connectors {
-        // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
-        if is_bundled(&i.id) {
-            continue;
-        }
-        writeln!(writer, "{}  (user)  {}", i.id, kind_word(i.auth_kind))?;
-    }
+    let mut rows: Vec<ConnectorRow> = bundled_connectors()
+        .iter()
+        .map(|i| ConnectorRow::new(i, "bundled"))
+        .collect();
+    // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
+    rows.extend(
+        user.connectors
+            .iter()
+            .filter(|i| !is_bundled(&i.id))
+            .map(|i| ConnectorRow::new(i, "user")),
+    );
+    crate::output::emit(args.output.format, &rows, writer)?;
     Ok(0)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorRow {
+    id: String,
+    source: &'static str,
+    auth_kind: &'static str,
+}
+
+impl ConnectorRow {
+    fn new(connector: &Connector, source: &'static str) -> Self {
+        Self {
+            id: connector.id.clone(),
+            source,
+            auth_kind: kind_word(connector.auth_kind),
+        }
+    }
+}
+
+impl crate::output::TableRow for ConnectorRow {
+    const HEADERS: &'static [&'static str] = &["CONNECTOR", "SOURCE", "AUTH"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.source.to_string(),
+            self.auth_kind.to_string(),
+        ]
+    }
 }
 
 fn remove(args: &ConnectorRemoveArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
@@ -283,6 +360,7 @@ pub async fn connect(
     args: &ConnectArgs,
     cwd: &Path,
     catalog_path: &Path,
+    grants_path: &Path,
     signin: &dyn ConnectorSignIn,
     writer: &mut impl Write,
 ) -> Result<i32> {
@@ -326,7 +404,26 @@ pub async fn connect(
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
     writeln!(writer, "{closing}")?;
+    // Binding the value cannot lift a workload's decline, so say what will: otherwise the connect reports success and the workload goes on being refused with nothing on screen explaining it.
+    match standing_declines(grants_path, &project_key(&path), &args.id) {
+        0 => {}
+        n => writeln!(
+            writer,
+            "note: {n} workload(s) in this project declined {:?} and will keep being refused; run `lns connector revoke {}` to forget this project's grants for it.",
+            args.id, args.id
+        )?,
+    }
     Ok(0)
+}
+
+/// How many workloads in this project have declined the connector; an unreadable sidecar reports none rather than failing a connect that has already landed.
+fn standing_declines(grants_path: &Path, project: &str, connector: &str) -> usize {
+    let Ok(file) = JsonFileGrantStore::new(grants_path.to_path_buf()).load() else {
+        return 0;
+    };
+    file.for_project(project)
+        .filter(|g| g.connector == connector && g.verdict == GrantVerdict::Deny)
+        .count()
 }
 
 /// Each completed value decision reads back what was bound on this machine — never an effect on any sandbox definition.
@@ -344,17 +441,133 @@ fn bind_message(id: &str, decision: lns_ipc::CredentialBindDecision) -> String {
     }
 }
 
-pub fn disconnect(args: &DisconnectArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
+pub fn disconnect(
+    args: &DisconnectArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     if !policy.disconnect(&args.id) {
         bail!("{:?} is not connected in {}", args.id, path.display());
     }
+    // Forget the grants before dropping the id, so a sidecar this run cannot update leaves a still-connected policy to retry rather than stale grants a later reconnect would inherit.
+    let cleared = clear_project_grants(grants_path, &project_key(&path), &args.id)?;
     policy
         .save_atomic(&path)
         .with_context(|| format!("writing policy to {}", path.display()))?;
-    writeln!(writer, "Disconnected {:?}", args.id)?;
+    let grants_note = match cleared {
+        0 => String::new(),
+        n => format!(" and forgot {n} per-workload grant(s)"),
+    };
+    writeln!(writer, "Disconnected {:?}{grants_note}", args.id)?;
+    Ok(0)
+}
+
+/// Drop every per-workload grant for one connector in a project from the sidecar, returning how many were removed; the forget is always recorded, even with nothing to remove, because a run still deciding is exactly the one whose grant this has to cancel.
+fn clear_project_grants(grants_path: &Path, project: &str, connector: &str) -> Result<usize> {
+    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+    let mut cleared = 0;
+    store
+        .update(&mut |file| {
+            cleared = file.revoke_project_connector(project, connector);
+            true
+        })
+        .with_context(|| format!("updating grants at {}", grants_path.display()))?;
+    Ok(cleared)
+}
+
+fn grants(
+    args: &GrantsArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+    let file = store
+        .load()
+        .with_context(|| format!("reading grants from {}", grants_path.display()))?;
+    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let rows: Vec<&GrantRecord> = if args.all {
+        file.grants.iter().collect()
+    } else {
+        file.for_project(&project).collect()
+    };
+    if args.output.format == crate::output::Format::Json {
+        let json: Vec<GrantRow> = rows.iter().map(|g| GrantRow::new(g)).collect();
+        crate::output::emit_object(&json, writer)?;
+        return Ok(0);
+    }
+    if rows.is_empty() {
+        let scope = if args.all { "" } else { " for this project" };
+        writeln!(writer, "No connector grants{scope}.")?;
+        return Ok(0);
+    }
+    for g in rows {
+        let verdict = match g.verdict {
+            GrantVerdict::Allow => "allow",
+            GrantVerdict::Deny => "deny",
+        };
+        if args.all {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{verdict}",
+                g.project, g.workload, g.connector
+            )?;
+        } else {
+            writeln!(writer, "{}\t{}\t{verdict}", g.workload, g.connector)?;
+        }
+    }
+    Ok(0)
+}
+
+/// The grants table varies its columns with `--all`, so json carries the full row regardless of scope.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantRow {
+    project: String,
+    workload: String,
+    connector: String,
+    verdict: &'static str,
+    env_var: String,
+}
+
+impl GrantRow {
+    fn new(grant: &GrantRecord) -> Self {
+        Self {
+            project: grant.project.clone(),
+            workload: grant.workload.clone(),
+            connector: grant.connector.clone(),
+            verdict: match grant.verdict {
+                GrantVerdict::Allow => "allow",
+                GrantVerdict::Deny => "deny",
+            },
+            env_var: grant.env_var.clone(),
+        }
+    }
+}
+
+fn revoke(
+    args: &RevokeArgs,
+    cwd: &Path,
+    grants_path: &Path,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let cleared = clear_project_grants(grants_path, &project, &args.id)?;
+    if cleared == 0 {
+        bail!(
+            "no grants for {:?} in this project; a decision a running sandbox was still holding for it is cancelled all the same",
+            args.id
+        );
+    }
+    writeln!(
+        writer,
+        "Revoked {cleared} grant(s) for {:?} in this project.",
+        args.id
+    )?;
     Ok(0)
 }
 
@@ -364,6 +577,18 @@ mod tests {
     use lns_policy::connectors::{OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
+
+    #[test]
+    fn standing_declines_reports_none_when_the_sidecar_cannot_be_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("grants.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            standing_declines(&path, "/proj", "some-provider"),
+            0,
+            "the bind has already landed by the time the note is composed, so an unreadable sidecar must cost the user a note, not the connect"
+        );
+    }
 
     #[test]
     fn parse_injection_accepts_the_two_declarable_kinds() {
@@ -443,6 +668,20 @@ mod tests {
     fn parse_injection_rejects_a_header_segment_on_kinds_that_do_not_use_one() {
         let err = parse_injection("bearer_header:api.acme.corp:x-api-key").unwrap_err();
         assert!(err.contains("does not take a header name"), "got: {err}");
+    }
+
+    fn row_for<'a>(text: &'a str, id: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.starts_with(id))
+            .unwrap_or_else(|| panic!("no listing row for {id} in:\n{text}"))
+    }
+
+    fn list_args() -> ConnectorListArgs {
+        ConnectorListArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
     }
 
     fn add_args(id: &str) -> ConnectorAddArgs {
@@ -578,10 +817,17 @@ mod tests {
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("gitlab  (bundled)  credential"), "{text}");
-        assert!(text.contains("acme  (user)  credential"), "{text}");
+        assert!(text.contains("CONNECTOR"), "{text}");
+        assert!(
+            row_for(&text, "gitlab").ends_with("bundled  credential"),
+            "{text}"
+        );
+        assert!(
+            row_for(&text, "acme").ends_with("user     credential"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -590,11 +836,9 @@ mod tests {
         let path = catalog_at(dir.path());
         write_user_catalog(&path, vec![oauth_connector("somesaas")]);
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("somesaas  (user)  oauth"),
+            String::from_utf8(out).unwrap().contains("somesaas"),
             "oauth kind must be labelled"
         );
     }
@@ -620,11 +864,11 @@ mod tests {
             }],
         );
         let mut out = Vec::new();
-        list(&path, &mut out).unwrap();
+        list(&list_args(), &path, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("gitlab  (bundled)"), "{text}");
+        assert!(row_for(&text, "gitlab").contains("bundled"), "{text}");
         assert!(
-            !text.contains("gitlab  (user)"),
+            text.lines().filter(|l| l.starts_with("gitlab")).count() == 1,
             "a shadow must not be listed: {text}"
         );
     }
@@ -634,7 +878,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         std::fs::write(&path, "connectors: not-a-list\n").unwrap();
-        let err = list(&path, &mut Vec::new()).unwrap_err();
+        let err = list(&list_args(), &path, &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("loading"));
     }
 
@@ -740,6 +984,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut out,
         )
@@ -759,6 +1004,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -779,6 +1025,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -804,6 +1051,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::returning(SignInOutcome::Failed("access_denied".into())),
             &mut Vec::new(),
         )
@@ -828,6 +1076,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::HostDetect,
             )),
@@ -857,6 +1106,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Completed(
                 lns_ipc::CredentialBindDecision::Denied,
             )),
@@ -878,6 +1128,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::Failed("the value decision timed out".into())),
             &mut Vec::new(),
         )
@@ -901,6 +1152,7 @@ mod tests {
             },
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::binding(BindOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -924,6 +1176,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::returning(SignInOutcome::ServiceUnavailable),
             &mut Vec::new(),
         )
@@ -946,6 +1199,7 @@ mod tests {
             },
             dir.path(),
             &catalog,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -957,6 +1211,7 @@ mod tests {
                 policy: None,
             },
             dir.path(),
+            &dir.path().join("grants.json"),
             &mut Vec::new(),
         )
         .unwrap();
@@ -973,6 +1228,7 @@ mod tests {
                 policy: None,
             },
             dir.path(),
+            &dir.path().join("grants.json"),
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -984,19 +1240,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut out = Vec::new();
         run(
-            &ConnectorCommand::List,
+            &ConnectorCommand::List(list_args()),
             dir.path(),
             &catalog_at(dir.path()),
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut out,
         )
         .await
         .unwrap();
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("gitlab  (bundled)")
-        );
+        assert!(String::from_utf8(out).unwrap().contains("gitlab"));
     }
 
     #[tokio::test]
@@ -1007,6 +1260,7 @@ mod tests {
             &ConnectorCommand::Add(add_args("acme")),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1017,6 +1271,7 @@ mod tests {
             &ConnectorCommand::Remove(ConnectorRemoveArgs { id: "acme".into() }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1036,6 +1291,7 @@ mod tests {
             }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )
@@ -1054,6 +1310,7 @@ mod tests {
             }),
             dir.path(),
             &path,
+            &dir.path().join("grants.json"),
             &FakeSignIn::completed(),
             &mut Vec::new(),
         )

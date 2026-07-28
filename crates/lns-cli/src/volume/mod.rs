@@ -19,7 +19,7 @@ pub struct VolumeArgs {
 #[derive(clap::Subcommand)]
 pub enum VolumeCommand {
     #[command(about = "List named volumes with their on-disk size, age, and holder.")]
-    Ls,
+    Ls(VolumeLsArgs),
     #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
     Create(VolumeNameArg),
     #[command(about = "Show a volume's details as JSON.")]
@@ -28,6 +28,12 @@ pub enum VolumeCommand {
     Rm(VolumeNameArg),
     #[command(about = "Remove every volume not attached to a running sandbox.")]
     Prune(VolumePruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct VolumeLsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -82,7 +88,7 @@ pub async fn run(
     writer: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
-        VolumeCommand::Ls => ls(svc, writer).await,
+        VolumeCommand::Ls(args) => ls(svc, args, writer).await,
         VolumeCommand::Create(args) => create(svc, &args.name, writer).await,
         VolumeCommand::Inspect(args) => inspect(svc, &args.name, writer).await,
         VolumeCommand::Rm(args) => rm(svc, &args.name, writer).await,
@@ -101,13 +107,49 @@ async fn send(svc: &dyn VolumeService, req: Request) -> Result<Response> {
     Ok(response)
 }
 
-async fn ls(svc: &dyn VolumeService, writer: &mut impl Write) -> Result<i32> {
+async fn ls(svc: &dyn VolumeService, args: &VolumeLsArgs, writer: &mut impl Write) -> Result<i32> {
     match send(svc, Request::ListVolumes).await? {
         Response::VolumeList { volumes } => {
-            render_volume_table(writer, &volumes)?;
+            let rows: Vec<VolumeRow> = volumes.iter().map(VolumeRow::new).collect();
+            crate::output::emit(args.output.format, &rows, writer)?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VolumeRow {
+    name: String,
+    size_bytes: u64,
+    disk_bytes: u64,
+    created: String,
+    in_use_by: Option<String>,
+}
+
+impl VolumeRow {
+    fn new(volume: &VolumeInfo) -> Self {
+        Self {
+            name: volume.name.clone(),
+            size_bytes: volume.size_bytes,
+            disk_bytes: volume.disk_bytes,
+            created: volume.created.clone(),
+            in_use_by: volume.in_use_by.clone(),
+        }
+    }
+}
+
+impl crate::output::TableRow for VolumeRow {
+    const HEADERS: &'static [&'static str] = &["NAME", "ON DISK", "CREATED", "IN USE"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            format_size(self.disk_bytes),
+            crate::service::friendly_started(&self.created),
+            in_use_str(self.in_use_by.as_deref()),
+        ]
     }
 }
 
@@ -130,7 +172,7 @@ async fn inspect(svc: &dyn VolumeService, name: &str, writer: &mut impl Write) -
     };
     match send(svc, req).await? {
         Response::VolumeInspect { volume } => {
-            writeln!(writer, "{}", serde_json::to_string_pretty(&volume)?)?;
+            crate::output::emit_object(&VolumeRow::new(&volume), writer)?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -203,41 +245,6 @@ fn confirm_prune(input: &mut dyn BufRead, writer: &mut impl Write) -> Result<boo
     Ok(yes)
 }
 
-fn render_volume_table<W: Write>(out: &mut W, rows: &[VolumeInfo]) -> std::io::Result<()> {
-    let cells: Vec<(String, String, String, String)> = rows
-        .iter()
-        .map(|v| {
-            (
-                v.name.clone(),
-                format_size(v.disk_bytes),
-                crate::service::friendly_started(&v.created),
-                in_use_str(v.in_use_by.as_deref()),
-            )
-        })
-        .collect();
-    let width = |header: &str, pick: fn(&(String, String, String, String)) -> &String| {
-        header
-            .len()
-            .max(cells.iter().map(|c| pick(c).len()).max().unwrap_or(0))
-    };
-    let name_w = width("NAME", |c| &c.0);
-    let disk_w = width("ON DISK", |c| &c.1);
-    let created_w = width("CREATED", |c| &c.2);
-
-    writeln!(
-        out,
-        "{:<name_w$}  {:<disk_w$}  {:<created_w$}  IN USE",
-        "NAME", "ON DISK", "CREATED",
-    )?;
-    for (name, disk, created, in_use) in &cells {
-        writeln!(
-            out,
-            "{name:<name_w$}  {disk:<disk_w$}  {created:<created_w$}  {in_use}",
-        )?;
-    }
-    Ok(())
-}
-
 fn in_use_str(holder: Option<&str>) -> String {
     match holder {
         Some(run_id) => format!("run {}", lns_ipc::short_run_id(run_id)),
@@ -308,6 +315,14 @@ mod tests {
         Ok((code, String::from_utf8(buf).unwrap()))
     }
 
+    fn ls_args() -> VolumeLsArgs {
+        VolumeLsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
+    }
+
     fn name_arg(name: &str) -> VolumeNameArg {
         VolumeNameArg {
             name: name.to_string(),
@@ -317,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn each_verb_rejects_a_mismatched_response_kind() {
         for cmd in [
-            VolumeCommand::Ls,
+            VolumeCommand::Ls(ls_args()),
             VolumeCommand::Create(name_arg("v")),
             VolumeCommand::Inspect(name_arg("v")),
             VolumeCommand::Rm(name_arg("v")),
@@ -367,7 +382,7 @@ mod tests {
         let svc = CannedService::with([Some(Response::VolumeList {
             volumes: Vec::new(),
         })]);
-        let (code, out) = run_cmd(&VolumeCommand::Ls, &svc).await.unwrap();
+        let (code, out) = run_cmd(&VolumeCommand::Ls(ls_args()), &svc).await.unwrap();
         assert_eq!(code, 0);
         for header in ["NAME", "ON DISK", "CREATED", "IN USE"] {
             assert!(out.contains(header), "missing {header} in {out:?}");
@@ -396,8 +411,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["name"], "prism-data");
-        assert_eq!(parsed["size_bytes"], 10_737_418_240_u64);
-        assert_eq!(parsed["disk_bytes"], 33_554_432);
+        assert_eq!(parsed["sizeBytes"], 10_737_418_240_u64);
+        assert_eq!(parsed["diskBytes"], 33_554_432);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::credential_flow::store::{CredentialEntry, CredentialStateFile, Creden
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
+use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, WorkloadIdentity};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -44,6 +45,8 @@ pub struct CredentialPendingPrompt {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    /// True when a value is already bound for this connector on this machine, so the card can grant that binding instead of demanding the secret again (or re-running a sign-in).
+    pub bound_value_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,10 +100,11 @@ pub enum DecisionOutcome {
     UnknownId,
 }
 
-/// `Allow`/`Deny` persist a rule to the store; `Timeout` persists nothing (S12).
+/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline and `Timeout` records nothing (S12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialDecisionRequest {
     Allow(CredentialEntry),
+    AllowBound,
     Deny,
     Timeout,
 }
@@ -109,6 +113,32 @@ struct PendingEntry {
     prompt_id: String,
     request_ids: Vec<String>,
     deadline: Instant,
+}
+
+struct GrantBinding {
+    project: String,
+    workload: WorkloadIdentity,
+    store: Arc<dyn GrantStore>,
+    /// Each connector's forget count as of the question this run is currently asking about it, so a `lns connector disconnect` landing after the card went up cancels the decision it interrupted, while one that landed before is a question the card is answering.
+    revocations: Mutex<HashMap<String, u64>>,
+}
+
+impl GrantBinding {
+    fn revocations_asked_against(&self, connector: &str) -> u64 {
+        self.revocations
+            .lock()
+            .expect("revocations mutex poisoned")
+            .get(connector)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn ask_against_revocations(&self, connector: &str, count: u64) {
+        self.revocations
+            .lock()
+            .expect("revocations mutex poisoned")
+            .insert(connector.to_string(), count);
+    }
 }
 
 pub struct CredentialSession {
@@ -123,7 +153,9 @@ pub struct CredentialSession {
     bundled_ids: HashSet<String>,
     connectable: HashSet<String>,
     armed: Mutex<HashSet<String>>,
-    reload_grants: HashSet<String>,
+    slot_ids: HashSet<String>,
+    grant_binding: Option<GrantBinding>,
+    run_grants: Mutex<HashMap<String, GrantRecord>>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
     oauth_display_names: HashMap<String, String>,
@@ -171,7 +203,9 @@ impl CredentialSession {
             bundled_ids: HashSet::new(),
             connectable: HashSet::new(),
             armed: Mutex::new(HashSet::new()),
-            reload_grants: HashSet::new(),
+            slot_ids: HashSet::new(),
+            grant_binding: None,
+            run_grants: Mutex::new(HashMap::new()),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
             oauth_display_names: HashMap::new(),
@@ -276,9 +310,40 @@ impl CredentialSession {
         self
     }
 
-    /// The grants that survive a policy reload because they don't derive from `lns-policy.yaml` — the definition's credential slots; a policy edit that disconnects a connector must not revoke these.
-    pub fn with_reload_grants(mut self, slots: HashSet<String>) -> Self {
-        self.reload_grants = slots;
+    /// The run's artifact-declared credential slot ids, which `lns-policy.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the slot was granted at boot or consented at first use.
+    pub fn with_slot_ids(mut self, slots: HashSet<String>) -> Self {
+        self.slot_ids = slots;
+        self
+    }
+
+    /// Binds this run's grant context so an accepted or declined credential decision is remembered per (project, workload, connector) in the machine-local sidecar; run-local memory is seeded with this workload's own sidecar records so a prior deny suppresses the offer, and without a binding a decision is remembered for the run alone.
+    pub fn with_grants(
+        mut self,
+        project: String,
+        workload: WorkloadIdentity,
+        store: Arc<dyn GrantStore>,
+    ) -> Self {
+        let key = workload.key();
+        let loaded = store.load().unwrap_or_default();
+        let revocations: HashMap<String, u64> = loaded
+            .revocations
+            .iter()
+            .filter(|r| r.project == project)
+            .map(|r| (r.connector.clone(), r.count))
+            .collect();
+        let seeded = loaded
+            .grants
+            .into_iter()
+            .filter(|g| g.project == project && g.workload == key)
+            .map(|g| (g.connector.clone(), g))
+            .collect();
+        self.run_grants = Mutex::new(seeded);
+        self.grant_binding = Some(GrantBinding {
+            project,
+            workload,
+            store,
+            revocations: Mutex::new(revocations),
+        });
         self
     }
 
@@ -286,14 +351,12 @@ impl CredentialSession {
         self.armed.lock().expect("armed mutex poisoned").clone()
     }
 
-    /// Recompute the armed set from a reloaded policy's connected connectors, preserving the reload-surviving slot grants — so `lns connector disconnect` stops the stored value from arming even when a route still permits the destination.
-    pub fn reconcile_armed(&self, connectors: &[String]) {
+    /// Reconcile the armed set against a reloaded policy without erasing this run's live consent: keep an id the reload still lists or that names a credential slot (a live connect isn't self-revoked by its own persist, and the policy file can't revoke an artifact slot), re-arm the ids the reloaded policy grants, and drop everything else (a `lns connector disconnect`) — so a reload can revoke arming but never re-arm a connector this workload never granted.
+    pub fn reconcile_armed(&self, granted: &[String], reloaded: &[String]) {
+        let reloaded_set: HashSet<&str> = reloaded.iter().map(String::as_str).collect();
         let mut armed = self.armed.lock().expect("armed mutex poisoned");
-        *armed = connectors
-            .iter()
-            .cloned()
-            .chain(self.reload_grants.iter().cloned())
-            .collect();
+        armed.retain(|id| reloaded_set.contains(id.as_str()) || self.slot_ids.contains(id));
+        armed.extend(granted.iter().cloned());
     }
 
     fn grant_armed(&self, credential_id: &str) {
@@ -301,6 +364,110 @@ impl CredentialSession {
             .lock()
             .expect("armed mutex poisoned")
             .insert(credential_id.to_string());
+    }
+
+    /// True when this workload holds a standing deny grant for the connector whose recorded disclosure still describes it, so a held request fails without re-prompting for the rest of this run and future runs; a redefinition invalidates the deny exactly as it invalidates an allow.
+    fn workload_denied(&self, credential_id: &str) -> bool {
+        let grant = self
+            .run_grants
+            .lock()
+            .expect("run grants mutex poisoned")
+            .get(credential_id)
+            .cloned();
+        let Some(grant) = grant.filter(|g| g.verdict == GrantVerdict::Deny) else {
+            return false;
+        };
+        if grant.has_no_disclosure() {
+            return true;
+        }
+        match self.provider_disclosure(credential_id) {
+            (Some(env_var), domains, _) => grant.matches_disclosure(&env_var, &domains),
+            _ => true,
+        }
+    }
+
+    /// This run's accept/decline as a grant record, unless it is an allow the provider discloses no injection to pin it to (a deny, being a standing "no", needs none); an unbound session's record carries empty keys nothing ever reads — run-local memory keys by connector alone.
+    fn grant_record_for(&self, credential_id: &str, verdict: GrantVerdict) -> Option<GrantRecord> {
+        let (env_var, injection_domains) = match self.provider_disclosure(credential_id) {
+            (Some(env_var), domains, _) => (env_var, domains),
+            _ if verdict == GrantVerdict::Deny => (String::new(), Vec::new()),
+            _ => return None,
+        };
+        let (project, workload) = match &self.grant_binding {
+            Some(b) => (b.project.clone(), b.workload.key()),
+            None => (String::new(), String::new()),
+        };
+        Some(GrantRecord {
+            project,
+            workload,
+            connector: credential_id.to_string(),
+            verdict,
+            env_var,
+            injection_domains,
+        })
+    }
+
+    /// Remembers this run's accept/decline for `credential_id` in run-local memory, so a decline suppresses the re-prompt whether or not a sidecar is bound and writable; the returned record is what [`Self::persist_grant`] later carries to the sidecar.
+    fn remember_grant_for_the_run(
+        &self,
+        credential_id: &str,
+        verdict: GrantVerdict,
+    ) -> Option<GrantRecord> {
+        let record = self.grant_record_for(credential_id, verdict)?;
+        self.run_grants
+            .lock()
+            .expect("run grants mutex poisoned")
+            .insert(credential_id.to_string(), record.clone());
+        Some(record)
+    }
+
+    /// Pins the forget count a freshly-raised card is asked against, so a `lns connector disconnect` the developer did before it went up is a question this card answers rather than a cancellation of it; an unreadable sidecar leaves the previous count in place, which can only cancel.
+    fn ask_against_current_revocations(&self, credential_id: &str) {
+        let Some(binding) = &self.grant_binding else {
+            return;
+        };
+        let Ok(file) = binding.store.load() else {
+            return;
+        };
+        binding.ask_against_revocations(
+            credential_id,
+            file.revocations_of(&binding.project, credential_id),
+        );
+    }
+
+    /// Writes a remembered grant to the sidecar unless a forget landed since the card was raised, decided inside the store's update so the disconnect and this write cannot interleave.
+    fn persist_grant(&self, record: Option<GrantRecord>) {
+        let (Some(record), Some(binding)) = (record, &self.grant_binding) else {
+            return;
+        };
+        let asked_against = binding.revocations_asked_against(&record.connector);
+        let mut forgotten_since = false;
+        let outcome = binding.store.update(&mut |file| {
+            if file.revocations_of(&record.project, &record.connector) != asked_against {
+                forgotten_since = true;
+                return false;
+            }
+            file.upsert(record.clone());
+            true
+        });
+        if forgotten_since {
+            self.notifier.inform(&format!(
+                "{} was disconnected during this run, so this decision was not remembered; the next run will ask again",
+                record.connector
+            ));
+            return;
+        }
+        if let Err(e) = outcome {
+            self.notifier.inform(&format!(
+                "credential decision applied but its grant was not persisted; the next run will ask again: {e}"
+            ));
+        }
+    }
+
+    /// Remembers a decision that writes no value of its own — a decline, or a grant of what is already bound on this machine — so nothing gates its durability.
+    fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
+        let record = self.remember_grant_for_the_run(credential_id, verdict);
+        self.persist_grant(record);
     }
 
     fn is_armed_id(&self, credential_id: &str) -> bool {
@@ -357,6 +524,8 @@ impl CredentialSession {
             },
         );
         drop(pending);
+        // Only a newly-raised card asks a new question: a request joining a card already up must not move the count its decision is judged against.
+        self.ask_against_current_revocations(&req.credential_id);
         let oauth_display_name = self
             .is_signin(&req.credential_id)
             .then(|| self.display_name_for(&req.credential_id));
@@ -368,6 +537,8 @@ impl CredentialSession {
         };
         let (env_var, injection_domains, is_project_defined) =
             self.provider_disclosure(&req.credential_id);
+        // Only a value bound in the store counts: a host-detect entry resolves to the very value the card's detected-value offer already spends.
+        let bound_value_available = self.has_armed_value(&req.credential_id);
         self.notifier.present(&CredentialPendingPrompt {
             id: req.id,
             credential_id: req.credential_id,
@@ -377,17 +548,19 @@ impl CredentialSession {
             env_var,
             injection_domains,
             is_project_defined,
+            bound_value_available,
         });
     }
 
     fn is_denied(&self, credential_id: &str) -> bool {
-        matches!(
-            self.state
-                .lock()
-                .expect("state mutex poisoned")
-                .get(credential_id),
-            Some(CredentialEntry::Deny)
-        )
+        self.workload_denied(credential_id)
+            || matches!(
+                self.state
+                    .lock()
+                    .expect("state mutex poisoned")
+                    .get(credential_id),
+                Some(CredentialEntry::Deny)
+            )
     }
 
     fn provider_disclosure(&self, credential_id: &str) -> (Option<String>, Vec<String>, bool) {
@@ -395,15 +568,9 @@ impl CredentialSession {
             .iter()
             .find(|p| p.id() == credential_id)
             .map(|p| {
-                let domains: Vec<String> = p
-                    .unarmed_injections()
-                    .iter()
-                    .map(|inj| inj.domain().to_string())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
+                let (env_var, domains) = p.disclosure_snapshot();
                 let is_project = !self.bundled_ids.contains(p.id());
-                (Some(p.env_var().to_string()), domains, is_project)
+                (Some(env_var), domains, is_project)
             })
             .unwrap_or((None, Vec::new(), false))
     }
@@ -462,7 +629,7 @@ impl CredentialSession {
         self.notifier.dismiss(id);
         let kind = decision_kind_of(&request);
         match &request {
-            CredentialDecisionRequest::Allow(_) => {
+            CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
                 self.record_credential_approval(&credential_id, Decision::Allow)
             }
             CredentialDecisionRequest::Deny => {
@@ -470,17 +637,34 @@ impl CredentialSession {
             }
             CredentialDecisionRequest::Timeout => {}
         }
-        let connect_now = matches!(request, CredentialDecisionRequest::Allow(_))
-            && self.connectable.contains(&credential_id);
-        if let Some(entry) = persistent_entry(request) {
-            if connect_now {
+        match request {
+            CredentialDecisionRequest::Allow(entry) => {
+                // Answering the first-use card Allow is this run's consent, so arm the id whether or not it was connectable; a value never arms without a card being answered.
                 self.grant_armed(&credential_id);
+                let grant = self.remember_grant_for_the_run(&credential_id, GrantVerdict::Allow);
+                // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
+                if self.apply_persistent_entry(credential_id.clone(), entry) {
+                    self.persist_grant(grant);
+                }
+                if self.connectable.contains(&credential_id) {
+                    (self.connect)(&credential_id);
+                }
             }
-            // Apply and emit the armed value before the connect releases network holds, so a released request never reaches the placeholder gate ahead of its injection.
-            self.apply_persistent_entry(credential_id.clone(), entry);
-            if connect_now {
-                (self.connect)(&credential_id);
+            // Granting the binding already on this machine is consent to spend it, not a decision to rebind: the stored entry is left exactly as `lns connector connect` wrote it and only the armed set changes.
+            CredentialDecisionRequest::AllowBound => {
+                self.grant_armed(&credential_id);
+                self.remember_grant(&credential_id, GrantVerdict::Allow);
+                self.record_bound_credential_event(&credential_id);
+                self.emit_armed_state();
+                if self.connectable.contains(&credential_id) {
+                    (self.connect)(&credential_id);
+                }
             }
+            // A declined card is remembered per-workload in the grant sidecar, not as a machine-wide credential Deny that would block the connector for every project.
+            CredentialDecisionRequest::Deny => {
+                self.remember_grant(&credential_id, GrantVerdict::Deny);
+            }
+            CredentialDecisionRequest::Timeout => {}
         }
         for request_id in &request_ids {
             self.send_decision_frame(request_id, kind);
@@ -535,6 +719,7 @@ impl CredentialSession {
         }
         if self.connectable.contains(id) {
             self.grant_armed(id);
+            self.remember_grant(id, GrantVerdict::Allow);
             (self.connect)(id);
             // The connect armed a value the wire expansion resolves (stored, oauth, or a host-detect that the host supplies), so a held value card asks an answered question; with nothing resolvable the card stays — that decision is still owed.
             if self.has_resolvable_value(id) {
@@ -722,7 +907,10 @@ impl CredentialSession {
     /// Connects the connector live (if it isn't already) and arms `entry` in its credential slot — the shared tail of every successful connect, whether by completed sign-in or pasted token. The value is applied and emitted before the connect, because the connect releases network holds and the released request must not reach the placeholder gate before the armed injection is in hand.
     fn arm_connected(&self, credential_id: &str, entry: CredentialEntry) {
         self.grant_armed(credential_id);
-        self.apply_persistent_entry(credential_id.to_string(), entry);
+        let grant = self.remember_grant_for_the_run(credential_id, GrantVerdict::Allow);
+        if self.apply_persistent_entry(credential_id.to_string(), entry) {
+            self.persist_grant(grant);
+        }
         if self.connectable.contains(credential_id) {
             (self.connect)(credential_id);
         }
@@ -754,20 +942,45 @@ impl CredentialSession {
             }));
     }
 
-    fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) {
+    /// Re-emits the wire snapshot for an unchanged store, so a decision that only widened the armed set still reaches the boundary with the injection in hand.
+    fn emit_armed_state(&self) {
+        let snapshot = self.state.lock().expect("state mutex poisoned").clone();
+        (self.policy_emitter)(&snapshot, &self.armed_ids());
+    }
+
+    /// Reports whether the entry reached the store, so a caller can hold back a grant that would otherwise outlive the value it was given for.
+    fn apply_persistent_entry(&self, credential_id: String, entry: CredentialEntry) -> bool {
         self.record_credential_event(&credential_id, &entry);
         let snapshot = {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.insert(credential_id, entry);
             state.clone()
         };
-        if let Err(e) = self.store.save(&snapshot) {
-            self.notifier.inform(&format!(
-                "credential rule applied in-memory but not persisted: {e}"
-            ));
-        }
+        let persisted = match self.store.save(&snapshot) {
+            Ok(()) => true,
+            Err(e) => {
+                self.notifier.inform(&format!(
+                    "credential rule applied in-memory but not persisted: {e}"
+                ));
+                false
+            }
+        };
         // Policy frame goes out even on a failed write so the held request that triggered the decision isn't stalled (S14).
         (self.policy_emitter)(&snapshot, &self.armed_ids());
+        persisted
+    }
+
+    /// Records the ledger event for the value already bound, so granting an existing binding leaves the same audit trail as a decision that binds one.
+    fn record_bound_credential_event(&self, credential_id: &str) {
+        let bound = self
+            .state
+            .lock()
+            .expect("state mutex poisoned")
+            .get(credential_id)
+            .cloned();
+        if let Some(entry) = bound {
+            self.record_credential_event(credential_id, &entry);
+        }
     }
 
     fn record_credential_approval(&self, credential_id: &str, decision: Decision) {
@@ -890,17 +1103,11 @@ impl CredentialSession {
 
 fn decision_kind_of(request: &CredentialDecisionRequest) -> CredentialDecisionKind {
     match request {
-        CredentialDecisionRequest::Allow(_) => CredentialDecisionKind::Allow,
+        CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
+            CredentialDecisionKind::Allow
+        }
         CredentialDecisionRequest::Deny => CredentialDecisionKind::Deny,
         CredentialDecisionRequest::Timeout => CredentialDecisionKind::Timeout,
-    }
-}
-
-fn persistent_entry(request: CredentialDecisionRequest) -> Option<CredentialEntry> {
-    match request {
-        CredentialDecisionRequest::Allow(entry) => Some(entry),
-        CredentialDecisionRequest::Deny => Some(CredentialEntry::Deny),
-        CredentialDecisionRequest::Timeout => None,
     }
 }
 
@@ -923,6 +1130,7 @@ fn injection_targets_host(inj: &CredentialInjection, host: &str) -> bool {
 mod tests {
     use super::*;
     use crate::approval_flow::session::tests::CapturingRecorder;
+    use lns_policy::grants::WorkloadGrantFile;
     use std::io;
     use std::sync::Mutex as StdMutex;
 
@@ -1248,6 +1456,459 @@ mod tests {
     }
 
     #[test]
+    fn allowing_a_first_use_card_arms_an_ungranted_connector_for_the_run() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]));
+        assert!(
+            !session.armed_ids().contains("some-provider"),
+            "an applied-but-ungranted id starts unarmed"
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "answering the first-use card Allow is this run's consent, so the id must arm even though it was neither connectable nor granted at boot"
+        );
+        assert!(
+            wire_injections(&session, "some-provider")
+                .iter()
+                .any(|i| matches!(
+                    i,
+                    CredentialInjection::Header { value, .. } if value.contains("some-real")
+                )),
+            "the consented value reaches the wire after Allow"
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingGrantStore {
+        saved: StdMutex<lns_policy::grants::WorkloadGrantFile>,
+    }
+    impl GrantStore for CapturingGrantStore {
+        fn load(&self) -> std::io::Result<lns_policy::grants::WorkloadGrantFile> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, s: &lns_policy::grants::WorkloadGrantFile) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = s.clone();
+            Ok(())
+        }
+    }
+
+    struct FailingGrantStore;
+    impl GrantStore for FailingGrantStore {
+        fn load(&self) -> std::io::Result<lns_policy::grants::WorkloadGrantFile> {
+            Ok(lns_policy::grants::WorkloadGrantFile::default())
+        }
+        fn save(&self, _: &lns_policy::grants::WorkloadGrantFile) -> std::io::Result<()> {
+            Err(std::io::Error::other("sidecar unwritable"))
+        }
+    }
+
+    fn grants_session(
+        store: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+        custom: Vec<DefProvider>,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(custom))
+        .with_grants("proj".into(), workload, store)
+    }
+
+    #[test]
+    fn a_consent_allow_persists_an_allow_grant_to_the_sidecar() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("the consent must persist a grant so the next run skips the offer");
+        assert_eq!(grant.verdict, lns_policy::grants::GrantVerdict::Allow);
+        assert_eq!(grant.env_var, "SOME_TOKEN");
+        assert_eq!(grant.injection_domains, ["api.some-provider.example"]);
+    }
+
+    #[test]
+    fn a_forget_from_before_this_run_does_not_block_the_grant_it_consents_to_now() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.revoke_project_connector("proj", "some-provider");
+        store.save(&prior).unwrap();
+
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "the run compares the forget count against what it started with, so a revoke the developer did before launching is already answered by the card they just accepted — only a forget landing mid-run may drop it"
+        );
+    }
+
+    /// `lns connector disconnect` landing from its own process while this run is live.
+    fn forget_from_another_process(store: &dyn GrantStore) {
+        store
+            .update(&mut |file| {
+                file.revoke_project_connector("proj", "some-provider");
+                true
+            })
+            .unwrap();
+    }
+
+    fn allow_stored(session: &CredentialSession, prompt_id: &str) {
+        session.record_decision(
+            prompt_id,
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_forget_landing_while_the_card_is_open_cancels_that_decision_and_no_later_one() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        forget_from_another_process(store.as_ref());
+        allow_stored(&session, "c1");
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "the forget interrupted this card, so it wins over the decision the run was still holding"
+        );
+
+        // The developer reconnects, and the next request raises a card they answer knowing about the disconnect.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        allow_stored(&session, "c2");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "a card raised after the forget is a new question, so answering it must land — otherwise one disconnect makes every later consent in this run un-rememberable, and the next run re-asks citing a disconnect the developer already undid"
+        );
+    }
+
+    /// A sidecar that can be made momentarily unreadable, so what a card asked against can be pinned when the read behind it fails.
+    #[derive(Default)]
+    struct FlakyReadGrantStore {
+        saved: StdMutex<WorkloadGrantFile>,
+        unreadable: std::sync::atomic::AtomicBool,
+    }
+
+    impl FlakyReadGrantStore {
+        fn set_unreadable(&self, unreadable: bool) {
+            self.unreadable
+                .store(unreadable, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl GrantStore for FlakyReadGrantStore {
+        fn load(&self) -> std::io::Result<WorkloadGrantFile> {
+            if self.unreadable.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(std::io::Error::other("sidecar unreadable"));
+            }
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, s: &WorkloadGrantFile) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = s.clone();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_card_raised_over_an_unreadable_sidecar_can_only_cancel_never_wave_through() {
+        let store = Arc::new(FlakyReadGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        forget_from_another_process(store.as_ref());
+
+        store.set_unreadable(true);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        store.set_unreadable(false);
+        allow_stored(&session, "c1");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "a card that could not read what it was asked against must fall back to the count the run started with, so an unreadable sidecar costs a re-ask rather than letting a forget it never saw be overwritten"
+        );
+    }
+
+    #[test]
+    fn a_forget_that_landed_before_the_card_went_up_is_answered_by_it() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+
+        forget_from_another_process(store.as_ref());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        allow_stored(&session, "c1");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "the card postdates the forget, so the developer is answering it, not being overruled by it — a run started before the disconnect must not hold that against every card it raises afterwards"
+        );
+    }
+
+    #[test]
+    fn a_grant_persist_failure_informs_the_user_but_still_arms_for_the_run() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            Arc::new(FailingGrantStore),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "consent still arms for this run even when the sidecar can't be written"
+        );
+        assert!(
+            notifier
+                .informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("not persisted")),
+            "the user is told the grant did not persist so the re-prompt next run isn't a surprise"
+        );
+    }
+
+    fn grants_session_with_store(
+        grants: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+        store: Arc<CapturingStore>,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(|_| {}),
+        )
+        .with_grants("proj".into(), workload, grants)
+    }
+
+    #[test]
+    fn a_consent_whose_value_cannot_be_written_persists_no_grant() {
+        let grants = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let store = Arc::new(CapturingStore::default());
+        let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
+        store.fail_next(io::ErrorKind::PermissionDenied, "denied");
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-new".into(),
+            }),
+        );
+
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "the run the developer consented to still arms from the in-memory value"
+        );
+        assert!(
+            grants
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "a grant outliving the value it was given for would silently arm whatever stale value the next run loads from disk, with no card"
+        );
+    }
+
+    #[test]
+    fn a_connect_whose_token_cannot_be_written_persists_no_grant() {
+        let grants = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let store = Arc::new(CapturingStore::default());
+        let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
+        store.fail_next(io::ErrorKind::PermissionDenied, "denied");
+
+        session.connect_connector_with_token("some-provider", "some-new".into());
+
+        assert!(
+            grants
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "the pasted-token tail must hold its grant back too, or the next run arms the stale on-disk value under it"
+        );
+    }
+
+    #[test]
+    fn a_consent_for_an_undisclosed_id_persists_no_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let session = grants_session(
+            store.clone(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            vec![],
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            store.load().unwrap().grants.is_empty(),
+            "with no injection snapshot to pin the grant to, nothing is persisted"
+        );
+    }
+
+    fn grants_session_connectable(
+        store: Arc<dyn GrantStore>,
+        workload: WorkloadIdentity,
+    ) -> CredentialSession {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_connect_emitter(
+            HashSet::from(["some-provider".to_string()]),
+            Box::new(|_| {}),
+        )
+        .with_grants("proj".into(), workload, store)
+    }
+
+    #[tokio::test]
+    async fn a_network_offer_connect_persists_the_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session_connectable(store.clone(), workload.clone());
+        assert!(session.connect_connector_now("some-provider").await);
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "accepting a network-offer connect must persist the grant so the next run skips the offer"
+        );
+    }
+
+    #[test]
+    fn a_connect_by_pasted_token_persists_the_grant() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session_connectable(store.clone(), workload.clone());
+        session.connect_connector_with_token("some-provider", "some-real".into());
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_some(),
+            "connecting with a pasted token (the shared arm_connected tail) must persist the grant"
+        );
+    }
+
+    #[test]
     fn a_credential_deny_records_a_credential_approval() {
         let (s, _n, _store, _rx) = fixture();
         let recorder = Arc::new(CapturingRecorder::default());
@@ -1438,21 +2099,271 @@ mod tests {
     }
 
     #[test]
-    fn deny_persists_deny_rule_and_emits_deny_decision_frame() {
-        let (s, _n, store, mut rx) = fixture();
-        s.submit_pending(pending("c1", "linear"), Instant::now());
+    fn a_card_deny_persists_a_per_workload_deny_and_emits_a_deny_frame() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants("proj".into(), workload.clone(), store.clone());
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
 
-        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
 
-        let saves = store.saves.lock().unwrap();
-        assert_eq!(saves[0].get("linear"), Some(&CredentialEntry::Deny));
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("a declined card persists a per-workload deny grant");
+        assert_eq!(grant.verdict, GrantVerdict::Deny);
         assert_eq!(
             decision_frame(&mut rx).decision,
             CredentialDecisionKind::Deny
         );
+        assert!(
+            !matches!(
+                session.current_state().get("some-provider"),
+                Some(CredentialEntry::Deny)
+            ),
+            "a declined card is per-workload, never a machine-wide credential Deny that would block the connector for every project"
+        );
+    }
+
+    #[test]
+    fn a_card_deny_for_an_undisclosed_id_persists_a_standing_deny() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("a deny is a standing no, recorded even with no injection to pin it to");
+        assert_eq!(grant.verdict, GrantVerdict::Deny);
+        assert!(grant.env_var.is_empty());
+    }
+
+    #[test]
+    fn a_prior_workload_deny_suppresses_the_offer_without_re_prompting() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants("proj".into(), workload, store);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
         assert_eq!(
-            s.current_state().get("linear"),
-            Some(&CredentialEntry::Deny)
+            decision_frame(&mut rx).decision,
+            CredentialDecisionKind::Deny,
+            "a standing per-workload deny fails the request at the boundary"
+        );
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "no card is shown for a connector this workload already declined"
+        );
+    }
+
+    fn session_with_prior_grant(
+        record: GrantRecord,
+    ) -> (CredentialSession, Arc<RecordingNotifier>) {
+        let store = Arc::new(CapturingGrantStore::default());
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(record);
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            store,
+        );
+        (session, notifier)
+    }
+
+    #[test]
+    fn a_prior_deny_for_another_workload_does_not_suppress_this_workloads_card() {
+        let foreign = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/other".into(),
+            },
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        );
+        let (session, notifier) = session_with_prior_grant(foreign);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "another workload's decline is not this workload's answer; the card must still be asked"
+        );
+    }
+
+    #[test]
+    fn a_deny_is_remembered_for_the_run_even_with_no_grant_binding() {
+        let (s, n, _store, _rx) = fixture();
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        s.record_decision("c1", CredentialDecisionRequest::Deny);
+        let after_decline = n.presented.lock().unwrap().len();
+        s.submit_pending(pending("c2", "some-provider"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap().len(),
+            after_decline,
+            "a decline must stop the re-prompt from run-local memory alone; whether a sidecar is bound is not the workload's concern"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_whose_connector_was_redefined_asks_again() {
+        let stale = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            "some-provider",
+            "OLD_TOKEN",
+            vec!["api.old.example".into()],
+        );
+        let (session, notifier) = session_with_prior_grant(stale);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            1,
+            "a deny pinned to a since-changed env var and domain must be re-asked, exactly as a stale allow is re-asked rather than silently inherited"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_holds_when_the_run_resolves_no_provider_to_compare_against() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut prior = WorkloadGrantFile::default();
+        prior.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        store.save(&prior).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // No custom providers, so this run has no disclosure to check the recorded one against.
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_grants("proj".into(), workload, store);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "with nothing to compare the recorded disclosure against, the standing no holds rather than failing open into a fresh card"
+        );
+    }
+
+    #[test]
+    fn a_prior_deny_recorded_without_a_disclosure_still_suppresses_the_offer() {
+        let unpinned = GrantRecord::deny(
+            "proj",
+            &WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            "some-provider",
+            "",
+            vec![],
+        );
+        let (session, notifier) = session_with_prior_grant(unpinned);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap().is_empty(),
+            "a standing no with no disclosure to pin it to has nothing a redefinition could invalidate, so it holds"
+        );
+    }
+
+    #[test]
+    fn a_mid_run_deny_suppresses_the_offer_even_when_the_sidecar_write_failed() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier.clone(),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants(
+            "proj".into(),
+            WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+            Arc::new(FailingGrantStore),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        let cards_after_first_decline = notifier.presented.lock().unwrap().len();
+        // The re-request in the same run must be suppressed from run-local memory even though the sidecar write failed.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap().len(),
+            cards_after_first_decline,
+            "the re-request is suppressed without a fresh card even though the deny could not be persisted"
+        );
+        let mut c2_denied = false;
+        while let Ok(frame) = rx.try_recv() {
+            if let HostFrame::CredentialDecision(d) = frame
+                && d.id == "c2"
+            {
+                c2_denied = d.decision == CredentialDecisionKind::Deny;
+            }
+        }
+        assert!(
+            c2_denied,
+            "the re-request is failed at the boundary from the run-local deny memory"
         );
     }
 
@@ -1734,6 +2645,11 @@ mod tests {
             CredentialDecisionKind::Allow
         );
         assert_eq!(
+            decision_kind_of(&CredentialDecisionRequest::AllowBound),
+            CredentialDecisionKind::Allow,
+            "granting the existing binding releases the held request like any other allow"
+        );
+        assert_eq!(
             decision_kind_of(&CredentialDecisionRequest::Deny),
             CredentialDecisionKind::Deny
         );
@@ -1833,7 +2749,12 @@ mod tests {
             }),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
-        session.record_decision("c1", CredentialDecisionRequest::Deny);
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
 
         let snaps = captured.snapshots.lock().unwrap();
         assert_eq!(
@@ -1845,8 +2766,34 @@ mod tests {
 
     #[test]
     fn timeout_does_not_invoke_policy_emitter() {
-        // The emitter's only call site is reached when `persistent_entry` is `Some`, so asserting the `None` mapping pins this without dead closure-instrumentation code (S12).
-        assert_eq!(persistent_entry(CredentialDecisionRequest::Timeout), None);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let captured = Arc::new(CapturingEmitter::default());
+        let captured_clone = captured.clone();
+        let session = CredentialSession::with_policy_emitter(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            Duration::from_secs(30),
+            Box::new(move |state, _armed| {
+                captured_clone.snapshots.lock().unwrap().push(state.clone());
+            }),
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision("c1", CredentialDecisionRequest::Timeout);
+        assert!(
+            captured.snapshots.lock().unwrap().is_empty(),
+            "a timed-out prompt writes nothing and must not touch the wire"
+        );
+        // Positive control: the same emitter fires on a real decision, so the assertion above is about the timeout and not about an unwired emitter.
+        session.submit_pending(pending("c2", "some-provider"), Instant::now());
+        session.record_decision(
+            "c2",
+            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect),
+        );
+        assert_eq!(captured.snapshots.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1873,21 +2820,6 @@ mod tests {
         let snaps = captured.snapshots.lock().unwrap();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].get("openai"), Some(&CredentialEntry::Deny));
-    }
-
-    #[test]
-    fn persistent_entry_drops_timeout_and_preserves_allow_and_deny() {
-        assert_eq!(
-            persistent_entry(CredentialDecisionRequest::Allow(
-                CredentialEntry::HostDetect
-            )),
-            Some(CredentialEntry::HostDetect)
-        );
-        assert_eq!(
-            persistent_entry(CredentialDecisionRequest::Deny),
-            Some(CredentialEntry::Deny)
-        );
-        assert_eq!(persistent_entry(CredentialDecisionRequest::Timeout), None);
     }
 
     type ConnectableFixture = (
@@ -1917,6 +2849,69 @@ mod tests {
             Box::new(move |id| connected_cb.lock().unwrap().push(id.to_string())),
         );
         (session, notifier, store, rx, connected)
+    }
+
+    #[test]
+    fn granting_a_connectable_ids_existing_binding_connects_it_live_and_keeps_the_stored_value() {
+        let (s, n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        let bound = CredentialEntry::Stored {
+            value: "already-bound".into(),
+        };
+        let mut machine = CredentialStateFile::new();
+        machine.insert("gitlab".to_string(), bound.clone());
+        s.apply_external_state(machine);
+        s.submit_pending(pending("c1", "gitlab"), Instant::now());
+        assert!(
+            n.presented.lock().unwrap()[0].bound_value_available,
+            "a value bound on this machine must be offerable for reuse on the card"
+        );
+
+        s.record_decision("c1", CredentialDecisionRequest::AllowBound);
+
+        assert_eq!(
+            connected.lock().unwrap().as_slice(),
+            &["gitlab".to_string()],
+            "granting the binding still connects the connector live, exactly as a fresh value would"
+        );
+        assert!(s.armed_ids().contains("gitlab"));
+        assert_eq!(
+            s.current_state().get("gitlab"),
+            Some(&bound),
+            "the machine binding is spent, never rewritten"
+        );
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "reusing a binding writes nothing to the credential store"
+        );
+    }
+
+    #[test]
+    fn granting_an_existing_binding_records_the_credential_use_it_starts() {
+        let (s, _n, _store, _rx, _connected) = fixture_connectable(&["some-provider"]);
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        let mut machine = CredentialStateFile::new();
+        machine.insert(
+            "some-provider".to_string(),
+            CredentialEntry::Stored {
+                value: "some-already-bound".into(),
+            },
+        );
+        s.apply_external_state(machine);
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        s.record_decision("c1", CredentialDecisionRequest::AllowBound);
+
+        let events = recorder.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LedgerEvent::CredentialUse { connector, fp, .. }
+                    if connector == "some-provider"
+                        && fp == &Some(lns_ipc::fingerprint("some-already-bound"))
+            )),
+            "granting a bound value is where that secret starts reaching the workload's destinations, so the audit chain owes the same credential-use row a freshly-bound value writes; got: {events:?}"
+        );
     }
 
     #[test]
@@ -2024,16 +3019,12 @@ mod tests {
 
     #[test]
     fn deny_for_a_connectable_id_does_not_connect() {
-        let (s, _n, store, _rx, connected) = fixture_connectable(&["gitlab"]);
+        let (s, _n, _store, _rx, connected) = fixture_connectable(&["gitlab"]);
         s.submit_pending(pending("c1", "gitlab"), Instant::now());
         s.record_decision("c1", CredentialDecisionRequest::Deny);
         assert!(
             connected.lock().unwrap().is_empty(),
             "denying must not connect the connector"
-        );
-        assert_eq!(
-            store.saves.lock().unwrap()[0].get("gitlab"),
-            Some(&CredentialEntry::Deny)
         );
     }
 
@@ -3009,6 +4000,34 @@ mod tests {
         (session, notifier, rx)
     }
 
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_host_detect_binding_is_not_also_offered_as_a_bound_value() {
+        let _g = crate::test_env::EnvVarGuard::set("SOME_TOKEN", "host-real");
+        let (session, notifier, _rx) =
+            unconsented_session_with(vec![("some-provider", CredentialEntry::HostDetect)]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            !notifier.presented.lock().unwrap()[0].bound_value_available,
+            "a host-detect entry is the same host value the card's own detected-value offer spends, so offering it a second time would put two primary buttons with one effect on the consent card"
+        );
+    }
+
+    #[test]
+    fn a_stored_binding_is_offered_as_a_bound_value() {
+        let (session, notifier, _rx) = unconsented_session_with(vec![(
+            "some-provider",
+            CredentialEntry::Stored {
+                value: "some-already-bound".into(),
+            },
+        )]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert!(
+            notifier.presented.lock().unwrap()[0].bound_value_available,
+            "a value bound on this machine is the card's whole reason to offer a grant instead of demanding the secret again"
+        );
+    }
+
     #[tokio::test]
     async fn a_network_offer_connect_releases_a_held_request_once_the_stored_value_arms() {
         let (session, notifier, mut rx) = unconsented_session_with(vec![(
@@ -3149,7 +4168,7 @@ mod tests {
             "while connected, the stored value arms"
         );
         // `lns connector disconnect` drops the id from lns-policy.yaml; the reload reconciles with the remaining connectors.
-        session.reconcile_armed(&[]);
+        session.reconcile_armed(&[], &[]);
         assert!(
             wire_injections(&session, "some-provider")
                 .iter()
@@ -3171,22 +4190,59 @@ mod tests {
             tx,
             TEST_TIMEOUT,
         )
-        .with_reload_grants(HashSet::from(["some-slot".to_string()]))
+        .with_slot_ids(HashSet::from(["some-slot".to_string()]))
         .with_armed_ids(HashSet::from([
             "some-slot".to_string(),
             "gitlab".to_string(),
         ]));
-        session.reconcile_armed(&["gitlab".to_string()]);
+        session.reconcile_armed(&[], &["gitlab".to_string()]);
         assert_eq!(
             session.armed_ids(),
             HashSet::from(["gitlab".to_string(), "some-slot".to_string()]),
             "the reloaded connector and the slot grant both hold"
         );
-        session.reconcile_armed(&[]);
+        session.reconcile_armed(&[], &[]);
         assert_eq!(
             session.armed_ids(),
             HashSet::from(["some-slot".to_string()]),
             "a credential slot is an artifact contract, never revoked by a policy edit"
+        );
+    }
+
+    #[test]
+    fn a_slot_consented_at_first_use_survives_an_unrelated_policy_reload() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            notifier,
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_slot_ids(HashSet::from(["some-provider".to_string()]));
+        assert!(
+            !session.armed_ids().contains("some-provider"),
+            "an ungranted slot boots unarmed"
+        );
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        session.record_decision(
+            "c1",
+            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
+                value: "some-real".into(),
+            }),
+        );
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "answering the first-use card arms the slot for the run"
+        );
+        // An unrelated policy write (e.g. an allow-always network rule) triggers the watcher with no slots in the reloaded overlay and no grant on disk.
+        session.reconcile_armed(&[], &[]);
+        assert!(
+            session.armed_ids().contains("some-provider"),
+            "a slot consented at first use must survive a policy reload it has nothing to do with; the policy file has no authority over an artifact-declared slot"
         );
     }
 

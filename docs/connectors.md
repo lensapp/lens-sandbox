@@ -67,18 +67,22 @@ A connector reaches a project's workloads in any of three ways:
 - **Required as a credential slot.** A definition's `spec.credentials` entry
   names a connector, the env var it is injected as (remapping the catalog
   default), and whether the workload requires it — the explicit way a sandbox
-  insists on a credential. A bound slot arms silently under the slot's env name.
+  insists on a credential. A bound slot is injected under the slot's env name
+  once this workload has been [granted](credentials.md#workload-grants) the
+  connector; until then it is offered on first use like any other.
   A **required** slot with no value bound on the machine refuses the launch
   before any microVM boots — naming the credential, its injection target, and
   the `lns connector connect` fix — and a credential you've denied refuses
   distinctly. An optional slot runs reactively. A required `oauth`-kind slot
-  blocks on the sign-in instead.
+  blocks on the sign-in instead, and completing that sign-in is itself the
+  [grant](credentials.md#workload-grants) — the workload starts armed rather
+  than asking you twice.
 - **Connected to the directory.** `lns connector connect` binds the
   connector's per-machine [value decision](credentials.md#value-decisions) —
   the approval-window card for a credential connector, the sign-in for an
   `oauth` one — and records the id in that directory's
   [`lns-policy.yaml`](policy.md), which is also how a directory with no
-  definition arms a connector:
+  definition connects one:
 
 ```bash
 lns connector connect gitlab
@@ -96,15 +100,17 @@ connectors:
   - gitlab
 ```
 
-Only a connector you have **connected** to this directory arms at launch: its
-declared routes are allowed and its placeholder is seeded, and the first request
-carrying that placeholder follows the ordinary credential
-[value decision](credentials.md#value-decisions) — it pauses for approval if you
-haven't bound a value yet, where you choose to use the host value, store one, or
-deny. A **declared** id from a sandbox definition seeds its placeholder but
-never arms on its own; it is offered reactively on first use, so an untrusted
-published sandbox can't open a route or spend a bound credential without your
-say-so. A **required credential
+Only a connector you have **connected** to this directory opens its declared
+routes and seeds its placeholder at launch, and the first request carrying that
+placeholder follows the ordinary credential
+[value decision](credentials.md#value-decisions) — where you choose to use the
+host value, store one, or deny. Connecting is a property of the directory, not
+of any one workload, so the value itself arms only where this workload holds a
+[grant](credentials.md#workload-grants); a copied policy file asks again rather
+than inheriting your approval. A **declared** id from a sandbox definition
+seeds its placeholder but never arms on its own; it is offered reactively on
+first use, so an untrusted published sandbox can't open a route or spend a
+bound credential without your say-so. A **required credential
 slot** is the exception a sandbox uses to insist on a credential — it refuses
 the launch when unbound (or blocks on the sign-in for an `oauth` slot), so the
 workload never starts half-provisioned. A new connector reaches a workload

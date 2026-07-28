@@ -13,6 +13,38 @@ information at the terminal.
 
 Log levels: `error`, `warn`, `info`, `debug`.
 
+## Machine-readable output
+
+The list and status verbs take `--format <table|json>`, so a script doesn't have to
+parse the human table:
+
+`lns ps`, `lns sandbox ls`, `lns volume ls`, `lns policy list`, `lns connector list`,
+`lns connector grants`, `lns config list`, `lns config get`, `lns service status`.
+
+`lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
+its machine-readable form is one JSON event per line. The older `--json` spelling still
+works as an alias for `--format jsonl`.
+
+What the JSON gives you:
+
+- **A bare array of objects** for the list verbs, pretty-printed. `lns service status`,
+  `lns inspect`, and `lns volume inspect` emit a single object instead.
+- **camelCase keys**, always present — a key with no value is `null`, never omitted, so
+  `jq .inUseBy` needs no guard.
+- **Raw numbers**, so nothing has to be un-humanized: `sizeBytes: 92274688`, not
+  `"88.0 MiB"`. Timestamps pass through as the service reports them.
+- **The same exit code as the table.** `--format` changes the shape and nothing else:
+  `lns config get` on an unset key still exits 1, emitting `[]`.
+- Some verbs report more in JSON than the table has room for. `lns sandbox ls` is the
+  clearest case: the table shows a reference and a state, the JSON adds digest, size,
+  layer count, pull time, and holder.
+- The empty-list sentences (`No rules in …`) become `[]`. Warnings go to stderr in both
+  formats, so stdout stays parseable either way.
+
+> **The JSON shape is experimental until v1.0.** Field names and shapes may change in a
+> minor release, so pin your `lns` version in scripts that depend on them. Table output
+> is for humans and carries no stability promise at all.
+
 ## The sandbox surface
 
 Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
@@ -203,7 +235,7 @@ Show one chronological timeline of every audit event across all sandboxes — or
 ```bash
 lns audit                                   # every event, every sandbox, newest first
 lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
-lns audit [--connector <id>] [--kind <kind>] [--json]
+lns audit [--connector <id>] [--kind <kind>] [--format <table|jsonl>]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
@@ -219,7 +251,8 @@ Filters compose:
   events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
   `connection`, `credential`, `tool`.
-- `--json` — one raw JSON event per line instead of the table.
+- `--format jsonl` — one raw JSON event per line instead of the table. (`--json` is the
+  older spelling of the same thing and still works.)
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline
@@ -284,9 +317,11 @@ lns policy remove <PATTERN>
 Manage the credential-connector catalog — the services whose credentials reach a
 workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
 declared in a sandbox definition's `spec.connectors` seeds its placeholder env
-var but is only offered — the workload is prompted to connect it on first use,
-never armed automatically; connecting one (here or reactively) arms it and
-records it under `connectors:` in that directory's `lns-policy.yaml`.
+var but is only offered — the workload is prompted on first use, never armed
+automatically. Connecting one records it under `connectors:` in that
+directory's `lns-policy.yaml` and binds its value on your machine; the workload
+still meets a first-use card, and answering it is what grants that workload the
+value.
 
 ```bash
 lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
@@ -294,6 +329,8 @@ lns connector list
 lns connector remove <ID>
 lns connector connect <ID> [--policy <PATH>]
 lns connector disconnect <ID> [--policy <PATH>]
+lns connector grants [--policy <PATH>] [--all]
+lns connector revoke <ID> [--policy <PATH>]
 ```
 
 | Subcommand   | Meaning                                                                       |
@@ -302,12 +339,15 @@ lns connector disconnect <ID> [--policy <PATH>]
 | `list`       | List the bundled and user-declared connectors and their auth kind.          |
 | `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
 | `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares or requires. |
-| `disconnect` | Disconnect a connector from this directory's policy.                       |
+| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
+| `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
+| `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
 name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
-connected connector are made interactively in the approval window — see
+connected connector are made interactively in the approval window; grants are
+recorded per project and workload in `~/.lns-workload-grants.json`. See
 [Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`

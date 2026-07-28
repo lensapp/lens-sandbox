@@ -34,8 +34,11 @@ pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
     Box::pin(async move { run_author(&super::SandboxCommand::Init, ctx) })
 }
 
-pub fn run_ps<'a>(_matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move { dispatch_command(super::SandboxCommand::Ps).await })
+pub fn run_ps<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::PsArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Ps(args)).await
+    })
 }
 
 async fn dispatch_command(command: super::SandboxCommand) -> Result<i32> {

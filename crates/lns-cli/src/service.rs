@@ -43,13 +43,19 @@ pub enum ServiceCommand {
     #[command(about = "Stop the Lens Sandbox background service.")]
     Stop,
     #[command(about = "Show status of the Lens Sandbox background service.")]
-    Status,
+    Status(ServiceStatusArgs),
     #[command(
         about = "Register a per-user login agent and start the service now and on every login."
     )]
     Enable,
     #[command(about = "Stop the service and unregister the per-user login agent.")]
     Disable,
+}
+
+#[derive(clap::Args)]
+pub struct ServiceStatusArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -108,22 +114,51 @@ pub(super) async fn cmd_stop(client: &impl ServiceClient) -> Result<()> {
     }
 }
 
-pub(super) async fn cmd_status(client: &impl ServiceClient) -> Result<()> {
+pub(super) async fn cmd_status(
+    client: &impl ServiceClient,
+    args: &ServiceStatusArgs,
+    writer: &mut dyn std::io::Write,
+) -> Result<()> {
+    let status = client.status().await;
+    if args.output.format == crate::output::Format::Json {
+        return crate::output::emit_object(&StatusView::new(status.as_ref()), writer);
+    }
     let Some(StatusInfo {
         pid,
         uptime_secs,
         version,
-    }) = client.status().await
+    }) = status
     else {
-        println!("Lens Sandbox is not running.");
+        writeln!(writer, "Lens Sandbox is not running.")?;
         return Ok(());
     };
 
-    println!("Lens Sandbox is running.");
-    println!("  PID:     {pid}");
-    println!("  Uptime:  {uptime_secs}s");
-    println!("  Version: {version}");
+    writeln!(writer, "Lens Sandbox is running.")?;
+    writeln!(writer, "  PID:     {pid}")?;
+    writeln!(writer, "  Uptime:  {uptime_secs}s")?;
+    writeln!(writer, "  Version: {version}")?;
     Ok(())
+}
+
+/// A stopped service is `running: false` with null details, not an error, so a script can branch on one field.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusView {
+    running: bool,
+    pid: Option<u32>,
+    uptime_secs: Option<u64>,
+    version: Option<String>,
+}
+
+impl StatusView {
+    fn new(status: Option<&StatusInfo>) -> Self {
+        Self {
+            running: status.is_some(),
+            pid: status.map(|s| s.pid),
+            uptime_secs: status.map(|s| s.uptime_secs),
+            version: status.map(|s| s.version.clone()),
+        }
+    }
 }
 
 pub(super) async fn cmd_enable(client: &impl ServiceClient) -> Result<()> {
@@ -438,32 +473,75 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cmd_status_reports_not_running_when_status_is_none() {
-        let client = FakeClient::default();
-        *client.status_response.lock().unwrap() = Some(None);
-
-        cmd_status(&client)
-            .await
-            .expect("cmd_status should succeed");
-
-        assert_eq!(client.calls(), vec!["status"]);
+    fn status_args(format: crate::output::Format) -> ServiceStatusArgs {
+        ServiceStatusArgs {
+            output: crate::output::OutputArgs { format },
+        }
     }
 
-    #[tokio::test]
-    async fn cmd_status_reports_details_when_status_returned() {
+    async fn status_output(client: &FakeClient, format: crate::output::Format) -> String {
+        let mut out = Vec::new();
+        cmd_status(client, &status_args(format), &mut out)
+            .await
+            .expect("cmd_status should succeed");
+        String::from_utf8(out).expect("status output is utf8")
+    }
+
+    fn running_status() -> FakeClient {
         let client = FakeClient::default();
         *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
             pid: 4242,
             uptime_secs: 17,
             version: "test-version".into(),
         }));
+        client
+    }
 
-        cmd_status(&client)
-            .await
-            .expect("cmd_status should succeed");
+    #[tokio::test]
+    async fn cmd_status_reports_not_running_when_status_is_none() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(None);
 
+        let text = status_output(&client, crate::output::Format::Table).await;
+
+        assert_eq!(text, "Lens Sandbox is not running.\n");
         assert_eq!(client.calls(), vec!["status"]);
+    }
+
+    #[tokio::test]
+    async fn cmd_status_reports_details_when_status_returned() {
+        let client = running_status();
+
+        let text = status_output(&client, crate::output::Format::Table).await;
+
+        assert!(text.contains("Lens Sandbox is running."), "got: {text}");
+        assert!(text.contains("PID:     4242"), "got: {text}");
+        assert!(text.contains("Uptime:  17s"), "got: {text}");
+        assert!(text.contains("Version: test-version"), "got: {text}");
+        assert_eq!(client.calls(), vec!["status"]);
+    }
+
+    #[tokio::test]
+    async fn status_as_json_is_one_object_a_script_can_branch_on() {
+        let text = status_output(&running_status(), crate::output::Format::Json).await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("json object");
+        assert_eq!(parsed["running"], true);
+        assert_eq!(parsed["pid"], 4242);
+        assert_eq!(parsed["uptimeSecs"], 17);
+        assert_eq!(parsed["version"], "test-version");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_service_is_running_false_rather_than_an_error() {
+        let client = FakeClient::default();
+        *client.status_response.lock().unwrap() = Some(None);
+
+        let text = status_output(&client, crate::output::Format::Json).await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("json object");
+        assert_eq!(parsed["running"], false);
+        assert!(parsed["pid"].is_null(), "no pid when stopped: {text}");
     }
 
     use crate::test_env::EnvScope;

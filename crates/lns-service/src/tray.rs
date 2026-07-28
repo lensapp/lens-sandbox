@@ -1517,7 +1517,7 @@ fn render_credential_card(
                         .color(window::TEXT_WARN),
                 );
             }
-            if !prompt.host_value_available {
+            if !prompt.host_value_available && !prompt.bound_value_available {
                 ui.add_space(8.0);
                 ui.colored_label(
                     window::TEXT_MUTED,
@@ -1548,6 +1548,12 @@ fn render_credential_card(
         },
         |ui| {
             let mut chosen: Option<CredentialDecisionRequest> = None;
+            if prompt.bound_value_available {
+                if primary_button(ui, "Use connected value").clicked() {
+                    chosen = Some(CredentialDecisionRequest::AllowBound);
+                }
+                ui.add_space(BTN_GAP);
+            }
             if prompt.host_value_available {
                 if primary_button(ui, "Use detected value").clicked() {
                     chosen = Some(CredentialDecisionRequest::Allow(
@@ -1610,11 +1616,31 @@ fn render_oauth_consent_card(
                 .size(theme::FONT_BODY)
                 .color(window::TEXT_MUTED),
             );
+            if prompt.bound_value_available {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("You are already signed in to {display_name}."))
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
         },
         |ui| {
             let mut chosen: Option<CredentialDecisionRequest> = None;
+            // Granting the existing sign-in is offered alongside a fresh one, never instead of it: the bound connection can be the wrong account or one the service has since revoked, and denying is a standing no for this workload rather than a way to re-authenticate.
+            if prompt.bound_value_available {
+                if primary_button(ui, "Use connection").clicked() {
+                    chosen = Some(CredentialDecisionRequest::AllowBound);
+                }
+                ui.add_space(BTN_GAP);
+            }
+            let connect_label = if prompt.bound_value_available {
+                "Reconnect"
+            } else {
+                "Connect"
+            };
             ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], "Connect").clicked() {
+                if primary_button(&mut cols[0], connect_label).clicked() {
                     chosen = Some(CredentialDecisionRequest::Allow(
                         CredentialEntry::HostDetect,
                     ));
@@ -2055,6 +2081,7 @@ mod tests {
             credential_id: "cred".to_string(),
             action: "read".to_string(),
             host_value_available: false,
+            bound_value_available: false,
             oauth_display_name: None,
             token_fallback: None,
             env_var: None,

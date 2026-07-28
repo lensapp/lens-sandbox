@@ -31,6 +31,16 @@ impl DefProvider {
         self.seed_env = false;
         self
     }
+
+    /// The effective env var and sorted, de-duplicated injection domains this provider discloses — the one snapshot both the consent card records a grant against and the boot gate later verifies, so disclosure and verification can never drift.
+    pub fn disclosure_snapshot(&self) -> (String, Vec<String>) {
+        let domains: std::collections::BTreeSet<String> = self
+            .unarmed_injections()
+            .iter()
+            .map(|inj| inj.domain().to_string())
+            .collect();
+        (self.env_var().to_string(), domains.into_iter().collect())
+    }
 }
 
 fn armed(inj: &InjectionDef, value: &str) -> Vec<CredentialInjection> {

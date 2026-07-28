@@ -1,7 +1,9 @@
 use cucumber::{given, then, when};
 use std::time::Instant;
 
-use crate::credential_rig::{CredentialRig, FIXTURE_ENV, FIXTURE_ID, FIXTURE_PLACEHOLDER};
+use crate::credential_rig::{
+    CredentialRig, FIXTURE_BOUND_VALUE, FIXTURE_ENV, FIXTURE_ID, FIXTURE_PLACEHOLDER,
+};
 use crate::world::BehaviourWorld;
 use lns_service::approval_flow::protocol::{
     CredentialDecisionKind, CredentialInjection, CredentialPending, HostFrame, PolicyMessage,
@@ -257,6 +259,61 @@ fn when_developer_types_value(world: &mut BehaviourWorld) {
     );
 }
 
+#[given(r#"a value for "some-provider" is bound on this machine but this workload holds no grant"#)]
+fn given_bound_but_ungranted(world: &mut BehaviourWorld) {
+    world.credential = Some(CredentialRig::bound_but_ungranted());
+}
+
+#[then("the card offers to use the value already bound on this machine")]
+fn then_card_offers_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let snap = rig.window_state.snapshot();
+    let card = snap
+        .pending_credentials
+        .last()
+        .ok_or("no credential card visible")?;
+    if !card.bound_value_available {
+        return Err(
+            "expected bound_value_available=true so the card can grant the existing binding rather than demand the secret again".into(),
+        );
+    }
+    Ok(())
+}
+
+#[when(r#"the developer picks "use the bound value""#)]
+fn when_developer_picks_bound_value(world: &mut BehaviourWorld) {
+    let rig = world.credential();
+    let id = window_credential_id(rig);
+    rig.session
+        .record_decision(&id, CredentialDecisionRequest::AllowBound);
+}
+
+#[then(
+    "the workload's request leaves the boundary with the bound value substituted for the placeholder"
+)]
+fn then_request_leaves_with_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let frames = drain_frames(rig);
+    let policy = last_policy_frame(&frames).ok_or("no Policy frame emitted after decision")?;
+    let cred = find_credential(policy, FIXTURE_ID)
+        .ok_or("Policy frame missing some-provider credential")?;
+    assert_credential_armed_with(cred, FIXTURE_BOUND_VALUE)?;
+    decision_allow_assert(&frames)?;
+    Ok(())
+}
+
+#[then(r#""~/.lns-credentials.json" still holds the value it was bound with"#)]
+fn then_credentials_file_keeps_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let on_disk = rig.store.load().map_err(|e| e.to_string())?;
+    match on_disk.get(FIXTURE_ID) {
+        Some(CredentialEntry::Stored { value }) if value == FIXTURE_BOUND_VALUE => Ok(()),
+        other => Err(format!(
+            "granting the existing binding must not rewrite the machine store, got {other:?}"
+        )),
+    }
+}
+
 #[when(r#"the developer picks "deny""#)]
 fn when_developer_picks_deny_credential(world: &mut BehaviourWorld) {
     let rig = world.credential();
@@ -468,6 +525,51 @@ fn then_card_says_fresh_needed(world: &mut BehaviourWorld) -> Result<(), String>
     Ok(())
 }
 
+#[given(regex = r#"^"([^"]+)" is disconnected from this project while the card is open$"#)]
+fn given_disconnected_while_card_open(world: &mut BehaviourWorld, credential_id: String) {
+    world.credential().forget_project_grants(&credential_id);
+}
+
+#[then(regex = r#"^the workload grant sidecar records no grant for "([^"]+)"$"#)]
+fn then_grant_sidecar_records_nothing(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    if world.credential().workload_grant_recorded(&credential_id) {
+        return Err(format!(
+            "the disconnect reported that it forgot {credential_id}'s grants, so a decision this run was already holding must not put one back — a later reconnect would inherit it with no card"
+        ));
+    }
+    Ok(())
+}
+
+#[then("the approval window says the decision was not remembered")]
+fn then_window_says_not_remembered(world: &mut BehaviourWorld) -> Result<(), String> {
+    let informs = world.credential().window_state.snapshot().informs;
+    if informs.iter().any(|m| m.contains("not remembered")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the developer answered a card and the answer was dropped; silence would make the next run's fresh card look like a bug. Informs: {informs:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the workload grant sidecar records a deny for "([^"]+)"$"#)]
+fn then_grant_sidecar_records_deny(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    let rig = world.credential();
+    if rig.workload_deny_recorded(&credential_id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "no per-workload deny grant recorded for {credential_id}"
+        ))
+    }
+}
+
 #[then(regex = r#"^"~/.lns-credentials.json" gains an entry for "([^"]+)" with kind "([^"]+)"$"#)]
 fn then_credentials_file_has_entry(
     world: &mut BehaviourWorld,
@@ -616,11 +718,6 @@ fn then_future_request_failed(world: &mut BehaviourWorld) -> Result<(), String> 
         .ok_or("expected a Deny decision for the future request, got none")?;
     if d.decision != CredentialDecisionKind::Deny {
         return Err(format!("expected Deny decision, got {:?}", d.decision));
-    }
-    if rig.session.current_state().get(credential_id) != Some(&CredentialEntry::Deny) {
-        return Err(format!(
-            "expected the Deny rule for {credential_id} to persist"
-        ));
     }
     Ok(())
 }

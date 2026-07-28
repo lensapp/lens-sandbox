@@ -128,7 +128,29 @@ fn add_allow_with_description(world: &mut BehaviourWorld, pattern: String, descr
 #[when(regex = r"^the developer lists rules$")]
 fn list_rules(world: &mut BehaviourWorld) {
     let _ = cwd(world);
-    run_policy(world, PolicyCommand::List(PolicyScopeArgs { policy: None }));
+    run_policy(
+        world,
+        PolicyCommand::List(PolicyScopeArgs {
+            policy: None,
+            output: lns_cli::output::OutputArgs {
+                format: lns_cli::output::Format::Table,
+            },
+        }),
+    );
+}
+
+#[when(regex = r"^the developer lists rules as JSON$")]
+fn list_rules_as_json(world: &mut BehaviourWorld) {
+    let _ = cwd(world);
+    run_policy(
+        world,
+        PolicyCommand::List(PolicyScopeArgs {
+            policy: None,
+            output: lns_cli::output::OutputArgs {
+                format: lns_cli::output::Format::Json,
+            },
+        }),
+    );
 }
 
 #[when(regex = r#"^the developer removes the rule matching "([^"]+)"$"#)]

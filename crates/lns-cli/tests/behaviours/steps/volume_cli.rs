@@ -107,6 +107,11 @@ fn reports_idle_volume(world: &mut BehaviourWorld, name: String, disk: u64) {
     world.volume.volumes.push(fixture_volume(&name, disk, None));
 }
 
+#[given(expr = "the service reports no volumes")]
+fn reports_no_volumes(world: &mut BehaviourWorld) {
+    world.volume.volumes.clear();
+}
+
 #[given(expr = "the service refuses with {string}")]
 fn service_refuses(world: &mut BehaviourWorld, message: String) {
     world.volume.refuse_message = Some(message);
@@ -225,9 +230,9 @@ fn output_is_volume_json(world: &mut BehaviourWorld, name: String, disk: u64) {
     let parsed: serde_json::Value =
         serde_json::from_str(output).unwrap_or_else(|e| panic!("not JSON ({e}): {output:?}"));
     assert_eq!(parsed["name"], serde_json::Value::String(name));
-    assert_eq!(parsed["size_bytes"], serde_json::json!(FIXTURE_SIZE_BYTES));
-    assert_eq!(parsed["disk_bytes"], serde_json::json!(disk));
-    assert_eq!(parsed["in_use_by"], serde_json::Value::Null);
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(FIXTURE_SIZE_BYTES));
+    assert_eq!(parsed["diskBytes"], serde_json::json!(disk));
+    assert_eq!(parsed["inUseBy"], serde_json::Value::Null);
 }
 
 #[then(expr = "the listed row for {string} ends with {string}")]

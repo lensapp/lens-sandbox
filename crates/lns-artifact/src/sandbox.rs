@@ -215,9 +215,14 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             bail!("invalid connector id {connector:?}");
         }
     }
+    let mut slot_connectors = BTreeSet::new();
     for slot in &doc.spec.credentials {
         if !spec::is_valid_name(&slot.name) {
             bail!("invalid credential connector id {:?}", slot.name);
+        }
+        // One connector discloses one env var: a consent card names the one it was asked about, so a second slot would inject that secret somewhere the developer never saw.
+        if !slot_connectors.insert(&slot.name) {
+            bail!("duplicate credential connector {:?}", slot.name);
         }
         if slot.env.trim().is_empty() {
             bail!(
@@ -1120,6 +1125,18 @@ mod tests {
         assert!(
             format!("{err:#}").contains("invalid credential connector id"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_two_credential_slots_naming_one_connector() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN"},{"name":"some-provider","env":"OTHER_TOKEN"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate credential connector \"some-provider\""),
+            "one connector cannot disclose two env vars: the consent card names one of them, so the second would inject the same secret somewhere the developer was never shown; got: {err:#}"
         );
     }
 

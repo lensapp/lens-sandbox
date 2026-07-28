@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
+use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule, Verdict};
 
@@ -189,6 +190,60 @@ pub fn run_providers(applied: Vec<DefProvider>, connectable: Vec<DefProvider>) -
     }
 }
 
+fn grant_arms(
+    p: &DefProvider,
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> bool {
+    let Some(grant) = grants.lookup(project, workload, p.id()) else {
+        return false;
+    };
+    if grant.verdict != GrantVerdict::Allow {
+        return false;
+    }
+    let (env_var, domains) = p.disclosure_snapshot();
+    grant.matches_disclosure(&env_var, &domains)
+}
+
+/// Arm only the applied ids this workload holds an allow grant for whose recorded (env var, injection domains) snapshot still matches *every* provider resolved under that id — arming is per id, so one unmatched provider would ride in on another's grant; an ungranted, denied, or stale id stays unarmed and falls through to a first-use offer, so a machine-global value never arms without this workload's consent.
+pub fn gate_armed_by_grant(
+    applied: &HashSet<String>,
+    providers: &[DefProvider],
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> HashSet<String> {
+    let mut armed: HashSet<String> = HashSet::new();
+    let mut unmatched: HashSet<&str> = HashSet::new();
+    for p in providers.iter().filter(|p| applied.contains(p.id())) {
+        if grant_arms(p, project, workload, grants) {
+            armed.insert(p.id().to_string());
+        } else {
+            unmatched.insert(p.id());
+        }
+    }
+    armed.retain(|id| !unmatched.contains(id.as_str()));
+    armed
+}
+
+/// The allow grants a boot-gate sign-in earns, pinned to each resolved provider's own disclosure snapshot so they satisfy [`gate_armed_by_grant`] by construction; an id with no resolved provider yields none.
+pub fn boot_sign_in_grants(
+    signed_in: &[String],
+    providers: &[DefProvider],
+    project: &str,
+    workload: &WorkloadIdentity,
+) -> Vec<GrantRecord> {
+    signed_in
+        .iter()
+        .filter_map(|id| providers.iter().find(|p| p.id() == id))
+        .map(|p| {
+            let (env_var, domains) = p.disclosure_snapshot();
+            GrantRecord::allow(project, workload, p.id(), env_var, domains)
+        })
+        .collect()
+}
+
 /// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
 fn domains_overlap(a: &str, b: &str) -> bool {
     use crate::approval_flow::session::host_matches_pattern;
@@ -278,6 +333,7 @@ mod tests {
     use super::*;
     use crate::credential_flow::providers::Provider;
     use lns_policy::connectors::{ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow};
+    use lns_policy::grants::GrantRecord;
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
     fn cred_connector(id: &str, env_var: &str, domain: &str) -> Connector {
@@ -323,6 +379,256 @@ mod tests {
         assert_eq!(out.routes.len(), 1);
         assert_eq!(out.routes[0].match_pattern, "gitlab.com");
         assert_eq!(out.routes[0].verdict, lns_policy::Verdict::Allow);
+    }
+
+    fn provider_of(id: &str, env: &str, domain: &str) -> DefProvider {
+        resolve_applied_connectors(&policy_applying(&[id]), &[cred_connector(id, env, domain)])
+            .providers
+            .pop()
+            .expect("one provider")
+    }
+
+    fn allow_grants(
+        workload: &WorkloadIdentity,
+        connector: &str,
+        env: &str,
+        domain: &str,
+    ) -> WorkloadGrantFile {
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            workload,
+            connector,
+            env,
+            vec![domain.to_string()],
+        ));
+        grants
+    }
+
+    #[test]
+    fn gate_armed_by_grant_arms_an_allow_grant_with_a_matching_snapshot() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(
+            armed, applied,
+            "an allow grant whose snapshot matches the resolved provider must arm it"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_holds_an_id_whose_second_provider_the_grant_does_not_cover() {
+        let providers = vec![
+            provider_of("some-provider", "SOME_TOKEN", "api.some-provider.example"),
+            provider_of("some-provider", "OTHER_TOKEN", "api.some-provider.example"),
+        ];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "arming is per id, so admitting the id on one matching provider would arm the other one too — injecting the secret under an env var the card never disclosed"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_leaves_an_ungranted_id_unarmed() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let armed = gate_armed_by_grant(
+            &applied,
+            &providers,
+            "proj",
+            &workload,
+            &WorkloadGrantFile::default(),
+        );
+        assert!(
+            armed.is_empty(),
+            "a connector this workload never consented to must stay unarmed"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_leaves_a_denied_id_unarmed() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::deny(
+            "proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(armed.is_empty(), "a denied connector must never arm");
+    }
+
+    #[test]
+    fn gate_armed_by_grant_rejects_a_grant_whose_env_var_drifted() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "OLD_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "a grant pinned to a since-changed env var must be invalidated, not silently inherited"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_rejects_a_grant_whose_injection_domains_drifted() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(&workload, "some-provider", "SOME_TOKEN", "api.old.example");
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "a grant pinned to since-changed injection domains must be invalidated"
+        );
+    }
+
+    #[test]
+    fn gate_armed_by_grant_ignores_a_provider_outside_the_applied_set() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let grants = allow_grants(
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        );
+        let armed = gate_armed_by_grant(&HashSet::new(), &providers, "proj", &workload, &grants);
+        assert!(
+            armed.is_empty(),
+            "only ids in the applied set are candidates for arming, grant or no grant"
+        );
+    }
+
+    #[test]
+    fn boot_sign_in_grants_arm_through_the_same_gate_that_admits_later_runs() {
+        let providers = vec![provider_of(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records = boot_sign_in_grants(
+            &["some-provider".to_string()],
+            &providers,
+            "proj",
+            &workload,
+        );
+        let mut grants = WorkloadGrantFile::default();
+        for r in records {
+            grants.upsert(r);
+        }
+        let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(
+            armed, applied,
+            "the grant a boot sign-in records must satisfy the very gate that admits the next run — a snapshot mismatch here means the fix silently fixes nothing"
+        );
+    }
+
+    #[test]
+    fn boot_sign_in_grant_records_the_slot_remapped_env_var_not_the_catalog_default() {
+        let catalog = vec![oauth_connector(
+            "some-oauth",
+            "SOME_OAUTH_TOKEN",
+            "api.some-oauth.example",
+        )];
+        let slots = vec![slot("some-oauth", "REMAPPED_TOKEN", true)];
+        let providers = resolve_applied_with_slots(&Policy::default(), &slots, &catalog).providers;
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records =
+            boot_sign_in_grants(&["some-oauth".to_string()], &providers, "proj", &workload);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].env_var, "REMAPPED_TOKEN",
+            "the grant must pin the slot's effective env var, or a remapped slot's grant never matches at the next boot"
+        );
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(records[0].clone());
+        let applied: HashSet<String> = ["some-oauth".to_string()].into_iter().collect();
+        let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
+        assert_eq!(armed, applied);
+    }
+
+    #[test]
+    fn boot_sign_in_grants_skip_an_id_that_resolved_no_provider() {
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let records = boot_sign_in_grants(&["some-oauth".to_string()], &[], "proj", &workload);
+        assert!(
+            records.is_empty(),
+            "with no resolved provider there is no disclosure to pin a grant to"
+        );
     }
 
     #[test]

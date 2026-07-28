@@ -73,6 +73,15 @@ Feature: a sandbox definition's credential slots gate the launch
     Then a sign-in prompt for "some-oauth" is shown before the workload starts
     And the workload does not start until the sign-in is decided
 
+  Scenario: Completing the boot sign-in is this workload's grant, so the slot arms without a second card
+    Given the machine catalog has an oauth connector "some-oauth"
+    And the sandbox definition requires a credential slot for "some-oauth" injected as "SOME_OAUTH_TOKEN"
+    And the per-machine credential store has no grant for "some-oauth"
+    And this workload has no grant for "some-oauth"
+    When the sandbox is launched
+    And the boot sign-in for "some-oauth" completes
+    Then the boundary injection for "some-oauth" is armed with the signed-in token
+
   Scenario: A slot naming an unknown connector refuses the launch
     Given the sandbox definition requires a credential slot for "some-unknown" injected as "SOME_TOKEN"
     And the machine catalog has no connector "some-unknown"

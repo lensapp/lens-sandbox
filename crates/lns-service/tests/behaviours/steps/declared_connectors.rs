@@ -2,6 +2,7 @@ use cucumber::{given, then, when};
 use lns_policy::connectors::{
     AuthKind, Connector, ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow,
 };
+use lns_policy::grants::{GrantRecord, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
@@ -10,8 +11,9 @@ use lns_service::artifact::credential_boot::{
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::connectors::{
-    resolve_applied_with_slots, resolve_connectable_with_slots, run_providers,
-    unknown_connector_ids, unknown_connectors_refusal,
+    boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_slots,
+    resolve_connectable_with_slots, run_providers, unknown_connector_ids,
+    unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
@@ -130,7 +132,35 @@ fn launch(
         })
         .collect();
     rig.offered = run.connectable_ids.iter().cloned().collect();
-    rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &run.armed, &|_| None);
+    // The launch consents to its applied connectors by default (the grant a prior first-use card would have left); a scenario withholds an id to model a cloned overlay or a slot with no machine-local grant, and the gate then keeps it unarmed.
+    let workload = WorkloadIdentity::Definition {
+        dir: "/rig/project".into(),
+    };
+    let mut grants = WorkloadGrantFile::default();
+    for p in &run.providers {
+        if run.armed.contains(p.id()) && !rig.withhold_grants.contains(p.id()) {
+            let (env_var, domains) = p.disclosure_snapshot();
+            grants.upsert(GrantRecord::allow(
+                "rig-project",
+                &workload,
+                p.id(),
+                env_var,
+                domains,
+            ));
+        }
+    }
+    // A completed boot-gate sign-in grants the workload even where a prior grant was withheld, exactly as adapter::start records it before the gate.
+    for record in boot_sign_in_grants(&rig.signed_in, &run.providers, "rig-project", &workload) {
+        grants.upsert(record);
+    }
+    let armed = gate_armed_by_grant(
+        &run.armed,
+        &run.providers,
+        "rig-project",
+        &workload,
+        &grants,
+    );
+    rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &armed, &|_| None);
     rig.running_policy = Some(policy);
 }
 
@@ -183,6 +213,12 @@ fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     rig.overlay.connectors.push(id);
 }
 
+#[given(regex = r#"^this workload has no grant for "([^"]+)"$"#)]
+fn workload_has_no_grant(w: &mut BehaviourWorld, id: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.withhold_grants.insert(id);
+}
+
 #[when("the sandbox is launched")]
 fn sandbox_launched(w: &mut BehaviourWorld) {
     let definition = w
@@ -225,7 +261,11 @@ fn oauth_connector(id: &str) -> Connector {
             account_field: None,
             env_var: "SOME_OAUTH_TOKEN".into(),
             placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-            injections: Vec::new(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.some-oauth.example".into(),
+                header: None,
+            }],
         }),
         token_fallback: None,
     }
@@ -245,6 +285,48 @@ fn relaunch(w: &mut BehaviourWorld) {
 fn catalog_has_oauth(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.catalog.push(oauth_connector(&id));
+}
+
+#[when(regex = r#"^the boot sign-in for "([^"]+)" completes$"#)]
+fn boot_sign_in_completes(w: &mut BehaviourWorld, id: String) {
+    {
+        let rig = w.declared.get_or_insert_with(Default::default);
+        let pending = rig
+            .pending
+            .take()
+            .expect("the launch must be blocked on a sign-in");
+        assert_eq!(
+            pending.connector, id,
+            "the launch is blocked on a different connector"
+        );
+        rig.store.insert(
+            id.clone(),
+            lns_policy::credentials::CredentialEntry::Oauth {
+                access_token: "some-access".into(),
+                refresh_token: "some-refresh".into(),
+                expires_at: u64::MAX,
+                scopes: Vec::new(),
+                account: None,
+            },
+        );
+        rig.signed_in.push(id);
+    }
+    relaunch(w);
+}
+
+#[then(regex = r#"^the boundary injection for "([^"]+)" is armed with the signed-in token$"#)]
+fn boundary_injection_armed_with_signed_in_token(
+    w: &mut BehaviourWorld,
+    id: String,
+) -> Result<(), String> {
+    let values = wire_injection_values(w, &id)?;
+    if values.iter().any(|v| v.contains("some-access")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "no injection for {id} carries the token the boot sign-in yielded; injections: {values:?}"
+        ))
+    }
 }
 
 fn wire_injection_values(w: &BehaviourWorld, id: &str) -> Result<Vec<String>, String> {

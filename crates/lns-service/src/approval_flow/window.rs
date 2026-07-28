@@ -38,6 +38,8 @@ pub struct CredentialCardPrompt {
     pub credential_id: String,
     pub action: String,
     pub host_value_available: bool,
+    /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::bound_value_available`]: a value is already bound on this machine, so the card can grant it rather than rebind.
+    pub bound_value_available: bool,
     pub oauth_display_name: Option<String>,
     pub token_fallback: Option<TokenFallback>,
     pub env_var: Option<String>,
@@ -209,6 +211,7 @@ impl WindowState {
                 credential_id: prompt.credential_id,
                 action: prompt.action,
                 host_value_available,
+                bound_value_available: prompt.bound_value_available,
                 oauth_display_name: prompt.oauth_display_name,
                 token_fallback: prompt.token_fallback,
                 env_var: prompt.env_var,
@@ -638,6 +641,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            bound_value_available: false,
         }
     }
 
@@ -1328,6 +1332,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            bound_value_available: false,
         }
     }
 
@@ -1363,6 +1368,18 @@ mod tests {
         assert!(
             s.snapshot().connecting.is_empty(),
             "a pasted token arms synchronously, so no slot needs holding"
+        );
+    }
+
+    #[test]
+    fn consent_reusing_an_existing_sign_in_leaves_no_placeholder() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_credential_pending(oauth_cred_prompt("c1", "GitHub"), false, tx);
+        assert!(s.decide_credential("c1", CredentialDecisionRequest::AllowBound));
+        assert!(
+            s.snapshot().connecting.is_empty(),
+            "granting the token already bound arms synchronously — there is no sign-in to wait on, so nothing should spin"
         );
     }
 

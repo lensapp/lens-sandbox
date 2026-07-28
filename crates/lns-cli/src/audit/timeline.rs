@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 
 use lns_audit::{TimelineRow, collect_timeline};
 
-use super::AuditArgs;
-use super::table::render_table;
+use super::{AuditArgs, AuditFormat};
 use crate::log;
+use crate::output::render_table;
 
 pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
     let runs_root = lns_ipc::audit_runs_root().context("locating the audit runs root")?;
@@ -32,10 +32,9 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
     let mut rows = timeline.rows;
     rows.retain(|row| matches_filter(row, args));
 
-    if args.json {
-        emit_json(&rows, out)?;
-    } else {
-        render(&rows, args.sandbox.as_deref(), out)?;
+    match args.format() {
+        AuditFormat::Jsonl => emit_json(&rows, out)?,
+        AuditFormat::Table => render(&rows, args.sandbox.as_deref(), out)?,
     }
     Ok(0)
 }
@@ -269,10 +268,9 @@ mod tests {
         fn render(&self, args: &AuditArgs) -> String {
             let rows = self.collect(args).unwrap();
             let mut buf = Vec::new();
-            if args.json {
-                emit_json(&rows, &mut buf).unwrap();
-            } else {
-                render(&rows, args.sandbox.as_deref(), &mut buf).unwrap();
+            match args.format() {
+                AuditFormat::Jsonl => emit_json(&rows, &mut buf).unwrap(),
+                AuditFormat::Table => render(&rows, args.sandbox.as_deref(), &mut buf).unwrap(),
             }
             String::from_utf8(buf).unwrap()
         }
@@ -283,6 +281,7 @@ mod tests {
             sandbox: None,
             connector: None,
             kind: None,
+            format: None,
             json: false,
         }
     }

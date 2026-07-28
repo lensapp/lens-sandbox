@@ -42,4 +42,4 @@ Feature: users discover the CLI surface
     And the output contains "SANDBOX"
     And the output contains "--connector"
     And the output contains "--kind"
-    And the output contains "--json"
+    And the output contains "--format"
