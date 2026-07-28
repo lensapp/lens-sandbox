@@ -110,8 +110,10 @@ pub(crate) fn parse_driver_output(
         else {
             continue;
         };
-        let (Ok(resolved), true) = (resolved.parse::<SafeVersion>(), is_safe_bin_path(bin_path))
-        else {
+        let (Ok(resolved), true) = (
+            resolved.parse::<SafeVersion>(),
+            lns_artifact::tools::is_safe_bin_path(bin_path),
+        ) else {
             return Err(ProvisionError::Engine(format!(
                 "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_path:?}"
             )));
@@ -155,15 +157,6 @@ pub(crate) fn parse_driver_output(
         "the provisioner driver exited with code {exit_code}: {}",
         failure_cause(stdout, stderr)
     )))
-}
-
-/// The driver's output is guest-supplied and both fields become path components on the host cache and in the guest layer, so they are allowlisted before anything joins them.
-fn is_safe_segment(segment: &str) -> bool {
-    lns_artifact::tools::is_safe_version(segment)
-}
-
-fn is_safe_bin_path(bin_path: &str) -> bool {
-    bin_path == "." || bin_path.split('/').all(is_safe_segment)
 }
 
 /// The engine writes its diagnostics to stderr, but a bare `sh` failure (a missing driver, a bad redirect) can land on stdout with no marker at all, so that is the fallback.

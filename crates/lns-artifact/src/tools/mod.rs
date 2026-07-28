@@ -15,6 +15,11 @@ pub fn is_safe_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
 }
 
+/// Whether a tool's bin directory is safe to append to its own root: `.` for the tree root, otherwise plain segments. It becomes a `PATH` entry for the workload and for every later `lns exec`, so it is checked wherever it arrives from — the driver's output and a manifest read back off disk alike.
+pub fn is_safe_bin_path(bin_path: &str) -> bool {
+    bin_path == "." || bin_path.split('/').all(is_safe_version)
+}
+
 /// A version that has passed [`is_safe_version`], so no source of one — index, driver output, or a file on disk a later process could edit — can reach a path component or the shell driver unchecked.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,

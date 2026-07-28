@@ -144,6 +144,10 @@ impl ToolCache for RealToolCache {
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
             return Ok(None);
         }
+        if let Err(e) = validate_tree(&manifest.entries, &manifest.bin_paths) {
+            crate::log::warn!("ignoring the cached tool tree at {}: {e:#}", dir.display());
+            return Ok(None);
+        }
         for entry in &manifest.entries {
             if let EntryKind::Regular { digest, .. } = &entry.kind
                 && !self.store.contains(digest)?
@@ -162,6 +166,7 @@ impl ToolCache for RealToolCache {
             }
             StagedTar::Bytes(bytes) => ingest_tar_entries(&bytes[..], &self.store)?,
         };
+        validate_tree(&entries, &staged.bin_paths)?;
         let manifest = ToolManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             tool: key.name.clone(),
@@ -296,8 +301,36 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
             kind,
         });
     }
-    refuse_entries_under_a_symlink(&entries)?;
     Ok(entries)
+}
+
+/// Every guard the tar walk applies, restated over the finished tree so a manifest read back off disk gets them too — the provision path is not the only way these entries reach a guest, and the file on disk is exactly the kind of input the version and schema checks already refuse to trust.
+fn validate_tree(entries: &[ManifestEntry], bin_paths: &[String]) -> Result<()> {
+    for bin_path in bin_paths {
+        if !lns_artifact::tools::is_safe_bin_path(bin_path) {
+            bail!("tool bin path {bin_path:?} escapes the tool tree");
+        }
+    }
+    for entry in entries {
+        let path = Path::new(&entry.path);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
+            || entry.path.chars().any(char::is_control)
+        {
+            bail!("tool entry {} escapes the tool tree", entry.path);
+        }
+        if let EntryKind::Symlink { target } = &entry.kind
+            && !target_stays_in_tree(&entry.path, Path::new(target))
+        {
+            bail!(
+                "tool symlink {} -> {target} escapes the tool tree",
+                entry.path
+            );
+        }
+    }
+    refuse_entries_under_a_symlink(entries)
 }
 
 /// Injection resolves a path's parent segments *through* symlinks, so an entry under a link lands wherever the link points — and a chain of them climbs out of the tree however innocent each link's own target looks (`s1 -> "."`, `s1/s2 -> ".."`, …), which no per-link textual check can see. Nothing legitimate needs the shape: a tool tar carries real directories and its links are leaves. Refusing it is also what makes the per-link target check sound, because every entry's real parent is then the parent its path spells.
@@ -743,6 +776,60 @@ mod tests {
             format!("{err:#}").contains("is not a regular file"),
             "got: {err:#}"
         );
+    }
+
+    fn tamper_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+        let path = tree_dir(root).join("manifest.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut raw);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_cached_manifest_whose_bin_path_escapes_the_tree_is_a_miss() {
+        // bin_paths goes straight onto the workload's PATH — and every later `lns exec` into that run — so a tampered cache file must not be readable.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        tamper_manifest(dir.path(), |raw| {
+            raw["bin_paths"] = serde_json::json!(["../../../../../../workspace"]);
+        });
+        assert_eq!(cache.lookup(&key()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_cached_manifest_whose_entry_path_leaves_the_tree_is_a_miss() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        for path in ["/etc/shadow", "../../../../etc/shadow"] {
+            tamper_manifest(dir.path(), |raw| {
+                raw["entries"] = serde_json::json!([{
+                    "path": path, "mode": 493, "kind": "regular",
+                    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "size": 1,
+                }]);
+            });
+            assert_eq!(cache.lookup(&key()).unwrap(), None, "path {path}");
+        }
+    }
+
+    #[test]
+    fn a_cached_manifest_placing_an_entry_under_a_symlink_is_a_miss() {
+        // The shape refuse_entries_under_a_symlink closes at ingest reopens if a warm read trusts the file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        tamper_manifest(dir.path(), |raw| {
+            raw["entries"] = serde_json::json!([
+                {"path": "esc", "mode": 511, "kind": "symlink", "target": "/.lens/bin"},
+                {"path": "esc/lns-supervisor", "mode": 493, "kind": "regular",
+                 "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                 "size": 1},
+            ]);
+        });
+        assert_eq!(cache.lookup(&key()).unwrap(), None);
     }
 
     #[test]
