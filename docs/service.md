@@ -40,10 +40,23 @@ everything the service knows:
 Selecting a sandbox in the sidebar scopes both views to it. `⌘K` searches
 credentials and activity together.
 
-Credential values are never shown. The window discloses what is bound (signed
-in, stored on this machine, host value) along with the account, scopes, expiry,
-and the fake placeholder the workload holds — never the real secret, which stays
-in `~/.lns-credentials.json` and is injected at the boundary.
+### Seeing a credential's value
+
+A credential's detail panel shows what is bound — signed in, stored on this
+machine, host value — with the account, scopes, expiry, and the fake placeholder
+the workload holds.
+
+Both the real value and the placeholder are masked until you press **Reveal**,
+and both can be copied. A revealed value hides itself again after 15 seconds, or
+as soon as the window loses focus, so a dashboard left open doesn't leave a
+secret on screen. **Copy** puts the value on the system clipboard, which any
+process on your machine can read and which Lens Sandbox does not clear —
+paste it where you meant to and copy something else after.
+
+The value is only ever read for the screen: it is never written to the audit
+log, never printed to the developer trace stream, and is scrubbed from memory
+when the window refreshes or closes. It continues to live in
+`~/.lns-credentials.json` and is injected at the boundary.
 
 Three actions write through to the same files the CLI edits:
 

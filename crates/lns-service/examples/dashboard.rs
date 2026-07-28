@@ -110,6 +110,7 @@ fn access(
 struct CredentialDetails<'a> {
     destinations: &'a [&'a str],
     sandboxes: Vec<SandboxAccess>,
+    value: Option<&'a str>,
     placeholder: Option<&'a str>,
 }
 
@@ -140,6 +141,7 @@ fn credential(
             recent_activity: None,
             pending: None,
         },
+        value: details.value.map(|value| value.to_string().into()),
         placeholder: details.placeholder.map(str::to_string),
     }
 }
@@ -154,6 +156,7 @@ fn seed_credentials() -> Vec<DashboardCredential> {
         CredentialDetails {
             destinations: &["api.some-oauth.example"],
             sandboxes: Vec::new(),
+            value: Some("oauth-LNS-DEMO-TOKEN-00000001"),
             placeholder: Some("oauth-LNSPLACEHOLDER0000000000000001"),
         },
     );
@@ -197,6 +200,7 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                     true,
                 ),
             ],
+            value: Some("sk-LNS-DEMO-SECRET-0000000000000001"),
             placeholder: Some("sk-LNSPLACEHOLDER000000000000000001"),
         },
     );
@@ -217,6 +221,7 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 "Connected by project policy",
                 true,
             )],
+            value: Some("oauth-LNS-DEMO-TOKEN-00000002"),
             placeholder: Some("oauth-LNSPLACEHOLDER0000000000000002"),
         },
     );
@@ -240,6 +245,7 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 "Granted by sandbox definition",
                 true,
             )],
+            value: Some("host-LNS-DEMO-TOKEN-00000003"),
             placeholder: Some("host-LNSPLACEHOLDER0000000000000003"),
         },
     );
@@ -260,6 +266,7 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 "Requested by sandbox definition",
                 false,
             )],
+            value: None,
             placeholder: Some("blocked-LNSPLACEHOLDER00000000000004"),
         },
     );

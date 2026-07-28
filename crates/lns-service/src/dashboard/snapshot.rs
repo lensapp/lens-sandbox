@@ -1,8 +1,9 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use lns_audit::TimelineRow;
 use lns_policy::connectors::{AuthKind, Connector};
 use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
+use zeroize::Zeroizing;
 
 use super::{
     CredentialBinding, CredentialStatus, CredentialSummary, DashboardCredential, DashboardSandbox,
@@ -46,7 +47,7 @@ pub(super) struct SnapshotInput<'a> {
     pub sandboxes: Vec<DashboardSandbox>,
     pub run_access: Vec<RunCredentialAccess>,
     pub pending: Vec<PendingCredential>,
-    pub host_value_ids: HashSet<String>,
+    pub host_values: HashMap<String, Zeroizing<String>>,
     pub rows: &'a [TimelineRow],
     pub now: u64,
 }
@@ -94,11 +95,12 @@ fn build_credential(connector_id: &str, input: &SnapshotInput<'_>) -> DashboardC
     let status = credential_status(
         entry,
         pending.is_some(),
-        input.host_value_ids.contains(connector_id),
+        input.host_values.contains_key(connector_id),
         input.now,
     );
     let (environment_variable, placeholder, destinations) = connector_disclosure(connector);
-    let (account, scopes, expires_at) = entry_disclosure(entry, input.now);
+    let (value, account, scopes, expires_at) =
+        entry_disclosure(entry, input.host_values.get(connector_id), input.now);
     DashboardCredential {
         summary: CredentialSummary {
             connector_id: connector_id.to_string(),
@@ -116,6 +118,7 @@ fn build_credential(connector_id: &str, input: &SnapshotInput<'_>) -> DashboardC
             recent_activity: recent_activity(connector_id, input.rows, input.now),
             pending: pending.map(pending_request),
         },
+        value,
         placeholder,
     }
 }
@@ -198,27 +201,38 @@ fn connector_disclosure(
     (environment_variable, placeholder, destinations)
 }
 
-/// Discloses what an entry is, never what it holds: the account, scopes, and expiry a user needs to recognize the binding, with the value itself left in the credential store.
+/// The usable value alongside what identifies it: the account, scopes, and expiry a user needs to recognize the binding. A host-detect entry's value is whatever the host resolves right now, so it comes from `host_value` rather than the file.
 fn entry_disclosure(
     entry: Option<&CredentialEntry>,
+    host_value: Option<&Zeroizing<String>>,
     now: u64,
-) -> (Option<String>, Vec<String>, Option<String>) {
+) -> (
+    Option<Zeroizing<String>>,
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+) {
     match entry {
+        Some(CredentialEntry::Stored { value }) => (nonempty(value), None, Vec::new(), None),
         Some(CredentialEntry::Oauth {
+            access_token,
             expires_at,
             scopes,
             account,
             ..
         }) => (
+            nonempty(access_token),
             account.clone(),
             scopes.clone(),
             Some(expiry_label(*expires_at, now)),
         ),
-        Some(
-            CredentialEntry::Stored { .. } | CredentialEntry::HostDetect | CredentialEntry::Deny,
-        )
-        | None => (None, Vec::new(), None),
+        Some(CredentialEntry::HostDetect) => (host_value.cloned(), None, Vec::new(), None),
+        Some(CredentialEntry::Deny) | None => (None, None, Vec::new(), None),
     }
+}
+
+fn nonempty(value: &str) -> Option<Zeroizing<String>> {
+    (!value.is_empty()).then(|| Zeroizing::new(value.to_string()))
 }
 
 fn expiry_label(expires_at: u64, now: u64) -> String {
@@ -427,7 +441,7 @@ mod tests {
                 }],
             }],
             pending: Vec::new(),
-            host_value_ids: HashSet::new(),
+            host_values: HashMap::new(),
             rows,
             now: NOW,
         }
@@ -480,6 +494,10 @@ mod tests {
         assert_eq!(
             credential.summary.recent_activity.as_deref(),
             Some("1m ago")
+        );
+        assert_eq!(
+            credential.value.as_deref().map(String::as_str),
+            Some("some-secret")
         );
         assert_eq!(
             credential.placeholder.as_deref(),
@@ -587,34 +605,49 @@ mod tests {
             ),
         ]);
         let mut source = input(&catalog, &state, &[]);
-        source.host_value_ids.insert("host".into());
+        source
+            .host_values
+            .insert("host".into(), Zeroizing::new("detected-secret".to_string()));
         let credentials = build_credentials(source);
         let by_id: HashMap<_, _> = credentials
             .iter()
             .map(|credential| {
                 (
                     credential.summary.connector_id.as_str(),
-                    (credential.summary.binding, credential.summary.status),
+                    (
+                        credential.summary.binding,
+                        credential.summary.status,
+                        credential.value.as_deref().map(String::as_str),
+                    ),
                 )
             })
             .collect();
         assert_eq!(
             by_id["denied"],
-            (CredentialBinding::Denied, CredentialStatus::Denied)
+            (CredentialBinding::Denied, CredentialStatus::Denied, None)
         );
         assert_eq!(
             by_id["host"],
-            (CredentialBinding::HostDetected, CredentialStatus::Active)
+            (
+                CredentialBinding::HostDetected,
+                CredentialStatus::Active,
+                Some("detected-secret")
+            )
         );
         assert_eq!(
             by_id["some-provider"],
-            (CredentialBinding::Stored, CredentialStatus::Unavailable)
+            (
+                CredentialBinding::Stored,
+                CredentialStatus::Unavailable,
+                None
+            )
         );
         assert_eq!(
             by_id["host-missing"],
             (
                 CredentialBinding::HostDetected,
-                CredentialStatus::Unavailable
+                CredentialStatus::Unavailable,
+                None
             )
         );
     }
@@ -631,10 +664,14 @@ mod tests {
         let credentials = build_credentials(input(&catalog, &state, &[]));
         assert_eq!(credentials[0].summary.binding, CredentialBinding::OAuth);
         assert_eq!(credentials[0].summary.status, CredentialStatus::Active);
+        assert_eq!(
+            credentials[0].value.as_deref().map(String::as_str),
+            Some("durable-key")
+        );
     }
 
     #[test]
-    fn no_secret_from_the_credential_store_reaches_the_snapshot() {
+    fn a_snapshot_never_debug_prints_the_values_it_carries() {
         let catalog = vec![credential_connector(), oauth_connector()];
         let state = HashMap::from([
             (
@@ -656,16 +693,28 @@ mod tests {
             ("host".into(), CredentialEntry::HostDetect),
         ]);
         let mut source = input(&catalog, &state, &[]);
-        source.host_value_ids.insert("host".into());
+        source
+            .host_values
+            .insert("host".into(), Zeroizing::new("detected-secret".to_string()));
 
-        let rendered = format!("{:?}", build_credentials(source));
+        let credentials = build_credentials(source);
+        let rendered = format!("{credentials:?}");
 
-        for secret in ["some-secret", "some-access", "some-refresh"] {
+        assert!(credentials.iter().any(
+            |credential| credential.value.as_deref().map(String::as_str) == Some("some-secret")
+        ));
+        for secret in [
+            "some-secret",
+            "some-access",
+            "some-refresh",
+            "detected-secret",
+        ] {
             assert!(
                 !rendered.contains(secret),
-                "{secret} reached the dashboard snapshot"
+                "{secret} reached the trace stream"
             );
         }
+        assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("person@example.test"));
         assert!(rendered.contains("some-LNSPLACEHOLDER"));
     }

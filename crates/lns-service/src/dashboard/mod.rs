@@ -302,7 +302,7 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
         sandboxes: sandboxes.clone(),
         run_access,
         pending,
-        host_value_ids: host_detected_ids(&catalog, &credential_state),
+        host_values: host_detected_values(&catalog, &credential_state),
         rows: &rows,
         now: now_unix_secs().max(0) as u64,
     });
@@ -315,11 +315,11 @@ fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState
     }
 }
 
-/// Answers whether a host-detect binding currently resolves, through the same detector the boundary uses, without holding on to the value it found.
-fn host_detected_ids(
+/// Resolves each host-detect binding through the same detector the boundary uses, so the dashboard reports and reveals the value a request would actually carry.
+fn host_detected_values(
     catalog: &[lns_policy::connectors::Connector],
     credential_state: &lns_policy::credentials::CredentialStateFile,
-) -> std::collections::HashSet<String> {
+) -> std::collections::HashMap<String, zeroize::Zeroizing<String>> {
     use crate::credential_flow::detection::{EnvVarDetector, HostDetector};
 
     catalog
@@ -330,7 +330,7 @@ fn host_detected_ids(
                 Some(lns_policy::credentials::CredentialEntry::HostDetect)
             )
         })
-        .filter(|connector| {
+        .filter_map(|connector| {
             let env_var = match connector.auth_kind {
                 lns_policy::connectors::AuthKind::Credential => connector
                     .credential
@@ -339,10 +339,10 @@ fn host_detected_ids(
                 lns_policy::connectors::AuthKind::Oauth => {
                     connector.oauth.as_ref().map(|oauth| oauth.env_var.as_str())
                 }
-            };
-            env_var.is_some_and(|env_var| EnvVarDetector::new(env_var).detect().is_some())
+            }?;
+            let value = EnvVarDetector::new(env_var).detect()?;
+            Some((connector.id.clone(), zeroize::Zeroizing::new(value)))
         })
-        .map(|connector| connector.id.clone())
         .collect()
 }
 

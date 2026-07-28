@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Layout, Margin,
     RichText, Sense, Stroke, vec2,
@@ -6,9 +8,9 @@ use egui_material_icons::icons;
 
 use super::state::{
     AuditColumns, CredentialColumns, CredentialReviewChoice, DashboardMode, DashboardView,
-    TABLE_CHEVRON_WIDTH, TABLE_RESIZER_WIDTH, TableColumnWidths, UnifiedDashboardAction,
-    UnifiedDashboardState, authorization_detail, credential_access_label, credential_machine_label,
-    credential_row_icon_color,
+    RevealedKind, TABLE_CHEVRON_WIDTH, TABLE_RESIZER_WIDTH, TableColumnWidths,
+    UnifiedDashboardAction, UnifiedDashboardState, authorization_detail, credential_access_label,
+    credential_machine_label, credential_row_icon_color,
 };
 use super::{
     ACCENT_GREEN, BORDER, CATEGORY, CHROME_FILL, CONTENT_FILL, CredentialBinding,
@@ -32,6 +34,7 @@ pub fn render_unified_dashboard(
     state: &mut UnifiedDashboardState,
 ) -> UnifiedDashboardAction {
     ui.ctx().set_visuals(super::dashboard_visuals());
+    expire_revealed_value(ui.ctx(), state);
     if ui
         .ctx()
         .input(|input| input.modifiers.command && input.key_pressed(egui::Key::K))
@@ -74,6 +77,15 @@ pub fn render_unified_dashboard(
         .pending_command
         .take()
         .map_or(action, UnifiedDashboardAction::Command)
+}
+
+/// Repaints while something is revealed so the countdown expires on its own, without input.
+fn expire_revealed_value(ctx: &egui::Context, state: &mut UnifiedDashboardState) {
+    let now = ctx.input(|input| input.time);
+    let focused = ctx.input(|input| input.viewport().focused != Some(false));
+    if state.hide_expired_reveal(now, focused) {
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
 }
 
 fn unified_refresh_button(ui: &mut egui::Ui, mode: DashboardMode) -> UnifiedDashboardAction {
@@ -276,7 +288,7 @@ fn view_tabs(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
         for view in [DashboardView::Credentials, DashboardView::Audit] {
             if view_tab(ui, view, state.view == view).clicked() {
                 state.view = view;
-                state.selected_connector = None;
+                state.select_connector(None);
                 state.audit.selected = None;
             }
         }
@@ -331,7 +343,7 @@ fn credentials(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
         ui.separator();
     }
     if selected_connector.is_some() {
-        state.selected_connector = selected_connector;
+        state.select_connector(selected_connector);
     }
 }
 
@@ -716,7 +728,7 @@ fn audit_detail_panel(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
         state.view = DashboardView::Credentials;
         state.audit.selected = None;
         state.audit.detail_row = None;
-        state.selected_connector = Some(connector);
+        state.select_connector(Some(connector));
     }
 }
 
@@ -819,11 +831,11 @@ fn unified_search_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState, re
             state.audit.selected = None;
             state.audit.detail_row = None;
             state.audit.search_open = false;
-            state.selected_connector = Some(connector_id);
+            state.select_connector(Some(connector_id));
         }
         Some(UnifiedSearchPick::Audit(index)) => {
             state.view = DashboardView::Audit;
-            state.selected_connector = None;
+            state.select_connector(None);
             state.audit.selected = Some(index);
             state.audit.detail_row = Some(state.audit.rows[index].clone());
             state.audit.search_open = false;
@@ -935,7 +947,7 @@ fn credential_detail(
                 .on_hover_text("Close credential details")
                 .clicked()
             {
-                state.selected_connector = None;
+                state.select_connector(None);
             }
         });
     });
@@ -965,8 +977,25 @@ fn credential_detail(
             if !credential.summary.scopes.is_empty() {
                 detail_field(ui, "Scopes", &credential.summary.scopes.join(", "));
             }
+            if let Some(value) = credential.value.as_deref() {
+                sensitive_value(
+                    ui,
+                    state,
+                    &credential.summary.connector_id,
+                    "Real machine credential",
+                    value,
+                    RevealedKind::Value,
+                );
+            }
             if let Some(placeholder) = credential.placeholder.as_deref() {
-                placeholder_field(ui, placeholder);
+                sensitive_value(
+                    ui,
+                    state,
+                    &credential.summary.connector_id,
+                    "Fake workload placeholder",
+                    placeholder,
+                    RevealedKind::Placeholder,
+                );
             }
             if !credential.summary.sandboxes.is_empty() {
                 ui.add_space(8.0);
@@ -1001,13 +1030,17 @@ fn detail_field(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(9.0);
 }
 
-/// The placeholder is the fake, self-identifying value the workload holds — safe to show, and the only credential-shaped string this window ever renders.
-fn placeholder_field(ui: &mut egui::Ui, placeholder: &str) {
-    ui.label(
-        RichText::new("Fake workload placeholder")
-            .size(FS_LABEL)
-            .color(TEXT_MUTED),
-    );
+/// Masked until asked for, selectable only while revealed, and hidden again by [`UnifiedDashboardState::hide_expired_reveal`].
+fn sensitive_value(
+    ui: &mut egui::Ui,
+    state: &mut UnifiedDashboardState,
+    connector_id: &str,
+    label: &str,
+    value: &str,
+    kind: RevealedKind,
+) {
+    let revealed = state.is_revealed(connector_id, kind);
+    ui.label(RichText::new(label).size(FS_LABEL).color(TEXT_MUTED));
     Frame::new()
         .fill(INPUT_FILL)
         .stroke(Stroke::new(1.0, BORDER))
@@ -1017,15 +1050,46 @@ fn placeholder_field(ui: &mut egui::Ui, placeholder: &str) {
             ui.set_width(ui.available_width());
             ui.add(
                 egui::Label::new(
-                    RichText::new(placeholder)
+                    RichText::new(if revealed { value } else { MASKED_VALUE })
                         .size(FS_SECONDARY)
                         .monospace()
                         .color(TEXT_PRIMARY),
                 )
-                .truncate(),
+                .selectable(revealed),
             );
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if Button::new("Copy", ButtonKind::Secondary)
+                        .show(ui)
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(value.to_string());
+                        state.notice = Some(copied_notice(label, state.mode));
+                    }
+                    if Button::new(
+                        if revealed { "Hide" } else { "Reveal" },
+                        ButtonKind::Secondary,
+                    )
+                    .show(ui)
+                    .clicked()
+                    {
+                        state.toggle_reveal(connector_id, kind, ui.input(|input| input.time));
+                    }
+                });
+            });
         });
     ui.add_space(9.0);
+}
+
+const MASKED_VALUE: &str = "••••••••••••••••";
+
+/// Names the preview's data as synthetic, so a copy taken from it is never mistaken for a real credential.
+fn copied_notice(label: &str, mode: DashboardMode) -> String {
+    match mode {
+        DashboardMode::Preview => format!("{label} copied from synthetic preview data."),
+        DashboardMode::Live => format!("{label} copied."),
+    }
 }
 
 fn pending_detail(
