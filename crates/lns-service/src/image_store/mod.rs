@@ -421,6 +421,15 @@ pub async fn pull_with<F: Fs>(
     Ok(info_from(record, active))
 }
 
+/// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a transient index or provisioner failure must not throw away a pull whose layers already landed.
+fn warn_if_tools_unprovisioned(image: &str, outcome: anyhow::Result<()>) {
+    if let Err(e) = outcome {
+        crate::log::warn!(
+            "could not provision the declared tools of {image} ({e:#}); the sandbox is cached, but its first run needs the network"
+        );
+    }
+}
+
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
@@ -428,12 +437,10 @@ pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
-    // Pre-provisioning only buys an offline first start; the run path provisions anyway, so a transient index or provisioner failure must not throw away a pull whose layers already landed.
-    if let Err(e) = crate::tools::real::pre_provision_for_pull(&artifact, &base_image).await {
-        crate::log::warn!(
-            "could not provision the declared tools of {image} ({e:#}); the sandbox is cached, but its first run needs the network"
-        );
-    }
+    warn_if_tools_unprovisioned(
+        image,
+        crate::tools::real::pre_provision_for_pull(&artifact, &base_image).await,
+    );
     let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
     pull_with(
         &real::RealFs,
@@ -486,6 +493,21 @@ pub async fn prune() -> Result<PruneReport> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_tool_pre_provision_warns_and_keeps_the_pull() {
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(()));
+            warn_if_tools_unprovisioned(
+                "ghcr.io/team/hermes:1.4.0",
+                Err(anyhow::anyhow!("the version index is unreachable")),
+            );
+        });
+    }
+
     use super::*;
     use std::collections::HashMap;
     use std::io;

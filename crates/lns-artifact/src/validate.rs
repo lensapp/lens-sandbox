@@ -15,17 +15,25 @@ pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
     Ok(())
 }
 
-/// The authoring-time half of the tool gate: an author is refused here rather than by a consumer's failed launch.
+/// The authoring-time half of the tool gate: an author is refused here rather than by a consumer's failed launch. Anything about the document's shape is the schema check's to report, so this reads the declared entries and judges only whether each names a tool this build can install.
 pub fn refuse_unprovisionable_tools(doc: &[u8]) -> Result<(), String> {
-    let def = match crate::sandbox::parse(doc) {
-        Ok(def) => def,
-        Err(_) => return Ok(()),
+    let Some(entries) = serde_json::from_slice::<serde_json::Value>(doc)
+        .ok()
+        .and_then(|doc| doc["spec"]["tools"].as_array().cloned())
+    else {
+        return Ok(());
     };
-    let requests = match crate::tools::parse_all(&def.spec.tools) {
-        Ok(requests) => requests,
-        Err(_) => return Ok(()),
-    };
-    crate::tools::registry::refuse_unprovisionable(&requests).map_err(|e| format!("tools: {e}"))
+    for entry in entries {
+        let Some(declared) = entry.as_str() else {
+            continue;
+        };
+        let Ok(tool) = crate::tools::parse(declared) else {
+            continue;
+        };
+        crate::tools::registry::refuse_unprovisionable(std::slice::from_ref(&tool))
+            .map_err(|e| format!("tools: {e}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -73,6 +81,23 @@ mod tests {
                 .any(|p| p.contains("bring it via spec.image")),
             "a plugin-backed tool is refused at authoring time too"
         );
+    }
+
+    #[test]
+    fn the_tool_gate_leaves_every_other_shape_problem_to_the_schema_check() {
+        for doc in [
+            &b"not json at all"[..],
+            br#"{"spec":{}}"#,
+            br#"{"spec":{"tools":[42]}}"#,
+            br#"{"spec":{"tools":["no-version"]}}"#,
+        ] {
+            let label = String::from_utf8_lossy(doc);
+            assert_eq!(
+                refuse_unprovisionable_tools(doc),
+                Ok(()),
+                "the gate judges provisionability only: {label}"
+            );
+        }
     }
 
     #[test]
