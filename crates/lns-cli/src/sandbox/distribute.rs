@@ -216,14 +216,23 @@ where
         let bytes = blob_bytes(&fileset.built);
         writeln!(out, "would push fileset {} ({bytes})", fileset.reference)?;
     }
-    let declared_tools = serde_json::from_slice::<serde_json::Value>(&doc)
+    // Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
+    let unresolved_tools = serde_json::from_slice::<serde_json::Value>(&doc)
         .ok()
-        .and_then(|value| value["spec"]["tools"].as_array().map(Vec::len))
-        .unwrap_or(0);
-    if declared_tools > 0 {
+        .and_then(|value| value["spec"]["tools"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .and_then(|entry| lns_artifact::tools::parse(entry).ok())
+        })
+        .filter(|tool| !lns_artifact::tools::is_exact_version(&tool.version))
+        .count();
+    if unresolved_tools > 0 {
         writeln!(
             out,
-            "note: {declared_tools} tool version(s) resolve at push time; the published digest may differ from this preview"
+            "note: {unresolved_tools} tool version(s) resolve at push time; the published digest may differ from this preview"
         )?;
     }
     let built = lns_artifact::build::build_artifact(&doc)?;
@@ -663,6 +672,39 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(quiet).unwrap();
         assert!(!text.contains("note:"), "got: {text}");
+    }
+
+    #[test]
+    fn a_dry_run_of_already_pinned_tools_promises_the_digest_it_previewed() {
+        // push short-circuits exact pins without consulting the index, so the real push produces the same bytes — warning otherwise defeats the point of an offline preview.
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6"]}}"#;
+        let mut out = Vec::new();
+        push_dry_run(
+            &fs_with_skills(),
+            cwd(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("may differ"), "got: {text}");
+
+        let mixed = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","jq@latest"]}}"#;
+        let mut mixed_out = Vec::new();
+        push_dry_run(
+            &fs_with_skills(),
+            cwd(),
+            mixed,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut mixed_out,
+        )
+        .unwrap();
+        let text = String::from_utf8(mixed_out).unwrap();
+        assert!(
+            text.contains("note: 1 tool version(s) resolve at push time"),
+            "the one fuzzy entry is still called out: {text}"
+        );
     }
 
     #[tokio::test]
