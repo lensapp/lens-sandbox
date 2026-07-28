@@ -88,7 +88,14 @@ impl ToolRecordStore for RealRecordStore {
         }
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(record).context("serializing the tool record")?;
-        std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+        // An unparseable record is read as "no pins at all", so a rename that outlived its data would silently re-resolve every bounded version on the machine.
+        let file =
+            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        std::io::Write::write_all(&mut &file, &bytes)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+        drop(file);
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("installing {}", self.path.display()))
     }

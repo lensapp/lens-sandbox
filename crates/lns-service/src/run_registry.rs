@@ -206,13 +206,6 @@ pub fn tool_bin_paths(run_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn set_tool_bin_paths(run_id: &str, paths: Vec<String>) {
-    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
-        h.tool_bin_paths = paths;
-    }
-}
-
 pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
@@ -657,12 +650,10 @@ mod tests {
     async fn a_runs_tool_paths_are_readable_for_the_life_of_the_run() {
         // `lns exec` enters the same guest later and has to compose the same PATH.
         let id = allocate_run_id();
-        let (h, _rx) = make_handle();
+        let (mut h, _rx) = make_handle();
+        h.tool_bin_paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
         register_named(id.clone(), None, h).unwrap();
-        assert!(tool_bin_paths(&id).is_empty());
-        set_tool_bin_paths(&id, vec!["/.lens/tools/node/22.11.0/bin".to_string()]);
         assert_eq!(tool_bin_paths(&id), vec!["/.lens/tools/node/22.11.0/bin"]);
-        set_tool_bin_paths("ghost", vec!["/nowhere".to_string()]);
         assert!(tool_bin_paths("ghost").is_empty());
         deregister(&id);
         assert!(tool_bin_paths(&id).is_empty());
