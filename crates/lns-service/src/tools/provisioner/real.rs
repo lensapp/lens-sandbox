@@ -13,6 +13,7 @@ const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DRIVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 const BOOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub(crate) struct MiseProvisioner {
     pub scratch_id: String,
@@ -52,6 +53,31 @@ impl ToolProvisioner for MiseProvisioner {
                 })
         }
     }
+}
+
+/// The VMM runs on a blocking task, so aborting the await would leave the guest running for the service's lifetime while its scratch disk is deleted underneath it. `request_stop` needs the guest's own transport, so give a late connector a bounded chance to arrive and use it; only when none does is the guest genuinely beyond our reach, and the caller is told so.
+async fn reap_unreachable_guest(
+    mut vm_task: tokio::task::JoinHandle<Result<()>>,
+    connector_rx: tokio::sync::oneshot::Receiver<Arc<dyn vm::GuestTransport>>,
+) -> anyhow::Error {
+    let stopped = match tokio::time::timeout(REAP_BUDGET, connector_rx).await {
+        Ok(Ok(connector)) => {
+            connector.request_stop();
+            tokio::time::timeout(REAP_BUDGET, &mut vm_task)
+                .await
+                .is_ok()
+        }
+        _ => false,
+    };
+    if stopped {
+        return anyhow::anyhow!(
+            "the provisioner guest did not become reachable within {BOOT_BUDGET:?} and was stopped"
+        );
+    }
+    vm_task.abort();
+    anyhow::anyhow!(
+        "the provisioner guest did not become reachable within {BOOT_BUDGET:?} and could not be stopped; it may still be running"
+    )
 }
 
 /// The guest ended before it was reachable: surface why rather than collapsing every cause into "never became reachable".
@@ -185,16 +211,16 @@ async fn run_provisioner(
     };
 
     let mut vm_task = tokio::spawn(vm::boot(spec, None));
+    let mut connector_rx = connector_rx;
     let connector = tokio::select! {
         biased;
         r = &mut vm_task => {
             return Err(boot_failure(r));
         }
-        c = connector_rx => c.context("the provisioner guest never became reachable")?,
+        c = &mut connector_rx => c.context("the provisioner guest never became reachable")?,
         // One wedged VMM would otherwise hold the provision lock for the service's lifetime.
         _ = tokio::time::sleep(BOOT_BUDGET) => {
-            vm_task.abort();
-            anyhow::bail!("the provisioner guest did not become reachable within {BOOT_BUDGET:?}");
+            return Err(reap_unreachable_guest(vm_task, connector_rx).await);
         }
     };
     let _stop_guard = vm::VmStopGuard::new(connector.clone());
