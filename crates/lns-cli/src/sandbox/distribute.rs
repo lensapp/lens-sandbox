@@ -30,6 +30,15 @@ pub trait ToolResolver {
     ) -> LocalBoxFuture<'a, Result<String>>;
 }
 
+/// A version is already a pin when it names every component of a release, so there is nothing left for the index to resolve.
+fn is_exact_version(version: &str) -> bool {
+    version != lns_artifact::tools::LATEST
+        && version.split('.').count() >= 3
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
+}
+
 /// What a declared entry was published as, so the publisher sees the version they shipped rather than having to read it back out of the registry.
 #[derive(Debug)]
 pub struct PinnedTool {
@@ -54,11 +63,16 @@ pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
     for entry in entries {
         let declared = entry.as_str().context("spec.tools entry is not a string")?;
         let tool = lns_artifact::tools::parse(declared)?;
-        let exact = resolver
-            .resolve(&tool)
-            .await
-            .with_context(|| format!("resolving {declared} for publishing"))?;
-        let published = format!("{}@{exact}", tool.name);
+        // An entry that already names an exact version is its own pin; re-publishing must not need the index, which may be blocked or may have dropped that version.
+        let published = if is_exact_version(&tool.version) {
+            declared.to_string()
+        } else {
+            let exact = resolver
+                .resolve(&tool)
+                .await
+                .with_context(|| format!("resolving {declared} for publishing"))?;
+            format!("{}@{exact}", tool.name)
+        };
         pinned.push(PinnedTool {
             declared: declared.to_string(),
             published: published.clone(),
@@ -556,6 +570,37 @@ mod tests {
         assert!(
             producer.docs.borrow().is_empty(),
             "nothing is uploaded and the index is never consulted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_already_exact_pin_publishes_without_consulting_the_index() {
+        // Re-publishing must not fail because the index is blocked or has dropped that version.
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
+        let mut out = Vec::new();
+        push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let docs = producer.docs.borrow();
+        let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
+        assert_eq!(
+            published["spec"]["tools"],
+            serde_json::json!(["node@22.11.0"])
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("pinned node@22.11.0"),
+            "the entry is still disclosed as published"
         );
     }
 
