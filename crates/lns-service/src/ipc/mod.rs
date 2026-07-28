@@ -474,8 +474,8 @@ pub(super) fn build_session_params(
     run_id: &str,
 ) -> crate::vm::session_client::SessionParams {
     let mut env = args.env;
-    // Same guest, same rule: `lns exec` reaches the PATH the workload got.
-    crate::workload_env::prepend_tool_paths(&mut env, &crate::run_registry::tool_bin_paths(run_id));
+    // The run's declared tools reach exec through the same rule the workload's PATH was built with; the image's own PATH additions are not part of an exec session, which inherits the guest default.
+    crate::workload_env::compose_guest_path(&mut env, &crate::run_registry::tool_bin_paths(run_id));
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env,
@@ -1943,6 +1943,31 @@ mod tests {
             params.env.iter().find(|kv| kv.starts_with("PATH=")),
             Some(workload_path),
             "exec must reach the PATH the workload got"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn an_exec_carrying_no_env_still_puts_the_runs_tool_dirs_first() {
+        // What `lns exec` actually sends is an empty env, so the composed PATH has to hold up on that input and not just on a hand-supplied one.
+        let tools = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        crate::run_registry::set_tool_bin_paths(&run_id, tools.clone());
+        let args = exec_args(vec!["node".into()], false, false);
+        assert!(args.env.is_empty(), "the CLI sends no env for exec");
+        let params = build_session_params(args, &run_id);
+        crate::run_registry::deregister(&run_id);
+
+        assert_eq!(
+            params.env.iter().find(|kv| kv.starts_with("PATH=")),
+            Some(&format!(
+                "PATH=/.lens/tools/node/22.11.0/bin:{}",
+                crate::workload_env::GUEST_DEFAULT_PATH
+            )),
+            "got: {:?}",
+            params.env
         );
     }
 
