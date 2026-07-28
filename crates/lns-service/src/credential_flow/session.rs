@@ -1640,6 +1640,57 @@ mod tests {
         );
     }
 
+    /// A sidecar that can be made momentarily unreadable, so what a card asked against can be pinned when the read behind it fails.
+    #[derive(Default)]
+    struct FlakyReadGrantStore {
+        saved: StdMutex<WorkloadGrantFile>,
+        unreadable: std::sync::atomic::AtomicBool,
+    }
+
+    impl FlakyReadGrantStore {
+        fn set_unreadable(&self, unreadable: bool) {
+            self.unreadable
+                .store(unreadable, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl GrantStore for FlakyReadGrantStore {
+        fn load(&self) -> std::io::Result<WorkloadGrantFile> {
+            if self.unreadable.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(std::io::Error::other("sidecar unreadable"));
+            }
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, s: &WorkloadGrantFile) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = s.clone();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_card_raised_over_an_unreadable_sidecar_can_only_cancel_never_wave_through() {
+        let store = Arc::new(FlakyReadGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
+        forget_from_another_process(store.as_ref());
+
+        store.set_unreadable(true);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+        store.set_unreadable(false);
+        allow_stored(&session, "c1");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider")
+                .is_none(),
+            "a card that could not read what it was asked against must fall back to the count the run started with, so an unreadable sidecar costs a re-ask rather than letting a forget it never saw be overwritten"
+        );
+    }
+
     #[test]
     fn a_forget_that_landed_before_the_card_went_up_is_answered_by_it() {
         let store = Arc::new(CapturingGrantStore::default());
