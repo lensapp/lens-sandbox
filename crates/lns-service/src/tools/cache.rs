@@ -260,9 +260,8 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
                 .link_name()
                 .context("reading hardlink target")?
                 .with_context(|| format!("tool hardlink {} has no target", path.display()))?;
-            let kind = by_path
-                .get(&normalized(&target))
-                .cloned()
+            let kind = in_tree_path(&target)
+                .and_then(|target| by_path.get(&target).cloned())
                 .with_context(|| {
                     format!(
                         "tool hardlink {} points at {}, which is not in the tree",
@@ -302,9 +301,8 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
 
 /// Injection resolves a path's parent segments *through* symlinks, so a link out of the tree makes every entry "under" it land wherever the link points — over the supervisor's own files, which are injected first. Only a target that still resolves inside the tool's own root may be preserved.
 fn target_stays_in_tree(link_rel: &str, target: &Path) -> bool {
-    // An empty segment (`bin//esc`) must not count as a level, or it absorbs one `..` and a target that leaves the tree reads as staying inside it.
     let mut resolved: Vec<&str> = match link_rel.rsplit_once('/') {
-        Some((parent, _)) => parent.split('/').filter(|seg| !seg.is_empty()).collect(),
+        Some((parent, _)) => parent.split('/').collect(),
         None => Vec::new(),
     };
     for component in target.components() {
@@ -322,8 +320,23 @@ fn target_stays_in_tree(link_rel: &str, target: &Path) -> bool {
     true
 }
 
+/// A hardlink names an earlier entry in the same tree, so a target that steps out of it (or starts at the root) names nothing we ingested.
+fn in_tree_path(target: &Path) -> Option<String> {
+    target
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+        .then(|| normalized(target))
+}
+
+/// One spelling per guest path: tar carries `./x`, `a//b`, and `a/./b` for the same file, and injection collapses all of them — so anything that indexes on a path (the tree guard's depth, the hardlink lookup, the manifest itself) has to see the collapsed form or it measures a path that never gets created. Callers have already refused `..` and absolute entries, so keeping the normal segments is lossless here.
 fn normalized(path: &Path) -> String {
-    path.to_string_lossy().trim_start_matches("./").to_string()
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -502,12 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn repeated_slashes_in_the_link_path_buy_no_levels_back() {
-        // Injection collapses these, so every empty segment would otherwise hand the target another `..` of budget.
+    fn padded_link_paths_buy_no_levels_back() {
+        // Injection collapses every blank and `.` segment, so counting them would hand the target extra `..` budget and let a tool tree land on /.lens/bin.
         for (raw_link, target) in [
             (&b"bin//esc"[..], "../.."),
             (b"bin//////esc", "../../../../../.lens/bin"),
             (b"a//b//c", "../../.."),
+            // Same trick with `.` instead of blanks: injection collapses these too.
+            (b"bin/./././././esc", "../../../../../.lens/bin"),
+            (b"./bin/./esc", "../.."),
         ] {
             let mut builder = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();

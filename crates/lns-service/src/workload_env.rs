@@ -65,8 +65,26 @@ pub fn compose_workload_env(
 pub const GUEST_DEFAULT_PATH: &str =
     "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// The one PATH rule for a guest that has declared tools: the tool dirs win over whatever the image (or `-e`) composed, and `lns exec` into the same guest must reach the same answer — two copies of this drift into exactly the "run finds node, exec does not" bug.
+pub fn prepend_tool_paths(env: &mut Vec<String>, tool_bin_paths: &[String]) {
+    if tool_bin_paths.is_empty() {
+        return;
+    }
+    let existing = env
+        .iter()
+        .find_map(|kv| kv.strip_prefix("PATH="))
+        .filter(|path| !path.is_empty())
+        .unwrap_or(GUEST_DEFAULT_PATH)
+        .to_string();
+    let value = format!("PATH={}", join_path(tool_bin_paths, &existing));
+    match env.iter_mut().find(|kv| kv.starts_with("PATH=")) {
+        Some(slot) => *slot = value,
+        None => env.push(value),
+    }
+}
+
 /// An empty PATH segment is the current directory to `execvp`, so a blank entry — from `PATH=` in the image config, or a stray `::` — must never survive into the workload's PATH.
-pub fn join_path(tool_bin_paths: &[String], existing: &str) -> String {
+fn join_path(tool_bin_paths: &[String], existing: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     tool_bin_paths
         .iter()
@@ -88,21 +106,8 @@ pub fn run_workload_env(
 ) -> WorkloadEnv {
     const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
-    if !tool_bin_paths.is_empty() {
-        // Declared tools win over the image's copies, so the tool dirs prepend whatever PATH the image (or -e) composed; the broker's last-wins putenv would otherwise let the image PATH shadow them.
-        let existing = composed
-            .env
-            .iter()
-            .find_map(|kv| kv.strip_prefix("PATH="))
-            .filter(|path| !path.is_empty())
-            .unwrap_or(GUEST_DEFAULT_PATH)
-            .to_string();
-        let value = format!("PATH={}", join_path(tool_bin_paths, &existing));
-        match composed.env.iter_mut().find(|kv| kv.starts_with("PATH=")) {
-            Some(slot) => *slot = value,
-            None => composed.env.push(value),
-        }
-    }
+    // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
+    prepend_tool_paths(&mut composed.env, tool_bin_paths);
     if let Some(agent_command) = agent_command {
         // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
