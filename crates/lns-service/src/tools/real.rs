@@ -13,6 +13,7 @@ pub async fn ensure_for_run(
     content_store: &ContentStore,
     requests: &[ToolRef],
     target: &ProvisionTarget,
+    disclose: &(dyn Fn(&super::ProvisionOutcome) + Send + Sync),
 ) -> Result<EnsuredTools, ProvisionError> {
     let cache_dir = cache_dir()?;
     let tools_root = cache_dir.join("tools");
@@ -48,6 +49,7 @@ pub async fn ensure_for_run(
                 target,
                 mise::engine_version(),
                 now_unix_secs(),
+                disclose,
             )
             .await?;
             drop(scratch);
@@ -97,18 +99,29 @@ pub async fn pre_provision_for_pull(
             .get(..12)
             .unwrap_or("tools")
     );
-    let ensured = ensure_for_run(&scratch_id, &content_store, &requests, &target).await?;
-    let cx = crate::ocsf_audit::OcsfCtx::at_unix(scratch_id, String::new(), now_unix_secs());
-    for outcome in &ensured.provisioned {
-        crate::log::info!(
-            "Provisioned",
-            "{} → {} (cached for offline start)",
-            outcome.requested,
-            outcome.resolved
-        );
-        crate::ledger::append_tool_provisioned(&cx, outcome)
-            .context("recording the provisioned tool in the machine ledger")?;
-    }
+    let cx =
+        crate::ocsf_audit::OcsfCtx::at_unix(scratch_id.clone(), String::new(), now_unix_secs());
+    ensure_for_run(
+        &scratch_id,
+        &content_store,
+        &requests,
+        &target,
+        &|outcome| {
+            crate::log::info!(
+                "Provisioned",
+                "{} → {} (cached for offline start)",
+                outcome.requested,
+                outcome.resolved
+            );
+            // The tool is already cached; a chain that cannot be written is a warning, never a reason to undo an acquisition.
+            if let Err(e) = crate::ledger::append_tool_provisioned(&cx, outcome) {
+                crate::log::warn!(
+                    "could not record the provisioned tool in the machine ledger: {e:#}"
+                );
+            }
+        },
+    )
+    .await?;
     Ok(())
 }
 

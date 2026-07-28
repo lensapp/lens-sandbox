@@ -241,16 +241,19 @@ async fn orchestrate(
             &content_store,
             &tool_requests,
             &target,
+            &|outcome| {
+                // The tool is cached the moment this runs; a chain we cannot append to is a warning, not a reason to fail a launch whose tool is already on disk.
+                if let Err(e) = crate::audit::record_tool_provisioned(
+                    &run_id,
+                    &microvm,
+                    outcome,
+                    &crate::oauth::RealClock,
+                ) {
+                    log::warn!("could not record the provisioned tool in the run's chain: {e:#}");
+                }
+            },
         )
         .await?;
-        for outcome in &ensured.provisioned {
-            crate::audit::record_tool_provisioned(
-                &run_id,
-                &microvm,
-                outcome,
-                &crate::oauth::RealClock,
-            )?;
-        }
         Some(ensured)
     };
 

@@ -310,6 +310,7 @@ pub async fn ensure_tools<R, C, P>(
     target: &ProvisionTarget,
     engine_version: &str,
     now_unix_secs: u64,
+    disclose: &(dyn Fn(&ProvisionOutcome) + Send + Sync),
 ) -> Result<EnsuredTools, ProvisionError>
 where
     R: ToolRecordStore,
@@ -367,19 +368,21 @@ where
             } else {
                 record.merge_new(&spec, entry);
             }
-            provisioned.push(ProvisionOutcome {
+            let outcome = ProvisionOutcome {
                 tool: tool.name.clone(),
                 requested: request.to_string(),
                 resolved: tool.resolved.to_string(),
                 backend: tool.backend.clone(),
                 source_host: tool.source_host.clone(),
-            });
+            };
             hits.insert(tool.name.clone(), manifest);
-            // Persist per tool: a failure ingesting a later one must not leave this tree cached but unreferenceable.
+            // Commit and disclose per tool: a failure ingesting a later one must not leave this tree cached, recorded, and unmentioned on any chain.
             records
                 .save(&record)
                 .map_err(|e| ProvisionError::Engine(format!("saving the tool record: {e:#}")))?;
             record_changed = false;
+            disclose(&outcome);
+            provisioned.push(outcome);
         }
     }
     if record_changed {
@@ -611,6 +614,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -641,6 +645,7 @@ mod tests {
         let cache = MemCache::default();
         *cache.ingests_before_failing.lock().unwrap() = Some(1);
         let provisioner = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        let disclosed = Mutex::new(Vec::new());
         let err = ensure_tools(
             &records,
             &cache,
@@ -649,6 +654,12 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|outcome| {
+                disclosed
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} -> {}", outcome.requested, outcome.resolved))
+            },
         )
         .await
         .unwrap_err();
@@ -657,6 +668,11 @@ mod tests {
             recorded(&records, "some-tool@1"),
             "1.2.3",
             "the tree ingested before the failure is still named by the record"
+        );
+        assert_eq!(
+            disclosed.lock().unwrap().as_slice(),
+            ["some-tool@1 -> 1.2.3"],
+            "and it was disclosed when it committed, not after the whole set survived"
         );
     }
 
@@ -673,6 +689,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -753,6 +770,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -788,6 +806,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -821,6 +840,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -835,6 +855,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -864,6 +885,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -876,6 +898,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -903,6 +926,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -916,6 +940,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -940,6 +965,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -953,6 +979,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -976,6 +1003,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1000,6 +1028,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1012,6 +1041,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1034,6 +1064,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1048,6 +1079,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1071,6 +1103,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1084,6 +1117,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1112,6 +1146,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1124,6 +1159,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_009,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1151,6 +1187,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap_err();
@@ -1172,6 +1209,7 @@ mod tests {
             &target(),
             "2026.7.14",
             1_700_000_000,
+            &|_| {},
         )
         .await
         .unwrap_err();
