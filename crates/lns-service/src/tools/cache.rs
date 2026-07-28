@@ -237,6 +237,13 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
                 .link_name()
                 .context("reading symlink target")?
                 .with_context(|| format!("tool symlink {} has no target", path.display()))?;
+            if !target_stays_in_tree(&path, &target) {
+                bail!(
+                    "tool symlink {} -> {} escapes the tool tree",
+                    path.display(),
+                    target.display()
+                );
+            }
             entries.push(ManifestEntry {
                 path: rel,
                 mode,
@@ -290,6 +297,35 @@ fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<Manif
         });
     }
     Ok(entries)
+}
+
+/// Injection resolves a path's parent segments *through* symlinks, so a link out of the tree makes every entry "under" it land wherever the link points — over the supervisor's own files, which are injected first. Only a target that still resolves inside the tool's own root may be preserved.
+fn target_stays_in_tree(link: &Path, target: &Path) -> bool {
+    let mut resolved: Vec<&std::ffi::OsStr> = link
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(seg) => Some(seg),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for component in target.components() {
+        match component {
+            Component::Normal(seg) => resolved.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
 }
 
 fn normalized(path: &Path) -> String {
@@ -435,6 +471,61 @@ mod tests {
         assert!(
             format!("{err:#}").contains("control characters"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_that_leaves_the_tool_tree_is_refused() {
+        // A link out plus a regular file "under" it lands wherever the link points: injection resolves parent segments through symlinks, and tool specs are appended after the supervisor's.
+        for (link, target) in [
+            ("esc", "/.lens/bin"),
+            ("esc", ".."),
+            ("esc", "../../../../bin"),
+            ("bin/esc", "../../../.."),
+        ] {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_path(link).unwrap();
+            header.set_link_name(target).unwrap();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+            let tar = builder.into_inner().unwrap();
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let err = cache(dir.path())
+                .ingest(&key(), &staged(tar))
+                .expect_err("a tool tree must not reach outside itself");
+            assert!(
+                format!("{err:#}").contains("escapes the tool tree"),
+                "{link} -> {target}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_inside_the_tool_tree_is_preserved() {
+        // Real trees rely on these: node ships bin/node -> ../lib/node_modules/... and friends.
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_path("bin/node").unwrap();
+        header.set_link_name("../lib/node").unwrap();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap();
+        assert_eq!(
+            manifest.entries[0].kind,
+            EntryKind::Symlink {
+                target: "../lib/node".into()
+            }
         );
     }
 
