@@ -367,18 +367,8 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProvisionError {
-    #[error(
-        "spec.tools declares \"{entry}\": \"{name}\" is not a tool lns can provision; check the name against mise's registry"
-    )]
-    Unknown { entry: String, name: String },
-    #[error(
-        "spec.tools declares \"{entry}\": \"{name}\" needs the {backend} backend, which lns does not provision; bring it via spec.image instead"
-    )]
-    UnsupportedBackend {
-        entry: String,
-        name: String,
-        backend: String,
-    },
+    #[error(transparent)]
+    Unprovisionable(#[from] lns_artifact::tools::registry::ToolRefusal),
     #[error(
         "spec.tools declares {tool} but image {image} is musl-based and {reason}. Use a glibc base image (e.g. debian:12-slim) or remove {name} from spec.tools"
     )]

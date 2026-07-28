@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 fn workspace_paths() -> Result<(PathBuf, PathBuf)> {
     let root = std::env::current_dir().context("resolving the working directory")?;
     let manifest = root.join("crates/lns-service/mise.toml");
-    let snapshot = root.join("crates/lns-service/src/tools/registry.snapshot");
+    let snapshot = root.join("crates/lns-artifact/src/tools/registry.snapshot");
     if !manifest.is_file() {
         bail!(
             "{} not found — run bump-mise from the workspace root",

@@ -1,3 +1,5 @@
+pub mod registry;
+
 use anyhow::{Result, bail};
 
 /// The one version keyword the spec accepts: it re-resolves on every run rather than pinning.

@@ -2,7 +2,7 @@
 
 The tool-provisioning engine (mise), its provisioner rootfs images, and the
 companion artifacts are pinned in `crates/lns-service/mise.toml`; the tool-name
-registry snapshot lives at `crates/lns-service/src/tools/registry.snapshot`.
+registry snapshot lives at `crates/lns-artifact/src/tools/registry.snapshot`.
 Users never see or choose the engine version, and the tool cache key excludes
 it, so a bump never re-provisions installed tools.
 
