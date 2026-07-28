@@ -7,7 +7,7 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 static OPEN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn viewport_id() -> ViewportId {
-    ViewportId::from_hash_of("lns-audit-dashboard")
+    ViewportId::from_hash_of("lns-dashboard")
 }
 
 pub fn note_write() {

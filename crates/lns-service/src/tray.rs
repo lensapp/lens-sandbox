@@ -46,10 +46,10 @@ fn build_tray_icon(
     on_event: impl Fn() + Send + Sync + 'static,
 ) -> anyhow::Result<tray_icon::TrayIcon> {
     let menu = Menu::new();
-    let audit_item = MenuItem::new("Audit", true, None);
-    menu.append(&audit_item)
-        .context("failed to append audit menu item")?;
-    let audit_id = audit_item.id().clone();
+    let dashboard_item = MenuItem::new("Dashboard", true, None);
+    menu.append(&dashboard_item)
+        .context("failed to append dashboard menu item")?;
+    let dashboard_id = dashboard_item.id().clone();
     let quit_item = MenuItem::new(
         "Quit Lens Sandbox",
         true,
@@ -70,7 +70,7 @@ fn build_tray_icon(
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == audit_id {
+        if event.id == dashboard_id {
             crate::dashboard::live::request_open();
             if let Some(ctx) = window::ctx() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -210,13 +210,13 @@ struct TrayApp {
     credential_inputs: HashMap<String, String>,
     token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
-    audit: Arc<Mutex<AuditWindow>>,
-    audit_open: Arc<AtomicBool>,
+    dashboard: Arc<Mutex<DashboardWindow>>,
+    dashboard_open: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
-struct AuditWindow {
-    state: crate::dashboard::DashboardState,
+struct DashboardWindow {
+    state: Option<crate::dashboard::UnifiedDashboardState>,
     last_gen: u64,
     focused: bool,
 }
@@ -263,17 +263,16 @@ impl TrayApp {
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
-            audit: Arc::new(Mutex::new(AuditWindow::default())),
-            audit_open: Arc::new(AtomicBool::new(false)),
+            dashboard: Arc::new(Mutex::new(DashboardWindow::default())),
+            dashboard_open: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
+    fn render_dashboard(&mut self, ctx: &egui::Context) {
         if crate::dashboard::live::take_open_request() {
-            self.audit_open.store(true, Ordering::Relaxed);
-            if let Ok(mut w) = self.audit.lock() {
-                w.state = crate::dashboard::DashboardState::new();
-                crate::dashboard::load(&mut w.state);
+            self.dashboard_open.store(true, Ordering::Relaxed);
+            if let Ok(mut w) = self.dashboard.lock() {
+                w.state = Some(crate::dashboard::load_unified(&self.window_state));
                 w.last_gen = crate::dashboard::live::generation();
                 w.focused = false;
             }
@@ -282,20 +281,28 @@ impl TrayApp {
                 egui::ViewportCommand::Focus,
             );
         }
-        if !self.audit_open.load(Ordering::Relaxed) {
+        if !self.dashboard_open.load(Ordering::Relaxed) {
             return;
         }
-        let audit = self.audit.clone();
-        let audit_open = self.audit_open.clone();
+        let dashboard = self.dashboard.clone();
+        let dashboard_open = self.dashboard_open.clone();
+        let window_state = self.window_state.clone();
         ctx.show_viewport_deferred(
             crate::dashboard::live::viewport_id(),
-            crate::dashboard::viewport_builder(),
-            move |ui, _class| audit_frame(ui, &audit, &audit_open),
+            crate::dashboard::unified_viewport_builder(),
+            move |ui, _class| {
+                dashboard_frame(ui, &dashboard, &dashboard_open, &window_state);
+            },
         );
     }
 }
 
-fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &AtomicBool) {
+fn dashboard_frame(
+    ui: &mut egui::Ui,
+    dashboard: &Mutex<DashboardWindow>,
+    dashboard_open: &AtomicBool,
+    window_state: &WindowState,
+) {
     let saved_style = ui.ctx().global_style();
     crate::dashboard::apply_theme(ui.ctx());
     ui.set_style(ui.ctx().global_style());
@@ -304,21 +311,35 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
         (vp.focused.unwrap_or(false), vp.close_requested())
     });
     crate::dashboard::live::set_watching(focused);
-    if let Ok(mut w) = audit.lock() {
+    if let Ok(mut window) = dashboard.lock() {
         let generation = crate::dashboard::live::generation();
-        if (focused && !w.focused) || generation != w.last_gen {
-            crate::dashboard::load(&mut w.state);
-            w.last_gen = crate::dashboard::live::generation();
+        let should_reload = (focused && !window.focused) || generation != window.last_gen;
+        if should_reload && let Some(state) = window.state.as_mut() {
+            crate::dashboard::reload_unified(state, window_state);
+            window.last_gen = crate::dashboard::live::generation();
         }
-        w.focused = focused;
-        if crate::dashboard::render(ui, &mut w.state) == crate::dashboard::DashboardAction::Refresh
-        {
-            crate::dashboard::load(&mut w.state);
-            w.last_gen = crate::dashboard::live::generation();
+        window.focused = focused;
+        if let Some(state) = window.state.as_mut() {
+            match crate::dashboard::render_unified_dashboard(ui, state) {
+                crate::dashboard::UnifiedDashboardAction::None => {}
+                crate::dashboard::UnifiedDashboardAction::Refresh => {
+                    crate::dashboard::reload_unified(state, window_state);
+                    window.last_gen = crate::dashboard::live::generation();
+                }
+                crate::dashboard::UnifiedDashboardAction::Command(command) => {
+                    let result = crate::dashboard::execute_unified_command(&command, window_state);
+                    crate::dashboard::reload_unified(state, window_state);
+                    match result {
+                        Ok(notice) => state.notice = Some(notice),
+                        Err(error) => state.audit.last_error = Some(format!("{error:#}")),
+                    }
+                    window.last_gen = crate::dashboard::live::generation();
+                }
+            }
         }
     }
     if close_requested {
-        audit_open.store(false, Ordering::Relaxed);
+        dashboard_open.store(false, Ordering::Relaxed);
         crate::dashboard::live::set_watching(false);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
@@ -425,7 +446,7 @@ impl eframe::App for TrayApp {
             .filter(|d| d.is_revealed())
             .count();
         self.placement.sync_visibility(ctx, &order, revealed);
-        self.render_audit_dashboard(ctx);
+        self.render_dashboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2396,6 +2417,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             deny_scope: DenyScope::Workload,
+            origin: None,
         }
     }
 

@@ -921,6 +921,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                credential_slots: Vec::new(),
             },
         );
 
@@ -1280,6 +1281,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            credential_slots: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
         let resp = handle_request(
@@ -1314,6 +1316,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            credential_slots: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1369,6 +1372,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
+            credential_slots: Vec::new(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1457,6 +1461,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                credential_slots: Vec::new(),
             },
         );
     }
@@ -1804,6 +1809,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                credential_slots: Vec::new(),
             },
         );
 

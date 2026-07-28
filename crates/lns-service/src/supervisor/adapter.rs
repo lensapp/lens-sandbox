@@ -376,6 +376,7 @@ fn make_armed_reconciler(
 fn build_credential_notifier(
     decision_tx: tokio::sync::mpsc::UnboundedSender<CredentialDecisionDelivery>,
     custom_providers: Arc<Vec<DefProvider>>,
+    origin: crate::approval_flow::window::CredentialPromptOrigin,
 ) -> WindowCredentialNotifier {
     let window_state = window::get().expect("window state installed by caller");
     WindowCredentialNotifier::with_registry_detection(
@@ -384,6 +385,7 @@ fn build_credential_notifier(
         window::ctx(),
         custom_providers,
     )
+    .with_origin(origin)
 }
 
 /// The follow-up `Policy` frame after a credential decision must carry both the current network policy and the registry-expanded credentials.
@@ -511,6 +513,7 @@ async fn start_credential_subsystem(
     consent: CredentialConsent,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth: OauthWiring,
+    origin: crate::approval_flow::window::CredentialPromptOrigin,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = default_credentials_path();
@@ -533,6 +536,7 @@ async fn start_credential_subsystem(
     let credential_notifier = Arc::new(build_credential_notifier(
         credential_decision_tx,
         custom_providers.clone(),
+        origin,
     ));
 
     let policy_emitter = make_policy_emitter(
@@ -748,6 +752,15 @@ pub(super) async fn start(
             pkce_configs,
             display_names: oauth_display_names,
             token_fallbacks,
+        },
+        crate::approval_flow::window::CredentialPromptOrigin {
+            sandbox_id: run_id.clone(),
+            sandbox_name: microvm_name.clone(),
+            project: policy_path
+                .parent()
+                .unwrap_or(policy_path)
+                .display()
+                .to_string(),
         },
     )
     .await?;

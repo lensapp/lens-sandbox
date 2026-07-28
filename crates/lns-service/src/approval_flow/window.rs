@@ -37,6 +37,13 @@ pub struct CredentialDecisionDelivery {
     pub request: CredentialDecisionRequest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialPromptOrigin {
+    pub sandbox_id: String,
+    pub sandbox_name: String,
+    pub project: String,
+}
+
 /// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time; `oauth_display_name` is `Some` for an oauth connector, making the card a browser-sign-in consent rather than a value prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialCardPrompt {
@@ -53,6 +60,7 @@ pub struct CredentialCardPrompt {
     pub is_project_defined: bool,
     /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::deny_scope`]: how far this card's "Deny" reaches.
     pub deny_scope: DenyScope,
+    pub origin: Option<CredentialPromptOrigin>,
 }
 
 /// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
@@ -66,6 +74,7 @@ pub struct SignInCard {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    pub origin: Option<CredentialPromptOrigin>,
 }
 
 pub struct WindowState {
@@ -205,6 +214,21 @@ impl WindowState {
         host_value_available: bool,
         decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
     ) -> bool {
+        self.try_insert_credential_pending_with_origin(
+            prompt,
+            host_value_available,
+            decision_tx,
+            None,
+        )
+    }
+
+    pub fn try_insert_credential_pending_with_origin(
+        &self,
+        prompt: CredentialPendingPrompt,
+        host_value_available: bool,
+        decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
+        origin: Option<CredentialPromptOrigin>,
+    ) -> bool {
         let mut g = self.lock();
         if g.pending_credentials
             .iter()
@@ -226,10 +250,13 @@ impl WindowState {
                 injection_domains: prompt.injection_domains,
                 is_project_defined: prompt.is_project_defined,
                 deny_scope: prompt.deny_scope,
+                origin,
             },
             decision_tx,
             seq,
         });
+        drop(g);
+        crate::dashboard::live::note_write();
         true
     }
 
@@ -237,6 +264,7 @@ impl WindowState {
         self.lock()
             .pending_credentials
             .retain(|e| e.prompt.id != id);
+        crate::dashboard::live::note_write();
     }
 
     /// Coalesces by `credential_id`; the `cancel` sender aborts the in-flight device-flow poll (or pivots it to a pasted token) when the card resolves. The card takes over a matching connecting placeholder's slot so it appears where the accepted card was.
@@ -256,12 +284,15 @@ impl WindowState {
             .take_connecting(&card.display_name)
             .unwrap_or_else(|| g.alloc_seq());
         g.pending_sign_ins.push(SignInEntry { card, cancel, seq });
+        drop(g);
+        crate::dashboard::live::note_write();
     }
 
     pub fn remove_sign_in(&self, credential_id: &str) {
         self.lock()
             .pending_sign_ins
             .retain(|e| e.card.credential_id != credential_id);
+        crate::dashboard::live::note_write();
     }
 
     /// Drops the card and aborts the in-flight device-flow poll; returns whether a card was present.
@@ -286,6 +317,8 @@ impl WindowState {
         };
         let entry = g.pending_sign_ins.remove(idx);
         let _ = entry.cancel.send(pivot);
+        drop(g);
+        crate::dashboard::live::note_write();
         true
     }
 
@@ -425,6 +458,8 @@ impl WindowState {
             id: id.to_string(),
             request,
         });
+        drop(g);
+        crate::dashboard::live::note_write();
         true
     }
 
@@ -1139,6 +1174,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            origin: None,
         }
     }
 
