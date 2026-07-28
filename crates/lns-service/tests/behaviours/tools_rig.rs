@@ -61,8 +61,21 @@ impl ToolCache for MemToolCache {
     fn lookup(
         &self,
         key: &lns_service::tools::ToolCacheKey,
+        declared: &[String],
     ) -> anyhow::Result<Option<ToolManifest>> {
-        Ok(self.map.lock().unwrap().get(key).cloned())
+        // Same rule as the real cache: a tree is only reused when the sandbox declares everything that shared its guest.
+        Ok(self
+            .map
+            .lock()
+            .unwrap()
+            .get(key)
+            .filter(|manifest| {
+                manifest
+                    .co_installed
+                    .iter()
+                    .all(|neighbour| declared.iter().any(|tool| tool == neighbour))
+            })
+            .cloned())
     }
     fn ingest(
         &self,
@@ -71,6 +84,7 @@ impl ToolCache for MemToolCache {
     ) -> anyhow::Result<ToolManifest> {
         let manifest = ToolManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
+            co_installed: staged.co_installed.clone(),
             tool: staged.name.clone(),
             resolved: staged.resolved.clone(),
             backend: staged.backend.clone(),
@@ -129,6 +143,7 @@ impl ToolProvisioner for ScriptedProvisioner {
                 };
                 StagedTool {
                     name: request.name.clone(),
+                    co_installed: Vec::new(),
                     resolved: resolved.parse().expect("a usable version"),
                     backend: format!("core:{}", request.name),
                     source_host: Some("upstream.example.test".into()),
