@@ -86,7 +86,7 @@ pub async fn pre_provision_for_pull(
         .collect();
     let target = ProvisionTarget {
         arch: super::host_arch(),
-        libc: super::libc::detect_libc_for(&base_image.layer_digests, &layers)
+        libc: super::libc::detect_libc_off_runtime(&base_image.layer_digests, &layers)
             .map_err(|e| ProvisionError::Engine(format!("reading the base image: {e:#}")))?,
     };
     super::registry::refuse_libc_unsupported(&requests, &target, &artifact.base_image)?;
