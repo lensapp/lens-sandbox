@@ -1231,15 +1231,6 @@ mod tests {
     #[test]
     fn a_boot_sign_in_grant_that_cannot_persist_still_arms_this_run_and_tells_the_user() {
         init_tracing_capture();
-        struct FailingGrantStore;
-        impl GrantStore for FailingGrantStore {
-            fn load(&self) -> std::io::Result<WorkloadGrantFile> {
-                Ok(WorkloadGrantFile::default())
-            }
-            fn save(&self, _: &WorkloadGrantFile) -> std::io::Result<()> {
-                Err(std::io::Error::other("sidecar unwritable"))
-            }
-        }
         let providers = acme_custom();
         let workload = acme_workload();
         let mut grants = WorkloadGrantFile::default();
@@ -1248,7 +1239,7 @@ mod tests {
             &["acme".to_string()],
             &providers,
             &mut grants,
-            &FailingGrantStore,
+            &MemoryGrantStore::unwritable(),
         );
 
         let applied: HashSet<String> = ["acme".to_string()].into_iter().collect();
@@ -1382,13 +1373,37 @@ mod tests {
     #[derive(Default)]
     struct MemoryGrantStore {
         file: std::sync::Mutex<WorkloadGrantFile>,
+        unreadable: bool,
+        unwritable: bool,
+    }
+
+    impl MemoryGrantStore {
+        fn unreadable() -> Self {
+            Self {
+                unreadable: true,
+                ..Self::default()
+            }
+        }
+
+        fn unwritable() -> Self {
+            Self {
+                unwritable: true,
+                ..Self::default()
+            }
+        }
     }
 
     impl GrantStore for MemoryGrantStore {
         fn load(&self) -> std::io::Result<WorkloadGrantFile> {
+            if self.unreadable {
+                return Err(std::io::Error::other("sidecar unreadable"));
+            }
             Ok(self.file.lock().expect("grant fake poisoned").clone())
         }
         fn save(&self, state: &WorkloadGrantFile) -> std::io::Result<()> {
+            if self.unwritable {
+                return Err(std::io::Error::other("sidecar unwritable"));
+            }
             *self.file.lock().expect("grant fake poisoned") = state.clone();
             Ok(())
         }
@@ -1477,22 +1492,13 @@ mod tests {
 
     #[test]
     fn make_armed_reconciler_arms_nothing_when_the_sidecar_cannot_be_read() {
-        struct UnreadableGrantStore;
-        impl GrantStore for UnreadableGrantStore {
-            fn load(&self) -> std::io::Result<WorkloadGrantFile> {
-                Err(std::io::Error::other("sidecar unreadable"))
-            }
-            fn save(&self, _: &WorkloadGrantFile) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let (session, _frame_rx) =
             fixture_credential_session_armed(acme_custom(), HashSet::new(), HashSet::new());
         let reconcile = make_armed_reconciler(
             &session,
             "proj".into(),
             acme_workload(),
-            Arc::new(UnreadableGrantStore),
+            Arc::new(MemoryGrantStore::unreadable()),
             acme_custom(),
         );
         reconcile(&["acme".to_string()]);

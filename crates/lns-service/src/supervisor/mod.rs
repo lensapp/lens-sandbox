@@ -570,23 +570,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn start_persists_a_boot_sign_in_grant_to_the_sidecar() {
+    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start_if_policy` drives a required slot's boot sign-in through the real grant sidecar.
+    struct BootSignInFixture {
+        dir: tempfile::TempDir,
+        policy_path: PathBuf,
+        slot: lns_artifact::spec::CredentialSlot,
+        _guards: Vec<crate::test_env::EnvVarGuard>,
+    }
+
+    fn boot_sign_in_fixture() -> BootSignInFixture {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
-        use lns_policy::grants::{
-            GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
-        };
         window::install(WindowState::new());
-        let d = tempfile::TempDir::new().expect("tempdir");
-        let _home = EnvVarGuard::set("HOME", d.path());
-        let _cp = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
-        let _gp = EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH");
-        let supervisor_bin = d.path().join("supervisor.real");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let supervisor_bin = dir.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
-        let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-policy.yaml");
+        let guards = vec![
+            EnvVarGuard::set("HOME", dir.path()),
+            EnvVarGuard::unset("LNS_CONNECTORS_PATH"),
+            EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH"),
+            EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
+        ];
+        let policy_path = dir.path().join("lns-policy.yaml");
         std::fs::write(
             &policy_path,
             "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
@@ -622,43 +627,90 @@ mod tests {
                 token_fallback: None,
             }],
         }
-        .save_atomic(&d.path().join(".lns-connectors.yaml"))
+        .save_atomic(&dir.path().join(".lns-connectors.yaml"))
         .expect("user catalog");
-        let slot = lns_artifact::spec::CredentialSlot {
-            name: "some-oauth".into(),
-            env: "SOME_OAUTH_TOKEN".into(),
-            required: true,
-        };
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        BootSignInFixture {
+            dir,
+            policy_path,
+            slot: lns_artifact::spec::CredentialSlot {
+                name: "some-oauth".into(),
+                env: "SOME_OAUTH_TOKEN".into(),
+                required: true,
+            },
+            _guards: guards,
+        }
+    }
 
+    async fn start_with_boot_sign_in(
+        fixture: &BootSignInFixture,
+        workload: &lns_policy::grants::WorkloadIdentity,
+    ) -> SupervisorSession {
         let result = SupervisorSession::start_if_policy(
             "deadbeef00000000000000000000aa97".to_string(),
             "calm-finch".into(),
-            Some(&policy_path),
+            Some(&fixture.policy_path),
             None,
             RunConsent {
-                credentials: std::slice::from_ref(&slot),
+                credentials: std::slice::from_ref(&fixture.slot),
                 workload: workload.clone(),
                 signed_in: vec!["some-oauth".into()],
             },
-            d.path().to_path_buf(),
+            fixture.dir.path().to_path_buf(),
             vec![],
         )
         .await
         .expect("start_if_policy");
-        let session = result.expect("Some(session) with policy set");
+        result.expect("Some(session) with policy set")
+    }
 
-        let sidecar = JsonFileGrantStore::new(d.path().join(".lns-workload-grants.json"));
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn start_persists_a_boot_sign_in_grant_to_the_sidecar() {
+        use lns_policy::grants::{
+            GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
+        };
+        let fixture = boot_sign_in_fixture();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+
+        let session = start_with_boot_sign_in(&fixture, &workload).await;
+
+        let sidecar = JsonFileGrantStore::new(fixture.dir.path().join(".lns-workload-grants.json"));
         let grants = sidecar.load().expect("sidecar readable");
         let grant = grants
-            .lookup(&project_key(&policy_path), &workload, "some-oauth")
+            .lookup(&project_key(&fixture.policy_path), &workload, "some-oauth")
             .expect("the boot sign-in must persist a grant so the next run skips the sign-in");
         assert_eq!(grant.verdict, GrantVerdict::Allow);
         assert_eq!(
             grant.env_var, "SOME_OAUTH_TOKEN",
             "the grant pins the slot's effective env var, not the catalog default"
+        );
+        drop(session);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn start_tells_the_user_when_a_boot_sign_in_grant_cannot_be_persisted() {
+        use crate::approval_flow::window;
+        let fixture = boot_sign_in_fixture();
+        // An unopenable lockfile path fails the sidecar update closed, standing in for any machine where it can't be written.
+        std::fs::create_dir(fixture.dir.path().join(".lns-workload-grants.json.lock"))
+            .expect("occupy the lock path");
+
+        let session = start_with_boot_sign_in(
+            &fixture,
+            &lns_policy::grants::WorkloadIdentity::Definition {
+                dir: "/proj".into(),
+            },
+        )
+        .await;
+
+        let informs = window::get().expect("window installed").snapshot().informs;
+        assert!(
+            informs.iter().any(|m| m.contains("sign in again")),
+            "the developer who just walked a device flow must be told in the window that it won't stick, not only in the service log; got: {informs:?}"
         );
         drop(session);
         tokio::task::yield_now().await;
