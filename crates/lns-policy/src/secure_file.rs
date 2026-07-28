@@ -37,12 +37,33 @@ pub struct SidecarLock {
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
+/// One attempt at the advisory lock, injected so the kernel refusing to lock at all — an error no test can provoke on a working filesystem — can be driven deterministically.
+trait TryLocker {
+    fn try_lock(&self, file: &fs::File) -> Result<(), fs::TryLockError>;
+}
+
+struct KernelLock;
+
+impl TryLocker for KernelLock {
+    fn try_lock(&self, file: &fs::File) -> Result<(), fs::TryLockError> {
+        file.try_lock()
+    }
+}
+
 /// Takes the exclusive advisory lock that serializes a sidecar's read-modify-write across processes, on a companion file (never the sidecar itself, whose inode a rename-install replaces); the lock is the kernel's, so it releases when the guard drops and a crashed holder can never wedge later writers.
 pub fn lock_sidecar_exclusive(path: &Path) -> io::Result<SidecarLock> {
     lock_sidecar_exclusive_within(path, LOCK_WAIT)
 }
 
 fn lock_sidecar_exclusive_within(path: &Path, wait: Duration) -> io::Result<SidecarLock> {
+    lock_sidecar_exclusive_with(path, wait, &KernelLock)
+}
+
+fn lock_sidecar_exclusive_with(
+    path: &Path,
+    wait: Duration,
+    locker: &dyn TryLocker,
+) -> io::Result<SidecarLock> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -55,7 +76,7 @@ fn lock_sidecar_exclusive_within(path: &Path, wait: Duration) -> io::Result<Side
         .open(path)?;
     let deadline = Instant::now() + wait;
     loop {
-        match file.try_lock() {
+        match locker.try_lock(&file) {
             Ok(()) => return Ok(SidecarLock { _file: file }),
             Err(fs::TryLockError::Error(e)) => return Err(e),
             Err(fs::TryLockError::WouldBlock) => {
@@ -245,6 +266,45 @@ mod tests {
             outcome,
             Some(io::ErrorKind::WouldBlock),
             "a wedged holder must surface as an error the caller can report, never a second guard over the same lock nor an unbounded wait on a thread the service needs back"
+        );
+    }
+
+    #[test]
+    fn lock_surfaces_a_kernel_refusal_to_lock_rather_than_yielding_an_unlocked_guard() {
+        // A filesystem that refuses advisory locks (a network mount, say) answers neither Ok nor WouldBlock; the caller must hear about it, because a guard handed back here would let two processes read-modify-write the sidecar at once.
+        struct RefusingLocker;
+        impl TryLocker for RefusingLocker {
+            fn try_lock(&self, _file: &fs::File) -> Result<(), fs::TryLockError> {
+                Err(fs::TryLockError::Error(io::Error::from_raw_os_error(
+                    libc::ENOLCK,
+                )))
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sidecar.json.lock");
+
+        let outcome = lock_sidecar_exclusive_with(&path, Duration::from_secs(5), &RefusingLocker)
+            .err()
+            .map(|e| e.raw_os_error());
+
+        assert_eq!(
+            outcome,
+            Some(Some(libc::ENOLCK)),
+            "a refusal must surface the kernel's own reason so the caller can report it, never a guard over a lock nobody holds"
+        );
+    }
+
+    #[test]
+    fn kernel_locker_takes_the_real_lock_so_the_injected_seam_is_the_shipping_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sidecar.json.lock");
+        let file = fs::File::create(&path).unwrap();
+        KernelLock.try_lock(&file).expect("an unheld lock is taken");
+
+        let contender = fs::File::open(&path).unwrap();
+        assert!(
+            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "the port really locks the file rather than reporting success without one"
         );
     }
 
