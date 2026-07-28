@@ -1,6 +1,6 @@
 use lns_audit::TimelineRow;
 
-pub const KINDS: [&str; 8] = [
+pub const KINDS: [&str; 9] = [
     "launch",
     "egress",
     "env",
@@ -9,6 +9,7 @@ pub const KINDS: [&str; 8] = [
     "approval",
     "connection",
     "credential",
+    "tool",
 ];
 
 #[derive(Debug, Default, Clone)]

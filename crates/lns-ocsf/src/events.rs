@@ -314,11 +314,12 @@ pub fn tool_provision(
     source_host: &str,
     backend: &str,
 ) -> Value {
-    Event::new(
+    // Acquisition creates a tree in the host cache; nothing is mounted yet, and a SIEM rule on Mount would read a download as a filesystem mount.
+    let mut event = Event::new(
         "tool",
         class::FILE_ACTIVITY,
         category::SYSTEM,
-        activity::FILE_MOUNT,
+        activity::FILE_CREATE,
         severity::INFORMATIONAL,
         ctx,
     )
@@ -330,15 +331,18 @@ pub fn tool_provision(
         "file",
         json!({"name": format!("/.lens/tools/{tool}/{resolved}"), "type_id": file_type::FOLDER}),
     )
-    .set("device", microvm_device(ctx))
     .set("actor", lns_actor())
     .note("lns_origin", "host".into())
     .note("lns_tool", tool.into())
     .note("lns_requested", requested.into())
     .note("lns_resolved", resolved.into())
     .note("lns_source", source_host.into())
-    .note("lns_backend", backend.into())
-    .build()
+    .note("lns_backend", backend.into());
+    // A pull provisions before any microVM exists, so there is no device to name.
+    if !ctx.microvm.is_empty() {
+        event = event.set("device", microvm_device(ctx));
+    }
+    event.build()
 }
 
 pub fn volume_mount(ctx: &Context, name: &str, target: &str) -> Value {
@@ -507,6 +511,33 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_resolved"], "22.11.0");
         assert_eq!(ev["unmapped"]["lns_source"], "nodejs.org");
         assert_eq!(ev["unmapped"]["lns_backend"], "core:node");
+        assert_eq!(
+            (&ev["activity_name"], &ev["type_uid"]),
+            (&json!("Create"), &json!(100101)),
+            "acquisition creates a cache tree; nothing is mounted at record time"
+        );
+        assert_eq!(ev["device"]["name"], "calm-finch");
+    }
+
+    #[test]
+    fn a_tool_provisioned_by_a_pull_names_no_device() {
+        // `lns pull` provisions before any microVM exists, so claiming a virtual device named "" would be a lie to a SIEM.
+        let pull = Context {
+            time_unix_secs: 1_780_000_000,
+            ts_rfc3339: "2026-06-29T14:00:00Z",
+            run: "pull-1a2b3c4d5e6f",
+            microvm: "",
+        };
+        let ev = tool_provision(
+            &pull,
+            "node",
+            "node@22",
+            "22.11.0",
+            "nodejs.org",
+            "core:node",
+        );
+        assert_schema_valid(&ev);
+        assert!(ev.get("device").is_none(), "got: {ev}");
     }
 
     #[test]
