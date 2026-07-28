@@ -39,7 +39,7 @@ pub enum SandboxCommand {
     #[command(about = "Add a tag to a cached sandbox within its current repository.")]
     Tag(SandboxTagArgs),
     #[command(about = "List running sandboxes with their CPU and memory (`docker ps`-style).")]
-    Ps,
+    Ps(PsArgs),
     #[command(
         visible_alias = "list",
         about = "List cached sandboxes (pulled or built) in the local store."
@@ -67,6 +67,12 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
     Prune(SandboxPruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct PsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -243,11 +249,9 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_ps(app: clap::Command) -> clap::Command {
-    app.subcommand(
-        clap::Command::new("ps").about(
-            "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
-        ),
-    )
+    app.subcommand(subcommand::<PsArgs>("ps").about(
+        "List running sandboxes with their CPU and memory (shortcut for `lns sandbox ps`).",
+    ))
 }
 
 pub const PS_SPEC: CommandSpec = CommandSpec {
@@ -388,7 +392,7 @@ where
         }
         SandboxCommand::Pull(args) => pull(svc, args, out).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
-        SandboxCommand::Ps => ps(svc, out).await,
+        SandboxCommand::Ps(args) => ps(svc, args, out).await,
         SandboxCommand::Ls => ls(svc, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
         SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
@@ -453,7 +457,11 @@ async fn tag<W: std::io::Write>(
     }
 }
 
-async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
+async fn ps<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &PsArgs,
+    out: &mut W,
+) -> Result<i32> {
     let running = match svc.one_shot(Request::ListRuns).await? {
         Response::RunList { runs } => runs
             .into_iter()
@@ -474,47 +482,58 @@ async fn ps<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result
             Response::Error { message } => bail!("daemon error: {message}"),
             other => bail!("unexpected response from daemon: {other:?}"),
         };
-        rows.push((run, stats));
+        rows.push(PsRow::new(run, stats));
     }
-    render_ps_table(&running, &rows, out)
+    crate::output::emit(args.output.format, &rows, out)?;
+    Ok(0)
 }
 
-fn render_ps_table<W: std::io::Write>(
-    running: &[lns_ipc::RunSummary],
-    rows: &[(&lns_ipc::RunSummary, RunStatsInfo)],
-    out: &mut W,
-) -> Result<i32> {
-    let id_w = "ID".len().max(
-        running
-            .iter()
-            .map(|r| lns_ipc::short_run_id(&r.id).len())
-            .max()
-            .unwrap_or(0),
-    );
-    let name_w = "NAME"
-        .len()
-        .max(running.iter().map(|r| r.name.len()).max().unwrap_or(0));
-    let image_w = "IMAGE"
-        .len()
-        .max(running.iter().map(|r| r.image.len()).max().unwrap_or(0));
-    writeln!(
-        out,
-        "{:<id_w$}  {:<name_w$}  {:<image_w$}  CPU %   MEM",
-        "ID", "NAME", "IMAGE",
-    )?;
-    for (run, stats) in rows {
-        writeln!(
-            out,
-            "{:<id_w$}  {:<name_w$}  {:<image_w$}  {:<6}  {} / {}",
-            lns_ipc::short_run_id(&run.id),
-            run.name,
-            run.image,
-            format_permille(stats.cpu_permille),
-            format_bytes(stats.mem_used_bytes),
-            format_bytes(stats.mem_total_bytes),
-        )?;
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PsRow {
+    id: String,
+    name: String,
+    image: String,
+    command: String,
+    status: &'static str,
+    started: String,
+    cpu_permille: u32,
+    mem_used_bytes: u64,
+    mem_total_bytes: u64,
+}
+
+impl PsRow {
+    fn new(run: &lns_ipc::RunSummary, stats: RunStatsInfo) -> Self {
+        Self {
+            id: run.id.clone(),
+            name: run.name.clone(),
+            image: run.image.clone(),
+            command: run.command.clone(),
+            status: "running",
+            started: run.started.clone(),
+            cpu_permille: stats.cpu_permille,
+            mem_used_bytes: stats.mem_used_bytes,
+            mem_total_bytes: stats.mem_total_bytes,
+        }
     }
-    Ok(0)
+}
+
+impl crate::output::TableRow for PsRow {
+    const HEADERS: &'static [&'static str] = &["ID", "NAME", "IMAGE", "CPU %", "MEM"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            lns_ipc::short_run_id(&self.id).to_string(),
+            self.name.clone(),
+            self.image.clone(),
+            format_permille(self.cpu_permille),
+            format!(
+                "{} / {}",
+                format_bytes(self.mem_used_bytes),
+                format_bytes(self.mem_total_bytes)
+            ),
+        ]
+    }
 }
 
 async fn ls<W: std::io::Write>(svc: &impl SandboxService, out: &mut W) -> Result<i32> {
@@ -1353,6 +1372,14 @@ mod tests {
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
+    fn ps_args() -> PsArgs {
+        PsArgs {
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
+        }
+    }
+
     fn running_run() -> lns_ipc::RunSummary {
         lns_ipc::RunSummary {
             id: "1a2b3c4d0000000000000000000000aa".into(),
@@ -1379,7 +1406,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = ps(&svc, &mut out).await.unwrap();
+        let code = ps(&svc, &ps_args(), &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("CPU") && text.contains("MEM"), "got: {text}");
@@ -1396,7 +1423,7 @@ mod tests {
             }],
         });
         let mut out = Vec::new();
-        let code = ps(&svc, &mut out).await.unwrap();
+        let code = ps(&svc, &ps_args(), &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("CPU"), "got: {text}");
@@ -1412,13 +1439,14 @@ mod tests {
             &CannedService::new(Response::Error {
                 message: "registry poisoned".into(),
             }),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("registry poisoned"));
 
-        let err = ps(&CannedService::new(Response::Pong), &mut Vec::new())
+        let err = ps(&CannedService::new(Response::Pong), &ps_args(), &mut Vec::new())
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
@@ -1435,6 +1463,7 @@ mod tests {
                     message: "stats probe failed".into(),
                 },
             ),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await
@@ -1448,6 +1477,7 @@ mod tests {
                 },
                 Response::Pong,
             ),
+            &ps_args(),
             &mut Vec::new(),
         )
         .await

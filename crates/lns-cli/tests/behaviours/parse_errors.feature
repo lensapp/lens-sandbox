@@ -40,3 +40,9 @@ Feature: clap rejects bad input with exit code 2
     Then the exit code is 2
     And the output contains "invalid value"
     And the output contains "--kind"
+
+  Scenario: lns ps rejects the streaming format only an event stream can emit
+    When I run "lns ps --format jsonl"
+    Then the exit code is 2
+    And the output contains "invalid value"
+    And the output contains "--format"

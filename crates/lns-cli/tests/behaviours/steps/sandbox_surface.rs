@@ -9,10 +9,7 @@ use crate::world::BehaviourWorld;
 fn decode_shortcut(argv: &[String]) -> SandboxCommand {
     match argv[1].as_str() {
         "pull" => SandboxCommand::Pull(parse_args(argv).expect("pull argv parses")),
-        "ps" => {
-            lns_cli::command::try_get_matches_from(argv).expect("ps argv parses");
-            SandboxCommand::Ps
-        }
+        "ps" => SandboxCommand::Ps(parse_args(argv).expect("ps argv parses")),
         "stop" => SandboxCommand::Stop(parse_args(argv).expect("stop argv parses")),
         "kill" => SandboxCommand::Kill(parse_args(argv).expect("kill argv parses")),
         "rm" => SandboxCommand::Rm(parse_args(argv).expect("rm argv parses")),
