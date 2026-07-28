@@ -85,28 +85,26 @@ pub async fn capture_session_output(
     connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
 ) -> Result<String> {
-    let (out, code) = capture_session_exec(
+    let (captured, code) = capture_session_exec(
         connector,
         argv,
         Vec::new(),
-        super::Captured::StdoutOnly,
         CAPTURE_TIMEOUT,
         MAX_CAPTURE_BYTES,
     )
     .await?;
     anyhow::ensure!(code == 0, "capture command exited with code {code}");
-    Ok(out)
+    Ok(captured.stdout)
 }
 
-/// Run argv in the guest and collect the requested streams with the exit code — the long-form capture the tool provisioner drives its install script through.
+/// Run argv in the guest and collect both streams with the exit code — the long-form capture the tool provisioner drives its install script through.
 pub async fn capture_session_exec(
     connector: &dyn crate::vm::GuestTransport,
     argv: Vec<String>,
     env: Vec<String>,
-    captured: super::Captured,
     timeout: std::time::Duration,
     max_bytes: usize,
-) -> Result<(String, i32)> {
+) -> Result<(super::CapturedStreams, i32)> {
     let fd = connector
         .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(10))
         .await
@@ -126,20 +124,14 @@ pub async fn capture_session_exec(
     let session = tokio::spawn(run_session_on_fd(fd, params, frame_tx, input_rx));
 
     let collect = async {
-        let mut out: Vec<u8> = Vec::new();
+        let mut buffers = super::CaptureBuffers::new(max_bytes);
         while let Some(frame) = frame_rx.recv().await {
-            if let Some(bytes) = captured.bytes_of(&frame) {
-                anyhow::ensure!(
-                    out.len() + bytes.len() <= max_bytes,
-                    "capture output exceeded {max_bytes} bytes"
-                );
-                out.extend_from_slice(bytes);
-            }
+            buffers.push(&frame)?;
         }
-        Ok(out)
+        Ok(buffers.finish())
     };
-    let out = match tokio::time::timeout(timeout, collect).await {
-        Ok(Ok(out)) => out,
+    let captured = match tokio::time::timeout(timeout, collect).await {
+        Ok(Ok(captured)) => captured,
         Ok(Err(e)) => {
             session.abort();
             return Err(e);
@@ -151,7 +143,7 @@ pub async fn capture_session_exec(
     };
     drop(input_keepalive);
     let code = session.await.context("capture session task panicked")??;
-    Ok((String::from_utf8_lossy(&out).into_owned(), code))
+    Ok((captured, code))
 }
 
 async fn pump_session_input(

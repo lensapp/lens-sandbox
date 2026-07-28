@@ -82,9 +82,10 @@ pub(crate) struct DriverResult {
     pub bin_path: String,
 }
 
-/// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the output tail as the cause; anything else is an engine fault.
+/// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the engine's diagnostics as the cause; anything else is an engine fault. Markers are only ever read from stdout — the engine's own chatter is on stderr and must not be able to shadow one.
 pub(crate) fn parse_driver_output(
     stdout: &str,
+    stderr: &str,
     exit_code: i32,
     requests: &[ToolRef],
 ) -> Result<Vec<DriverResult>, ProvisionError> {
@@ -135,12 +136,12 @@ pub(crate) fn parse_driver_output(
             .unwrap_or_else(|| failed.to_string());
         return Err(ProvisionError::FetchFailed {
             tool,
-            cause: output_tail(stdout),
+            cause: failure_cause(stdout, stderr),
         });
     }
     Err(ProvisionError::Engine(format!(
         "the provisioner driver exited with code {exit_code}: {}",
-        output_tail(stdout)
+        failure_cause(stdout, stderr)
     )))
 }
 
@@ -158,13 +159,23 @@ fn is_safe_bin_path(bin_path: &str) -> bool {
     bin_path == "." || bin_path.split('/').all(is_safe_segment)
 }
 
-fn output_tail(stdout: &str) -> String {
-    let lines: Vec<&str> = stdout
-        .lines()
-        .filter(|line| !line.starts_with("LNS_"))
-        .collect();
-    let tail = lines.len().saturating_sub(8);
-    lines[tail..].join(" | ")
+/// The engine writes its diagnostics to stderr, but a bare `sh` failure (a missing driver, a bad redirect) can land on stdout with no marker at all, so that is the fallback.
+fn failure_cause(stdout: &str, stderr: &str) -> String {
+    let tail = |text: &str| {
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty() && !line.starts_with("LNS_"))
+            .collect();
+        let start = lines.len().saturating_sub(8);
+        lines[start..].join(" | ")
+    };
+    let from_stderr = tail(stderr);
+    if from_stderr.is_empty() {
+        tail(stdout)
+    } else {
+        from_stderr
+    }
 }
 
 /// Ensure the pinned engine, static curl, CA bundle, and (musl) companion apks are cached and expanded — every byte sha-verified against the injected manifest before it can reach a guest.
@@ -371,7 +382,7 @@ mod tests {
     fn a_complete_driver_run_parses_into_per_tool_results() {
         let stdout = "fetching...\nLNS_TOOL node 22.11.0 bin\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
         let results =
-            parse_driver_output(stdout, 0, &[tool("node@22"), tool("jq@latest")]).unwrap();
+            parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap();
         assert_eq!(
             results,
             vec![
@@ -391,8 +402,9 @@ mod tests {
 
     #[test]
     fn a_failed_install_attributes_the_cause_to_its_tool() {
-        let stdout = "mise ERROR fetching https://nodejs.org: timeout\nLNS_FAIL node\n";
-        let err = parse_driver_output(stdout, 3, &[tool("node@22")]).unwrap_err();
+        let stdout = "LNS_FAIL node\n";
+        let stderr = "mise ERROR fetching https://nodejs.org: timeout\n";
+        let err = parse_driver_output(stdout, stderr, 3, &[tool("node@22")]).unwrap_err();
         assert!(
             matches!(&err, ProvisionError::FetchFailed { .. }),
             "got: {err}"
@@ -412,8 +424,9 @@ mod tests {
             "LNS_TOOL node 22.11.0 ../../etc",
             "LNS_TOOL node 22/11 bin",
         ] {
-            let err = parse_driver_output(&format!("{marker}\nLNS_DONE\n"), 0, &[tool("node@22")])
-                .unwrap_err();
+            let err =
+                parse_driver_output(&format!("{marker}\nLNS_DONE\n"), "", 0, &[tool("node@22")])
+                    .unwrap_err();
             assert!(
                 err.to_string().contains("unusable location for node"),
                 "marker {marker:?}: got: {err}"
@@ -422,9 +435,39 @@ mod tests {
     }
 
     #[test]
+    fn engine_chatter_on_stderr_cannot_shadow_a_marker_or_the_failure_attribution() {
+        // Merged into one buffer, a partial stderr line splices onto the next marker and a good install reads as an engine fault.
+        let noisy = "downloading node 50%\rmise WARN something\n";
+        let results = parse_driver_output(
+            "LNS_TOOL node 22.11.0 bin\nLNS_DONE\n",
+            noisy,
+            0,
+            &[tool("node@22")],
+        )
+        .unwrap();
+        assert_eq!(results[0].resolved, "22.11.0");
+
+        let err = parse_driver_output("LNS_FAIL node\n", noisy, 3, &[tool("node@22")]).unwrap_err();
+        assert!(
+            matches!(&err, ProvisionError::FetchFailed { tool, .. } if tool == "node@22"),
+            "the per-tool attribution survives noisy output: {err}"
+        );
+    }
+
+    #[test]
+    fn a_bare_shell_failure_with_nothing_on_stderr_still_reports_what_it_printed() {
+        let err = parse_driver_output("cannot open provision.sh\n", "", 2, &[tool("node@22")])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot open provision.sh"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn a_truncated_marker_registers_nothing_rather_than_half_a_tool() {
-        let err =
-            parse_driver_output("LNS_TOOL node\nLNS_DONE\n", 0, &[tool("node@22")]).unwrap_err();
+        let err = parse_driver_output("LNS_TOOL node\nLNS_DONE\n", "", 0, &[tool("node@22")])
+            .unwrap_err();
         assert!(
             err.to_string().contains("no result for node@22"),
             "got: {err}"
@@ -437,7 +480,7 @@ mod tests {
         let stdout =
             "LNS_TOOL jq 6.6.6 bin\nLNS_TOOL node 22.11.0 bin\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
         let err =
-            parse_driver_output(stdout, 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
+            parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
         assert!(err.to_string().contains("reported jq twice"), "got: {err}");
     }
 
@@ -445,6 +488,7 @@ mod tests {
     fn a_nested_bin_dir_is_still_accepted() {
         let results = parse_driver_output(
             "LNS_TOOL node 22.11.0 libexec/bin\nLNS_DONE\n",
+            "",
             0,
             &[tool("node@22")],
         )
@@ -454,7 +498,7 @@ mod tests {
 
     #[test]
     fn a_marker_less_crash_is_an_engine_fault_with_the_output_tail() {
-        let err = parse_driver_output("sh: boom\n", 127, &[tool("node@22")]).unwrap_err();
+        let err = parse_driver_output("sh: boom\n", "", 127, &[tool("node@22")]).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("infrastructure failed") && msg.contains("127") && msg.contains("boom"),
@@ -466,7 +510,7 @@ mod tests {
     fn a_complete_run_missing_a_request_is_an_engine_fault() {
         let stdout = "LNS_TOOL node 22.11.0 bin\nLNS_DONE\n";
         let err =
-            parse_driver_output(stdout, 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
+            parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
         assert!(
             err.to_string().contains("no result for jq@latest"),
             "got: {err}"
