@@ -157,6 +157,8 @@ impl CredentialRig {
                     }));
                 }),
             )
+            // The same providers the emitter expands against: a real run always resolves its connectors, and a session that knows none discloses none, so its decisions would record grants nothing could pin.
+            .with_custom_providers(Arc::new(fixture_providers()))
             .with_armed_ids(armed)
             .with_grants(
                 grant_project.clone(),
@@ -188,6 +190,26 @@ impl CredentialRig {
             .map(|f| {
                 f.lookup(&self.grant_project, &self.grant_workload, credential_id)
                     .is_some_and(|g| g.verdict == GrantVerdict::Deny)
+            })
+            .unwrap_or(false)
+    }
+
+    /// What `lns connector disconnect` does to the sidecar from its own process while this run is still deciding.
+    pub fn forget_project_grants(&self, credential_id: &str) {
+        self.grant_store
+            .update(&mut |file| {
+                file.revoke_project_connector(&self.grant_project, credential_id);
+                true
+            })
+            .expect("forget the project's grants");
+    }
+
+    pub fn workload_grant_recorded(&self, credential_id: &str) -> bool {
+        self.grant_store
+            .load()
+            .map(|f| {
+                f.lookup(&self.grant_project, &self.grant_workload, credential_id)
+                    .is_some()
             })
             .unwrap_or(false)
     }

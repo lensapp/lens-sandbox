@@ -79,6 +79,14 @@ Feature: lns-service credential flow
     Then the workload's request leaves the boundary with the bound value substituted for the placeholder
     And "~/.lns-credentials.json" still holds the value it was bound with
 
+  Scenario: A disconnect that lands while the card is open is not undone by answering it
+    Given a credential card for "some-provider" is visible
+    And "some-provider" is disconnected from this project while the card is open
+    When the developer types a value and submits
+    Then the workload grant sidecar records no grant for "some-provider"
+    And the approval window says the decision was not remembered
+    And the workload's request leaves the boundary with the typed value substituted for the placeholder
+
   Scenario: Deny remembers a per-workload decline and stops re-prompting it
     Given a credential card for "some-provider" is visible
     When the developer picks "deny"

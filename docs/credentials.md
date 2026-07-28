@@ -97,7 +97,10 @@ lns connector revoke <id>         # forget this project's grants for one connect
 
 `lns connector disconnect <id>` forgets them too, as part of removing the
 connector from the directory's policy. A revoke applies to the next run — a
-sandbox already running keeps the arming it was granted at launch.
+sandbox already running keeps the arming it was granted at launch — but it does
+win over a card that run is still holding: answering that card afterwards arms
+the run in front of you and records nothing, so the forget stays forgotten and
+the window tells you the decision was not remembered.
 Connecting is not a way back: binding a value on the machine and granting a
 workload are different decisions, so `lns connector connect <id>` leaves a
 decline standing and tells you when this project holds one.
