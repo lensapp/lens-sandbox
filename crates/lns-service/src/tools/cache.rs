@@ -140,6 +140,10 @@ impl ToolCache for RealToolCache {
             Ok(manifest) => manifest,
             Err(_) => return Ok(None),
         };
+        // A tree written under different manifest semantics is a miss, not something to reinterpret under today's.
+        if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+            return Ok(None);
+        }
         for entry in &manifest.entries {
             if let EntryKind::Regular { digest, .. } = &entry.kind
                 && !self.store.contains(digest)?
@@ -398,6 +402,27 @@ mod tests {
         assert!(
             format!("{err:#}").contains("control characters"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_tree_written_under_another_manifest_schema_is_a_miss() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut manifest = cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        manifest.schema_version = MANIFEST_SCHEMA_VERSION + 1;
+        let path = dir
+            .path()
+            .join("trees")
+            .join(&key().name)
+            .join(&key().resolved)
+            .join(format!("{}-{}", key().arch, key().libc))
+            .join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            cache.lookup(&key()).unwrap(),
+            None,
+            "the tree is re-provisioned rather than read under today's semantics"
         );
     }
 
