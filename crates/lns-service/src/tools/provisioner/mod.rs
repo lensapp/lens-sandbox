@@ -72,11 +72,11 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
              MISE_DATA_DIR='{ENGINE_STATE}/{name}/data'\n\
              MISE_CACHE_DIR='{ENGINE_STATE}/{name}/cache'\n\
              export MISE_DATA_DIR MISE_CACHE_DIR\n\
-             if ! mise install '{spec}'; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
+             if ! mise install '{spec}' >&2; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              path=\"$(mise where '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              resolved=\"$(basename \"$path\")\"\n\
              if [ -d \"$path/bin\" ]; then bp=bin; else bp=.; fi\n\
-             tar -cf '{STAGING}/{name}.tar' -C \"$path\" . || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
+             tar -cf '{STAGING}/{name}.tar' -C \"$path\" . >&2 || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              echo \"LNS_TOOL {name} $resolved $bp\"\n"
         ));
     }
@@ -91,7 +91,7 @@ pub(crate) struct DriverResult {
     pub bin_path: String,
 }
 
-/// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the engine's diagnostics as the cause; anything else is an engine fault. Markers are only ever read from stdout — the engine's own chatter is on stderr and must not be able to shadow one.
+/// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the engine's diagnostics as the cause; anything else is an engine fault. Markers are only ever read from stdout, which the driver redirects everything else away from — a partial write from a tool's own install code would otherwise prefix the next marker and lose it.
 pub(crate) fn parse_driver_output(
     stdout: &str,
     stderr: &str,
@@ -444,6 +444,36 @@ mod tests {
             "declaration order is preserved"
         );
         assert!(script.trim_end().ends_with("echo LNS_DONE"));
+    }
+
+    #[test]
+    fn only_the_driver_writes_the_marker_channel() {
+        // A tool's install code is third-party and writes wherever it likes; a single unterminated line on fd 1 would prefix the next marker and lose it, so nothing but the driver's own echoes may reach stdout.
+        let script = render_driver(&[tool("node@22"), tool("jq@latest")]);
+        for line in script.lines() {
+            let writes_marker = line.trim_start().starts_with("echo ");
+            let is_capture = line.contains("$(");
+            if writes_marker || is_capture || line.trim().is_empty() {
+                continue;
+            }
+            if line.contains("mise install") || line.contains("tar -cf") {
+                assert!(
+                    line.contains(">&2"),
+                    "install and tar output must land on stderr, not the marker channel: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unterminated_write_before_a_marker_loses_it() {
+        // Why the redirect above matters: `str::lines()` does not split a partial write off the marker that follows it, so the tool installs fine and the provision still fails.
+        let stdout = "building...LNS_TOOL node 22.11.0 bin\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("node@22")]).unwrap_err();
+        assert!(
+            format!("{err}").contains("reported no result for node@22"),
+            "got: {err}"
+        );
     }
 
     #[test]
