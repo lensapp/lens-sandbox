@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{Libc, ProvisionError, ProvisionTarget, StagedTar, StagedTool, ToolRef, mise};
+use super::{
+    Libc, ProvisionError, ProvisionTarget, SafeVersion, StagedTar, StagedTool, ToolRef, mise,
+};
 use crate::download::{Fetcher, Fs, PinnedArtifact, ensure_pinned};
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
@@ -85,7 +87,7 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DriverResult {
     pub name: String,
-    pub resolved: String,
+    pub resolved: SafeVersion,
     pub bin_path: String,
 }
 
@@ -106,11 +108,12 @@ pub(crate) fn parse_driver_output(
             continue;
         };
         let bin_path = parts.next().unwrap_or(".");
-        if !is_safe_segment(resolved) || !is_safe_bin_path(bin_path) {
+        let (Ok(resolved), true) = (resolved.parse::<SafeVersion>(), is_safe_bin_path(bin_path))
+        else {
             return Err(ProvisionError::Engine(format!(
                 "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_path:?}"
             )));
-        }
+        };
         if results.iter().any(|result| result.name == name) {
             return Err(ProvisionError::Engine(format!(
                 "the provisioner driver reported {name} twice"
@@ -118,7 +121,7 @@ pub(crate) fn parse_driver_output(
         }
         results.push(DriverResult {
             name: name.to_string(),
-            resolved: resolved.to_string(),
+            resolved,
             bin_path: bin_path.to_string(),
         });
     }
@@ -363,6 +366,10 @@ pub(crate) fn ca_bundle_pem(apk_bytes: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn version(literal: &str) -> lns_artifact::tools::SafeVersion {
+        literal.parse().expect("a usable version")
+    }
+
     fn tool(spec: &str) -> ToolRef {
         lns_artifact::tools::parse(spec).expect("valid tool spec")
     }
@@ -421,12 +428,12 @@ mod tests {
             vec![
                 DriverResult {
                     name: "node".into(),
-                    resolved: "22.11.0".into(),
+                    resolved: version("22.11.0"),
                     bin_path: "bin".into(),
                 },
                 DriverResult {
                     name: "jq".into(),
-                    resolved: "1.7.1".into(),
+                    resolved: version("1.7.1"),
                     bin_path: ".".into(),
                 },
             ]
@@ -478,7 +485,7 @@ mod tests {
             &[tool("node@22")],
         )
         .unwrap();
-        assert_eq!(results[0].resolved, "22.11.0");
+        assert_eq!(results[0].resolved.as_str(), "22.11.0");
 
         let err = parse_driver_output("LNS_FAIL node\n", noisy, 3, &[tool("node@22")]).unwrap_err();
         assert!(
@@ -688,18 +695,18 @@ mod tests {
         let results = vec![
             DriverResult {
                 name: "jq".into(),
-                resolved: "1.7.1".into(),
+                resolved: version("1.7.1"),
                 bin_path: ".".into(),
             },
             DriverResult {
                 name: "node".into(),
-                resolved: "22.11.0".into(),
+                resolved: version("22.11.0"),
                 bin_path: "bin".into(),
             },
         ];
         let staged = staged_tools_from_results(&requests, &results, Path::new("/staging")).unwrap();
         assert_eq!(staged[0].name, "node", "declaration order wins");
-        assert_eq!(staged[0].resolved, "22.11.0");
+        assert_eq!(staged[0].resolved.as_str(), "22.11.0");
         assert_eq!(staged[0].backend, "core:node");
         assert_eq!(staged[0].source_host, "nodejs.org");
         assert!(

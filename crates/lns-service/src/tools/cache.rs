@@ -15,7 +15,7 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub struct ToolManifest {
     pub schema_version: u32,
     pub tool: String,
-    pub resolved: String,
+    pub resolved: lns_artifact::tools::SafeVersion,
     pub backend: String,
     pub source_host: String,
     /// Debugging metadata only — never part of the cache key.
@@ -39,7 +39,7 @@ pub enum EntryKind {
     Symlink { target: String },
 }
 
-pub fn guest_root(tool: &str, resolved: &str) -> String {
+pub fn guest_root(tool: &str, resolved: &lns_artifact::tools::SafeVersion) -> String {
     format!("/.lens/tools/{tool}/{resolved}")
 }
 
@@ -291,10 +291,14 @@ mod tests {
     use super::*;
     use crate::tools::{Arch, Libc, StagedTar, StagedTool};
 
+    fn version(literal: &str) -> lns_artifact::tools::SafeVersion {
+        literal.parse().expect("a usable version")
+    }
+
     fn key() -> ToolCacheKey {
         ToolCacheKey {
             name: "some-tool".into(),
-            resolved: "1.2.3".into(),
+            resolved: version("1.2.3"),
             arch: Arch::Aarch64,
             libc: Libc::Musl,
         }
@@ -303,7 +307,7 @@ mod tests {
     fn staged(tar: Vec<u8>) -> StagedTool {
         StagedTool {
             name: "some-tool".into(),
-            resolved: "1.2.3".into(),
+            resolved: version("1.2.3"),
             backend: "core:some-tool".into(),
             source_host: "upstream.example.test".into(),
             tar: StagedTar::Bytes(tar),
@@ -483,6 +487,26 @@ mod tests {
             format!("{err:#}").contains("not in the tree"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn a_manifest_naming_an_unusable_version_is_a_miss() {
+        // manifest.resolved becomes the guest path the tool is injected at, so an edited file must not be readable.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        cache.ingest(&key(), &staged(tool_tar())).unwrap();
+        let path = dir
+            .path()
+            .join("trees")
+            .join(&key().name)
+            .join(key().resolved.as_str())
+            .join(format!("{}-{}", key().arch, key().libc))
+            .join("manifest.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["resolved"] = serde_json::Value::String("../../..".into());
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(cache.lookup(&key()).unwrap(), None);
     }
 
     #[test]

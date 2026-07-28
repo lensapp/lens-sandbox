@@ -247,7 +247,7 @@ fn resolved_version_recorded(w: &mut BehaviourWorld) -> Result<(), String> {
     let entry = record
         .recorded("node@22")
         .ok_or("node@22 has no recorded resolution")?;
-    if entry.resolved == "22.11.0" {
+    if entry.resolved.as_str() == "22.11.0" {
         Ok(())
     } else {
         Err(format!("expected 22.11.0, got {}", entry.resolved))
@@ -282,7 +282,7 @@ async fn later_runs_use_the_record(w: &mut BehaviourWorld) -> Result<(), String>
         .as_ref()
         .and_then(|record| record.recorded("node@22").cloned())
         .ok_or("the record lost node@22")?;
-    if entry.resolved == "22.11.0" {
+    if entry.resolved.as_str() == "22.11.0" {
         Ok(())
     } else {
         Err(format!("the record drifted to {}", entry.resolved))
