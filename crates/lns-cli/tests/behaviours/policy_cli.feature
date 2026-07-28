@@ -54,3 +54,17 @@ Feature: shaping network rules from the CLI
     When the developer tries to remove a rule for "ghost.example"
     Then the command fails with an exit code other than 0
     And the policy file is unchanged
+
+  Scenario: Listing rules as JSON gives a script the verdict and pattern per rule
+    Given "lns-policy.yaml" has an allow rule for "api.linear.app" and a deny rule for "evil.example"
+    When the developer lists rules as JSON
+    Then the output is a JSON array of 2 rows
+    And JSON row 0 has "verdict" set to "allow"
+    And JSON row 0 has "pattern" set to "api.linear.app"
+    And JSON row 1 has "verdict" set to "deny"
+    And JSON row 1 has "pattern" set to "evil.example"
+
+  Scenario: An empty policy lists as an empty JSON array, not prose
+    Given the developer is in a directory with no "lns-policy.yaml"
+    When the developer lists rules as JSON
+    Then the output is an empty JSON array
