@@ -7,14 +7,13 @@ use crate::content_store::ContentStore;
 
 static PROVISION_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// Composition root for a run's declared tools: real record store, real cache over the content store, and the mise provisioner, serialized machine-wide so two concurrent runs provision a shared tool set once.
+/// Composition root for a run's declared tools: real record store, real cache over the content store, and the mise provisioner. Installing is serialized across the service's runs so two of them provision a shared tool set once — but a run with nothing to install never joins that queue, or it would wait out an unrelated cold provision.
 pub async fn ensure_for_run(
     scratch_id: &str,
     content_store: &ContentStore,
     requests: &[ToolRef],
     target: &ProvisionTarget,
 ) -> Result<EnsuredTools, ProvisionError> {
-    let _serialized = PROVISION_LOCK.lock().await;
     let cache_dir = cache_dir()?;
     let tools_root = cache_dir.join("tools");
     let records = super::record::RealRecordStore::new(&tools_root);
@@ -23,11 +22,10 @@ pub async fn ensure_for_run(
         content_store.clone(),
         mise::engine_version(),
     );
-    let scratch = ScratchGuard(cache_dir.join("runs").join(scratch_id));
     let provisioner = MiseProvisioner {
         scratch_id: scratch_id.to_string(),
     };
-    let mut ensured = ensure_tools(
+    let warm = super::ensure_warm_tools(
         &records,
         &cache,
         &provisioner,
@@ -37,7 +35,25 @@ pub async fn ensure_for_run(
         now_unix_secs(),
     )
     .await?;
-    drop(scratch);
+    let mut ensured = match warm {
+        Some(ensured) => ensured,
+        None => {
+            let _serialized = PROVISION_LOCK.lock().await;
+            let scratch = ScratchGuard(cache_dir.join("runs").join(scratch_id));
+            let ensured = ensure_tools(
+                &records,
+                &cache,
+                &provisioner,
+                requests,
+                target,
+                mise::engine_version(),
+                now_unix_secs(),
+            )
+            .await?;
+            drop(scratch);
+            ensured
+        }
+    };
     if target.libc == Libc::Musl
         && requests
             .iter()
