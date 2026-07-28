@@ -1,6 +1,6 @@
 mod operations;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -32,6 +32,14 @@ fn main() -> Result<()> {
         Cmd::Bump { version } => bump(&version),
         Cmd::Show => show(),
     }
+}
+
+/// A half-written pin is worse than no bump, and the operator's only recovery signal is `git status`: write to a sibling temp file and rename, so each file is either the old one or the new one.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("bump-tmp");
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("replacing {} with {}", path.display(), tmp.display()))
 }
 
 fn workspace_paths() -> Result<(PathBuf, PathBuf)> {
@@ -90,8 +98,8 @@ fn bump(version: &str) -> Result<()> {
     let entries = operations::registry_entries_from_tarball(&tarball)?;
     let snapshot = operations::render_registry_snapshot(&entries)?;
 
-    std::fs::write(&manifest_path, bumped)?;
-    std::fs::write(&snapshot_path, snapshot)?;
+    write_atomically(&manifest_path, bumped.as_bytes())?;
+    write_atomically(&snapshot_path, snapshot.as_bytes())?;
 
     println!(
         "==> done. Next: re-validate the companion pins in mise.toml if the alpine branch moved,\n\
