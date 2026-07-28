@@ -138,6 +138,7 @@ fn list_rules(args: &PolicyScopeArgs, cwd: &Path, writer: &mut impl Write) -> Re
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RuleRow {
     verdict: &'static str,
     pattern: String,

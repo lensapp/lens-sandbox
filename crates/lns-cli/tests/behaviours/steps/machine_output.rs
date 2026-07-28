@@ -17,11 +17,15 @@ fn row(world: &BehaviourWorld, index: usize) -> Result<serde_json::Value, String
         .ok_or_else(|| format!("no row {index} in {doc}"))
 }
 
+/// Reads a dotted path so a scenario can pin a nested key such as `status.state`.
 fn field(value: &serde_json::Value, key: &str) -> Result<serde_json::Value, String> {
-    value
-        .get(key)
-        .cloned()
-        .ok_or_else(|| format!("no key {key:?} in {value}"))
+    let mut current = value;
+    for segment in key.split('.') {
+        current = current
+            .get(segment)
+            .ok_or_else(|| format!("no key {segment:?} in {current}"))?;
+    }
+    Ok(current.clone())
 }
 
 #[then(regex = r"^the output is a JSON array of (\d+) rows$")]

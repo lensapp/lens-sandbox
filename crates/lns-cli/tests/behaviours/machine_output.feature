@@ -11,7 +11,7 @@ Feature: machine-readable output from the list verbs
     And the output is a JSON array of 1 rows
     And JSON row 0 has "name" set to "reviewer"
     And JSON row 0 has "image" set to "some-image"
-    And JSON row 0 has "status" set to "running"
+    And JSON row 0 has "status.state" set to "running"
     And JSON row 0 has "memUsedBytes" set to 92274688
     And JSON row 0 has "cpuPermille" set to 125
 
