@@ -18,7 +18,7 @@ pub struct ResolvedRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedEntry {
-    pub resolved: String,
+    pub resolved: lns_artifact::tools::SafeVersion,
     pub backend: String,
     pub source_host: String,
     pub resolved_at_unix: u64,
@@ -99,7 +99,7 @@ mod tests {
 
     fn entry(resolved: &str) -> ResolvedEntry {
         ResolvedEntry {
-            resolved: resolved.into(),
+            resolved: resolved.parse().expect("a usable version"),
             backend: "core:some-tool".into(),
             source_host: "upstream.example.test".into(),
             resolved_at_unix: 1_700_000_000,
@@ -140,6 +140,47 @@ mod tests {
     }
 
     #[test]
+    fn a_record_naming_an_unusable_version_is_ignored_rather_than_trusted() {
+        // A resolved version becomes a host path component and a word in the provisioner's shell driver, so a tampered file must not be readable at all.
+        let dir = tempfile::TempDir::new().unwrap();
+        for tampered in [
+            "../../..",
+            "22.0' && touch /tmp/pwned; '",
+            "22.0;id",
+            "$(id)",
+        ] {
+            let record = serde_json::json!({
+                "schema_version": RECORD_SCHEMA_VERSION,
+                "engine_version": "2026.7.14",
+                "tools": {
+                    "some-tool@1": {
+                        "resolved": tampered,
+                        "backend": "core:some-tool",
+                        "source_host": "upstream.example.test",
+                        "resolved_at_unix": 1_700_000_000,
+                    }
+                }
+            });
+            std::fs::write(
+                dir.path().join("resolved.json"),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            let subscriber = tracing_subscriber::FmtSubscriber::builder()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(std::io::sink)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                assert_eq!(
+                    RealRecordStore::new(dir.path()).load().unwrap(),
+                    None,
+                    "record naming {tampered:?} must read as absent so the tool re-resolves"
+                );
+            });
+        }
+    }
+
+    #[test]
     fn an_unreadable_record_surfaces_the_error() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("resolved.json")).unwrap();
@@ -151,7 +192,10 @@ mod tests {
         let mut record = ResolvedRecord::default();
         assert!(record.merge_new("some-tool@1", entry("1.2.3")));
         assert!(!record.merge_new("some-tool@1", entry("1.9.9")));
-        assert_eq!(record.recorded("some-tool@1").unwrap().resolved, "1.2.3");
+        assert_eq!(
+            record.recorded("some-tool@1").unwrap().resolved.as_str(),
+            "1.2.3"
+        );
         assert_eq!(record.recorded("other-tool@2"), None);
     }
 }

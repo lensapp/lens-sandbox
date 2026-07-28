@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 pub use cache::ToolCache;
-pub use lns_artifact::tools::{LATEST, ToolRef};
+pub use lns_artifact::tools::{LATEST, SafeVersion, ToolRef};
 pub use record::ToolRecordStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +63,7 @@ pub struct ProvisionTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolCacheKey {
     pub name: String,
-    pub resolved: String,
+    pub resolved: SafeVersion,
     pub arch: Arch,
     pub libc: Libc,
 }
@@ -72,7 +72,7 @@ pub struct ToolCacheKey {
 #[derive(Debug, Clone)]
 pub struct StagedTool {
     pub name: String,
-    pub resolved: String,
+    pub resolved: SafeVersion,
     pub backend: String,
     pub source_host: String,
     pub tar: StagedTar,
@@ -133,9 +133,9 @@ const INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 async fn newest_within_budget<P: ToolProvisioner>(
     provisioner: &P,
     name: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<SafeVersion> {
     match tokio::time::timeout(INDEX_BUDGET, provisioner.newest_version(name)).await {
-        Ok(answer) => answer,
+        Ok(answer) => answer?.parse(),
         Err(_) => Err(anyhow::anyhow!(
             "the version index did not answer within {INDEX_BUDGET:?}"
         )),
@@ -186,7 +186,7 @@ where
         let pinned = match request.version.as_str() {
             LATEST => match newest_within_budget(provisioner, &request.name).await {
                 Ok(newest) => {
-                    record_changed |= recorded.as_deref() != Some(newest.as_str());
+                    record_changed |= recorded.as_ref() != Some(&newest);
                     Some(newest)
                 }
                 Err(e) => {
@@ -227,7 +227,9 @@ where
             }
             None => misses.push(ToolRef {
                 name: request.name.clone(),
-                version: pinned.unwrap_or_else(|| request.version.clone()),
+                version: pinned
+                    .map(SafeVersion::into)
+                    .unwrap_or_else(|| request.version.clone()),
             }),
         }
     }
@@ -364,7 +366,7 @@ where
             provisioned.push(ProvisionOutcome {
                 tool: tool.name.clone(),
                 requested: request.to_string(),
-                resolved: tool.resolved.clone(),
+                resolved: tool.resolved.to_string(),
                 backend: tool.backend.clone(),
                 source_host: tool.source_host.clone(),
             });
@@ -406,13 +408,21 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    fn version(literal: &str) -> SafeVersion {
+        literal.parse().expect("a usable version")
+    }
+
     fn recorded(records: &MemRecords, request: &str) -> String {
         records
             .record
             .lock()
             .unwrap()
             .as_ref()
-            .and_then(|saved| saved.recorded(request).map(|entry| entry.resolved.clone()))
+            .and_then(|saved| {
+                saved
+                    .recorded(request)
+                    .map(|entry| entry.resolved.to_string())
+            })
             .unwrap_or_default()
     }
 
@@ -542,10 +552,11 @@ mod tests {
                     .iter()
                     .map(|request| StagedTool {
                         name: request.name.clone(),
-                        resolved: map
-                            .get(&request.name)
-                            .cloned()
-                            .unwrap_or_else(|| request.version.clone()),
+                        resolved: version(
+                            map.get(&request.name)
+                                .map(String::as_str)
+                                .unwrap_or(&request.version),
+                        ),
                         backend: format!("core:{}", request.name),
                         source_host: "upstream.example.test".into(),
                         tar: StagedTar::Bytes(Vec::new()),
@@ -686,7 +697,7 @@ mod tests {
             tools: std::collections::BTreeMap::from([(
                 "some-tool@1".to_string(),
                 record::ResolvedEntry {
-                    resolved: "1.0.0-from-the-future".into(),
+                    resolved: version("1.0.0-from-the-future"),
                     backend: "core:some-tool".into(),
                     source_host: "upstream.example.test".into(),
                     resolved_at_unix: 1_600_000_000,
@@ -988,7 +999,7 @@ mod tests {
         cache
             .evict(&ToolCacheKey {
                 name: "some-tool".into(),
-                resolved: "1.2.3".into(),
+                resolved: version("1.2.3"),
                 arch: Arch::Aarch64,
                 libc: Libc::Gnu,
             })

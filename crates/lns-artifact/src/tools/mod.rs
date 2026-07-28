@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 /// The one version keyword the spec accepts: it re-resolves on every run rather than pinning.
 pub const LATEST: &str = "latest";
 
-/// Whether a resolved version is safe to use as a path component. Both the version index and the provisioner driver answer with strings that become directories in the host cache and the guest layer, and neither is more trusted than the other.
+/// Whether a version is safe to use as a path component and to interpolate into the provisioner's shell driver. An allowlist, not a denylist: anything a shell reads specially must never parse in the first place.
 pub fn is_safe_version(version: &str) -> bool {
     !version.is_empty()
         && version != "."
@@ -13,6 +13,56 @@ pub fn is_safe_version(version: &str) -> bool {
         && version
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
+/// A version that has passed [`is_safe_version`]. Every resolved version becomes a host path component, a guest path component, and a word in the provisioner's shell driver, and they arrive from three places we do not control — the version index, the driver's own output, and files on disk that a later process could have edited. Carrying the check in the type means a new source cannot skip it: deserializing an unsafe value fails, which the callers already treat as "unreadable, re-resolve".
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct SafeVersion(String);
+
+impl SafeVersion {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SafeVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(version: String) -> Result<Self> {
+        if !is_safe_version(&version) {
+            bail!("{version:?} is not a usable version");
+        }
+        Ok(Self(version))
+    }
+}
+
+impl std::str::FromStr for SafeVersion {
+    type Err = anyhow::Error;
+
+    fn from_str(version: &str) -> Result<Self> {
+        Self::try_from(version.to_string())
+    }
+}
+
+impl From<SafeVersion> for String {
+    fn from(version: SafeVersion) -> String {
+        version.0
+    }
+}
+
+impl std::fmt::Display for SafeVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<std::path::Path> for SafeVersion {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.0)
+    }
 }
 
 /// A portable declared tool: `name@version`, where version may be fuzzy (`22`) or `latest`.
@@ -45,7 +95,7 @@ pub fn parse(entry: &str) -> Result<ToolRef> {
             "spec.tools entry {entry:?} has no version; declare an explicit version such as \"{entry}@22\" or \"{entry}@latest\""
         );
     };
-    if name.is_empty() || version.is_empty() || !is_valid_version(version) {
+    if name.is_empty() || version.is_empty() || !is_safe_version(version) {
         bail!(
             "invalid spec.tools entry {entry:?}: expected the \"name@version\" shape (like \"node@22\" or \"python@3.12\")"
         );
@@ -107,13 +157,6 @@ pub fn parse_all(entries: &[String]) -> Result<Vec<ToolRef>> {
         refs.push(tool);
     }
     Ok(refs)
-}
-
-/// An allowlist, not a denylist: the version reaches the provisioner's shell driver, so anything a shell reads specially must never parse in the first place.
-fn is_valid_version(version: &str) -> bool {
-    version
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
 }
 
 #[cfg(test)]
