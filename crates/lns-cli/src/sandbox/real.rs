@@ -144,6 +144,9 @@ async fn push_local(
 struct RealToolResolver;
 
 const TOOL_INDEX_URL: &str = "https://mise-versions.jdx.dev";
+/// A push must fail with a diagnostic rather than hang against a blackholing proxy, and the index body is a version list, not a download.
+const TOOL_INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_TOOL_INDEX_BYTES: usize = 8 * 1024 * 1024;
 
 impl super::distribute::ToolResolver for RealToolResolver {
     fn resolve<'a>(
@@ -154,7 +157,12 @@ impl super::distribute::ToolResolver for RealToolResolver {
             let base =
                 std::env::var("LNS_TOOL_INDEX_URL").unwrap_or_else(|_| TOOL_INDEX_URL.to_string());
             let url = format!("{}/{}", base.trim_end_matches('/'), tool.name);
-            let response = reqwest::get(&url)
+            let response = reqwest::Client::builder()
+                .timeout(TOOL_INDEX_TIMEOUT)
+                .build()
+                .context("building the tool version index client")?
+                .get(&url)
+                .send()
                 .await
                 .with_context(|| format!("querying the tool version index at {url}"))?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -169,6 +177,11 @@ impl super::distribute::ToolResolver for RealToolResolver {
                 .text()
                 .await
                 .with_context(|| format!("reading the version index at {url}"))?;
+            anyhow::ensure!(
+                body.len() <= MAX_TOOL_INDEX_BYTES,
+                "the version index at {url} returned {} bytes, over the {MAX_TOOL_INDEX_BYTES}-byte limit",
+                body.len()
+            );
             lns_artifact::tools::resolve_from_index(&tool.name, &tool.version, &body)
         })
     }
