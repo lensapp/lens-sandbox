@@ -24,7 +24,11 @@ pub(crate) struct EngineArtifacts {
     pub curl: PathBuf,
     pub ca_bundle_pem: Vec<u8>,
     pub companion_specs: Vec<RuntimeFileSpec>,
+    /// The subset a provisioned musl binary itself links; the rest of the companion set exists for the engine's own wrapper scripts and must not reach the workload's userland.
+    pub workload_companion_specs: Vec<RuntimeFileSpec>,
 }
+
+const WORKLOAD_COMPANIONS: &[&str] = &["libstdc++", "libgcc"];
 
 /// The provisioner guest's runtime layer: the pinned engine and curl on a reserved path, the CA store at the one path mise reads, the rendered driver, and (musl) the companion library trees at their canonical paths.
 pub(crate) fn provisioner_runtime_specs(
@@ -57,9 +61,7 @@ pub(crate) fn provisioner_runtime_specs(
     specs
 }
 
-/// One shell driver per provision: install each tool with the fail-loud engine, tar its tree into the staging share, and emit one `LNS_TOOL <name> <resolved> <binpath>` marker per success — any failure names its tool with `LNS_FAIL` and stops.
-///
-/// Each tool gets its own engine state and download cache: a tool's install code runs as root in this guest, and against shared state it could plant `installs/<other-tool>/<version>/` so the engine reports a genuine install of a tree it wrote — which would then be cached machine-wide under the other tool's provenance.
+/// One shell driver per provision: each tool installs against its own engine state (a tool's install code runs as root here and could otherwise plant a sibling's `installs/<version>/`), tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpath>` marker; any failure names its tool with `LNS_FAIL` and stops.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
     let mut script = String::from(
         "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
@@ -104,10 +106,12 @@ pub(crate) fn parse_driver_output(
             continue;
         };
         let mut parts = marker.split_whitespace();
-        let (Some(name), Some(resolved)) = (parts.next(), parts.next()) else {
+        // Exactly three fields: a driver whose `basename` came back empty would otherwise shift the bin path into the version slot and cache the tree under it.
+        let (Some(name), Some(resolved), Some(bin_path), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
-        let bin_path = parts.next().unwrap_or(".");
         let (Ok(resolved), true) = (resolved.parse::<SafeVersion>(), is_safe_bin_path(bin_path))
         else {
             return Err(ProvisionError::Engine(format!(
@@ -203,7 +207,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
         &PinnedArtifact {
             filename: "mise",
             url: &manifest.engine_url(arch),
-            sha256: manifest.engine_sha256(arch),
+            sha256: manifest.engine_sha256(arch)?,
             mode: Some(0o755),
             label: "mise engine",
         },
@@ -216,7 +220,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
         &PinnedArtifact {
             filename: "curl",
             url: &manifest.curl_url(arch),
-            sha256: manifest.curl_sha256(arch),
+            sha256: manifest.curl_sha256(arch)?,
             mode: Some(0o755),
             label: "static curl",
         },
@@ -225,6 +229,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
 
     let mut ca_pem = Vec::new();
     let mut companion_specs = Vec::new();
+    let mut workload_companion_specs = Vec::new();
     for companion in &manifest.companion {
         let is_ca = companion.name == "ca-certificates-bundle";
         if !is_ca && target.libc != Libc::Musl {
@@ -238,7 +243,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
             &PinnedArtifact {
                 filename: &filename,
                 url: &mise::companion_url(companion, arch),
-                sha256: mise::companion_sha256(companion, arch),
+                sha256: mise::companion_sha256(companion, arch)?,
                 mode: None,
                 label: &companion.name,
             },
@@ -250,9 +255,13 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
             .with_context(|| format!("reading {}", apk_path.display()))?;
         if is_ca {
             ca_pem = ca_bundle_pem(&bytes)?;
-        } else {
-            companion_specs.extend(apk_runtime_specs(&bytes)?);
+            continue;
         }
+        let specs = apk_runtime_specs(&bytes)?;
+        if WORKLOAD_COMPANIONS.contains(&companion.name.as_str()) {
+            workload_companion_specs.extend(specs.iter().cloned());
+        }
+        companion_specs.extend(specs);
     }
     anyhow::ensure!(
         !ca_pem.is_empty(),
@@ -263,6 +272,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
         curl: curl_bin,
         ca_bundle_pem: ca_pem,
         companion_specs,
+        workload_companion_specs,
     })
 }
 
@@ -505,13 +515,21 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_marker_registers_nothing_rather_than_half_a_tool() {
-        let err = parse_driver_output("LNS_TOOL node\nLNS_DONE\n", "", 0, &[tool("node@22")])
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("no result for node@22"),
-            "got: {err}"
-        );
+    fn a_marker_without_exactly_three_fields_registers_nothing() {
+        // A two-field line would otherwise read the bin path as the version and cache the tree under it.
+        for marker in [
+            "LNS_TOOL node",
+            "LNS_TOOL node  bin",
+            "LNS_TOOL node 22.11.0 bin extra",
+        ] {
+            let err =
+                parse_driver_output(&format!("{marker}\nLNS_DONE\n"), "", 0, &[tool("node@22")])
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("no result for node@22"),
+                "marker {marker:?}: got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -844,6 +862,7 @@ mod tests {
                 tar::EntryType::Regular,
                 "elf",
             )]);
+            let bash_apk = build_apk(&[("bin/bash", tar::EntryType::Regular, "elf")]);
             let manifest = mise::Manifest {
                 engine: mise::Engine {
                     version: "1.0.0".into(),
@@ -868,6 +887,11 @@ mod tests {
                         version: "13-r1".into(),
                         sha256: shas(&lib_apk),
                     },
+                    mise::Companion {
+                        name: "bash".into(),
+                        version: "5.2-r0".into(),
+                        sha256: shas(&bash_apk),
+                    },
                 ],
             };
             let arch = crate::tools::Arch::Aarch64;
@@ -876,6 +900,7 @@ mod tests {
                 (manifest.curl_url(arch), curl),
                 (mise::companion_url(&manifest.companion[0], arch), ca_apk),
                 (mise::companion_url(&manifest.companion[1], arch), lib_apk),
+                (mise::companion_url(&manifest.companion[2], arch), bash_apk),
             ]);
             (manifest, FakeFetcher { responses })
         }
@@ -929,11 +954,33 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(artifacts.companion_specs.len(), 1);
-            assert_eq!(
-                artifacts.companion_specs[0].guest_path,
-                "/usr/lib/libstdc++.so.6.0.32"
-            );
+            let paths: Vec<&str> = artifacts
+                .companion_specs
+                .iter()
+                .map(|spec| spec.guest_path.as_str())
+                .collect();
+            assert_eq!(paths, vec!["/usr/lib/libstdc++.so.6.0.32", "/bin/bash"]);
+        }
+
+        #[tokio::test]
+        async fn only_the_libs_a_tool_links_reach_the_workload() {
+            // bash and its libs exist for the engine's own wrapper scripts; injecting them would replace the image's /bin/bash.
+            let (manifest, fetcher) = fixture();
+            let artifacts = ensure_engine_artifacts_with(
+                &fetcher,
+                &FakeFs::default(),
+                &manifest,
+                Path::new("/cache"),
+                &target(Libc::Musl),
+            )
+            .await
+            .unwrap();
+            let paths: Vec<&str> = artifacts
+                .workload_companion_specs
+                .iter()
+                .map(|spec| spec.guest_path.as_str())
+                .collect();
+            assert_eq!(paths, vec!["/usr/lib/libstdc++.so.6.0.32"]);
         }
 
         #[tokio::test]
@@ -967,6 +1014,7 @@ mod tests {
                 mode: 0o644,
                 source: RuntimeSource::Symlink("libstdc++.so.6.0.32".into()),
             }],
+            workload_companion_specs: Vec::new(),
         };
         let specs = provisioner_runtime_specs(&artifacts, "#!/bin/sh\n".into());
         let paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
