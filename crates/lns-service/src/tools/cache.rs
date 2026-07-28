@@ -483,6 +483,8 @@ mod tests {
             ("esc", ".."),
             ("esc", "../../../../bin"),
             ("bin/esc", "../../../.."),
+            // tar spells paths relative as `./x`, and a `.` segment must not buy a level back.
+            ("./bin/esc", "./../.."),
         ] {
             let mut builder = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
@@ -512,8 +514,8 @@ mod tests {
         let mut builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);
-        header.set_path("bin/node").unwrap();
-        header.set_link_name("../lib/node").unwrap();
+        header.set_path("./bin/node").unwrap();
+        header.set_link_name("./../lib/node").unwrap();
         header.set_size(0);
         header.set_mode(0o777);
         header.set_cksum();
@@ -525,7 +527,7 @@ mod tests {
         assert_eq!(
             manifest.entries[0].kind,
             EntryKind::Symlink {
-                target: "../lib/node".into()
+                target: "./../lib/node".into()
             }
         );
     }

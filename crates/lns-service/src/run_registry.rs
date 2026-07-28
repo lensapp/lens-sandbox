@@ -635,6 +635,22 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
+    async fn a_runs_tool_paths_are_readable_for_the_life_of_the_run() {
+        // `lns exec` enters the same guest later and has to compose the same PATH.
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id.clone(), None, h).unwrap();
+        assert!(tool_bin_paths(&id).is_empty());
+        set_tool_bin_paths(&id, vec!["/.lens/tools/node/22.11.0/bin".to_string()]);
+        assert_eq!(tool_bin_paths(&id), vec!["/.lens/tools/node/22.11.0/bin"]);
+        set_tool_bin_paths("ghost", vec!["/nowhere".to_string()]);
+        assert!(tool_bin_paths("ghost").is_empty());
+        deregister(&id);
+        assert!(tool_bin_paths(&id).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn rename_via_the_global_registry_updates_the_name() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
