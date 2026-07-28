@@ -148,7 +148,7 @@ fn published_target(
                 image: parsed.clone_with_digest(view.digest.clone()).to_string(),
                 defaults: crate::run::declarative::Defaults::from_view(&view),
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
-                tools: view.tools,
+                tools: crate::run::summary::tools_from_view(&view),
             })
         }
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
