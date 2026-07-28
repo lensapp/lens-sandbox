@@ -81,10 +81,6 @@ impl ToolCache for MemToolCache {
             .insert(key.clone(), manifest.clone());
         Ok(manifest)
     }
-    fn evict(&self, key: &lns_service::tools::ToolCacheKey) -> anyhow::Result<()> {
-        self.map.lock().unwrap().remove(key);
-        Ok(())
-    }
 }
 
 /// Resolves a fuzzy `node@22` to `{22}.{upstream_patch}` so a scenario can move upstream forward; an exact request echoes back unchanged; `fail_next` scripts one failed acquisition.

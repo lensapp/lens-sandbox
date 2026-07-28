@@ -15,7 +15,7 @@ pub fn is_safe_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
 }
 
-/// A version that has passed [`is_safe_version`]. Every resolved version becomes a host path component, a guest path component, and a word in the provisioner's shell driver, and they arrive from three places we do not control — the version index, the driver's own output, and files on disk that a later process could have edited. Carrying the check in the type means a new source cannot skip it: deserializing an unsafe value fails, which the callers already treat as "unreadable, re-resolve".
+/// A version that has passed [`is_safe_version`], so no source of one — index, driver output, or a file on disk a later process could edit — can reach a path component or the shell driver unchecked.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

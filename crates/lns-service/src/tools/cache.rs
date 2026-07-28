@@ -520,6 +520,34 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_tar_swapped_for_a_fifo_is_refused_instead_of_blocking_the_service() {
+        // O_NONBLOCK means the open succeeds on a fifo, so the file type is what has to refuse it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let staged_path = dir.path().join("node.tar");
+        let c_path = std::ffi::CString::new(staged_path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path that lives across the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+
+        let err = cache(dir.path())
+            .ingest(
+                &key(),
+                &StagedTool {
+                    name: "some-tool".into(),
+                    resolved: version("1.2.3"),
+                    backend: "core:some-tool".into(),
+                    source_host: "upstream.example.test".into(),
+                    tar: StagedTar::File(staged_path),
+                    bin_paths: vec!["bin".into()],
+                },
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not a regular file"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
     fn a_manifest_naming_an_unusable_version_is_a_miss() {
         // manifest.resolved becomes the guest path the tool is injected at, so an edited file must not be readable.
         let dir = tempfile::TempDir::new().unwrap();
