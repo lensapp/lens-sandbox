@@ -49,16 +49,33 @@ impl Fs for StepFs {
 
 #[given(regex = r#"^the registry serves the sandbox "([^"]+)"$"#)]
 fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
+    let digest = format!("sha256:{}", "a".repeat(64));
     w.sandbox.response = Some(lns_ipc::Response::ImagePulled {
         image: lns_ipc::ImageInfo {
-            reference,
-            digest: format!("sha256:{}", "a".repeat(64)),
+            reference: reference.clone(),
+            digest: digest.clone(),
             size_bytes: 3 * 1024 * 1024,
             layers: 1,
             pulled: "2026-01-01T00:00:00Z".into(),
             in_use_by: None,
         },
         warnings: Vec::new(),
+    });
+    w.sandbox.inspect_image_response = Some(Response::ImageInspected {
+        inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+            reference,
+            digest,
+            image: "docker.io/library/alpine@sha256:abc".into(),
+            workdir: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            connectors: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: Vec::new(),
+            policy_flags: Vec::new(),
+        })),
     });
 }
 

@@ -147,7 +147,7 @@ fn service_received_pull(w: &mut BehaviourWorld, reference: String) -> Result<()
     let requests = w.sandbox.requests.lock().unwrap();
     if requests
         .iter()
-        .any(|r| matches!(r, Request::PullImage { image } if *image == reference))
+        .any(|r| matches!(r, Request::PullImage { image, .. } if *image == reference))
     {
         Ok(())
     } else {

@@ -394,10 +394,20 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let answer = w
+        .sandbox
+        .prompt_answer
+        .clone()
+        .map(|answer| format!("{answer}\n"))
+        .unwrap_or_default();
     let result = run_with_writers(
         &args.command,
         &svc,
-        TermInfo::default(),
+        TermInfo {
+            stdin_is_tty: w.sandbox.stdin_is_tty,
+            stdout_is_terminal: false,
+        },
+        &mut std::io::Cursor::new(answer),
         &mut out,
         &mut stdout,
         &mut stderr,
@@ -412,9 +422,62 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
         },
         Err(e) => CliRun {
             exit_code: 1,
-            output: format!("{e:#}"),
+            output: format!("{}{e:#}", String::from_utf8_lossy(&out)),
         },
     });
+}
+
+#[given(regex = r#"^the published sandbox declares tool "([^"]+)"$"#)]
+fn published_sandbox_declares_tool(w: &mut BehaviourWorld, tool: String) {
+    let Some(Response::ImageInspected { inspection }) = &mut w.sandbox.inspect_image_response
+    else {
+        panic!("the registry sandbox must be staged before its tools");
+    };
+    let lns_ipc::ArtifactInspection::Sandbox(view) = inspection else {
+        panic!("the staged artifact must be a sandbox");
+    };
+    view.tools.push(tool);
+}
+
+#[given(regex = r#"^the user will answer "([^"]+)" to the sandbox prompt$"#)]
+fn sandbox_prompt_answer(w: &mut BehaviourWorld, answer: String) {
+    w.sandbox.prompt_answer = Some(answer);
+    w.sandbox.stdin_is_tty = true;
+}
+
+#[given("sandbox input is non-interactive")]
+fn sandbox_input_is_noninteractive(w: &mut BehaviourWorld) {
+    w.sandbox.stdin_is_tty = false;
+}
+
+#[then("the service received no pull request")]
+fn service_received_no_pull(w: &mut BehaviourWorld) {
+    let requests = w.sandbox.requests.lock().unwrap();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| matches!(request, Request::PullImage { .. })),
+        "got {requests:?}"
+    );
+}
+
+#[then("the pull request is bound to the inspected digest")]
+fn pull_is_bound_to_inspected_digest(w: &mut BehaviourWorld) {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let inspected = requests.iter().find_map(|request| match request {
+        Request::InspectImage { image } => Some(image),
+        _ => None,
+    });
+    let pulled = requests.iter().find_map(|request| match request {
+        Request::PullImage {
+            image,
+            expected_digest,
+        } => Some((image, expected_digest)),
+        _ => None,
+    });
+    let (pulled_image, expected_digest) = pulled.expect("a pull request");
+    assert_eq!(Some(pulled_image), inspected);
+    assert_eq!(expected_digest, &format!("sha256:{}", "a".repeat(64)));
 }
 
 #[given(
@@ -471,6 +534,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
         }),
         &svc,
         TermInfo::default(),
+        &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
         &mut stderr,
@@ -502,6 +566,7 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
         }),
         &svc,
         TermInfo::default(),
+        &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
         &mut stderr,

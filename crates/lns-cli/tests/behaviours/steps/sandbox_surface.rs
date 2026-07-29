@@ -27,6 +27,7 @@ async fn record_invocation(w: &mut BehaviourWorld, cmd: SandboxCommand) {
         &cmd,
         &svc,
         TermInfo::default(),
+        &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
         &mut stderr,

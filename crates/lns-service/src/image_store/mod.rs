@@ -445,6 +445,15 @@ pub struct PullOutcome {
     pub warnings: Vec<String>,
 }
 
+fn verify_consented_digest(image: &str, expected: &str, actual: &str) -> Result<()> {
+    if expected != actual {
+        bail!(
+            "{image} changed after consent: expected {expected}, got {actual}; inspect it and try again"
+        );
+    }
+    Ok(())
+}
+
 async fn finish_pull_with<F: Fs>(
     fs: &F,
     images_root: &Path,
@@ -463,9 +472,10 @@ async fn finish_pull_with<F: Fs>(
     })
 }
 
-pub async fn pull(image: &str) -> Result<PullOutcome> {
+pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
+    verify_consented_digest(image, expected_digest, &artifact.digest)?;
     let shared = lock_shared().await;
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
@@ -481,6 +491,32 @@ pub async fn pull(image: &str) -> Result<PullOutcome> {
         crate::tools::real::pre_provision_for_pull(&artifact, &base_image),
     )
     .await
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::verify_consented_digest;
+
+    #[test]
+    fn pull_accepts_the_digest_the_user_inspected() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        verify_consented_digest("ghcr.io/team/hermes:1", &digest, &digest).unwrap();
+    }
+
+    #[test]
+    fn pull_refuses_a_tag_that_changed_after_consent() {
+        let expected = format!("sha256:{}", "a".repeat(64));
+        let actual = format!("sha256:{}", "b".repeat(64));
+
+        let err = verify_consented_digest("ghcr.io/team/hermes:1", &expected, &actual).unwrap_err();
+
+        assert!(
+            err.to_string().contains("changed after consent"),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains(&expected), "got: {err}");
+        assert!(err.to_string().contains(&actual), "got: {err}");
+    }
 }
 
 pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {

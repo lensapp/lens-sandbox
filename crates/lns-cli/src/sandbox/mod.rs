@@ -120,6 +120,11 @@ pub struct SandboxPullArgs {
         help = "Published sandbox reference to fetch, e.g. ghcr.io/team/hermes:1.4.0."
     )]
     pub reference: String,
+    #[arg(
+        long = "yes",
+        help = "Accept publisher-declared tool installation without prompting."
+    )]
+    pub assume_yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -377,16 +382,18 @@ pub struct TermInfo {
     pub stdout_is_terminal: bool,
 }
 
-pub async fn run_with_writers<S, W, O, E>(
+pub async fn run_with_writers<S, I, W, O, E>(
     cmd: &SandboxCommand,
     svc: &S,
     term: TermInfo,
+    input: &mut I,
     out: &mut W,
     stdout: &mut O,
     stderr: &mut E,
 ) -> Result<i32>
 where
     S: SandboxService,
+    I: std::io::BufRead,
     W: std::io::Write,
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
@@ -398,7 +405,7 @@ where
         SandboxCommand::Push(_) => {
             bail!("push builds and uploads locally, not through the service dispatch")
         }
-        SandboxCommand::Pull(args) => pull(svc, args, out, stderr).await,
+        SandboxCommand::Pull(args) => pull(svc, args, term, input, out, stderr).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
         SandboxCommand::Ps(args) => ps(svc, args, out).await,
         SandboxCommand::Ls(args) => ls(svc, args, out).await,
@@ -423,19 +430,60 @@ pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
 }
 
-async fn pull<W, E>(
+async fn pull<I, W, E>(
     svc: &impl SandboxService,
     args: &SandboxPullArgs,
+    term: TermInfo,
+    input: &mut I,
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32>
 where
+    I: std::io::BufRead,
     W: std::io::Write,
     E: AsyncWriteExt + Unpin,
 {
+    let inspection = svc
+        .one_shot(Request::InspectImage {
+            image: args.reference.clone(),
+        })
+        .await?;
+    let (digest, tools) = match inspection {
+        Response::ImageInspected {
+            inspection: lns_ipc::ArtifactInspection::Sandbox(view),
+        } if !view.digest.is_empty() => (view.digest, view.tools),
+        Response::ImageInspected {
+            inspection: lns_ipc::ArtifactInspection::Sandbox(_),
+        } => bail!(
+            "the registry did not provide a digest for {}",
+            args.reference
+        ),
+        Response::ImageInspected {
+            inspection: lns_ipc::ArtifactInspection::Image(_),
+        } => bail!(
+            "{} is an OCI image, not a published sandbox",
+            args.reference
+        ),
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    };
+    crate::run::pull_confirm::confirm_pulled_effects(
+        &crate::run::pull_confirm::PulledEffects {
+            reference: &args.reference,
+            binds: &[],
+            volumes: &[],
+            filesets: &[],
+            tools: &tools,
+        },
+        args.assume_yes,
+        term.stdin_is_tty,
+        input,
+        out,
+    )?;
     let response = svc
         .one_shot(Request::PullImage {
             image: args.reference.clone(),
+            expected_digest: digest,
         })
         .await?;
     match response {
@@ -1143,6 +1191,43 @@ mod tests {
         }
     }
 
+    fn sandbox_inspection(tools: Vec<String>) -> Response {
+        sandbox_inspection_with_digest(tools, format!("sha256:{}", "a".repeat(64)))
+    }
+
+    fn sandbox_inspection_with_digest(tools: Vec<String>, digest: String) -> Response {
+        Response::ImageInspected {
+            inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                digest,
+                image: "docker.io/library/alpine@sha256:abc".into(),
+                workdir: None,
+                mounts: Vec::new(),
+                ports: Vec::new(),
+                filesets: Vec::new(),
+                connectors: Vec::new(),
+                env: Vec::new(),
+                credentials: Vec::new(),
+                tools,
+                policy_flags: Vec::new(),
+            })),
+        }
+    }
+
+    fn pulled_response() -> Response {
+        Response::ImagePulled {
+            image: lns_ipc::ImageInfo {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 1024,
+                layers: 1,
+                pulled: "2026-01-01T00:00:00Z".into(),
+                in_use_by: None,
+            },
+            warnings: Vec::new(),
+        }
+    }
+
     impl SandboxService for CannedService {
         type Stream = tokio::io::DuplexStream;
         fn one_shot(&self, request: Request) -> BoxFuture<'_, Result<Response>> {
@@ -1210,6 +1295,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1231,6 +1317,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1258,6 +1345,7 @@ mod tests {
                 &cmd,
                 &svc,
                 TermInfo::default(),
+                &mut std::io::Cursor::new(""),
                 &mut out,
                 &mut stdout,
                 &mut stderr,
@@ -1283,6 +1371,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1294,26 +1383,32 @@ mod tests {
 
     #[tokio::test]
     async fn pull_reports_the_pulled_reference_and_digest() {
-        let svc = CannedService::new(Response::ImagePulled {
-            image: lns_ipc::ImageInfo {
-                reference: "ghcr.io/team/hermes:1.4.0".into(),
-                digest: format!("sha256:{}", "a".repeat(64)),
-                size_bytes: 1024,
-                layers: 1,
-                pulled: "2026-01-01T00:00:00Z".into(),
-                in_use_by: None,
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let svc = CannedService::with_inspect_image(
+            Response::ImagePulled {
+                image: lns_ipc::ImageInfo {
+                    reference: "ghcr.io/team/hermes:1.4.0".into(),
+                    digest: digest.clone(),
+                    size_bytes: 1024,
+                    layers: 1,
+                    pulled: "2026-01-01T00:00:00Z".into(),
+                    in_use_by: None,
+                },
+                warnings: vec!["the sandbox is cached, but its first run needs the network".into()],
             },
-            warnings: vec!["the sandbox is cached, but its first run needs the network".into()],
-        });
+            sandbox_inspection(Vec::new()),
+        );
         let mut out = Vec::new();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run_with_writers(
             &SandboxCommand::Pull(SandboxPullArgs {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
+                assume_yes: false,
             }),
             &svc,
             TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1327,6 +1422,137 @@ mod tests {
             String::from_utf8(stderr).unwrap(),
             "warning: the sandbox is cached, but its first run needs the network\n"
         );
+        assert!(matches!(
+            svc.requests.lock().unwrap().as_slice(),
+            [
+                Request::InspectImage { image },
+                Request::PullImage {
+                    image: pulled,
+                    expected_digest
+                }
+            ] if image == "ghcr.io/team/hermes:1.4.0"
+                && pulled == image
+                && expected_digest == &digest
+        ));
+    }
+
+    #[tokio::test]
+    async fn pull_discloses_declared_tools_before_requesting_provisioning() {
+        let svc = CannedService::with_inspect_image(
+            pulled_response(),
+            sandbox_inspection(vec!["node@22".into()]),
+        );
+        let mut out = Vec::new();
+
+        let code = pull(
+            &svc,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                assume_yes: false,
+            },
+            TermInfo {
+                stdin_is_tty: true,
+                stdout_is_terminal: false,
+            },
+            &mut std::io::Cursor::new("yes\n"),
+            &mut out,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Tool:       node@22"), "got: {text}");
+        assert!(
+            matches!(
+                svc.requests.lock().unwrap().as_slice(),
+                [Request::InspectImage { .. }, Request::PullImage { .. }]
+            ),
+            "inspection must precede the provisioning pull"
+        );
+    }
+
+    #[tokio::test]
+    async fn declining_pulled_tools_sends_no_provisioning_request() {
+        let svc = CannedService::with_inspect_image(
+            pulled_response(),
+            sandbox_inspection(vec!["node@22".into()]),
+        );
+
+        let err = pull(
+            &svc,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                assume_yes: false,
+            },
+            TermInfo {
+                stdin_is_tty: true,
+                stdout_is_terminal: false,
+            },
+            &mut std::io::Cursor::new("n\n"),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("declined"), "got: {err}");
+        assert!(matches!(
+            svc.requests.lock().unwrap().as_slice(),
+            [Request::InspectImage { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn noninteractive_tool_pull_requires_yes_and_yes_skips_the_prompt() {
+        let refused = CannedService::with_inspect_image(
+            pulled_response(),
+            sandbox_inspection(vec!["node@22".into()]),
+        );
+        let err = pull(
+            &refused,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                assume_yes: false,
+            },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--yes"), "got: {err}");
+        assert!(matches!(
+            refused.requests.lock().unwrap().as_slice(),
+            [Request::InspectImage { .. }]
+        ));
+
+        let accepted = CannedService::with_inspect_image(
+            pulled_response(),
+            sandbox_inspection(vec!["node@22".into()]),
+        );
+        let mut out = Vec::new();
+        pull(
+            &accepted,
+            &SandboxPullArgs {
+                reference: "ghcr.io/team/hermes:1.4.0".into(),
+                assume_yes: true,
+            },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut out,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("Continue?"), "got: {out}");
+        assert!(matches!(
+            accepted.requests.lock().unwrap().as_slice(),
+            [Request::InspectImage { .. }, Request::PullImage { .. }]
+        ));
     }
 
     #[tokio::test]
@@ -1337,7 +1563,10 @@ mod tests {
             }),
             &SandboxPullArgs {
                 reference: "x:1".into(),
+                assume_yes: false,
             },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1349,13 +1578,88 @@ mod tests {
             &CannedService::new(Response::Pong),
             &SandboxPullArgs {
                 reference: "x:1".into(),
+                assume_yes: false,
             },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
             &mut Vec::new(),
             &mut Vec::new(),
         )
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_an_unpinned_sandbox_and_a_plain_image() {
+        let err = pull(
+            &CannedService::with_inspect_image(
+                Response::Pong,
+                sandbox_inspection_with_digest(Vec::new(), String::new()),
+            ),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+                assume_yes: false,
+            },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did not provide a digest"));
+
+        let err = pull(
+            &CannedService::with_inspect_image(
+                Response::Pong,
+                Response::ImageInspected {
+                    inspection: lns_ipc::ArtifactInspection::Image(lns_ipc::ImageView {
+                        reference: "x:1".into(),
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                    }),
+                },
+            ),
+            &SandboxPullArgs {
+                reference: "x:1".into(),
+                assume_yes: false,
+            },
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("OCI image"));
+    }
+
+    #[tokio::test]
+    async fn pull_surfaces_a_post_consent_daemon_error_and_unexpected_response() {
+        for (response, expected) in [
+            (
+                Response::Error {
+                    message: "registry changed".into(),
+                },
+                "registry changed",
+            ),
+            (Response::Pong, "unexpected response"),
+        ] {
+            let err = pull(
+                &CannedService::with_inspect_image(response, sandbox_inspection(Vec::new())),
+                &SandboxPullArgs {
+                    reference: "x:1".into(),
+                    assume_yes: false,
+                },
+                TermInfo::default(),
+                &mut std::io::Cursor::new(""),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains(expected), "got: {err}");
+        }
     }
 
     #[tokio::test]
