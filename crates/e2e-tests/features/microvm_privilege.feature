@@ -45,6 +45,22 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is 0
     And the output contains "00000000000000fb"
 
+  Scenario: an exec lands on the workload's identity, not the broker's root
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c 'echo uid=$(/.lens/guest-tools/bin/busybox id -u)'" in that run
+    Then the exit code is 0
+    And the output contains "uid=65534"
+
+  Scenario: an exec into a root sandbox is capped like the workload it joins
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'" as user "root"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c '/.lens/guest-tools/bin/busybox grep CapEff /proc/self/status'" in that run
+    Then the exit code is 0
+    And the output contains "00000000000000fb"
+
   Scenario: /run is a fresh tmpfs, not the workload's persistent root
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep /run /proc/mounts'"

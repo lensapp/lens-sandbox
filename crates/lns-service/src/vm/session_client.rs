@@ -31,6 +31,8 @@ pub struct SessionParams {
     pub tty: bool,
     pub stdin: bool,
     pub initial_winsize: Option<Winsize>,
+    /// Ask the broker to drop to the guest run-as identity before exec; false for the primary session, whose workload is the supervisor.
+    pub confine: bool,
 }
 
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {

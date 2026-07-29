@@ -14,8 +14,9 @@ const PTY_DRAIN_GRACE: Duration = Duration::from_millis(500);
 const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
-    LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close, dispatch_frame,
-    read_client_frame, signal_target, validate_argv, validate_open_session,
+    Confinement, LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close,
+    confinement, dispatch_frame, read_client_frame, signal_target, validate_argv,
+    validate_open_session,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
@@ -46,6 +47,95 @@ fn writeln_stderr(msg: &str) -> io::Result<()> {
     writeln!(std::io::stderr(), "lns-session-broker: {msg}")
 }
 
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok().and_then(|s| s.parse().ok())
+}
+
+/// Identity-management caps a confined root workload keeps; mirrors `KEEP_CAP_MASK` in lens-sandbox-core so an exec lands on the same set as the workload it joins.
+const KEEP_CAP_MASK: u64 =
+    (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7);
+
+const CAPSET_V3: u32 = 0x2008_0522;
+
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+fn no_new_privs() -> io::Result<()> {
+    // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes scalars only and cannot fail on a live process.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drop_capabilities() -> io::Result<()> {
+    no_new_privs()?;
+    // SAFETY: prctl with PR_CAP_AMBIENT_CLEAR_ALL takes scalars only.
+    if unsafe {
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let header = CapHeader {
+        version: CAPSET_V3,
+        pid: 0,
+    };
+    let lo = (KEEP_CAP_MASK & 0xFFFF_FFFF) as u32;
+    let hi = (KEEP_CAP_MASK >> 32) as u32;
+    let data = [
+        CapData {
+            effective: lo,
+            permitted: lo,
+            inheritable: 0,
+        },
+        CapData {
+            effective: hi,
+            permitted: hi,
+            inheritable: 0,
+        },
+    ];
+    // SAFETY: capset reads a v3 header plus the two 32-bit datums the version mandates; both live until the call returns.
+    if unsafe { libc::syscall(libc::SYS_capset, &header as *const _, data.as_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn setuid_to(uid: u32, gid: u32) -> io::Result<()> {
+    // SAFETY: each call takes scalars; setgroups before setgid/setuid so the supplementary set is cleared while still privileged.
+    unsafe {
+        if libc::setgroups(0, ptr::null()) < 0 || libc::setgid(gid) < 0 || libc::setuid(uid) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    no_new_privs()
+}
+
+fn apply_confinement(confinement: &Confinement) -> io::Result<()> {
+    match confinement {
+        Confinement::Inherit => Ok(()),
+        Confinement::CapsOnly => drop_capabilities(),
+        Confinement::Setuid { uid, gid } => setuid_to(*uid, *gid),
+    }
+}
+
 pub fn handle_session(
     conn: RawFd,
     pid_tx: Option<SyncSender<libc::pid_t>>,
@@ -70,6 +160,7 @@ pub fn handle_session(
         tty,
         stdin,
         winsize,
+        confine,
     } = opening
     else {
         unreachable!("validate_open_session guarantees OpenSession");
@@ -79,6 +170,7 @@ pub fn handle_session(
         env,
         cwd,
         hostname,
+        confinement: confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID")),
     };
     if tty {
         run_tty_session(conn, spec, winsize, stdin, pid_tx, forker)
@@ -411,6 +503,10 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
             // SAFETY: putenv keeps the pointer; child execs imminently, so the leak ends with the process image.
             unsafe { libc::putenv(raw) };
         }
+    }
+    if let Err(e) = apply_confinement(&spec.confinement) {
+        let _ = writeln_stderr(&format!("confining the session: {e}"));
+        child_exit(126);
     }
     let Some(cargs) = validate_argv(&spec.argv) else {
         let _ = writeln_stderr("argv contained interior NUL");
