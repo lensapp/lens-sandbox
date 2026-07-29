@@ -83,3 +83,17 @@ Feature: image cache lifecycle — list, remove, prune
   Scenario: Pruning an empty cache removes nothing
     When the images are pruned
     Then the prune removes no images
+
+  Scenario: Pruning reclaims the provisioned tool cache
+    Given a provisioned tool cache of 700 bytes
+    When the images are pruned
+    Then the provisioned tool cache is gone
+    And the image prune reports 700 reclaimed bytes
+
+  Scenario: Pruning preserves shared tool content while a sandbox is live
+    Given image "registry.example.test/team/live:1.0" is cached with layer "sha256:live" of 1000 bytes
+    And a live run uses image "registry.example.test/team/live:1.0"
+    And a provisioned tool cache of 700 bytes
+    When the images are pruned
+    Then the provisioned tool cache remains
+    And the image prune reports 0 reclaimed bytes

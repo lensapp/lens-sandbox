@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lns_service::image_store::{
-    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RemovedImage,
+    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RemovedImage, RuntimeCacheFs,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -16,10 +16,19 @@ pub struct IndexFs {
 impl Fs for IndexFs {
     async fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         let g = self.files.lock().unwrap();
-        Ok(g.keys()
+        if g.contains_key(dir) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+        }
+        let entries: Vec<PathBuf> = g
+            .keys()
             .filter(|p| p.parent() == Some(dir))
             .cloned()
-            .collect())
+            .collect();
+        if entries.is_empty() {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        } else {
+            Ok(entries)
+        }
     }
     async fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
         self.files
@@ -41,6 +50,18 @@ impl Fs for IndexFs {
     }
     async fn remove_file(&self, p: &Path) -> std::io::Result<()> {
         if self.files.lock().unwrap().remove(p).is_none() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeCacheFs for IndexFs {
+    async fn remove_dir_all(&self, p: &Path) -> std::io::Result<()> {
+        let mut files = self.files.lock().unwrap();
+        let before = files.len();
+        files.retain(|path, _| !path.starts_with(p));
+        if files.len() == before {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
         Ok(())
@@ -83,6 +104,7 @@ pub struct ImageRig {
     pub fs: IndexFs,
     pub caches: CacheFake,
     pub images_root: PathBuf,
+    tool_cache_paths: Vec<PathBuf>,
     pub active: Vec<lns_ipc::RunSummary>,
     pub holder_run_id: Option<String>,
     next_run_id: u32,
@@ -100,6 +122,7 @@ impl ImageRig {
             fs: IndexFs::default(),
             caches: CacheFake::default(),
             images_root: PathBuf::from("/images"),
+            tool_cache_paths: Vec::new(),
             active: Vec::new(),
             holder_run_id: None,
             next_run_id: 1,
@@ -110,6 +133,31 @@ impl ImageRig {
             last_pull: None,
             last_error: None,
         }
+    }
+
+    pub fn seed_tool_cache(&mut self, bytes: u64) {
+        let cache_root = self.images_root.parent().unwrap_or_else(|| Path::new(""));
+        let portions = [bytes / 3, bytes / 3, bytes - 2 * (bytes / 3)];
+        self.tool_cache_paths = ["tools", "content", "composefs"]
+            .into_iter()
+            .zip(portions)
+            .map(|(name, size)| {
+                let path = cache_root.join(name).join("cached");
+                self.fs
+                    .files
+                    .lock()
+                    .unwrap()
+                    .insert(path.clone(), vec![0; size as usize]);
+                path
+            })
+            .collect();
+    }
+
+    pub fn has_tool_cache(&self) -> bool {
+        let files = self.fs.files.lock().unwrap();
+        self.tool_cache_paths
+            .iter()
+            .any(|path| files.contains_key(path))
     }
 
     pub fn fail_index_writes(&self) {
