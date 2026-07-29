@@ -20,6 +20,23 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is 0
     And the output contains "who=sandbox"
 
+  Scenario: a root run-as is honoured as an identity
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox id -u'" as user "root"
+    Then the exit code is 0
+    And the output contains "0"
+
+  Scenario: a root workload cannot tear down the network cage
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/nft flush ruleset'" as user "root"
+    Then the exit code is non-zero
+    And the output contains "Operation not permitted"
+
+  Scenario: a root workload cannot read the supervisor's memory
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox cat /proc/1/mem'" as user "root"
+    Then the exit code is non-zero
+
   Scenario: /run is a fresh tmpfs, not the workload's persistent root
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep /run /proc/mounts'"
