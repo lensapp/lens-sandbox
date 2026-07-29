@@ -5,7 +5,9 @@ use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
+use crate::credential_flow::session::{
+    CredentialDecisionRequest, CredentialPendingPrompt, DenyScope,
+};
 use crate::credential_flow::store::CredentialEntry;
 use crate::oauth::SignInPivot;
 use lns_policy::connectors::TokenFallback;
@@ -49,6 +51,8 @@ pub struct CredentialCardPrompt {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::deny_scope`]: how far this card's "Deny" reaches.
+    pub deny_scope: DenyScope,
 }
 
 /// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
@@ -221,6 +225,7 @@ impl WindowState {
                 env_var: prompt.env_var,
                 injection_domains: prompt.injection_domains,
                 is_project_defined: prompt.is_project_defined,
+                deny_scope: prompt.deny_scope,
             },
             decision_tx,
             seq,
@@ -651,6 +656,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 
@@ -1361,6 +1367,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 

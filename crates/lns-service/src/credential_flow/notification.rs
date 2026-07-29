@@ -139,6 +139,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            deny_scope: crate::credential_flow::session::DenyScope::Workload,
         }
     }
 

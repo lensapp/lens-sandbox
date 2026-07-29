@@ -33,6 +33,14 @@ pub type ChallengeGen = Box<dyn Fn() -> crate::oauth::PkceChallenge + Send + Syn
 /// How long a pkce browser sign-in may run before the held request is failed closed.
 pub const PKCE_SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How far a deny on a card reaches. A card raised by a run speaks for that workload; only the connect-time bind card, which holds no request, can bind a standing refusal for the whole machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DenyScope {
+    #[default]
+    Workload,
+    Machine,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPendingPrompt {
     pub id: String,
@@ -47,6 +55,8 @@ pub struct CredentialPendingPrompt {
     pub is_project_defined: bool,
     /// True when a value is already bound for this connector on this machine, so the card can grant that binding instead of demanding the secret again (or re-running a sign-in).
     pub bound_value_available: bool,
+    /// What this card's "Deny" is allowed to mean, so the durability of a refusal is fixed by the card that asked rather than by which flow happens to receive the answer.
+    pub deny_scope: DenyScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,12 +128,13 @@ impl SignInOutcome {
     }
 }
 
-/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline. `Dismiss` and `Timeout` are the absence of a decision and record nothing (S12).
+/// `Allow` binds a new value on this machine and `AllowBound` grants the one already bound; both are this workload's consent. `Deny` records a per-workload decline, and `DenyAlways` — which only a [`DenyScope::Machine`] card can ask for — binds a standing refusal. `Dismiss` and `Timeout` are the absence of a decision and record nothing (S12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialDecisionRequest {
     Allow(CredentialEntry),
     AllowBound,
     Deny,
+    DenyAlways,
     Dismiss,
     Timeout,
 }
@@ -568,6 +579,7 @@ impl CredentialSession {
             injection_domains,
             is_project_defined,
             bound_value_available,
+            deny_scope: DenyScope::Workload,
         });
     }
 
@@ -673,8 +685,8 @@ impl CredentialSession {
                     (self.connect)(&credential_id);
                 }
             }
-            // A declined card is remembered per-workload in the grant sidecar, not as a machine-wide credential Deny that would block the connector for every project.
-            CredentialDecisionRequest::Deny => {
+            // A declined card is remembered per-workload in the grant sidecar, never as a machine-wide credential Deny that would block the connector for every project — including a DenyAlways that only a bind card can raise, so no misrouted card can widen a refusal from here.
+            CredentialDecisionRequest::Deny | CredentialDecisionRequest::DenyAlways => {
                 self.remember_grant(&credential_id, GrantVerdict::Deny);
             }
             CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => {}
@@ -1115,7 +1127,9 @@ fn decision_kind_of(request: &CredentialDecisionRequest) -> CredentialDecisionKi
         CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
             CredentialDecisionKind::Allow
         }
-        CredentialDecisionRequest::Deny => CredentialDecisionKind::Deny,
+        CredentialDecisionRequest::Deny | CredentialDecisionRequest::DenyAlways => {
+            CredentialDecisionKind::Deny
+        }
         CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => {
             CredentialDecisionKind::Timeout
         }
@@ -1128,7 +1142,9 @@ fn ledger_decision_of(request: &CredentialDecisionRequest) -> Option<Decision> {
         CredentialDecisionRequest::Allow(_) | CredentialDecisionRequest::AllowBound => {
             Some(Decision::Allow)
         }
-        CredentialDecisionRequest::Deny => Some(Decision::Deny),
+        CredentialDecisionRequest::Deny | CredentialDecisionRequest::DenyAlways => {
+            Some(Decision::Deny)
+        }
         CredentialDecisionRequest::Dismiss | CredentialDecisionRequest::Timeout => None,
     }
 }
@@ -2155,6 +2171,34 @@ mod tests {
                 Some(CredentialEntry::Deny)
             ),
             "a declined card is per-workload, never a machine-wide credential Deny that would block the connector for every project"
+        );
+    }
+
+    #[test]
+    fn the_run_flow_cannot_widen_a_deny_past_the_workload_even_when_asked_to() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = grants_session(store.clone(), workload.clone(), vec![]);
+        session.submit_pending(pending("c1", "some-provider"), Instant::now());
+
+        session.record_decision("c1", CredentialDecisionRequest::DenyAlways);
+
+        let persisted = store.load().unwrap();
+        assert_eq!(
+            persisted
+                .lookup("proj", &workload, "some-provider")
+                .expect("the decline is still remembered for this workload")
+                .verdict,
+            GrantVerdict::Deny
+        );
+        assert!(
+            !matches!(
+                session.current_state().get("some-provider"),
+                Some(CredentialEntry::Deny)
+            ),
+            "a standing deny belongs to the bind flow; a run card misrouted one must narrow to this workload rather than block the connector for every project"
         );
     }
 

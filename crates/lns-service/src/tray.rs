@@ -14,7 +14,7 @@ use crate::approval_flow::session::PendingPrompt;
 use crate::approval_flow::window::{
     self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
 };
-use crate::credential_flow::session::CredentialDecisionRequest;
+use crate::credential_flow::session::{CredentialDecisionRequest, DenyScope};
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
@@ -552,6 +552,14 @@ pub enum CardAction {
         credential_id: String,
         value: String,
     },
+}
+
+/// The refusal a card's "Deny" is entitled to ask for, so durability follows the card that asked rather than the flow that happens to answer.
+fn deny_request(scope: DenyScope) -> CredentialDecisionRequest {
+    match scope {
+        DenyScope::Workload => CredentialDecisionRequest::Deny,
+        DenyScope::Machine => CredentialDecisionRequest::DenyAlways,
+    }
 }
 
 /// Every way a card can leave the stack without a verdict; closed as a type so adding a card kind fails to compile in [`apply_dismissal`] rather than silently hanging its held request.
@@ -1636,7 +1644,7 @@ fn render_credential_card(
                     }));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Deny);
+                    chosen = Some(deny_request(prompt.deny_scope));
                 }
             });
             chosen.map(|request| CardAction::DecideCredential {
@@ -1708,7 +1716,7 @@ fn render_oauth_consent_card(
                     ));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Deny);
+                    chosen = Some(deny_request(prompt.deny_scope));
                 }
             });
             if chosen.is_none()
@@ -2256,6 +2264,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: crate::credential_flow::session::DenyScope::Workload,
         }
     }
 
@@ -2351,6 +2360,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 
