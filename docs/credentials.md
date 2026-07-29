@@ -55,11 +55,9 @@ Decisions are made interactively, at either of two moments:
 
 Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then
-fail at the boundary). A bound value is remembered for next time. A deny from an
-approval card is not — it fails that request, and the next use asks again.
-Closing a card decides nothing at all. Only `lns connector connect <id>` binds a
-standing deny that stops the asking, because that choice applies to every
-project on this machine and an approval card speaks for one run.
+fail at the boundary). A bound value is remembered for next time, and so is a
+deny. Closing a card, by contrast, decides nothing at all: nothing is recorded,
+the held request fails, and the next use asks again.
 
 Denying is the one choice whose reach depends on which card you answered.
 Denying the **proactive** card is a decision about the machine, and lands in
