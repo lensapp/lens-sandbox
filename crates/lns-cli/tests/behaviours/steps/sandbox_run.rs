@@ -58,6 +58,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             pulled: "2026-01-01T00:00:00Z".into(),
             in_use_by: None,
         },
+        warnings: Vec::new(),
     });
 }
 
