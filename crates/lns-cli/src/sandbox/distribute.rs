@@ -164,6 +164,12 @@ fn fileset_name(path: &str) -> String {
     name.trim_end_matches('-').to_string()
 }
 
+fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
+    lns_artifact::validate::refuse_unprovisionable_tools(doc).map_err(|problem| {
+        anyhow::anyhow!("refusing to push a sandbox no consumer can start: {problem}")
+    })
+}
+
 /// `lns push <ref>`: validate the sandbox definition, pack and upload its path filesets, then build and upload the pinned definition as a sandbox artifact in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
     fs: &F,
@@ -180,9 +186,7 @@ where
     R: ToolResolver + ?Sized,
     W: Write,
 {
-    lns_artifact::validate::refuse_unprovisionable_tools(doc).map_err(|problem| {
-        anyhow::anyhow!("refusing to push a sandbox no consumer can start: {problem}")
-    })?;
+    refuse_unpushable_tools(doc)?;
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     for fileset in &packed {
@@ -211,6 +215,7 @@ where
     F: Fs + ?Sized,
     W: Write,
 {
+    refuse_unpushable_tools(doc)?;
     let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
     for fileset in &packed {
         let bytes = blob_bytes(&fileset.built);
@@ -570,6 +575,31 @@ mod tests {
         assert!(
             producer.docs.borrow().is_empty(),
             "nothing is uploaded and the index is never consulted"
+        );
+    }
+
+    #[test]
+    fn push_dry_run_refuses_a_tool_no_consumer_could_provision() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}],"tools":["prettier@3"]}}"#;
+        let mut out = Vec::new();
+        let err = push_dry_run(
+            &fs_with_skills(),
+            cwd(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("no consumer can start")
+                && message.contains("bring it via spec.image"),
+            "got: {message}"
+        );
+        assert!(
+            out.is_empty(),
+            "a refused dry run must not print a successful push preview"
         );
     }
 
