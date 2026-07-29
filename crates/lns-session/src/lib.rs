@@ -21,6 +21,8 @@ pub enum ClientFrame {
         tty: bool,
         stdin: bool,
         winsize: Option<Winsize>,
+        /// Drop to the guest's run-as identity (or cap a root one) before exec; the primary session leaves it false so the supervisor keeps the privileges the cage needs.
+        confine: bool,
     },
     StdinBytes(Vec<u8>),
     Resize(Winsize),
@@ -127,6 +129,7 @@ mod tests {
             tty: true,
             stdin: true,
             winsize: Some(Winsize { rows: 24, cols: 80 }),
+            confine: true,
         };
         let bytes = encode_frame(&frame).expect("encode");
         let len = decode_length_prefix(&bytes[..4].try_into().unwrap()).expect("len");
@@ -145,6 +148,7 @@ mod tests {
             tty: false,
             stdin: false,
             winsize: None,
+            confine: false,
         };
         let bytes = encode_frame(&frame).expect("encode");
         let back: ClientFrame = decode_frame(&bytes[4..]).expect("decode");

@@ -849,6 +849,14 @@ fn start_detached(world: &mut E2eWorld, cmd_line: String) {
     }
 }
 
+#[when(regex = r#"^the user starts a detached microVM command "([^"]*)" as user "([^"]+)"$"#)]
+fn start_detached_as_user(world: &mut E2eWorld, cmd_line: String, user: String) {
+    run_microvm(world, vec!["-d".into(), "-u".into(), user], &cmd_line);
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
+}
+
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with auto-remove$"#)]
 fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["-d".into(), "--rm".into()], &cmd_line);
