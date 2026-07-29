@@ -40,7 +40,7 @@ pub(super) async fn run_async_with<S: process::Spawner>(
     spawner: &S,
     spec: VmSpec,
     env_get: impl Fn(&str) -> Option<OsString>,
-    virtiofsd_help: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    require_read_only_support: impl Fn(&Path) -> Result<()>,
     kvm_check: impl Fn() -> KvmStatus,
     read_console_tail: impl Fn(&Path) -> Option<String>,
     timeouts: &orchestrate::LaunchTimeouts,
@@ -69,7 +69,7 @@ pub(super) async fn run_async_with<S: process::Spawner>(
         .unwrap_or_else(|| PathBuf::from("."));
     let layout = launch::SocketLayout::for_run_dir(&run_dir);
     let bins = vmm_bin::resolve(env_get)?;
-    vmm_bin::require_read_only_support(&bins.virtiofsd, virtiofsd_help)?;
+    require_read_only_support(&bins.virtiofsd)?;
     let relay_fd_tx = spec.vsock.as_ref().map(|c| c.fd_tx.clone());
     let running =
         orchestrate::launch(spawner, &spec, &bins, &layout, relay_fd_tx, timeouts).await?;
@@ -228,8 +228,8 @@ mod tests {
         None
     }
 
-    fn readonly_help(_: &Path) -> std::io::Result<Vec<u8>> {
-        Ok(b"Usage: virtiofsd [OPTIONS] --readonly".to_vec())
+    fn readonly_support(_: &Path) -> Result<()> {
+        Ok(())
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
-            readonly_help,
+            readonly_support,
             || KvmStatus::Missing,
             no_console_tail,
             &fast(),
@@ -274,7 +274,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
-            readonly_help,
+            readonly_support,
             || KvmStatus::NotAccessible,
             no_console_tail,
             &fast(),
@@ -302,7 +302,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -337,7 +337,11 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            |_| Ok(b"Usage: virtiofsd [OPTIONS]".to_vec()),
+            |path| {
+                vmm_bin::require_read_only_support(path, |_| {
+                    Ok(b"Usage: virtiofsd [OPTIONS]".to_vec())
+                })
+            },
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -371,11 +375,13 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            |_| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "denied",
-                ))
+            |path| {
+                vmm_bin::require_read_only_support(path, |_| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "denied",
+                    ))
+                })
             },
             kvm_ok,
             no_console_tail,
@@ -407,7 +413,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -441,7 +447,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -471,7 +477,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             |_| Some("Error: KvmCheck failed".to_string()),
             &fast(),
@@ -504,7 +510,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -543,7 +549,7 @@ mod tests {
             &spawner,
             s,
             env,
-            readonly_help,
+            readonly_support,
             kvm_ok,
             no_console_tail,
             &fast(),
