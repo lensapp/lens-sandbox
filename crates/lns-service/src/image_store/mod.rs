@@ -437,23 +437,37 @@ fn warn_if_tools_unprovisioned(image: &str, outcome: Result<(), crate::tools::Pr
     }
 }
 
+async fn finish_pull_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    record: &ImageRecord,
+    active: &[lns_ipc::RunSummary],
+    image: &str,
+    shared: tokio::sync::RwLockReadGuard<'_, ()>,
+    pre_provision: impl std::future::Future<Output = Result<(), crate::tools::ProvisionError>>,
+) -> Result<lns_ipc::ImageInfo> {
+    let info = pull_with(fs, images_root, record, active).await?;
+    drop(shared);
+    warn_if_tools_unprovisioned(image, pre_provision.await);
+    Ok(info)
+}
+
 pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
-    let _shared = lock_shared().await;
+    let shared = lock_shared().await;
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
-    warn_if_tools_unprovisioned(
-        image,
-        crate::tools::real::pre_provision_for_pull(&artifact, &base_image).await,
-    );
     let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
-    pull_with(
+    finish_pull_with(
         &real::RealFs,
         &images_root()?,
         &record,
         &crate::run_registry::snapshot(),
+        image,
+        shared,
+        crate::tools::real::pre_provision_for_pull(&artifact, &base_image),
     )
     .await
 }
@@ -619,6 +633,102 @@ mod tests {
         fn has(&self, p: &Path) -> bool {
             self.files.lock().unwrap().contains_key(p)
         }
+    }
+
+    #[tokio::test]
+    async fn pull_records_the_image_before_pre_provisioning() {
+        let lock = tokio::sync::RwLock::new(());
+        let shared = lock.read().await;
+        let fs = FakeFs::default();
+        let record = rec("registry.example.test/team/agent:1", &[]);
+
+        finish_pull_with(
+            &fs,
+            Path::new(ROOT),
+            &record,
+            &[],
+            &record.reference,
+            shared,
+            async {
+                assert!(
+                    fs.has(&record_path(Path::new(ROOT), &record.reference)),
+                    "the image must be committed before optional tool provisioning starts"
+                );
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_provisioning_does_not_hold_the_image_cache_lock() {
+        let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let shared = lock.read().await;
+        let writer_lock = lock.clone();
+        let writer = tokio::spawn(async move {
+            let _exclusive = writer_lock.write().await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while lock.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the test writer must queue before the simulated provisioner rootfs pull");
+
+        let fs = FakeFs::default();
+        let record = rec("registry.example.test/team/agent:1", &[]);
+        finish_pull_with(
+            &fs,
+            Path::new(ROOT),
+            &record,
+            &[],
+            &record.reference,
+            shared,
+            async {
+                let _nested =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), lock.read())
+                        .await
+                        .expect(
+                            "the provisioner rootfs pull must not deadlock behind a queued writer",
+                        );
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_pre_provisioning_keeps_the_committed_image() {
+        let lock = tokio::sync::RwLock::new(());
+        let shared = lock.read().await;
+        let fs = FakeFs::default();
+        let record = rec("registry.example.test/team/agent:1", &[]);
+
+        let info = finish_pull_with(
+            &fs,
+            Path::new(ROOT),
+            &record,
+            &[],
+            &record.reference,
+            shared,
+            async {
+                Err(crate::tools::ProvisionError::Engine(
+                    "the version index is unreachable".into(),
+                ))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.reference, record.reference);
+        assert!(
+            fs.has(&record_path(Path::new(ROOT), &record.reference)),
+            "optional tool provisioning must not roll back a completed image pull"
+        );
     }
 
     impl Fs for FakeFs {
