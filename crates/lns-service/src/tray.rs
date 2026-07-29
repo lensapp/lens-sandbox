@@ -462,7 +462,7 @@ impl eframe::App for TrayApp {
                 ui.ctx().request_repaint();
             }
             Some(CardAction::DismissInform { index }) => {
-                self.window_state.dismiss_inform(index);
+                apply_dismissal(&self.window_state, &Dismissal::Inform { index });
                 ui.ctx().request_repaint();
             }
             Some(CardAction::OpenBrowser { url }) => {
@@ -470,16 +470,16 @@ impl eframe::App for TrayApp {
                 ui.ctx().request_repaint();
             }
             Some(CardAction::CancelSignIn { credential_id }) => {
-                self.window_state.cancel_sign_in(&credential_id);
+                apply_dismissal(&self.window_state, &Dismissal::SignIn { credential_id });
                 ui.ctx().request_repaint();
             }
-            Some(
-                action @ (CardAction::DismissNetwork { .. } | CardAction::DismissCredential { .. }),
-            ) => {
-                if let CardAction::DismissCredential { id } = &action {
-                    self.credential_inputs.remove(id);
-                }
-                apply_dismissal(&self.window_state, &action);
+            Some(CardAction::DismissNetwork { id }) => {
+                apply_dismissal(&self.window_state, &Dismissal::Network { id });
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::DismissCredential { id }) => {
+                self.credential_inputs.remove(&id);
+                apply_dismissal(&self.window_state, &Dismissal::Credential { id });
                 ui.ctx().request_repaint();
             }
             Some(CardAction::ConnectOffer { id }) => {
@@ -552,6 +552,26 @@ pub enum CardAction {
         credential_id: String,
         value: String,
     },
+}
+
+/// Every way a card can leave the stack without a verdict; closed as a type so adding a card kind fails to compile in [`apply_dismissal`] rather than silently hanging its held request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Dismissal {
+    Network { id: String },
+    Credential { id: String },
+    SignIn { credential_id: String },
+    Inform { index: usize },
+}
+
+impl From<Dismissal> for CardAction {
+    fn from(dismissal: Dismissal) -> Self {
+        match dismissal {
+            Dismissal::Network { id } => Self::DismissNetwork { id },
+            Dismissal::Credential { id } => Self::DismissCredential { id },
+            Dismissal::SignIn { credential_id } => Self::CancelSignIn { credential_id },
+            Dismissal::Inform { index } => Self::DismissInform { index },
+        }
+    }
 }
 
 /// What the user did in the token-fallback affordance shared by every connect card.
@@ -667,7 +687,7 @@ fn render_single(
                             && close_button(ui, egui::Id::new(("card-close", idx)), close_rect)
                                 .clicked()
                         {
-                            fired = Some(close);
+                            fired = Some(close.into());
                         }
                         action = action.or(fired);
                     }
@@ -821,8 +841,9 @@ fn close_all(state: &WindowState, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
         match close_action(item, snapshot) {
-            Some(CardAction::DismissInform { .. }) => had_inform = true,
-            Some(action) => apply_dismissal(state, &action),
+            // Informs are cleared in one shot below, since dismissing them by index in a loop shifts the indices still to come.
+            Some(Dismissal::Inform { .. }) => had_inform = true,
+            Some(dismissal) => apply_dismissal(state, &dismissal),
             None => {}
         }
     }
@@ -832,18 +853,20 @@ fn close_all(state: &WindowState, snapshot: &Snapshot) {
 }
 
 /// The single place a closed card becomes a non-decision, shared by the per-card ✕ and the pile's close-all.
-fn apply_dismissal(state: &WindowState, action: &CardAction) {
-    match action {
-        CardAction::DismissNetwork { id } => {
+fn apply_dismissal(state: &WindowState, dismissal: &Dismissal) {
+    match dismissal {
+        Dismissal::Network { id } => {
             state.dismiss(id);
         }
-        CardAction::DismissCredential { id } => {
+        Dismissal::Credential { id } => {
             state.decide_credential(id, CredentialDecisionRequest::Dismiss);
         }
-        CardAction::CancelSignIn { credential_id } => {
+        Dismissal::SignIn { credential_id } => {
             state.cancel_sign_in(credential_id);
         }
-        _ => {}
+        Dismissal::Inform { index } => {
+            state.dismiss_inform(*index);
+        }
     }
 }
 
@@ -970,7 +993,7 @@ fn pile_close(
         && let Some(close) = close_action(item, snapshot)
         && close_button(ui, key.with("close"), close_rect).clicked()
     {
-        return Some(close);
+        return Some(close.into());
     }
     None
 }
@@ -1271,16 +1294,16 @@ fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
     });
 }
 
-fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<CardAction> {
+fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<Dismissal> {
     match *item {
-        StackItem::Inform(i) => Some(CardAction::DismissInform { index: i }),
-        StackItem::Network(i) => Some(CardAction::DismissNetwork {
+        StackItem::Inform(i) => Some(Dismissal::Inform { index: i }),
+        StackItem::Network(i) => Some(Dismissal::Network {
             id: snapshot.pending[i].id.clone(),
         }),
-        StackItem::SignIn(i) => Some(CardAction::CancelSignIn {
+        StackItem::SignIn(i) => Some(Dismissal::SignIn {
             credential_id: snapshot.sign_ins[i].credential_id.clone(),
         }),
-        StackItem::Credential(i) => Some(CardAction::DismissCredential {
+        StackItem::Credential(i) => Some(Dismissal::Credential {
             id: snapshot.pending_credentials[i].id.clone(),
         }),
         StackItem::Connecting(_) => None,
@@ -2215,7 +2238,7 @@ mod tests {
 
         assert_eq!(
             close_action(&StackItem::Network(0), &snapshot),
-            Some(CardAction::DismissNetwork { id: "r1".into() }),
+            Some(Dismissal::Network { id: "r1".into() }),
             "a dismissed card must not be recorded in the audit chain as a deny-once the developer picked"
         );
     }
@@ -2251,7 +2274,7 @@ mod tests {
     fn closing_a_credential_card_decides_nothing() {
         assert_eq!(
             close_action(&StackItem::Credential(0), &one_credential_card()),
-            Some(CardAction::DismissCredential { id: "c1".into() }),
+            Some(Dismissal::Credential { id: "c1".into() }),
             "a dismissed card is not a decision, so its action has nowhere to carry one"
         );
     }
@@ -2271,6 +2294,48 @@ mod tests {
             delivery.request,
             CredentialDecisionRequest::Dismiss,
             "one click on close-all must not permanently deny every credential in the stack"
+        );
+    }
+
+    #[test]
+    fn close_all_takes_down_every_kind_of_card_in_the_stack() {
+        let state = WindowState::new();
+        let (net_tx, _net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cred_tx, _cred_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        state.insert_pending(
+            crate::approval_flow::session::PendingPrompt {
+                id: "r1".into(),
+                host: "api.example.test".into(),
+                action: "CONNECT api.example.test:443".into(),
+                offer: None,
+                token_fallback: None,
+            },
+            net_tx,
+        );
+        state.insert_credential_pending(credential_pending_prompt("c1"), false, cred_tx);
+        state.insert_sign_in(
+            crate::approval_flow::window::SignInCard {
+                credential_id: "some-oauth".into(),
+                display_name: "Some OAuth".into(),
+                user_code: None,
+                verification_uri: "https://api.some-oauth.example/device".into(),
+                token_fallback: None,
+                env_var: None,
+                injection_domains: vec![],
+                is_project_defined: false,
+            },
+            cancel_tx,
+        );
+        state.push_inform("something went wrong".into());
+
+        close_all(&state, &state.snapshot());
+
+        let left = state.snapshot();
+        assert!(
+            left.order.is_empty(),
+            "every card kind the stack can hold must come down on close-all, or its held request hangs to the approval timeout: {:?}",
+            left.order
         );
     }
 
