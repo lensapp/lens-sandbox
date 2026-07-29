@@ -1133,7 +1133,6 @@ fn ledger_decision_of(request: &CredentialDecisionRequest) -> Option<Decision> {
     }
 }
 
-
 /// The host an outbound request targets, parsed from a gate `action` like `POST https://api.some-oauth.example/x` or `CONNECT api.some-oauth.example:443`.
 fn request_host(action: &str) -> Option<&str> {
     let target = action.split_whitespace().nth(1)?;
