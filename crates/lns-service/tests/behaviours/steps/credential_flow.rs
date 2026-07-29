@@ -951,17 +951,10 @@ fn when_developer_closes_the_card(world: &mut BehaviourWorld) {
 #[when("the developer closes every card at once")]
 fn when_developer_closes_every_card(world: &mut BehaviourWorld) {
     let rig = world.credential();
-    for id in rig
-        .window_state
-        .snapshot()
-        .pending_credentials
-        .iter()
-        .map(|c| c.id.clone())
-        .collect::<Vec<_>>()
-    {
-        rig.session
-            .record_decision(&id, CredentialDecisionRequest::Dismiss);
-    }
+    // Drive the pile's own fan-out rather than deciding each card here, or the scenario would pin the loop the test wrote instead of the one the ✕ runs.
+    let snapshot = rig.window_state.snapshot();
+    lns_service::tray::close_all(&rig.window_state, &snapshot);
+    rig.apply_queued_card_decisions();
 }
 
 #[given(regex = r#"^credential cards for "([^"]+)" and "([^"]+)" are visible$"#)]
@@ -994,17 +987,32 @@ fn then_both_held_requests_failed(world: &mut BehaviourWorld) -> Result<(), Stri
     Ok(())
 }
 
-#[then("a future request carrying either placeholder fires a fresh credential card")]
-fn then_either_placeholder_fires_fresh_card(world: &mut BehaviourWorld) -> Result<(), String> {
-    let rig = world.credential();
-    submit_credential_with_id(rig, "fresh-after-close", FIXTURE_ID);
-    let snap = rig.window_state.snapshot();
-    if snap
-        .pending_credentials
-        .iter()
-        .all(|c| c.credential_id != FIXTURE_ID)
-    {
-        return Err("no fresh credential card after a close-all".into());
+#[then(
+    regex = r#"^a future request carrying either the "([^"]+)" or "([^"]+)" placeholder fires a fresh credential card$"#
+)]
+fn then_both_placeholders_fire_fresh_cards(
+    world: &mut BehaviourWorld,
+    first: String,
+    second: String,
+) -> Result<(), String> {
+    // Both, not either: the bug was one click deciding for every card in the stack, so checking one of the two cannot tell "nothing was decided for any" from "nothing was decided for the first".
+    for credential_id in [&first, &second] {
+        let rig = world.credential();
+        submit_credential_with_id(
+            rig,
+            &format!("fresh-after-close-{credential_id}"),
+            credential_id,
+        );
+        let snap = rig.window_state.snapshot();
+        if snap
+            .pending_credentials
+            .iter()
+            .all(|c| &c.credential_id != credential_id)
+        {
+            return Err(format!(
+                "no fresh credential card for {credential_id} after a close-all"
+            ));
+        }
     }
     Ok(())
 }
