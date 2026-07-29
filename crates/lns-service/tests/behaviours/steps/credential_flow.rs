@@ -530,6 +530,22 @@ fn given_disconnected_while_card_open(world: &mut BehaviourWorld, credential_id:
     world.credential().forget_project_grants(&credential_id);
 }
 
+#[then(regex = r#"^a run in another project is still asked for "([^"]+)"$"#)]
+fn then_another_project_still_asked(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    if !world
+        .credential()
+        .another_project_is_still_asked(&credential_id)
+    {
+        return Err(format!(
+            "a run in another project got no card for {credential_id}, so closing a card here silenced it machine-wide — the blast radius the dismissal must not have"
+        ));
+    }
+    Ok(())
+}
+
 #[then(regex = r#"^the workload grant sidecar records no grant for "([^"]+)"$"#)]
 fn then_grant_sidecar_records_nothing(
     world: &mut BehaviourWorld,

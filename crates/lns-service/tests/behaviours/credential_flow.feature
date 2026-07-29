@@ -105,6 +105,12 @@ Feature: lns-service credential flow
     And the workload grant sidecar records no grant for "some-provider"
     And a future request carrying the some-provider placeholder fires a fresh credential card
 
+  Scenario: Closing a card in one project leaves every other project still asking
+    Given a credential card for "some-provider" is visible
+    When the developer closes the card without choosing
+    Then a run in another project is still asked for "some-provider"
+    And "~/.lns-credentials.json" is unchanged
+
   Scenario: Closing every card at once decides nothing for any of them
     Given credential cards for "some-provider" and "some-other-provider" are visible
     When the developer closes every card at once
