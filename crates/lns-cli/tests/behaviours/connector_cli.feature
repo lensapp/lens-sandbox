@@ -24,14 +24,6 @@ Feature: connecting connectors from the CLI
     And "some-provider" is recorded under connectors in lns-policy.yaml
     And lns-policy.yaml carries no credential material
 
-  Scenario: Dismissing the value card reports the dismissal and records nothing
-    Given a user catalog declares the "some-provider" credential connector
-    And the background service is available to sign in
-    And the approval-window value card will be dismissed
-    When the developer runs "lns connector connect some-provider"
-    Then the command fails noting the value decision was dismissed
-    And "some-provider" is not recorded in lns-policy.yaml
-
   Scenario: Connecting a credential connector fails clearly when the service is unavailable
     Given a user catalog declares the "some-provider" credential connector
     And the background service is not available

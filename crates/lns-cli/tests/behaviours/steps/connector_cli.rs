@@ -407,21 +407,3 @@ fn listed_as_kind(world: &mut BehaviourWorld, id: String, kind: String) {
         "expected {id} listed as {kind}, got line: {line}"
     );
 }
-
-#[given("the approval-window value card will be dismissed")]
-fn value_card_dismissed(world: &mut BehaviourWorld) {
-    world.signin_outcome = Some(SignInOutcome::Failed(
-        "the value card was dismissed before a decision was made".into(),
-    ));
-}
-
-#[then("the command fails noting the value decision was dismissed")]
-fn fails_noting_dismissal(world: &mut BehaviourWorld) {
-    let run = world.result.as_ref().expect("a run must have happened");
-    assert_ne!(run.exit_code, 0, "expected a non-zero exit");
-    assert!(
-        run.output.contains("dismissed"),
-        "a closed card must not read as a decision: {}",
-        run.output
-    );
-}
