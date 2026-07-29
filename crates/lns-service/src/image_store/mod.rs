@@ -422,19 +422,27 @@ pub async fn pull_with<F: Fs>(
 }
 
 /// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a failure must not throw away a pull whose layers already landed — but a refusal no network will fix must not read as an offline-readiness note either.
-fn warn_if_tools_unprovisioned(image: &str, outcome: Result<(), crate::tools::ProvisionError>) {
+fn warn_if_tools_unprovisioned(
+    image: &str,
+    outcome: Result<(), crate::tools::ProvisionError>,
+) -> Vec<String> {
     let Err(e) = outcome else {
-        return;
+        return Vec::new();
     };
-    if e.is_transient() {
-        crate::log::warn!(
+    let warning = if e.is_transient() {
+        format!(
             "could not provision the declared tools of {image} ({e}); the sandbox is cached, but its first run needs the network"
-        );
+        )
     } else {
-        crate::log::warn!(
-            "the declared tools of {image} cannot be provisioned on this machine: {e}"
-        );
-    }
+        format!("the declared tools of {image} cannot be provisioned on this machine: {e}")
+    };
+    crate::log::warn!("{warning}");
+    vec![warning]
+}
+
+pub struct PullOutcome {
+    pub image: lns_ipc::ImageInfo,
+    pub warnings: Vec<String>,
 }
 
 async fn finish_pull_with<F: Fs>(
@@ -445,14 +453,17 @@ async fn finish_pull_with<F: Fs>(
     image: &str,
     shared: tokio::sync::RwLockReadGuard<'_, ()>,
     pre_provision: impl std::future::Future<Output = Result<(), crate::tools::ProvisionError>>,
-) -> Result<lns_ipc::ImageInfo> {
-    let info = pull_with(fs, images_root, record, active).await?;
+) -> Result<PullOutcome> {
+    let image_info = pull_with(fs, images_root, record, active).await?;
     drop(shared);
-    warn_if_tools_unprovisioned(image, pre_provision.await);
-    Ok(info)
+    let warnings = warn_if_tools_unprovisioned(image, pre_provision.await);
+    Ok(PullOutcome {
+        image: image_info,
+        warnings,
+    })
 }
 
-pub async fn pull(image: &str) -> Result<lns_ipc::ImageInfo> {
+pub async fn pull(image: &str) -> Result<PullOutcome> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
     let artifact = crate::image::pull_sandbox(image).await?;
     let shared = lock_shared().await;
@@ -591,8 +602,9 @@ mod tests {
 
     #[test]
     fn a_provisioned_pull_says_nothing() {
-        let quiet =
-            warnings_from(|| warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(())));
+        let quiet = warnings_from(|| {
+            warn_if_tools_unprovisioned("ghcr.io/team/hermes:1.4.0", Ok(()));
+        });
         assert!(quiet.is_empty(), "got: {quiet}");
     }
 
@@ -708,7 +720,7 @@ mod tests {
         let fs = FakeFs::default();
         let record = rec("registry.example.test/team/agent:1", &[]);
 
-        let info = finish_pull_with(
+        let outcome = finish_pull_with(
             &fs,
             Path::new(ROOT),
             &record,
@@ -724,7 +736,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(info.reference, record.reference);
+        assert_eq!(outcome.image.reference, record.reference);
+        assert!(
+            outcome.warnings.iter().any(|warning| warning
+                .contains("the version index is unreachable")
+                && warning.contains("first run needs the network")),
+            "the successful pull must carry its offline-readiness warning: {:?}",
+            outcome.warnings
+        );
         assert!(
             fs.has(&record_path(Path::new(ROOT), &record.reference)),
             "optional tool provisioning must not roll back a completed image pull"

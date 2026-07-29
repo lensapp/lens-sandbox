@@ -197,6 +197,7 @@ pub enum Response {
     },
     ImagePulled {
         image: ImageInfo,
+        warnings: Vec<String>,
     },
     ImageList {
         images: Vec<ImageInfo>,
@@ -1281,6 +1282,7 @@ mod tests {
         for resp in [
             Response::ImagePulled {
                 image: info.clone(),
+                warnings: vec!["the first run needs the network".into()],
             },
             Response::ImageList {
                 images: vec![info.clone()],
