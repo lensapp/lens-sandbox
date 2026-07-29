@@ -22,9 +22,9 @@ Feature: the workload runs unprivileged inside a locked-down guest
 
   Scenario: a root run-as is honoured as an identity
     Given the Lens Sandbox service is running
-    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox id -u'" as user "root"
+    When the user runs a microVM command "/bin/sh -c 'echo uid=$(/.lens/guest-tools/bin/busybox id -u)'" as user "root"
     Then the exit code is 0
-    And the output contains "0"
+    And the output contains "uid=0"
 
   Scenario: a root run-as keeps HOME and USER
     Given the Lens Sandbox service is running
@@ -56,3 +56,4 @@ Feature: the workload runs unprivileged inside a locked-down guest
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox true && echo tooling-ok-$((7*6))'"
     Then the exit code is 0
     And the output contains "tooling-ok-42"
+
