@@ -27,21 +27,31 @@ if [ -z "${LNS_CLOUD_HYPERVISOR_BIN:-}" ] && ! command -v cloud-hypervisor >/dev
 fi
 
 # Mirrors the service's resolution: override, then PATH, then the distro dirs (apt ships virtiofsd off PATH under /usr/libexec).
-virtiofsd_found() {
+find_virtiofsd() {
 	if [ -n "${LNS_VIRTIOFSD_BIN:-}" ] && [ -x "${LNS_VIRTIOFSD_BIN}" ]; then
-		return 0
+		printf '%s\n' "${LNS_VIRTIOFSD_BIN}"
+		return
 	fi
 	if command -v virtiofsd >/dev/null 2>&1; then
-		return 0
+		command -v virtiofsd
+		return
 	fi
 	for dir in /usr/libexec /usr/lib/virtiofsd /usr/lib/qemu; do
-		[ -x "$dir/virtiofsd" ] && return 0
+		if [ -x "$dir/virtiofsd" ]; then
+			printf '%s\n' "$dir/virtiofsd"
+			return
+		fi
 	done
 	return 1
 }
-if ! virtiofsd_found; then
+VIRTIOFSD_PATH="$(find_virtiofsd || true)"
+if [ -z "$VIRTIOFSD_PATH" ]; then
 	echo "preflight: virtiofsd not found on PATH, in /usr/libexec, /usr/lib/virtiofsd, /usr/lib/qemu, or via LNS_VIRTIOFSD_BIN." >&2
 	echo "          install it: sudo apt-get install -y virtiofsd" >&2
+	fail=1
+elif ! "$VIRTIOFSD_PATH" --help 2>&1 | grep -q -- "--readonly"; then
+	echo "preflight: virtiofsd at $VIRTIOFSD_PATH does not support read-only shares (--readonly)." >&2
+	echo "          install a newer virtiofsd with --readonly support or set LNS_VIRTIOFSD_BIN=/path/to/virtiofsd." >&2
 	fail=1
 fi
 

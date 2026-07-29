@@ -40,3 +40,10 @@ impl Child for RealChild {
         self.0.start_kill()
     }
 }
+
+pub(crate) fn virtiofsd_help(program: &Path) -> std::io::Result<Vec<u8>> {
+    let output = std::process::Command::new(program).arg("--help").output()?;
+    let mut help = output.stdout;
+    help.extend_from_slice(&output.stderr);
+    Ok(help)
+}

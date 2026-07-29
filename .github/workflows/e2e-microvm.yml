@@ -23,6 +23,7 @@ env:
   # De-facto version pins for the out-of-process VMM (the service resolves
   # both from PATH at runtime; nothing in-tree pins them otherwise).
   CLOUD_HYPERVISOR_VERSION: v52.0
+  VIRTIOFSD_VERSION: v1.13.3
   # The x86_64 runner cross-builds the guest payloads for
   # x86_64-unknown-linux-musl (build.rs derives the guest triple from the host
   # arch) — same arrangement as ci.yml's check-release-build.
@@ -59,19 +60,20 @@ jobs:
           sudo install -m0755 /tmp/cloud-hypervisor /usr/local/bin/cloud-hypervisor
           cloud-hypervisor --version
 
-      - name: Install virtiofsd
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y virtiofsd
-          # apt ships virtiofsd off PATH under /usr/libexec; the service and the
-          # preflight both resolve that location, so no LNS_VIRTIOFSD_BIN needed.
-
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: x86_64-unknown-linux-musl
           cache-workspaces: .
           cache-on-failure: true
           cache-shared-key: lns-ci-e2e-microvm
+
+      - name: Install virtiofsd
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev libseccomp-dev
+          cargo install --git https://gitlab.com/virtio-fs/virtiofsd \
+            --tag "${VIRTIOFSD_VERSION}" --locked virtiofsd
+          virtiofsd --help | grep -q -- "--readonly"
 
       - run: CARGO_LOCKED=--locked make e2e-microvm
