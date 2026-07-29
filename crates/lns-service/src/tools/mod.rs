@@ -302,6 +302,20 @@ where
     compose(ask.requests, &plan.hits, Vec::new()).map(Some)
 }
 
+/// Extracting and hashing a tool tree holds the thread for the length of the tar, so it moves off the async worker; a current-thread runtime (tests) has nowhere to move it and runs it inline.
+fn ingest_off_runtime<C: ToolCache>(
+    cache: &C,
+    key: &ToolCacheKey,
+    staged: &StagedTool,
+) -> anyhow::Result<cache::ToolManifest> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| cache.ingest(key, staged))
+        }
+        _ => cache.ingest(key, staged),
+    }
+}
+
 /// Provision-or-reuse for a declared tool set: a bounded request pins to the version it first resolved to, `@latest` re-asks the index every run, cache hits contribute specs without booting anything, and every miss goes to the provisioner in one call.
 pub async fn ensure_tools<R, C, P>(
     records: &R,
@@ -333,17 +347,17 @@ where
                     "the provisioner returned no tree for {request}"
                 )));
             };
-            let manifest = cache
-                .ingest(
-                    &ToolCacheKey {
-                        name: tool.name.clone(),
-                        resolved: tool.resolved.clone(),
-                        arch: ask.target.arch,
-                        libc: ask.target.libc,
-                    },
-                    tool,
-                )
-                .map_err(|e| ProvisionError::Engine(format!("ingesting {}: {e:#}", tool.name)))?;
+            let manifest = ingest_off_runtime(
+                cache,
+                &ToolCacheKey {
+                    name: tool.name.clone(),
+                    resolved: tool.resolved.clone(),
+                    arch: ask.target.arch,
+                    libc: ask.target.libc,
+                },
+                tool,
+            )
+            .map_err(|e| ProvisionError::Engine(format!("ingesting {}: {e:#}", tool.name)))?;
             let entry = record::ResolvedEntry {
                 resolved: tool.resolved.clone(),
                 backend: tool.backend.clone(),
@@ -507,6 +521,35 @@ mod tests {
                 .unwrap()
                 .insert(key.clone(), manifest.clone());
             Ok(manifest)
+        }
+    }
+
+    /// An ingest that refuses to finish until some other task proves the runtime is still scheduling.
+    struct StarvingCache {
+        inner: MemCache,
+        started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        scheduled: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl ToolCache for StarvingCache {
+        fn lookup(
+            &self,
+            key: &ToolCacheKey,
+            declared: &[String],
+        ) -> anyhow::Result<Option<cache::ToolManifest>> {
+            self.inner.lookup(key, declared)
+        }
+        fn ingest(
+            &self,
+            key: &ToolCacheKey,
+            staged: &StagedTool,
+        ) -> anyhow::Result<cache::ToolManifest> {
+            self.started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let scheduled = self.scheduled.lock().unwrap().take().expect("one ingest");
+            let proof = scheduled.recv_timeout(std::time::Duration::from_millis(500));
+            anyhow::ensure!(proof.is_ok(), "no other task ran while this ingest held its thread");
+            self.inner.ingest(key, staged)
         }
     }
 
@@ -700,6 +743,51 @@ mod tests {
             ["some-tool@1 -> 1.2.3"],
             "and it was disclosed when it committed, not after the whole set survived"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_long_ingest_does_not_starve_the_runtime() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let started = std::sync::Arc::new(AtomicBool::new(false));
+        let witnessed = started.clone();
+        let (prove_scheduling, scheduled) = std::sync::mpsc::channel();
+        let work = tokio::spawn(async move {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    if witnessed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                let _ = prove_scheduling.send(());
+            });
+            let records = MemRecords::default();
+            let cache = StarvingCache {
+                inner: MemCache::default(),
+                started,
+                scheduled: Mutex::new(Some(scheduled)),
+            };
+            let provisioner = Scripted::resolving(&[("some-tool", "1.2.3")]);
+            ensure_tools(
+                &records,
+                &cache,
+                &provisioner,
+                &EnsureRequest {
+                    requests: &refs(&["some-tool@1.2.3"]),
+                    target: &target(),
+                    engine_version: "2026.7.14",
+                    now_unix_secs: 1_700_000_000,
+                    disclose: &discard,
+                },
+            )
+            .await
+            .map(|ensured| ensured.provisioned.len())
+        });
+        let provisioned = work
+            .await
+            .unwrap()
+            .expect("the ingest held the runtime's only worker, starving every other task");
+        assert_eq!(provisioned, 1);
     }
 
     #[tokio::test]
