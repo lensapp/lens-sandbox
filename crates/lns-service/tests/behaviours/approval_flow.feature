@@ -40,7 +40,7 @@ Feature: lns-service approval flow
   Scenario: Deny once fails the request without changing policy
     Given an approval entry is visible for a request to "api.linear.app"
     When the developer picks "deny once"
-    Then the workload's request is denied
+    Then the workload's request is denied once
     And the running policy is unchanged
     And the policy file is unchanged
     And a future request to "api.linear.app" prompts again
@@ -48,7 +48,7 @@ Feature: lns-service approval flow
   Scenario: Closing a network card fails the request without recording a decision
     Given an approval entry is visible for a request to "api.linear.app"
     When the developer closes the card without choosing
-    Then the workload's request is denied
+    Then the workload's request is failed at the boundary as undecided
     And the running policy is unchanged
     And the policy file is unchanged
     And the audit chain records no approval for "api.linear.app"
@@ -61,7 +61,7 @@ Feature: lns-service approval flow
     When the developer picks "always deny"
     Then "lns-policy.yaml" contains a new deny rule for "api.linear.app"
     And the running policy contains the same rule
-    And the workload's request is denied
+    And the workload's request is denied always
     And a future request to "api.linear.app" is denied without prompting
 
   Scenario: Repeated requests to the same destination share one entry
@@ -74,7 +74,7 @@ Feature: lns-service approval flow
   Scenario: An approval entry with no decision after the timeout fails closed
     Given an approval entry is visible for a request to "api.linear.app"
     When no decision is recorded before the configured approval timeout
-    Then the workload's request is denied
+    Then the workload's request is failed at the boundary as undecided
     And the approval card is removed from the approval window
     And the running policy is unchanged
     And the policy file is unchanged

@@ -321,21 +321,36 @@ fn then_request_proceeds(world: &mut BehaviourWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[then("the workload's request is denied")]
-fn then_request_denied(world: &mut BehaviourWorld) -> Result<(), String> {
+fn assert_decision_reaches_guest(
+    world: &mut BehaviourWorld,
+    expected: Decision,
+) -> Result<(), String> {
     let rig = world.approval();
     let frames = drain_frames(rig);
     let d = last_decision_frame(&frames).ok_or("no decision frame emitted")?;
-    if !matches!(
-        d.decision,
-        Decision::DenyOnce | Decision::DenyAlways | Decision::Timeout
-    ) {
+    if d.decision != expected {
         return Err(format!(
-            "expected deny/timeout decision, got {:?}",
+            "expected {expected:?} to reach the guest, got {:?}",
             d.decision
         ));
     }
     Ok(())
+}
+
+#[then("the workload's request is denied once")]
+fn then_request_denied_once(world: &mut BehaviourWorld) -> Result<(), String> {
+    assert_decision_reaches_guest(world, Decision::DenyOnce)
+}
+
+#[then("the workload's request is denied always")]
+fn then_request_denied_always(world: &mut BehaviourWorld) -> Result<(), String> {
+    assert_decision_reaches_guest(world, Decision::DenyAlways)
+}
+
+/// The guest fails an undecided request closed just as it fails a denied one, so the distinction only shows in what it records — which is why the scenarios assert the exact decision rather than "not allowed".
+#[then("the workload's request is failed at the boundary as undecided")]
+fn then_request_failed_as_undecided(world: &mut BehaviourWorld) -> Result<(), String> {
+    assert_decision_reaches_guest(world, Decision::Timeout)
 }
 
 #[then("the running policy is unchanged")]
