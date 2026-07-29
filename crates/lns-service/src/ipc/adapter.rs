@@ -544,6 +544,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     });
 
     let abort = run_task.abort_handle();
+    let runtime_cache_registration = crate::image_store::lock_runtime_cache_shared().await;
     let registered = crate::run_registry::register_named(
         run_id.clone(),
         requested_name,
@@ -563,6 +564,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
             tool_bin_paths: Vec::new(),
         },
     );
+    drop(runtime_cache_registration);
     match registered {
         Ok(microvm) => {
             let _ = microvm_tx.send(microvm);

@@ -97,6 +97,7 @@ pub async fn pre_provision_for_pull(
     if artifact.tools.is_empty() {
         return Ok(());
     }
+    let _runtime_cache = crate::image_store::lock_runtime_cache_shared().await;
     let requests = lns_artifact::tools::parse_all(&artifact.tools)
         .map_err(|e| ProvisionError::Engine(format!("{e:#}")))?;
     super::registry::refuse_unknown_tools(&requests)?;

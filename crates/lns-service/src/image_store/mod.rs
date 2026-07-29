@@ -1,7 +1,7 @@
 mod real;
 mod traits;
 
-pub use traits::{Caches, Fs};
+pub use traits::{Caches, Fs, RuntimeCacheFs};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -334,7 +334,7 @@ pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -
     record_with(fs, images_root, &record).await
 }
 
-pub async fn prune_with<F: Fs, C: Caches>(
+pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
     fs: &F,
     caches: &C,
     images_root: &Path,
@@ -367,11 +367,58 @@ pub async fn prune_with<F: Fs, C: Caches>(
     for pinned in removable_manifests.difference(&kept_manifests) {
         caches.remove_manifest(pinned)?;
     }
-    let reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
+    let mut reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
+    if !active
+        .iter()
+        .any(|run| matches!(run.status, lns_ipc::RunStatus::Running))
+    {
+        let cache_root = images_root.parent().unwrap_or_else(|| Path::new(""));
+        reclaimed_bytes += clear_runtime_cache(fs, cache_root).await?;
+    }
     Ok(PruneReport {
         removed,
         reclaimed_bytes,
     })
+}
+
+async fn clear_runtime_cache<F: RuntimeCacheFs>(fs: &F, cache_root: &Path) -> Result<u64> {
+    let mut reclaimed = 0;
+    for name in ["composefs", "tools", "content"] {
+        let root = cache_root.join(name);
+        let bytes = tree_bytes(fs, &root).await?;
+        match fs.remove_dir_all(&root).await {
+            Ok(()) => reclaimed += bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("removing runtime cache {}", root.display()));
+            }
+        }
+    }
+    Ok(reclaimed)
+}
+
+async fn tree_bytes<F: RuntimeCacheFs>(fs: &F, root: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        match fs.read_dir(&path).await {
+            Ok(entries) => pending.extend(entries),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+                total = total.saturating_add(
+                    fs.read(&path)
+                        .await
+                        .with_context(|| format!("reading runtime cache {}", path.display()))?
+                        .len() as u64,
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("listing runtime cache {}", path.display()));
+            }
+        }
+    }
+    Ok(total)
 }
 
 fn now_unix_secs() -> u64 {
@@ -390,9 +437,18 @@ fn cache_lock() -> &'static tokio::sync::RwLock<()> {
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
 
+fn runtime_cache_lock() -> &'static tokio::sync::RwLock<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::RwLock<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
 /// An in-flight pull holds this shared guard so a concurrent rm/prune can't sweep the layers it has installed but not yet recorded.
 pub(crate) async fn lock_shared() -> tokio::sync::RwLockReadGuard<'static, ()> {
     cache_lock().read().await
+}
+
+pub(crate) async fn lock_runtime_cache_shared() -> tokio::sync::RwLockReadGuard<'static, ()> {
+    runtime_cache_lock().read().await
 }
 
 pub async fn record(pulled: &PulledImage) -> Result<()> {
@@ -546,6 +602,7 @@ pub async fn tag(from: &str, to: &str) -> Result<()> {
 }
 
 pub async fn prune() -> Result<PruneReport> {
+    let _runtime_exclusive = runtime_cache_lock().write().await;
     let _exclusive = cache_lock().write().await;
     let mut report = prune_with(
         &real::RealFs,
@@ -795,10 +852,19 @@ mod tests {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let g = self.files.lock().unwrap();
-            Ok(g.keys()
+            if g.contains_key(dir) {
+                return Err(io::Error::from(io::ErrorKind::NotADirectory));
+            }
+            let entries: Vec<PathBuf> = g
+                .keys()
                 .filter(|p| p.parent() == Some(dir))
                 .cloned()
-                .collect())
+                .collect();
+            if entries.is_empty() {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(entries)
+            }
         }
 
         async fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
@@ -827,6 +893,22 @@ mod tests {
             }
             self.files.lock().unwrap().remove(p);
             Ok(())
+        }
+    }
+
+    impl RuntimeCacheFs for FakeFs {
+        async fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+            if self.fail_remove {
+                return Err(io::Error::other("remove boom"));
+            }
+            let mut files = self.files.lock().unwrap();
+            let before = files.len();
+            files.retain(|path, _| !path.starts_with(p));
+            if files.len() == before {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1666,6 +1748,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_cache_listing_failure_aborts_before_removal() {
+        let fs = FakeFs {
+            fail_read_dir: true,
+            ..Default::default()
+        };
+        let err = clear_runtime_cache(&fs, Path::new("/cache"))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("listing runtime cache /cache/composefs"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_runtime_cache_roots_are_already_clean() {
+        assert_eq!(
+            clear_runtime_cache(&FakeFs::default(), Path::new("/cache"))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_clear_counts_and_removes_each_coordinated_root() {
+        let fs = FakeFs::default();
+        fs.put(Path::new("/cache/composefs/descriptor"), b"meta");
+        fs.put(Path::new("/cache/tools/tree"), b"tool");
+        fs.put(Path::new("/cache/content/blob"), b"content");
+        let reclaimed = clear_runtime_cache(&fs, Path::new("/cache")).await.unwrap();
+        assert_eq!(reclaimed, 15);
+        assert!(!fs.has(Path::new("/cache/composefs/descriptor")));
+        assert!(!fs.has(Path::new("/cache/tools/tree")));
+        assert!(!fs.has(Path::new("/cache/content/blob")));
+    }
+
+    #[tokio::test]
+    async fn pull_time_runtime_cache_leases_can_overlap() {
+        let first = lock_runtime_cache_shared().await;
+        let second = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            lock_runtime_cache_shared(),
+        )
+        .await
+        .expect("pull-time cache readers must not serialize");
+        drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_blob_read_failure_names_the_blob() {
+        let fs = FakeFs {
+            fail_read: true,
+            ..Default::default()
+        };
+        fs.put(Path::new("/cache/composefs/descriptor"), b"descriptor");
+        let err = clear_runtime_cache(&fs, Path::new("/cache"))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading runtime cache /cache/composefs/descriptor"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_removal_failure_keeps_later_roots_intact() {
+        let fs = FakeFs {
+            fail_remove: true,
+            ..Default::default()
+        };
+        fs.put(Path::new("/cache/composefs/descriptor"), b"descriptor");
+        fs.put(Path::new("/cache/content/blob"), b"content");
+        let err = clear_runtime_cache(&fs, Path::new("/cache"))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("removing runtime cache /cache/composefs"),
+            "got: {err:#}"
+        );
+        assert!(fs.has(Path::new("/cache/content/blob")));
+    }
+
+    #[tokio::test]
     async fn prune_propagates_a_record_delete_failure() {
         let fs = FakeFs::with_records(&[rec("registry.example.test/idle:1", &[])]);
         let failing = FakeFs {
@@ -1709,6 +1875,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        real::RealFs
+            .remove_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        assert!(!path.parent().unwrap().exists());
     }
 
     #[tokio::test]

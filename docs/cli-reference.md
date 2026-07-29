@@ -176,7 +176,7 @@ interchangeable everywhere a run is addressed.
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
 | `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), and any over-broad-policy flag; or a plain `Image`. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
-| `prune`    | —              | Remove every cached sandbox not held by a running one, reclaiming disk. Requires `-f`/`--force` — there is no interactive prompt. |
+| `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Requires `-f`/`--force` — there is no interactive prompt. |
 
 The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: Sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,

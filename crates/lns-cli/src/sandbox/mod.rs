@@ -65,7 +65,9 @@ pub enum SandboxCommand {
         about = "Remove a cached sandbox and free its now-unreferenced layers; refuses a running one."
     )]
     Rm(SandboxRmArgs),
-    #[command(about = "Remove every cached sandbox not held by a running one, reclaiming disk.")]
+    #[command(
+        about = "Remove every cached sandbox not held by a running one and reclaim the provisioned tool cache when no sandbox is live."
+    )]
     Prune(SandboxPruneArgs),
 }
 
@@ -223,7 +225,7 @@ pub struct SandboxPruneArgs {
         short = 'f',
         long,
         default_value_t = false,
-        help = "Required: confirm removing every cached sandbox not held by a running one."
+        help = "Required: confirm removing unused cached sandboxes and, when none is live, the provisioned tool cache."
     )]
     pub force: bool,
 }
@@ -795,7 +797,7 @@ async fn prune<W: std::io::Write>(
 ) -> Result<i32> {
     if !args.force {
         bail!(
-            "this removes every cached sandbox not held by a running one; pass --force to confirm"
+            "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
         );
     }
     match svc.one_shot(Request::PruneImages).await? {

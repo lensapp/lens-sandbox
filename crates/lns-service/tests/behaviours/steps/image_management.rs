@@ -23,6 +23,11 @@ fn index_cannot_be_written(w: &mut BehaviourWorld) {
     w.image().fail_index_writes();
 }
 
+#[given(expr = "a provisioned tool cache of {int} bytes")]
+fn provisioned_tool_cache(w: &mut BehaviourWorld, bytes: u64) {
+    w.image().seed_tool_cache(bytes);
+}
+
 #[when(expr = "image {string} with layer {string} of {int} bytes is pulled")]
 async fn image_pulled(w: &mut BehaviourWorld, reference: String, digest: String, size: u64) {
     w.image().pull(&reference, &digest, size).await;
@@ -179,6 +184,22 @@ fn layer_remains(w: &mut BehaviourWorld, digest: String) {
     assert!(
         w.image().caches.has_layer(&digest),
         "layer {digest:?} should remain"
+    );
+}
+
+#[then(expr = "the provisioned tool cache is gone")]
+fn tool_cache_gone(w: &mut BehaviourWorld) {
+    assert!(
+        !w.image().has_tool_cache(),
+        "the provisioned tool cache should be gone"
+    );
+}
+
+#[then(expr = "the provisioned tool cache remains")]
+fn tool_cache_remains(w: &mut BehaviourWorld) {
+    assert!(
+        w.image().has_tool_cache(),
+        "a live sandbox may still read the shared tool content"
     );
 }
 
