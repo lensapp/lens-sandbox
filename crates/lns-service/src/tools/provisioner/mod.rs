@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use super::{
     Libc, ProvisionError, ProvisionTarget, SafeVersion, StagedTar, StagedTool, ToolRef, mise,
 };
-use crate::download::{Fetcher, Fs, PinnedArtifact, ensure_pinned};
+use crate::download::{Fetcher, Fs, PinnedArtifact, ensure_pinned, read_cached_pinned};
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub const ENGINE_BIN: &str = "/.lens/tools-engine/bin/mise";
@@ -196,6 +196,38 @@ pub(crate) async fn ensure_workload_companions_with<F: Fetcher, S: Fs>(
         specs.extend(apk_runtime_specs(&apk)?);
     }
     Ok(specs)
+}
+
+pub(crate) async fn cached_workload_companions_with<S: Fs>(
+    fs: &S,
+    manifest: &mise::Manifest,
+    cache_dir: &Path,
+    target: &ProvisionTarget,
+) -> Result<Option<Vec<RuntimeFileSpec>>> {
+    let mut specs = Vec::new();
+    for companion in manifest
+        .companion
+        .iter()
+        .filter(|companion| WORKLOAD_COMPANIONS.contains(&companion.name.as_str()))
+    {
+        let filename = format!("{}-{}.apk", companion.name, companion.version);
+        let url = mise::companion_url(companion, target.arch);
+        let artifact = PinnedArtifact {
+            filename: &filename,
+            url: &url,
+            sha256: mise::companion_sha256(companion, target.arch)?,
+            mode: None,
+            label: &companion.name,
+        };
+        let path = companions_root(cache_dir, target.arch)
+            .join("apks")
+            .join(&filename);
+        let Some(apk) = read_cached_pinned(fs, &path, &artifact).await else {
+            return Ok(None);
+        };
+        specs.extend(apk_runtime_specs(&apk)?);
+    }
+    Ok(Some(specs))
 }
 
 async fn ensure_companion_apk<F: Fetcher, S: Fs>(
@@ -841,6 +873,12 @@ mod tests {
             }
         }
 
+        impl FakeFs {
+            fn put_file(&self, path: PathBuf, bytes: Vec<u8>) {
+                self.files.lock().unwrap().insert(path, bytes);
+            }
+        }
+
         fn sha(bytes: &[u8]) -> String {
             format!("{:x}", Sha256::digest(bytes))
         }
@@ -996,6 +1034,67 @@ mod tests {
                     .map(|s| s.guest_path.as_str())
                     .collect::<Vec<_>>(),
                 vec!["/usr/lib/libstdc++.so.6.0.32"]
+            );
+        }
+
+        #[tokio::test]
+        async fn cached_workload_companions_are_verified_and_expanded_without_fetching() {
+            let (manifest, fetcher) = fixture();
+            let fs = FakeFs::default();
+            let target = target(Libc::Musl);
+            let installed = ensure_workload_companions_with(
+                &fetcher,
+                &fs,
+                &manifest,
+                Path::new("/cache"),
+                &target,
+            )
+            .await
+            .unwrap();
+
+            let cached =
+                cached_workload_companions_with(&fs, &manifest, Path::new("/cache"), &target)
+                    .await
+                    .unwrap()
+                    .expect("both pinned APKs are warm");
+
+            assert_eq!(
+                cached
+                    .iter()
+                    .map(|spec| (&spec.guest_path, spec.mode))
+                    .collect::<Vec<_>>(),
+                installed
+                    .iter()
+                    .map(|spec| (&spec.guest_path, spec.mode))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_missing_or_corrupt_workload_companion_is_a_cache_miss() {
+            let (manifest, _) = fixture();
+            let fs = FakeFs::default();
+            let target = target(Libc::Musl);
+            assert!(
+                cached_workload_companions_with(&fs, &manifest, Path::new("/cache"), &target)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let companion = &manifest.companion[0];
+            let filename = format!("{}-{}.apk", companion.name, companion.version);
+            fs.put_file(
+                companions_root(Path::new("/cache"), target.arch)
+                    .join("apks")
+                    .join(filename),
+                b"corrupt".to_vec(),
+            );
+            assert!(
+                cached_workload_companions_with(&fs, &manifest, Path::new("/cache"), &target)
+                    .await
+                    .unwrap()
+                    .is_none()
             );
         }
 
