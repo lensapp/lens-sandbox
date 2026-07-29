@@ -359,6 +359,23 @@ mod tests {
         Path::new("/work")
     }
 
+    fn unsupported_backend_doc(with_fileset: bool) -> (String, Vec<u8>) {
+        let tool = lns_artifact::tools::registry::backends()
+            .find(|(_, backend)| !lns_artifact::tools::registry::is_supported_backend(backend))
+            .map(|(name, _)| name.to_string())
+            .expect("the snapshot carries at least one unsupported-backend entry");
+        let fileset = if with_fileset {
+            r#","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]"#
+        } else {
+            ""
+        };
+        let doc = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1"{fileset},"tools":["{tool}@1"]}}}}"#
+        )
+        .into_bytes();
+        (tool, doc)
+    }
+
     #[tokio::test]
     async fn push_builds_then_reports_the_pushed_reference() {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
@@ -554,14 +571,14 @@ mod tests {
     #[tokio::test]
     async fn push_refuses_a_tool_no_consumer_could_provision() {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["prettier@3"]}}"#;
+        let (unsupported, doc) = unsupported_backend_doc(false);
         let mut out = Vec::new();
         let err = push(
             &fs_with_skills(),
             cwd(),
             &producer,
             &unconsultable(),
-            doc,
+            &doc,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
@@ -569,7 +586,8 @@ mod tests {
         .unwrap_err();
         assert!(
             format!("{err:#}").contains("no consumer can start")
-                && format!("{err:#}").contains("bring it via spec.image"),
+                && format!("{err:#}").contains("bring it via spec.image")
+                && format!("{err:#}").contains(&unsupported),
             "got: {err:#}"
         );
         assert!(
@@ -580,12 +598,12 @@ mod tests {
 
     #[test]
     fn push_dry_run_refuses_a_tool_no_consumer_could_provision() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}],"tools":["prettier@3"]}}"#;
+        let (unsupported, doc) = unsupported_backend_doc(true);
         let mut out = Vec::new();
         let err = push_dry_run(
             &fs_with_skills(),
             cwd(),
-            doc,
+            &doc,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
@@ -594,7 +612,8 @@ mod tests {
         let message = format!("{err:#}");
         assert!(
             message.contains("no consumer can start")
-                && message.contains("bring it via spec.image"),
+                && message.contains("bring it via spec.image")
+                && message.contains(&unsupported),
             "got: {message}"
         );
         assert!(

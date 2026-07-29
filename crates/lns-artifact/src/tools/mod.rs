@@ -296,8 +296,8 @@ mod tests {
         for entry in [
             "aqua:node@22",
             "ubi:owner/repo@1",
-            "npm:prettier@3",
-            "npm:prettier",
+            "npm:some-tool@3",
+            "npm:some-tool",
         ] {
             let err = parse(entry).unwrap_err();
             let msg = format!("{err:#}");

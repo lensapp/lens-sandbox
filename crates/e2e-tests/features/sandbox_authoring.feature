@@ -21,7 +21,7 @@ Feature: authoring a sandbox definition offline
     And the output contains "node@latest"
 
   Scenario: validate refuses an engine backend prefix through the real binary
-    Given a project definition declaring tool "npm:prettier@3"
+    Given a project definition declaring tool "npm:some-tool@3"
     When I run "lns sandbox validate" in the project directory
     Then the exit code is non-zero
     And the output contains "engine backend prefix"

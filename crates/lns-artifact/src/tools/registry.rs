@@ -32,14 +32,13 @@ pub enum ToolRefusal {
     },
 }
 
+pub fn backends() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SNAPSHOT.lines().filter_map(|line| line.split_once('\t'))
+}
+
 fn entries() -> &'static HashMap<&'static str, &'static str> {
     static ENTRIES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    ENTRIES.get_or_init(|| {
-        SNAPSHOT
-            .lines()
-            .filter_map(|line| line.split_once('\t'))
-            .collect()
-    })
+    ENTRIES.get_or_init(|| backends().collect())
 }
 
 pub fn backend_for(name: &str) -> Option<&'static str> {
@@ -157,10 +156,9 @@ mod tests {
 
     #[test]
     fn a_plugin_backed_tool_is_refused_naming_the_backend_and_the_remedy() {
-        let unsupported = entries()
-            .iter()
+        let unsupported = backends()
             .find(|(_, backend)| !is_supported_backend(backend))
-            .map(|(name, _)| (*name).to_string())
+            .map(|(name, _)| name.to_string())
             .expect("the snapshot carries at least one unsupported-backend entry");
         let err = refuse_unprovisionable(&[tool(&format!("{unsupported}@1"))]).unwrap_err();
         let msg = err.to_string();

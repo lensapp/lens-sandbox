@@ -47,6 +47,13 @@ mod tests {
         .into_bytes()
     }
 
+    fn unsupported_backend_tool() -> String {
+        crate::tools::registry::backends()
+            .find(|(_, backend)| !crate::tools::registry::is_supported_backend(backend))
+            .map(|(name, _)| name.to_string())
+            .expect("the snapshot carries at least one unsupported-backend entry")
+    }
+
     #[test]
     fn a_well_formed_sandbox_validates() {
         let doc = sandbox(&format!("reg/base@sha256:{}", "a".repeat(64)));
@@ -73,12 +80,15 @@ mod tests {
                 .any(|p| p.contains("not a tool lns can provision")),
             "got: {problems:?}"
         );
-        let plugin_backed = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["prettier@3"]}}"#;
+        let unsupported = unsupported_backend_tool();
+        let plugin_backed = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","tools":["{unsupported}@1"]}}}}"#
+        );
         assert!(
-            validate(plugin_backed)
+            validate(plugin_backed.as_bytes())
                 .unwrap_err()
                 .iter()
-                .any(|p| p.contains("bring it via spec.image")),
+                .any(|p| p.contains("bring it via spec.image") && p.contains(&unsupported)),
             "a plugin-backed tool is refused at authoring time too"
         );
     }

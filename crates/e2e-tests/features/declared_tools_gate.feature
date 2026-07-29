@@ -17,10 +17,10 @@ Feature: declared tools gate the launch before boot
   Scenario: a plugin-backed tool is refused with the image remedy
     Given a clean lns cache home
     And the Lens Sandbox service is running in that home
-    And a lns.yaml declaring tools ["prettier@3"]
+    And a lns.yaml declaring a registry tool with an unsupported backend
     When the user runs the sandbox definition
     Then the exit code is non-zero
-    And the output contains "prettier"
+    And the output names that declared tool
     And the output contains "bring it via spec.image"
 
   Scenario: push pins the resolved tool version into the published config
