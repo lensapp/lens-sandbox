@@ -15,7 +15,7 @@ const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
     Confinement, LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close,
-    confinement, dispatch_frame, read_client_frame, signal_target, validate_argv,
+    confinement, dispatch_frame, keys_to_scrub, read_client_frame, signal_target, validate_argv,
     validate_open_session,
 };
 use crate::forker::{Fork, Forker};
@@ -165,12 +165,15 @@ pub fn handle_session(
     else {
         unreachable!("validate_open_session guarantees OpenSession");
     };
+    let confinement = confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID"));
+    let inherited: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
     let spec = WorkloadSpec {
         argv,
         env,
         cwd,
         hostname,
-        confinement: confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID")),
+        scrub: keys_to_scrub(inherited.iter().map(String::as_str), &confinement),
+        confinement,
     };
     if tty {
         run_tty_session(conn, spec, winsize, stdin, pid_tx, forker)
@@ -497,6 +500,12 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
     };
     enter_workdir(spec.cwd.as_deref());
     set_guest_hostname(spec.hostname.as_deref());
+    for key in &spec.scrub {
+        if let Ok(c) = CString::new(key.as_str()) {
+            // SAFETY: unsetenv copies the name; the CString outlives the call.
+            unsafe { libc::unsetenv(c.as_ptr()) };
+        }
+    }
     for kv in &spec.env {
         if let Ok(c) = CString::new(kv.as_str()) {
             let raw = c.into_raw();
