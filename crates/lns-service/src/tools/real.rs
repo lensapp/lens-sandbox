@@ -147,3 +147,31 @@ fn now_unix_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cold_tool_installs_remain_serialized() {
+        let first = serialized_install().await;
+        let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(async move {
+            attempted_tx.send(()).unwrap();
+            let _second = serialized_install().await;
+            acquired_tx.send(()).unwrap();
+        });
+
+        attempted_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            acquired_rx.try_recv().is_err(),
+            "a second cold install must wait for the first"
+        );
+
+        drop(first);
+        acquired_rx.await.unwrap();
+        second.await.unwrap();
+    }
+}
