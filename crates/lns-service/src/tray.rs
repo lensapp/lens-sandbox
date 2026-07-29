@@ -2280,6 +2280,40 @@ mod tests {
         }
     }
 
+    fn card_with_deny_scope(scope: DenyScope) -> Snapshot {
+        Snapshot {
+            pending_credentials: vec![CredentialCardPrompt {
+                deny_scope: scope,
+                ..credential_prompt("c1")
+            }],
+            ..one_credential_card()
+        }
+    }
+
+    #[test]
+    fn a_run_card_denies_only_for_this_workload() {
+        assert_eq!(
+            click_labelled_control(card_with_deny_scope(DenyScope::Workload), "Deny", false),
+            Some(CardAction::DecideCredential {
+                id: "c1".into(),
+                request: CredentialDecisionRequest::Deny
+            }),
+            "a card raised by a run speaks for that workload, so its Deny must not reach the machine-wide store"
+        );
+    }
+
+    #[test]
+    fn the_bind_card_denies_for_the_whole_machine() {
+        assert_eq!(
+            click_labelled_control(card_with_deny_scope(DenyScope::Machine), "Deny", false),
+            Some(CardAction::DecideCredential {
+                id: "c1".into(),
+                request: CredentialDecisionRequest::DenyAlways
+            }),
+            "the bind card is the only one entitled to a standing refusal, and swapping this mapping would make `lns connector connect` + Deny record nothing"
+        );
+    }
+
     #[test]
     fn closing_a_credential_card_decides_nothing() {
         assert_eq!(
