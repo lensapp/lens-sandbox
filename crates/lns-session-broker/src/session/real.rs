@@ -582,6 +582,7 @@ mod tests {
             tty: false,
             stdin: false,
             winsize: None,
+            confine: false,
         };
         let bytes = encode_frame(&frame).expect("encode OpenSession");
         // SAFETY: bytes is borrowed for the duration of the call.
