@@ -44,6 +44,12 @@ Feature: shaping network rules from the CLI
     When the developer lists rules
     Then the output shows both rules with their verdicts
 
+  Scenario: Listing rules from a policy file naming the removed allowedRoutes key fails loudly
+    Given "lns-policy.yaml" uses the removed allowedRoutes key for "api.linear.app"
+    When the developer lists rules
+    Then the command fails with an exit code other than 0
+    And the error names "allowedRoutes"
+
   Scenario: Removing a rule by pattern deletes it from the policy file
     Given "lns-policy.yaml" has an allow rule for "api.linear.app"
     When the developer removes the rule matching "api.linear.app"

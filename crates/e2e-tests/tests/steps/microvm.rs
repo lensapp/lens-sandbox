@@ -169,7 +169,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
         root.join("lns-policy.yaml"),
-        "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+        "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
     )
     .expect("write the project policy");
     root
@@ -1110,7 +1110,7 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  allowedRoutes:\n    - match: api.example.test\n      verdict: allow\n      transport: direct\n",
+        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 

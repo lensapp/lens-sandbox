@@ -94,7 +94,8 @@ resolves from the catalog at run time and the shareable policy stays small:
 
 ```yaml
 network:
-  allowedRoutes: []
+  egress:
+    http: []
   defaultVerdict: ask
 connectors:
   - gitlab

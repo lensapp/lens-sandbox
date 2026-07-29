@@ -136,7 +136,8 @@ spec:
     memory: 512Mi
   policy:
     defaultVerdict: ask
-    allowedRoutes: []
+    egress:
+      http: []
   connectors: []
   credentials: []
   volumes:

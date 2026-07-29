@@ -20,15 +20,16 @@ spec:
     memory: 6Gi
   policy:
     defaultVerdict: ask
-    allowedRoutes:
-      - match: registry.npmjs.org
-        verdict: allow
-      - match: api.anthropic.com
-        verdict: allow
-      - match: platform.claude.com
-        verdict: allow
-      - match: downloads.claude.ai
-        verdict: allow
+    egress:
+      http:
+        - match: registry.npmjs.org
+          verdict: allow
+        - match: api.anthropic.com
+          verdict: allow
+        - match: platform.claude.com
+          verdict: allow
+        - match: downloads.claude.ai
+          verdict: allow
   connectors:
     - claude-code-subscription
   volumes:

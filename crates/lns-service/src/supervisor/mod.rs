@@ -597,7 +597,7 @@ mod tests {
         let policy_path = dir.path().join("lns-policy.yaml");
         std::fs::write(
             &policy_path,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
+            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
         )
         .expect("policy");
         lns_policy::connectors::Catalog {
@@ -734,7 +734,7 @@ mod tests {
         let policy_path = d.path().join("lns-policy.yaml");
         std::fs::write(
             &policy_path,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
+            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
         )
         .expect("policy");
 
@@ -769,7 +769,7 @@ mod tests {
         let policy_path = d.path().join("lns-policy.yaml");
         std::fs::write(
             &policy_path,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
         )
         .expect("policy");
         let mut sandbox_policy = lns_policy::Policy::default();

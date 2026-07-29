@@ -105,7 +105,8 @@ fn launch(
     let applied = resolve_applied_with_slots(&policy, &resolved.credentials, &rig.catalog);
     policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .extend(applied.routes.iter().cloned());
     let declared_connectors = resolved
         .policy
@@ -197,7 +198,7 @@ fn published_declares_one(w: &mut BehaviourWorld, id: String) {
 fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, host: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"defaultVerdict":"ask","allowedRoutes":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"defaultVerdict":"ask","egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}}}"#
     ));
 }
 
@@ -490,7 +491,8 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
     // The guest gate is first-match-wins; the merged policy must present the deny before the connector's allow.
     let verdict = policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .find(|r| r.match_pattern == host)
         .map(|r| r.verdict)
@@ -500,7 +502,7 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
     } else {
         Err(format!(
             "expected {host} to be denied, first match gave {verdict:?}; routes: {:?}",
-            policy.network.allowed_routes
+            policy.network.egress.http
         ))
     }
 }
@@ -511,7 +513,8 @@ fn allow_rule_written_to_policy_file(w: &mut BehaviourWorld) -> Result<(), Strin
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
     let has_allow = on_disk
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.verdict == Verdict::Allow);
     if has_allow {
@@ -520,7 +523,7 @@ fn allow_rule_written_to_policy_file(w: &mut BehaviourWorld) -> Result<(), Strin
         Err(format!(
             "no allow rule landed in {}: {:?}",
             rig.policy_path.display(),
-            on_disk.network.allowed_routes
+            on_disk.network.egress.http
         ))
     }
 }
@@ -607,7 +610,8 @@ fn running_policy_allows(w: &mut BehaviourWorld, host: String) -> Result<(), Str
         .ok_or("no running policy was produced")?;
     let allowed = policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.match_pattern == host && r.verdict == Verdict::Allow);
     if allowed {
@@ -615,7 +619,7 @@ fn running_policy_allows(w: &mut BehaviourWorld, host: String) -> Result<(), Str
     } else {
         Err(format!(
             "expected an allow route for {host}, got: {:?}",
-            policy.network.allowed_routes
+            policy.network.egress.http
         ))
     }
 }
@@ -643,7 +647,8 @@ fn running_policy_does_not_allow(w: &mut BehaviourWorld, host: String) -> Result
         .ok_or("no running policy was produced")?;
     match policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .find(|r| r.match_pattern == host && r.verdict == Verdict::Allow)
     {

@@ -17,7 +17,8 @@ pub enum PolicySource {
 const DEFAULT_POLICY_FILENAME: &str = "lns-policy.yaml";
 const DEFAULT_POLICY_YAML: &str = "\
 network:
-  allowedRoutes: []
+  egress:
+    http: []
   defaultVerdict: ask
 ";
 
@@ -268,7 +269,7 @@ fn verdict_word(v: Verdict) -> &'static str {
 }
 
 fn rules_line(policy: &Policy) -> String {
-    let routes = &policy.network.allowed_routes;
+    let routes = &policy.network.egress.http;
     if routes.is_empty() {
         return "none defined; anything else asks".to_string();
     }
@@ -918,7 +919,7 @@ mod tests {
         let preexisting = dir.path().join(DEFAULT_POLICY_FILENAME);
         std::fs::write(
             &preexisting,
-            "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n",
+            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
         )
         .unwrap();
         let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
@@ -934,6 +935,11 @@ mod tests {
         assert_eq!(source, PolicySource::AutoCreated);
         let body = std::fs::read_to_string(&resolved).unwrap();
         assert!(body.contains("defaultVerdict: ask"));
+        assert!(
+            body.contains("egress:") && body.contains("http: []"),
+            "the scaffold must name the table the guest reads, not the deprecated one:\n{body}"
+        );
+        assert!(!body.contains("allowedRoutes"), "got:\n{body}");
         assert!(!body.contains("defaultTransport"), "got:\n{body}");
         assert!(!body.contains("transport:"), "got:\n{body}");
     }
