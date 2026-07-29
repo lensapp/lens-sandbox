@@ -26,6 +26,13 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is 0
     And the output contains "0"
 
+  Scenario: a root run-as keeps HOME and USER
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo home=[$HOME] user=[$USER]'" as user "root"
+    Then the exit code is 0
+    And the output does not contain "home=[]"
+    And the output does not contain "user=[]"
+
   Scenario: a root workload cannot tear down the network cage
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c '/.lens/nft flush ruleset'" as user "root"
