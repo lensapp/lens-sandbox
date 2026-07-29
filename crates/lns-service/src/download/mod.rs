@@ -16,6 +16,37 @@ pub(crate) struct PinnedArtifact<'a> {
     pub label: &'a str,
 }
 
+pub(crate) async fn read_cached_pinned(
+    fs: &impl Fs,
+    path: &Path,
+    artifact: &PinnedArtifact<'_>,
+) -> Option<Vec<u8>> {
+    if !fs.is_file(path).await {
+        return None;
+    }
+    match fs.read(path).await {
+        Ok(bytes) => {
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            if actual == artifact.sha256 {
+                return Some(bytes);
+            }
+            let path_str = path.display();
+            let label = artifact.label;
+            let expected = artifact.sha256;
+            log::warn!(
+                "cached {label} at {path_str} has wrong sha256 ({actual} vs expected {expected}) — re-downloading"
+            );
+        }
+        Err(e) => {
+            let path_str = path.display();
+            let label = artifact.label;
+            let cause = format!("{e:#}");
+            log::warn!("cached {label} at {path_str} is unreadable ({cause}) — re-downloading");
+        }
+    }
+    None
+}
+
 #[allow(clippy::cognitive_complexity)] // cache hit/corrupt/miss are one resolution decision; extracting them buries the fall-through to fetch
 pub(crate) async fn ensure_pinned(
     fetcher: &impl Fetcher,
@@ -28,27 +59,8 @@ pub(crate) async fn ensure_pinned(
         .with_context(|| format!("create_dir_all {}", cache.display()))?;
     let path = cache.join(artifact.filename);
 
-    if fs.is_file(&path).await {
-        match fs.read(&path).await {
-            Ok(bytes) => {
-                let actual = format!("{:x}", Sha256::digest(&bytes));
-                if actual == artifact.sha256 {
-                    return Ok(path);
-                }
-                let path_str = path.display();
-                let label = artifact.label;
-                let expected = artifact.sha256;
-                log::warn!(
-                    "cached {label} at {path_str} has wrong sha256 ({actual} vs expected {expected}) — re-downloading"
-                );
-            }
-            Err(e) => {
-                let path_str = path.display();
-                let label = artifact.label;
-                let cause = format!("{e:#}");
-                log::warn!("cached {label} at {path_str} is unreadable ({cause}) — re-downloading");
-            }
-        }
+    if read_cached_pinned(fs, &path, artifact).await.is_some() {
+        return Ok(path);
     }
 
     let label = artifact.label;

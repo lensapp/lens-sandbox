@@ -18,6 +18,18 @@ async fn serialized_install() -> tokio::sync::MutexGuard<'static, ()> {
     }
 }
 
+async fn cached_or_serialized<T, E, G>(
+    cached: impl std::future::Future<Output = Result<Option<T>, E>>,
+    serialized: impl std::future::Future<Output = G>,
+    install: impl AsyncFnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if let Some(value) = cached.await? {
+        return Ok(value);
+    }
+    let _serialized = serialized.await;
+    install().await
+}
+
 /// Composition root for a run's declared tools: real record store, real cache over the content store, and the mise provisioner. Installing is serialized across the service's runs so two of them provision a shared tool set once — but a run with nothing to install never joins that queue, or it would wait out an unrelated cold provision.
 pub async fn ensure_for_run(
     scratch_id: &str,
@@ -60,11 +72,13 @@ pub async fn ensure_for_run(
             .iter()
             .any(|request| super::registry::needs_musl_companions(&request.name, target.libc))
     {
-        // The companion fetch writes the shared cache through a fixed temp name, so it belongs behind the same lock the installs take — a warm run reaches here without ever having held it.
-        let _serialized = serialized_install().await;
-        let companions = super::provisioner::real::workload_companion_specs(&cache_dir, target)
-            .await
-            .map_err(|e| ProvisionError::Engine(format!("staging musl companions: {e:#}")))?;
+        let companions = cached_or_serialized(
+            super::provisioner::real::cached_workload_companion_specs(&cache_dir, target),
+            serialized_install(),
+            || super::provisioner::real::workload_companion_specs(&cache_dir, target),
+        )
+        .await
+        .map_err(|e| ProvisionError::Engine(format!("staging musl companions: {e:#}")))?;
         ensured.specs.extend(companions);
     }
     Ok(ensured)
@@ -173,5 +187,48 @@ mod tests {
         drop(first);
         acquired_rx.await.unwrap();
         second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_companions_do_not_wait_for_the_install_lock() {
+        let cached = async { Ok::<_, &'static str>(Some("cached")) };
+        let unavailable_lock = std::future::pending::<()>();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            cached_or_serialized(cached, unavailable_lock, || async {
+                Err::<&str, _>("the install path must not run")
+            }),
+        )
+        .await
+        .expect("a warm run must not wait for the install lock")
+        .unwrap();
+
+        assert_eq!(result, "cached");
+    }
+
+    #[tokio::test]
+    async fn missing_companions_wait_for_the_lock_before_installing() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (installed_tx, mut installed_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            cached_or_serialized(
+                async { Ok::<Option<&str>, &'static str>(None) },
+                async { release_rx.await.unwrap() },
+                || async {
+                    installed_tx.send(()).unwrap();
+                    Ok("installed")
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            installed_rx.try_recv().is_err(),
+            "a cache miss must not install before acquiring the lock"
+        );
+        release_tx.send(()).unwrap();
+        installed_rx.await.unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "installed");
     }
 }

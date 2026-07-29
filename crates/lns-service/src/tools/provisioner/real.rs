@@ -291,3 +291,10 @@ pub(crate) async fn workload_companion_specs(
     )
     .await
 }
+
+pub(crate) async fn cached_workload_companion_specs(
+    cache_dir: &Path,
+    target: &ProvisionTarget,
+) -> Result<Option<Vec<crate::runtime_layer::RuntimeFileSpec>>> {
+    super::cached_workload_companions_with(&RealFs, mise::manifest(), cache_dir, target).await
+}
