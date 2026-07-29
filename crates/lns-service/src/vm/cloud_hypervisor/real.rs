@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{CloudHypervisor, orchestrate, process, run_async_with};
+use super::{CloudHypervisor, orchestrate, process, run_async_with, vmm_bin};
 use crate::log;
 use crate::vm::{VmSpec, VmmBackend};
 
@@ -77,6 +77,15 @@ fn real_read_console_tail(path: &std::path::Path) -> Option<String> {
     Some(super::truncate_tail(&buf, MAX_TAIL_BYTES))
 }
 
+fn real_require_read_only_support(path: &std::path::Path) -> Result<()> {
+    static CACHE: std::sync::OnceLock<vmm_bin::ReadOnlySupportCache> = std::sync::OnceLock::new();
+    let identity = process::virtiofsd_identity(path)
+        .with_context(|| format!("checking virtiofsd identity at {}", path.display()))?;
+    CACHE
+        .get_or_init(vmm_bin::ReadOnlySupportCache::default)
+        .require(path, identity, process::virtiofsd_help)
+}
+
 impl VmmBackend for CloudHypervisor {
     fn name(&self) -> &'static str {
         "cloud-hypervisor"
@@ -91,7 +100,7 @@ impl VmmBackend for CloudHypervisor {
             &process::RealSpawner,
             spec,
             |k| std::env::var_os(k),
-            process::virtiofsd_help,
+            real_require_read_only_support,
             real_kvm_check,
             real_read_console_tail,
             &orchestrate::LaunchTimeouts::default(),

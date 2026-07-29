@@ -4,6 +4,8 @@ use std::future::Future;
 use std::path::Path;
 use std::process::ExitStatus;
 
+use super::vmm_bin::BinaryIdentity;
+
 pub(crate) trait Spawner: Send + Sync {
     type Child: Child;
 
@@ -46,4 +48,17 @@ pub(crate) fn virtiofsd_help(program: &Path) -> std::io::Result<Vec<u8>> {
     let mut help = output.stdout;
     help.extend_from_slice(&output.stderr);
     Ok(help)
+}
+
+pub(crate) fn virtiofsd_identity(program: &Path) -> std::io::Result<BinaryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(program).map(|metadata| {
+        BinaryIdentity::new(
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            (metadata.mtime(), metadata.mtime_nsec()),
+            (metadata.ctime(), metadata.ctime_nsec()),
+        )
+    })
 }
