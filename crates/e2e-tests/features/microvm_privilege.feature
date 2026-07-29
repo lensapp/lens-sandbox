@@ -61,6 +61,15 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is 0
     And the output contains "00000000000000fb"
 
+  Scenario: an exec does not inherit the supervisor's relay credentials
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c '/.lens/guest-tools/bin/busybox env'" in that run
+    Then the exit code is 0
+    And the output does not contain "LENS_SANDBOX_TOKEN"
+    And the output does not contain "LENS_SANDBOX_WS_URL"
+
   Scenario: /run is a fresh tmpfs, not the workload's persistent root
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep /run /proc/mounts'"
@@ -72,4 +81,5 @@ Feature: the workload runs unprivileged inside a locked-down guest
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox true && echo tooling-ok-$((7*6))'"
     Then the exit code is 0
     And the output contains "tooling-ok-42"
+
 

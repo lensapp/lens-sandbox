@@ -21,7 +21,7 @@ pub enum ClientFrame {
         tty: bool,
         stdin: bool,
         winsize: Option<Winsize>,
-        /// Drop to the guest's run-as identity (or cap a root one) before exec; the primary session leaves it false so the supervisor keeps the privileges the cage needs.
+        /// Drop to the guest's run-as identity (or cap a root one) and scrub the relay credentials before exec; only a supervised primary session leaves it false, because its workload is the supervisor.
         confine: bool,
     },
     StdinBytes(Vec<u8>),

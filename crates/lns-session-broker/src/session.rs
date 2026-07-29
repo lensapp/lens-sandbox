@@ -28,6 +28,7 @@ pub(crate) struct WorkloadSpec {
     pub(crate) cwd: Option<String>,
     pub(crate) hostname: Option<String>,
     pub(crate) confinement: Confinement,
+    pub(crate) scrub: Vec<String>,
 }
 
 const ROOT_UID: u32 = 0;
@@ -48,6 +49,23 @@ pub(crate) fn confinement(confine: bool, uid: Option<u32>, gid: Option<u32>) -> 
         (Some(uid), Some(gid)) if uid != ROOT_UID => Confinement::Setuid { uid, gid },
         _ => Confinement::CapsOnly,
     }
+}
+
+/// Supervisor-internal vars the guest inherits from the kernel cmdline; mirrors `INTERNAL_VAR_PREFIX` in lens-sandbox-core, which scrubs the same set before the supervisor spawns its agent.
+const INTERNAL_VAR_PREFIX: &str = "LENS_SANDBOX_";
+
+/// Inherited env keys a confined session must not carry: they hold the relay token and url, which authenticate the supervisor to the host.
+pub(crate) fn keys_to_scrub<'a>(
+    inherited: impl Iterator<Item = &'a str>,
+    confinement: &Confinement,
+) -> Vec<String> {
+    if matches!(confinement, Confinement::Inherit) {
+        return Vec::new();
+    }
+    inherited
+        .filter(|k| k.starts_with(INTERNAL_VAR_PREFIX))
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug)]
@@ -309,6 +327,47 @@ mod tests {
         assert_eq!(confinement(true, None, None), Confinement::CapsOnly);
         assert_eq!(confinement(true, Some(1000), None), Confinement::CapsOnly);
         assert_eq!(confinement(true, None, Some(1000)), Confinement::CapsOnly);
+    }
+
+    #[test]
+    fn a_confined_session_scrubs_the_inherited_relay_credentials() {
+        let inherited = [
+            "LENS_SANDBOX_TOKEN",
+            "LENS_SANDBOX_WS_URL",
+            "PATH",
+            "HOME",
+            "LENS_RUN_UID",
+        ];
+        let scrubbed = keys_to_scrub(inherited.into_iter(), &Confinement::CapsOnly);
+        assert_eq!(
+            scrubbed,
+            vec![
+                "LENS_SANDBOX_TOKEN".to_string(),
+                "LENS_SANDBOX_WS_URL".to_string()
+            ],
+            "the relay token authenticates the supervisor to the host, so a confined session must not inherit it — /proc/cmdline is masked for the same reason"
+        );
+    }
+
+    #[test]
+    fn an_unconfined_session_keeps_the_relay_credentials() {
+        let scrubbed = keys_to_scrub(["LENS_SANDBOX_TOKEN"].into_iter(), &Confinement::Inherit);
+        assert!(
+            scrubbed.is_empty(),
+            "the primary session's workload is the supervisor, which needs the token to reach the relay at all"
+        );
+    }
+
+    #[test]
+    fn a_setuid_session_scrubs_them_too() {
+        let scrubbed = keys_to_scrub(
+            ["LENS_SANDBOX_TOKEN"].into_iter(),
+            &Confinement::Setuid {
+                uid: 65534,
+                gid: 65534,
+            },
+        );
+        assert_eq!(scrubbed, vec!["LENS_SANDBOX_TOKEN".to_string()]);
     }
 
     #[test]
