@@ -11,15 +11,13 @@ use lens_sandbox_core::network;
 use lens_sandbox_core::privilege;
 use lens_sandbox_core::proxy;
 
-/// Drop to the uid/gid lns-init resolved in the guest, or `None` so core's `apply_cap_drop` runs instead.
+/// The run-as identity lns-init resolved in the guest; whether it is also a setuid target is decided at spawn time by `run_as::setuid_creds`.
 fn resolve_agent_creds() -> Option<privilege::SandboxCredentials> {
     let uid = env_u32("LENS_RUN_UID");
     let gid = env_u32("LENS_RUN_GID");
-    let run_as::Plan::Setuid { uid, gid } = run_as::plan(uid, gid) else {
+    let (Some(uid), Some(gid)) = (uid, gid) else {
         tracing::info!(
-            ?uid,
-            ?gid,
-            "agent will run as root with capabilities dropped"
+            "no run-as uid/gid from lns-init — agent will run as root with capabilities dropped"
         );
         return None;
     };
