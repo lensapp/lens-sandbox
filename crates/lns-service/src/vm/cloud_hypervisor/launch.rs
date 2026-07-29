@@ -51,10 +51,17 @@ pub(crate) struct BindIdMap {
     pub host_gid: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShareAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
 pub(crate) fn virtiofsd_args(
     socket: &Path,
     shared_dir: &Path,
     id_map: Option<BindIdMap>,
+    access: ShareAccess,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--socket-path={}", socket.display()),
@@ -68,6 +75,9 @@ pub(crate) fn virtiofsd_args(
             args.push(format!("--gid-map=:{}:{}:1:", m.guest_gid, m.host_gid));
         }
         None => args.push("--sandbox=none".to_string()),
+    }
+    if access == ShareAccess::ReadOnly {
+        args.push("--readonly".to_string());
     }
     args
 }
@@ -183,6 +193,7 @@ mod tests {
             Path::new("/runs/7/virtiofsd.sock"),
             Path::new("/cache/content"),
             None,
+            ShareAccess::ReadOnly,
         );
         assert_eq!(
             args,
@@ -191,6 +202,7 @@ mod tests {
                 "--shared-dir=/cache/content".to_string(),
                 "--cache=never".to_string(),
                 "--sandbox=none".to_string(),
+                "--readonly".to_string(),
             ],
             "the content share is world-readable and keeps 1:1 uids — no map"
         );
@@ -207,6 +219,7 @@ mod tests {
                 host_uid: 1001,
                 host_gid: 100,
             }),
+            ShareAccess::ReadWrite,
         );
         assert!(
             args.contains(&"--uid-map=:65534:1001:1:".to_string())

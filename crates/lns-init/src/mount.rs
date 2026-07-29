@@ -723,7 +723,7 @@ fn mount_composefs_and_exec_broker_inner(
         content_tag,
         CONTENT,
         "virtiofs",
-        MountFlags::none().nosuid().nodev(),
+        MountFlags::read_only().nosuid().nodev(),
         None,
     )?;
 
@@ -1616,7 +1616,7 @@ mod tests {
         assert_eq!(flags_for(DEV), MountFlags::none().nosuid().noexec());
         assert_eq!(flags_for(DEV_PTS), MountFlags::none().nosuid().noexec());
         // Content store and overlay upper serve the workload's executables, so exec stays on.
-        assert_eq!(flags_for(CONTENT), MountFlags::none().nosuid().nodev());
+        assert_eq!(flags_for(CONTENT), MountFlags::read_only().nosuid().nodev());
         assert_eq!(
             flags_for(UPPER_MOUNTPOINT),
             MountFlags::none().nosuid().nodev()
