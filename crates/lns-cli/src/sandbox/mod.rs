@@ -398,7 +398,7 @@ where
         SandboxCommand::Push(_) => {
             bail!("push builds and uploads locally, not through the service dispatch")
         }
-        SandboxCommand::Pull(args) => pull(svc, args, out).await,
+        SandboxCommand::Pull(args) => pull(svc, args, out, stderr).await,
         SandboxCommand::Tag(args) => tag(svc, args, out).await,
         SandboxCommand::Ps(args) => ps(svc, args, out).await,
         SandboxCommand::Ls(args) => ls(svc, args, out).await,
@@ -423,20 +423,31 @@ pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
 }
 
-async fn pull<W: std::io::Write>(
+async fn pull<W, E>(
     svc: &impl SandboxService,
     args: &SandboxPullArgs,
     out: &mut W,
-) -> Result<i32> {
+    stderr: &mut E,
+) -> Result<i32>
+where
+    W: std::io::Write,
+    E: AsyncWriteExt + Unpin,
+{
     let response = svc
         .one_shot(Request::PullImage {
             image: args.reference.clone(),
         })
         .await?;
     match response {
-        Response::ImagePulled { image } => {
+        Response::ImagePulled { image, warnings } => {
             writeln!(out, "pulled {}", image.reference)?;
             writeln!(out, "digest: {}", image.digest)?;
+            for warning in warnings {
+                stderr
+                    .write_all(format!("warning: {warning}\n").as_bytes())
+                    .await?;
+                stderr.flush().await?;
+            }
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -1292,20 +1303,30 @@ mod tests {
                 pulled: "2026-01-01T00:00:00Z".into(),
                 in_use_by: None,
             },
+            warnings: vec!["the sandbox is cached, but its first run needs the network".into()],
         });
         let mut out = Vec::new();
-        let code = pull(
-            &svc,
-            &SandboxPullArgs {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_writers(
+            &SandboxCommand::Pull(SandboxPullArgs {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
-            },
+            }),
+            &svc,
+            TermInfo::default(),
             &mut out,
+            &mut stdout,
+            &mut stderr,
         )
         .await
         .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("sha256:"), "got: {text}");
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "warning: the sandbox is cached, but its first run needs the network\n"
+        );
     }
 
     #[tokio::test]
@@ -1318,6 +1339,7 @@ mod tests {
                 reference: "x:1".into(),
             },
             &mut Vec::new(),
+            &mut Vec::new(),
         )
         .await
         .unwrap_err();
@@ -1328,6 +1350,7 @@ mod tests {
             &SandboxPullArgs {
                 reference: "x:1".into(),
             },
+            &mut Vec::new(),
             &mut Vec::new(),
         )
         .await

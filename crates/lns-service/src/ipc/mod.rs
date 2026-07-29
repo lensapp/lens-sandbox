@@ -180,11 +180,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }))
         }
-        Request::PullImage { image } => image_response(
-            crate::image_store::pull(image)
-                .await
-                .map(|image| Response::ImagePulled { image }),
-        ),
+        Request::PullImage { image } => {
+            image_response(crate::image_store::pull(image).await.map(|outcome| {
+                Response::ImagePulled {
+                    image: outcome.image,
+                    warnings: outcome.warnings,
+                }
+            }))
+        }
         Request::ListImages => image_response(
             crate::image_store::list()
                 .await
