@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
+use crate::archive_limits::{ArchiveLimits, LimitedReader};
 use crate::composefs::Sha256Digest;
 use crate::composefs::changeset::{PathChange, classify_path};
 use crate::composefs::vendor::generic_tree::{Directory, Inode, LeafContent, Stat};
@@ -85,10 +86,14 @@ fn apply_layer_bytes(
 ) -> Result<()> {
     if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         let decoder = GzDecoder::new(Cursor::new(bytes));
-        let limited = LimitedReader::new(decoder, limits.decompressed_bytes);
+        let limited = LimitedReader::new(decoder, limits.archive.bytes, "decompressed layer");
         apply_tar(fs, content_store, tar::Archive::new(limited), limits)
     } else {
-        let limited = LimitedReader::new(Cursor::new(bytes), limits.decompressed_bytes);
+        let limited = LimitedReader::new(
+            Cursor::new(bytes),
+            limits.archive.bytes,
+            "decompressed layer",
+        );
         apply_tar(fs, content_store, tar::Archive::new(limited), limits)
     }
 }
@@ -131,61 +136,19 @@ fn worker_count() -> usize {
 // Files above this stream straight to the content store rather than buffering in RAM, so a layer of multi-GB blobs can't balloon the in-flight queue.
 const MAX_BUFFERED_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-const GIB: u64 = 1024 * 1024 * 1024;
-
-// Decompression DoS caps: a gzip/tar bomb has valid digests, so these bound what untrusted host-side ingest may expand to before the microVM boots.
-const MAX_DECOMPRESSED_LAYER_BYTES: u64 = 16 * GIB;
-const MAX_ENTRIES_PER_LAYER: usize = 4_000_000;
-const MAX_BUFFERED_LAYER_BYTES: u64 = 2 * GIB;
+const MAX_BUFFERED_LAYER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Limits {
-    decompressed_bytes: u64,
-    entries: usize,
+    archive: ArchiveLimits,
     buffered_bytes: u64,
 }
 
 impl Limits {
     const PRODUCTION: Self = Self {
-        decompressed_bytes: MAX_DECOMPRESSED_LAYER_BYTES,
-        entries: MAX_ENTRIES_PER_LAYER,
+        archive: ArchiveLimits::PRODUCTION,
         buffered_bytes: MAX_BUFFERED_LAYER_BYTES,
     };
-}
-
-struct LimitedReader<R> {
-    inner: R,
-    read: u64,
-    limit: u64,
-}
-
-impl<R: Read> LimitedReader<R> {
-    fn new(inner: R, limit: u64) -> Self {
-        Self {
-            inner,
-            read: 0,
-            limit,
-        }
-    }
-}
-
-impl<R: Read> Read for LimitedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let remaining = self.limit - self.read;
-        if remaining == 0 {
-            return match self.inner.read(&mut [0u8; 1])? {
-                0 => Ok(0),
-                _ => Err(std::io::Error::other(format!(
-                    "decompressed layer exceeds the {} cap",
-                    self.limit
-                ))),
-            };
-        }
-        let cap = remaining.min(buf.len() as u64) as usize;
-        let n = self.inner.read(&mut buf[..cap])?;
-        self.read += n as u64;
-        Ok(n)
-    }
 }
 
 fn apply_tar<R: Read>(
@@ -254,8 +217,8 @@ fn read_layer_ops<R: Read>(
     let mut buffered_bytes = 0u64;
     for entry in archive.entries().context("opening tar")? {
         entry_count += 1;
-        if entry_count > limits.entries {
-            bail!("layer exceeds the {}-entry cap", limits.entries);
+        if entry_count > limits.archive.entries {
+            bail!("layer exceeds the {}-entry cap", limits.archive.entries);
         }
         let mut entry = entry.context("reading tar entry")?;
         let header_path: PathBuf = entry.path().context("entry path")?.into_owned();
@@ -1091,8 +1054,10 @@ mod tests {
         let d = tempdir();
         let s = store(&d);
         let limits = Limits {
-            decompressed_bytes: MAX_BUFFERED_FILE_BYTES + 1024,
-            entries: 1000,
+            archive: ArchiveLimits {
+                bytes: MAX_BUFFERED_FILE_BYTES + 1024,
+                entries: 1000,
+            },
             buffered_bytes: ROOMY,
         };
         let err =
@@ -1115,7 +1080,7 @@ mod tests {
     #[test]
     fn limited_reader_never_returns_more_than_the_budget_in_one_read() {
         let source = vec![0xaau8; 10_000];
-        let mut reader = LimitedReader::new(Cursor::new(source), 100);
+        let mut reader = LimitedReader::new(Cursor::new(source), 100, "decompressed layer");
         let mut buf = [0u8; 4096];
         let n = reader.read(&mut buf).unwrap();
         assert!(
@@ -1128,12 +1093,12 @@ mod tests {
     #[test]
     fn limited_reader_errors_once_the_budget_is_exhausted_and_bytes_remain() {
         let source = vec![0xbbu8; 200];
-        let mut reader = LimitedReader::new(Cursor::new(source), 100);
+        let mut reader = LimitedReader::new(Cursor::new(source), 100, "decompressed layer");
         let mut buf = [0u8; 100];
         assert_eq!(reader.read(&mut buf).unwrap(), 100);
         let err = reader.read(&mut buf).unwrap_err();
         assert!(
-            err.to_string().contains("exceeds the 100 cap"),
+            err.to_string().contains("exceeds the 100-byte cap"),
             "got: {err}"
         );
     }
@@ -1141,7 +1106,7 @@ mod tests {
     #[test]
     fn limited_reader_reports_clean_eof_when_the_source_exactly_fills_the_budget() {
         let source = vec![0xccu8; 100];
-        let mut reader = LimitedReader::new(Cursor::new(source), 100);
+        let mut reader = LimitedReader::new(Cursor::new(source), 100, "decompressed layer");
         let mut buf = [0u8; 100];
         assert_eq!(reader.read(&mut buf).unwrap(), 100);
         assert_eq!(
@@ -1161,8 +1126,10 @@ mod tests {
             }
         });
         let limits = Limits {
-            decompressed_bytes: ROOMY,
-            entries: 8,
+            archive: ArchiveLimits {
+                bytes: ROOMY,
+                entries: 8,
+            },
             buffered_bytes: ROOMY,
         };
         let err = build_filesystem_from_layer_bytes_with_limits(&s, &[tar], limits).unwrap_err();
@@ -1180,8 +1147,10 @@ mod tests {
             write_file_entry(b, "c", 0o644, &chunk);
         });
         let limits = Limits {
-            decompressed_bytes: ROOMY,
-            entries: 1000,
+            archive: ArchiveLimits {
+                bytes: ROOMY,
+                entries: 1000,
+            },
             buffered_bytes: 4096,
         };
         let err = build_filesystem_from_layer_bytes_with_limits(&s, &[tar], limits).unwrap_err();
@@ -1197,8 +1166,10 @@ mod tests {
         let s = store(&d);
         let tar = build_tar(|b| write_file_entry(b, "etc/ok", 0o644, b"fits"));
         let limits = Limits {
-            decompressed_bytes: ROOMY,
-            entries: 1000,
+            archive: ArchiveLimits {
+                bytes: ROOMY,
+                entries: 1000,
+            },
             buffered_bytes: ROOMY,
         };
         let mut fs = build_filesystem_from_layer_bytes_with_limits(&s, &[tar], limits).unwrap();
@@ -1208,11 +1179,8 @@ mod tests {
 
     #[test]
     fn production_limits_are_the_named_consts() {
-        assert_eq!(
-            Limits::PRODUCTION.decompressed_bytes,
-            MAX_DECOMPRESSED_LAYER_BYTES
-        );
-        assert_eq!(Limits::PRODUCTION.entries, MAX_ENTRIES_PER_LAYER);
+        assert_eq!(Limits::PRODUCTION.archive.bytes, 16 * 1024 * 1024 * 1024);
+        assert_eq!(Limits::PRODUCTION.archive.entries, 4_000_000);
         assert_eq!(Limits::PRODUCTION.buffered_bytes, MAX_BUFFERED_LAYER_BYTES);
     }
 
