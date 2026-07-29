@@ -211,12 +211,24 @@ where
     record.schema_version = record::RECORD_SCHEMA_VERSION;
     record.engine_version = ask.engine_version.to_string();
 
-    let mut pins = Vec::with_capacity(ask.requests.len());
-    for request in ask.requests {
-        let recorded = record
-            .recorded(&request.to_string())
-            .map(|entry| entry.resolved.clone());
-        let (pinned, pin_changed) = effective_pin(provisioner, request, recorded).await;
+    let recorded: Vec<Option<SafeVersion>> = ask
+        .requests
+        .iter()
+        .map(|request| {
+            record
+                .recorded(&request.to_string())
+                .map(|entry| entry.resolved.clone())
+        })
+        .collect();
+    let pins_and_changes = futures_util::future::join_all(
+        ask.requests
+            .iter()
+            .zip(recorded)
+            .map(|(request, recorded)| effective_pin(provisioner, request, recorded)),
+    )
+    .await;
+    let mut pins = Vec::with_capacity(pins_and_changes.len());
+    for (pinned, pin_changed) in pins_and_changes {
         record_changed |= pin_changed;
         pins.push(pinned);
     }
@@ -586,6 +598,7 @@ mod tests {
         calls: Mutex<Vec<Vec<ToolRef>>>,
         index: Mutex<Option<String>>,
         index_stalls: Mutex<bool>,
+        index_barrier: Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>,
         index_calls: Mutex<u32>,
         drops_everything: Mutex<bool>,
     }
@@ -615,6 +628,12 @@ mod tests {
             self
         }
 
+        fn index_waits_for_concurrent_calls(self, calls: usize) -> Self {
+            *self.index_barrier.lock().unwrap() =
+                Some(std::sync::Arc::new(tokio::sync::Barrier::new(calls)));
+            self
+        }
+
         fn dropping_every_request(self) -> Self {
             *self.drops_everything.lock().unwrap() = true;
             self
@@ -629,7 +648,11 @@ mod tests {
             *self.index_calls.lock().unwrap() += 1;
             let scripted = self.index.lock().unwrap().clone();
             let stalls = *self.index_stalls.lock().unwrap();
+            let barrier = self.index_barrier.lock().unwrap().clone();
             async move {
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                }
                 if stalls {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
@@ -1028,6 +1051,40 @@ mod tests {
             recorded(&records, "some-tool@latest"),
             "1.9.9",
             "the record follows the index instead of freezing the first answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_latest_index_queries_start_concurrently() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let provisioner = Scripted::default()
+            .index_says("1.2.3")
+            .index_waits_for_concurrent_calls(2);
+        let requests = refs(&["some-tool@latest", "other-tool@latest"]);
+        let plan = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            plan_tools(
+                &records,
+                &cache,
+                &provisioner,
+                &EnsureRequest {
+                    requests: &requests,
+                    target: &target(),
+                    engine_version: "2026.7.14",
+                    now_unix_secs: 1_700_000_000,
+                    disclose: &discard,
+                },
+            ),
+        )
+        .await
+        .expect("both independent index lookups should start before either must finish")
+        .unwrap();
+
+        assert_eq!(
+            plan.misses,
+            refs(&["some-tool@1.2.3", "other-tool@1.2.3"]),
+            "concurrent results retain declaration order"
         );
     }
 
