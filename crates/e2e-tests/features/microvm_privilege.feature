@@ -39,10 +39,11 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is non-zero
     And the output contains "Operation not permitted"
 
-  Scenario: a root workload cannot read the supervisor's memory
+  Scenario: a root workload keeps only the identity-management capabilities
     Given the Lens Sandbox service is running
-    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox cat /proc/1/mem'" as user "root"
-    Then the exit code is non-zero
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep CapEff /proc/self/status'" as user "root"
+    Then the exit code is 0
+    And the output contains "00000000000000fb"
 
   Scenario: /run is a fresh tmpfs, not the workload's persistent root
     Given the Lens Sandbox service is running
