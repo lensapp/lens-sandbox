@@ -845,7 +845,8 @@ fn pile_scroll_offset(
     scroll
 }
 
-fn close_all(state: &WindowState, snapshot: &Snapshot) {
+/// Dismisses every card the pile is showing; `pub` so a behavioural test drives the same fan-out the header ✕ does rather than deciding each card itself.
+pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
         match close_action(item, snapshot) {

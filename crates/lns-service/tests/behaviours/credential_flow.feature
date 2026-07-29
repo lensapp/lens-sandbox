@@ -116,7 +116,7 @@ Feature: lns-service credential flow
     When the developer closes every card at once
     Then both held requests are failed at the boundary
     And "~/.lns-credentials.json" is unchanged
-    And a future request carrying either placeholder fires a fresh credential card
+    And a future request carrying either the "some-provider" or "some-other-provider" placeholder fires a fresh credential card
 
   Scenario: A dismissed credential card records no approval in the audit chain
     Given a credential card for "some-provider" is visible

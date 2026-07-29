@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use lns_policy::grants::{GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity};
 use lns_service::approval_flow::protocol::{CredentialPending, HostFrame, PolicyMessage};
-use lns_service::approval_flow::window::WindowState;
+use lns_service::approval_flow::window::{CredentialDecisionDelivery, WindowState};
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
 use lns_service::credential_flow::providers::DefProvider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
@@ -104,6 +104,7 @@ pub struct CredentialRig {
     grant_project: String,
     grant_workload: WorkloadIdentity,
     pub ledger: Arc<RigRecorder>,
+    card_decisions: Mutex<mpsc::UnboundedReceiver<CredentialDecisionDelivery>>,
     _tempdir: TempDir,
 }
 
@@ -137,7 +138,7 @@ impl CredentialRig {
         let window_state = WindowState::new();
         let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let detector_values = host_values.clone();
-        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let (decision_tx, decision_rx) = mpsc::unbounded_channel();
         let notifier = Arc::new(WindowCredentialNotifier::new(
             window_state.clone(),
             decision_tx,
@@ -196,6 +197,7 @@ impl CredentialRig {
             grant_project,
             grant_workload,
             ledger,
+            card_decisions: Mutex::new(decision_rx),
             _tempdir: dir,
         }
     }
@@ -209,6 +211,17 @@ impl CredentialRig {
                     .is_some_and(|g| g.verdict == GrantVerdict::Deny)
             })
             .unwrap_or(false)
+    }
+
+    /// Applies whatever decisions the approval window queued on its delivery channel, the way the service's credential delivery loop does, so a scenario can drive a real card gesture end to end instead of calling `record_decision` itself. Models the non-sign-in path only, which is every static value decision.
+    pub fn apply_queued_card_decisions(&self) {
+        let mut rx = self
+            .card_decisions
+            .lock()
+            .expect("card decisions mutex poisoned");
+        while let Ok(delivery) = rx.try_recv() {
+            self.session.record_decision(&delivery.id, delivery.request);
+        }
     }
 
     /// Whether a fresh run in a different project is still asked for `credential_id`, reading the machine-wide store exactly as a later run would. The blast radius of a decision only shows from outside the run that made it, so this builds a second session over the same store rather than re-asking inside this one.
@@ -358,7 +371,7 @@ impl CredentialRig {
         let window_state = WindowState::new();
         let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let detector_values = host_values.clone();
-        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let (decision_tx, decision_rx) = mpsc::unbounded_channel();
         let notifier = Arc::new(WindowCredentialNotifier::new(
             window_state.clone(),
             decision_tx,
@@ -449,6 +462,7 @@ impl CredentialRig {
             grant_project,
             grant_workload,
             ledger,
+            card_decisions: Mutex::new(decision_rx),
             _tempdir: dir,
         }
     }
@@ -519,6 +533,7 @@ impl CallbackHandle for RigCallbackHandle {
 
 struct RigShared {
     window_state: Arc<WindowState>,
+    decision_rx: mpsc::UnboundedReceiver<CredentialDecisionDelivery>,
     host_values: Arc<Mutex<HashMap<String, String>>>,
     store: Arc<FlakyCredentialStore>,
     frames: mpsc::UnboundedReceiver<HostFrame>,
@@ -549,7 +564,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
     let window_state = WindowState::new();
     let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
     let detector_values = host_values.clone();
-    let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+    let (decision_tx, decision_rx) = mpsc::unbounded_channel();
     let notifier = Arc::new(WindowCredentialNotifier::new(
         window_state.clone(),
         decision_tx,
@@ -586,6 +601,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
         session,
         RigShared {
             window_state,
+            decision_rx,
             host_values,
             store,
             frames: frame_rx,
@@ -680,6 +696,7 @@ impl CredentialRig {
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
             ledger,
+            card_decisions: Mutex::new(shared.decision_rx),
             _tempdir: shared.dir,
         }
     }
@@ -726,6 +743,7 @@ impl CredentialRig {
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
             ledger,
+            card_decisions: Mutex::new(shared.decision_rx),
             _tempdir: shared.dir,
         }
     }
