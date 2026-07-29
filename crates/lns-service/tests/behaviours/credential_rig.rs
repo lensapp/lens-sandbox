@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use lns_policy::grants::{GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity};
-use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
+use lns_service::approval_flow::protocol::{CredentialPending, HostFrame, PolicyMessage};
 use lns_service::approval_flow::window::WindowState;
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
 use lns_service::credential_flow::providers::DefProvider;
@@ -209,6 +209,44 @@ impl CredentialRig {
                     .is_some_and(|g| g.verdict == GrantVerdict::Deny)
             })
             .unwrap_or(false)
+    }
+
+    /// Whether a fresh run in a different project is still asked for `credential_id`, reading the machine-wide store exactly as a later run would. The blast radius of a decision only shows from outside the run that made it, so this builds a second session over the same store rather than re-asking inside this one.
+    pub fn another_project_is_still_asked(&self, credential_id: &str) -> bool {
+        let state = self.store.load().expect("read the machine-wide store");
+        let window_state = WindowState::new();
+        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let notifier = Arc::new(WindowCredentialNotifier::new(
+            window_state.clone(),
+            decision_tx,
+            None,
+            Arc::new(|_: &str| false),
+        ));
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
+        let session =
+            CredentialSession::new(state, notifier, self.store.clone(), frame_tx, self.timeout)
+                .with_custom_providers(Arc::new(fixture_providers()))
+                .with_grants(
+                    "rig-other-project".to_string(),
+                    WorkloadIdentity::Definition {
+                        dir: "/rig-other".to_string(),
+                    },
+                    self.grant_store.clone(),
+                );
+        session.submit_pending(
+            CredentialPending {
+                id: "other-project-request".to_string(),
+                credential_id: credential_id.to_string(),
+                action: format!("use of {credential_id} placeholder"),
+                reason: "placeholder-unauthorized".to_string(),
+            },
+            std::time::Instant::now(),
+        );
+        window_state
+            .snapshot()
+            .pending_credentials
+            .iter()
+            .any(|c| c.credential_id == credential_id)
     }
 
     /// What `lns connector disconnect` does to the sidecar from its own process while this run is still deciding.
