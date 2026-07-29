@@ -3,8 +3,21 @@ use std::time::{Duration, Instant};
 
 use crate::approval_rig::ApprovalRig;
 use crate::world::BehaviourWorld;
-use lns_policy::{Policy, RouteRule, Verdict};
-use lns_service::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+use lns_policy::{Policy, RouteRule, TcpEgressRule, Verdict};
+use lns_service::approval_flow::protocol::{Decision, HostFrame, RequestPending, Treatment};
+
+fn make_raw_pending(destination: &str) -> RequestPending {
+    let host = destination
+        .rsplit_once(':')
+        .map_or(destination, |(host, _)| host);
+    RequestPending {
+        id: format!("req-raw-{destination}"),
+        host: host.to_string(),
+        action: format!("CONNECT {destination}"),
+        reason: "policy-ambiguous".into(),
+        treatment: Treatment::Raw,
+    }
+}
 
 fn make_pending(host: &str) -> RequestPending {
     RequestPending {
@@ -12,6 +25,7 @@ fn make_pending(host: &str) -> RequestPending {
         host: host.to_string(),
         action: format!("CONNECT {host}:443"),
         reason: "policy-ambiguous".into(),
+        treatment: Treatment::Inspected,
     }
 }
 
@@ -21,6 +35,7 @@ fn pending_with_id(id: &str, host: &str) -> RequestPending {
         host: host.to_string(),
         action: format!("CONNECT {host}:443"),
         reason: "policy-ambiguous".into(),
+        treatment: Treatment::Inspected,
     }
 }
 
@@ -92,6 +107,75 @@ fn given_notification_visible_for(world: &mut BehaviourWorld, host: String) {
     let rig = world.approval();
     rig.session
         .submit_pending(make_pending(&host), Instant::now());
+    let _ = drain_frames(rig);
+}
+
+#[given(regex = r#"^the policy asks about "([^"]+)"$"#)]
+fn given_policy_asks_about(world: &mut BehaviourWorld, host: String) {
+    seed_policy(world, |policy| {
+        policy.network.egress.http.push(RouteRule {
+            verdict: Verdict::Ask,
+            ..RouteRule::allow_host(host)
+        })
+    });
+}
+
+#[given(regex = r#"^the policy asks about "([^"]+)" with TLS interception$"#)]
+fn given_policy_asks_about_with_tls(world: &mut BehaviourWorld, host: String) {
+    seed_policy(world, |policy| {
+        policy.network.egress.http.push(RouteRule {
+            verdict: Verdict::Ask,
+            tls_terminate: true,
+            ..RouteRule::allow_host(host)
+        })
+    });
+}
+
+#[given(regex = r#"^the policy asks about "([^"]+)" and holds an allow rule for it behind that$"#)]
+fn given_policy_asks_then_allows(world: &mut BehaviourWorld, host: String) {
+    seed_policy(world, |policy| {
+        policy.network.egress.http.push(RouteRule {
+            verdict: Verdict::Ask,
+            ..RouteRule::allow_host(host.clone())
+        });
+        policy.network.egress.http.push(RouteRule::allow_host(host));
+    });
+}
+
+#[given(regex = r#"^the policy allows "([^"]+)"$"#)]
+fn given_policy_allows(world: &mut BehaviourWorld, host: String) {
+    seed_policy(world, |policy| {
+        policy.network.egress.http.push(RouteRule::allow_host(host))
+    });
+}
+
+#[given(regex = r#"^the policy asks about the raw destination "([^"]+)"$"#)]
+fn given_policy_asks_about_raw(world: &mut BehaviourWorld, destination: String) {
+    seed_policy(world, |policy| {
+        policy
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::new(destination.clone(), Verdict::Ask))
+    });
+}
+
+fn seed_policy(world: &mut BehaviourWorld, add: impl FnOnce(&mut Policy)) {
+    let rig = world.approval();
+    let mut policy = rig.session.current_policy();
+    add(&mut policy);
+    policy
+        .save_atomic(&rig.policy_path)
+        .expect("save seeded policy");
+    rig.session.apply_external_policy(policy);
+    let _ = drain_frames(rig);
+}
+
+#[given(regex = r#"^an approval entry is visible for a raw splice to "([^"]+)"$"#)]
+fn given_raw_entry_visible(world: &mut BehaviourWorld, destination: String) {
+    let rig = world.approval();
+    rig.session
+        .submit_pending(make_raw_pending(&destination), Instant::now());
     let _ = drain_frames(rig);
 }
 
@@ -489,6 +573,206 @@ fn assert_file_rule(
         ));
     }
     Ok(())
+}
+
+#[then(regex = r#"^the allow rule sits ahead of the ask rule for "([^"]+)"$"#)]
+fn then_allow_precedes_ask(world: &mut BehaviourWorld, host: String) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let verdicts: Vec<Verdict> = on_disk
+        .network
+        .egress
+        .http
+        .iter()
+        .filter(|r| r.match_pattern == host)
+        .map(|r| r.verdict)
+        .collect();
+    if verdicts != vec![Verdict::Allow, Verdict::Ask] {
+        return Err(format!(
+            "the gate stops at the first match, so an approval behind the ask rule is dead: {verdicts:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r"^the new allow rule still terminates TLS$")]
+fn then_allow_still_terminates_tls(world: &mut BehaviourWorld) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let first = on_disk
+        .network
+        .egress
+        .http
+        .first()
+        .ok_or("the policy file holds no rules")?;
+    if first.verdict != Verdict::Allow || !first.tls_terminate {
+        return Err(format!(
+            "the allow decides the destination now, so dropping interception here silently stops credential injection for it: {first:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the raw allow rule sits ahead of the raw ask rule for "([^"]+)"$"#)]
+fn then_raw_allow_precedes_ask(
+    world: &mut BehaviourWorld,
+    destination: String,
+) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let verdicts: Vec<Verdict> = on_disk
+        .network
+        .egress
+        .tcp
+        .iter()
+        .filter(|r| r.match_pattern == destination)
+        .map(|r| r.verdict)
+        .collect();
+    if verdicts != vec![Verdict::Allow, Verdict::Ask] {
+        return Err(format!(
+            "an ask rule is the only way a raw card is ever raised, so an approval behind it is dead: {verdicts:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^"([^"]+)" contains a new raw allow rule for "([^"]+)"$"#)]
+fn then_file_contains_raw_allow(
+    world: &mut BehaviourWorld,
+    _filename: String,
+    destination: String,
+) -> Result<(), String> {
+    assert_raw_rule(world, &destination, Verdict::Allow)
+}
+
+#[then(regex = r#"^"([^"]+)" contains a new raw deny rule for "([^"]+)"$"#)]
+fn then_file_contains_raw_deny(
+    world: &mut BehaviourWorld,
+    _filename: String,
+    destination: String,
+) -> Result<(), String> {
+    assert_raw_rule(world, &destination, Verdict::Deny)
+}
+
+fn assert_raw_rule(
+    world: &mut BehaviourWorld,
+    destination: &str,
+    expected: Verdict,
+) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let matched = on_disk
+        .network
+        .egress
+        .tcp
+        .iter()
+        .find(|r| r.match_pattern == destination && r.verdict == expected)
+        .ok_or_else(|| {
+            format!(
+                "no {expected:?} rule for {destination} in the raw table: {:?}",
+                on_disk.network.egress.tcp
+            )
+        })?;
+    if matched.binaries.is_some() {
+        return Err("an approval grants the destination, not one binary".into());
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the raw table in "([^"]+)" stays empty$"#)]
+fn then_raw_table_empty(world: &mut BehaviourWorld, _filename: String) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    if !on_disk.network.egress.tcp.is_empty() {
+        return Err(format!(
+            "a rule the guest cannot parse force-denies the whole policy: {:?}",
+            on_disk.network.egress.tcp
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^"([^"]+)" holds no deny rule for "([^"]+)"$"#)]
+fn then_file_holds_no_deny_rule(
+    world: &mut BehaviourWorld,
+    _filename: String,
+    host: String,
+) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let denies: Vec<_> = on_disk
+        .network
+        .egress
+        .http
+        .iter()
+        .filter(|r| r.match_pattern == host && r.verdict == Verdict::Deny)
+        .collect();
+    if denies.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "a deny the gate can never reach reads as a deny that works: {denies:?}"
+    ))
+}
+
+#[then("the approval window informs the developer that a rule already decides the destination")]
+fn then_inform_shadowed_rule(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.approval();
+    let informed = rig.notifier.informed.lock().unwrap();
+    if informed.iter().any(|m| m.contains("already decides")) {
+        return Ok(());
+    }
+    Err(format!(
+        "expected an inform saying the decision outlived nothing, got {informed:?}"
+    ))
+}
+
+#[then("the approval window informs the developer that the rule it would write is unreachable")]
+fn then_inform_unreachable_rule(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.approval();
+    let informed = rig.notifier.informed.lock().unwrap();
+    if informed
+        .iter()
+        .any(|m| m.contains("already in the policy file, but behind the rule for"))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "expected an inform saying the rule the gate never reaches is already there, got {informed:?}"
+    ))
+}
+
+#[then(
+    regex = r#"^the approval window informs the developer that the HTTP rule for "([^"]+)" no longer applies$"#
+)]
+fn then_inform_pre_empted_http_rule(
+    world: &mut BehaviourWorld,
+    pattern: String,
+) -> Result<(), String> {
+    let rig = world.approval();
+    let informed = rig.notifier.informed.lock().unwrap();
+    if informed
+        .iter()
+        .any(|m| m.contains("spliced raw") && m.contains(&format!("{pattern:?}")))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "expected an inform naming the HTTP rule the splice displaces, got {informed:?}"
+    ))
+}
+
+#[then(
+    "the approval window informs the developer that the destination could not be turned into a rule"
+)]
+fn then_inform_underivable_rule(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.approval();
+    let informed = rig.notifier.informed.lock().unwrap();
+    if informed.iter().any(|m| m.contains("must specify a port")) {
+        return Ok(());
+    }
+    Err(format!(
+        "expected an inform naming why no rule could be written, got {informed:?}"
+    ))
+}
+
+fn on_disk_policy(world: &mut BehaviourWorld) -> Result<Policy, String> {
+    let rig = world.approval();
+    Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())
 }
 
 #[then("the running policy contains the same rule")]

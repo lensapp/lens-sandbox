@@ -23,6 +23,7 @@ spec:
     defaultVerdict: ask
     egress:
       http: []
+      tcp: []
   connectors: []
   credentials: []
   volumes:
@@ -230,9 +231,10 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     }
     writeln!(
         out,
-        "  policy:       defaultVerdict={} ({} route(s))",
+        "  policy:       defaultVerdict={} ({} route(s){})",
         verdict.trim_matches('"'),
-        def.spec.policy.egress.http.len()
+        def.spec.policy.egress.http.len(),
+        raw_rule_note(def.spec.policy.egress.tcp.len())
     )?;
     if !def.spec.connectors.is_empty() {
         writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;
@@ -251,6 +253,14 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         writeln!(out, "  tool: {tool}")?;
     }
     Ok(())
+}
+
+/// Raw rules are counted separately because they are spliced through uninspected — folding them into the route count would hide that.
+fn raw_rule_note(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        n => format!(", {n} raw TCP rule(s)"),
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +437,19 @@ mod tests {
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
+    }
+
+    #[test]
+    fn inspect_local_counts_raw_rules_apart_from_routes() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  policy:\n    defaultVerdict: ask\n    egress:\n      http:\n        - match: api.example.test\n          verdict: allow\n      tcp:\n        - match: db.internal:5432\n          verdict: allow\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("(1 route(s), 1 raw TCP rule(s))"),
+            "a raw splice is not one more inspected route; folding the counts would hide it: {text}"
+        );
     }
 
     #[test]

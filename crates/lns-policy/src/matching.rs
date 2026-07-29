@@ -3,7 +3,7 @@ use std::path::Path;
 
 use ipnet::IpNet;
 
-use crate::{NetworkPolicy, RouteRule, Scheme};
+use crate::{NetworkPolicy, RouteRule, Scheme, TcpEgressRule, Verdict};
 
 const CATCH_ALL: &str = "*";
 
@@ -34,12 +34,52 @@ impl NetworkPolicy {
             .enumerate()
             .find(|(_, existing)| shadows(existing, new))
     }
+
+    /// The [`Self::first_shadowing_rule`] of the raw table, which the gate scans first-match-wins the same way.
+    pub fn first_shadowing_tcp_rule(&self, new: &TcpEgressRule) -> Option<(usize, &TcpEgressRule)> {
+        self.egress
+            .tcp
+            .iter()
+            .enumerate()
+            .find(|(_, existing)| tcp_shadows(existing, new))
+    }
+
+    /// The `egress.http` rules a raw rule pre-empts on its port. The raw table is the pre-filter, so those rules are simply not applied there and the traffic is spliced unread — lens-sandbox-core computes the same pairs and leaves reporting them to its callers, silence being the failure mode.
+    pub fn http_rules_pre_empted_by(&self, raw: &TcpEgressRule) -> Vec<&RouteRule> {
+        if raw.verdict == Verdict::Deny {
+            return Vec::new();
+        }
+        let raw = classify(&raw.match_pattern);
+        // Whether a range covers a name is DNS's answer, so an address-matched raw rule is left to the guest, which sees the resolution.
+        let Hosts::Pattern(host) = raw.hosts else {
+            return Vec::new();
+        };
+        self.egress
+            .http
+            .iter()
+            .filter(|route| {
+                let route = classify(&route.match_pattern);
+                port_covers(&route.port, &raw.port)
+                    && matches!(route.hosts, Hosts::Pattern(pattern) if patterns_overlap(pattern, host))
+            })
+            .collect()
+    }
+}
+
+/// Whether two host patterns can name the same host, either one possibly a wildcard. Two mid-segment wildcards that nonetheless share hosts are not detected: this backs a warning, so a miss costs a line of output, not enforcement.
+fn patterns_overlap(one: &str, other: &str) -> bool {
+    domain_matches(one, other) || domain_matches(other, one)
 }
 
 fn shadows(existing: &RouteRule, new: &RouteRule) -> bool {
     scheme_covers(existing.scheme, new.scheme)
         && destination_covers(&existing.match_pattern, &new.match_pattern)
-        && caller_covers(existing, new)
+        && caller_covers(existing.binaries.as_deref(), new.binaries.as_deref())
+}
+
+fn tcp_shadows(existing: &TcpEgressRule, new: &TcpEgressRule) -> bool {
+    destination_covers(&existing.match_pattern, &new.match_pattern)
+        && caller_covers(existing.binaries.as_deref(), new.binaries.as_deref())
 }
 
 fn scheme_covers(existing: Option<Scheme>, new: Option<Scheme>) -> bool {
@@ -90,17 +130,35 @@ fn hosts_of(host: &str) -> Hosts<'_> {
 }
 
 fn split_port(pattern: &str) -> Option<(&str, u16)> {
-    if pattern.starts_with('[')
-        && let Some((bracketed, port)) = pattern.rsplit_once("]:")
-    {
-        return Some((bracketed.trim_start_matches('['), port.parse().ok()?));
+    let (host, port) = split_destination(pattern);
+    Some((host, port?.parse().ok()?))
+}
+
+/// A destination's address — brackets stripped, see [`unbracketed`] — and whatever sits in its port position, split the way lens-sandbox-core's `parse_matcher` splits one.
+pub fn split_destination(destination: &str) -> (&str, Option<&str>) {
+    if let Some((bracketed, port)) = destination.rsplit_once("]:") {
+        return (bracketed.trim_start_matches('['), Some(port));
     }
     // Several colons and no bracketed port means a bare IPv6 literal, not a host:port pair.
-    if pattern.matches(':').count() > 1 {
-        return None;
+    if destination.starts_with('[') || destination.matches(':').count() > 1 {
+        return (unbracketed(destination), None);
     }
-    let (host, port) = pattern.rsplit_once(':')?;
-    Some((host, port.parse().ok()?))
+    match destination.rsplit_once(':') {
+        // A tail that is no kind of number may be a hostname the author never meant to port-scope, so it is no port at all rather than a broken one.
+        Some((address, port)) if port_shaped(port) => (address, Some(port)),
+        _ => (destination, None),
+    }
+}
+
+/// An IPv6 literal without the brackets a `host:port` pattern needs to carry it; every other host unchanged.
+pub fn unbracketed(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+pub(crate) fn port_shaped(tail: &str) -> bool {
+    !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn destination_covers(existing: &str, new: &str) -> bool {
@@ -148,8 +206,8 @@ fn wildcard_covers(existing: &str, new: &str) -> bool {
     }
 }
 
-fn caller_covers(existing: &RouteRule, new: &RouteRule) -> bool {
-    match (existing.binaries.as_deref(), new.binaries.as_deref()) {
+fn caller_covers(existing: Option<&[String]>, new: Option<&[String]>) -> bool {
+    match (existing, new) {
         (None, _) => true,
         // A scoped rule claims the destination: the gate stops there for the callers it lists, and suppresses a later unrestricted allow or ask rather than let it re-open the rest. A later unrestricted deny is still reached, but it only repeats the denial they already get, so it is dead either way.
         (Some(_), None) => true,
@@ -579,6 +637,145 @@ mod tests {
             shadower_of(vec![https], &scoped("api.example.test", &["/usr/bin/curl"])),
             None,
             "a scheme-bound rule leaves plain-http requests to later rules"
+        );
+    }
+
+    fn tcp_shadower_of(existing: Vec<TcpEgressRule>, new: &TcpEgressRule) -> Option<usize> {
+        let mut network = NetworkPolicy::default();
+        network.egress.tcp = existing;
+        network
+            .first_shadowing_tcp_rule(new)
+            .map(|(index, _)| index)
+    }
+
+    #[test]
+    fn a_raw_range_shadows_a_later_rule_for_an_address_and_port_it_covers() {
+        assert_eq!(
+            tcp_shadower_of(
+                vec![TcpEgressRule::deny_destination("10.0.0.0/8:5432")],
+                &TcpEgressRule::allow_destination("10.0.0.5:5432")
+            ),
+            Some(0),
+            "the gate stops at the range, so an allow for one address behind it would never fire"
+        );
+    }
+
+    #[test]
+    fn a_raw_rule_on_one_port_does_not_shadow_another_port_on_the_same_host() {
+        assert_eq!(
+            tcp_shadower_of(
+                vec![TcpEgressRule::deny_destination("db.internal:5432")],
+                &TcpEgressRule::allow_destination("db.internal:6379")
+            ),
+            None,
+            "a raw grant is per port, so the other port is still undecided"
+        );
+    }
+
+    #[test]
+    fn a_destination_splits_into_the_address_and_port_core_reads_it_as() {
+        for (destination, address, port) in [
+            ("db.internal:5432", "db.internal", Some("5432")),
+            ("0.0.0.0/0:5432", "0.0.0.0/0", Some("5432")),
+            ("[::/0]:5432", "::/0", Some("5432")),
+            ("[2001:db8::1]:5432", "2001:db8::1", Some("5432")),
+            ("[2001:db8::1]:notaport", "2001:db8::1", Some("notaport")),
+            ("*:443", "*", Some("443")),
+            ("db.internal", "db.internal", None),
+            ("10.0.0.0/8", "10.0.0.0/8", None),
+            // A tail that is no number is no port, so the pattern keeps it: `db:notaport` names one host, not port `notaport` on `db`.
+            ("db:notaport", "db:notaport", None),
+            ("db.internal:65536", "db.internal", Some("65536")),
+            // Unbracketed IPv6 is a bare literal; reading its tail as a port would silently narrow the rule to port 1.
+            ("2001:db8::1", "2001:db8::1", None),
+            ("[2001:db8::1]", "2001:db8::1", None),
+        ] {
+            assert_eq!(
+                split_destination(destination),
+                (address, port),
+                "for {destination}"
+            );
+        }
+    }
+
+    fn tcp_allow_over(http: Vec<RouteRule>, raw: &str) -> Vec<String> {
+        let mut network = NetworkPolicy::default();
+        network.egress.http = http;
+        network
+            .http_rules_pre_empted_by(&TcpEgressRule::allow_destination(raw))
+            .iter()
+            .map(|rule| rule.match_pattern.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_raw_allow_pre_empts_the_http_rules_covering_its_host() {
+        assert_eq!(
+            tcp_allow_over(
+                vec![
+                    RouteRule::deny_host("db.internal"),
+                    RouteRule::allow_host("*.internal"),
+                    RouteRule::allow_host("other.internal"),
+                ],
+                "db.internal:5432"
+            ),
+            vec!["db.internal", "*.internal"],
+            "the raw table is consulted first, so both rules naming that host stop applying on that port"
+        );
+    }
+
+    #[test]
+    fn a_raw_allow_leaves_an_http_rule_pinned_to_another_port_alone() {
+        assert_eq!(
+            tcp_allow_over(
+                vec![RouteRule::deny_host("db.internal:6379")],
+                "db.internal:5432"
+            ),
+            Vec::<String>::new(),
+            "the pre-filter claims one port; the http rule for the other one still runs"
+        );
+    }
+
+    #[test]
+    fn a_raw_deny_pre_empts_nothing_because_it_grants_nothing() {
+        let mut network = NetworkPolicy::default();
+        network.egress.http = vec![RouteRule::allow_host("db.internal")];
+        assert!(
+            network
+                .http_rules_pre_empted_by(&TcpEgressRule::deny_destination("db.internal:5432"))
+                .is_empty(),
+            "a raw deny blocks the port outright; nothing is spliced past the http rules"
+        );
+    }
+
+    #[test]
+    fn a_raw_allow_matched_by_address_reports_no_pre_empted_http_rule() {
+        assert_eq!(
+            tcp_allow_over(
+                vec![RouteRule::allow_host("db.internal")],
+                "10.0.0.0/24:5432"
+            ),
+            Vec::<String>::new(),
+            "whether that range covers the name is only knowable once it resolves, which the guest sees and we do not"
+        );
+    }
+
+    #[test]
+    fn a_scoped_raw_rule_does_not_shadow_one_naming_a_binary_it_excludes() {
+        let existing = vec![TcpEgressRule {
+            binaries: Some(vec!["/usr/bin/psql".into()]),
+            ..TcpEgressRule::allow_destination("db.internal:5432")
+        }];
+        assert_eq!(
+            tcp_shadower_of(
+                existing,
+                &TcpEgressRule {
+                    binaries: Some(vec!["/usr/bin/nc".into()]),
+                    ..TcpEgressRule::allow_destination("db.internal:5432")
+                }
+            ),
+            None,
+            "the excluded caller scans on and the second scoped rule decides it"
         );
     }
 

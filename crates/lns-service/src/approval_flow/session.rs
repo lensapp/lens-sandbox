@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
-    Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending,
+    Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
 };
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
-use lns_policy::matching::domain_matches;
-use lns_policy::{Policy, PolicyStore, RouteRule};
+use lns_policy::matching::{domain_matches, split_destination, unbracketed};
+use lns_policy::{Approval, Policy, PolicyStore, RouteRule, TcpEgressRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 
@@ -65,14 +65,63 @@ pub struct PendingPrompt {
     pub offer: Option<String>,
     /// Some when the offered connector declares a token fallback, so the offer card can also reveal "use a token instead".
     pub token_fallback: Option<TokenFallback>,
+    /// `Raw` when approving splices the connection through unread, which the card has to say out loud.
+    pub treatment: Treatment,
 }
+
+impl PendingPrompt {
+    /// The destination badges the card shows, with `RAW` leading when nothing between the workload and the destination can read the traffic.
+    pub fn badges(&self) -> Vec<String> {
+        let mut badges = Vec::new();
+        if self.treatment == Treatment::Raw {
+            badges.push("RAW".to_string());
+        }
+        match self.action_port() {
+            Some(port) => badges.extend(["TCP".to_string(), port.to_string()]),
+            None => badges.push(self.action.clone()),
+        }
+        badges
+    }
+
+    fn action_port(&self) -> Option<&str> {
+        let (_, port) = split_destination(&self.action);
+        port.filter(|port| port.parse::<u16>().is_ok())
+    }
+
+    /// The one line a raw card must carry, because approving it grants traffic lns will never see.
+    pub fn caption(&self) -> Option<&'static str> {
+        match self.treatment {
+            Treatment::Raw => Some(RAW_SPLICE_CAPTION),
+            Treatment::Inspected => None,
+        }
+    }
+}
+
+const RAW_SPLICE_CAPTION: &str = "lns cannot inspect this traffic or inject credentials.";
 
 #[derive(Debug)]
 struct PendingEntry {
     host: String,
+    /// The gate's own name for the destination (`CONNECT db.internal:5432`) — the only place the port survives, since `host` reaches us already stripped of it.
+    action: String,
+    treatment: Treatment,
     deadline: Instant,
     offer: Option<OfferRef>,
     reason: String,
+}
+
+impl PendingEntry {
+    /// What the audit chain records as the destination: a raw splice is granted per port, so the host alone would understate the grant.
+    fn audit_target(&self) -> &str {
+        match self.treatment {
+            Treatment::Raw => self.raw_destination().unwrap_or(&self.host),
+            Treatment::Inspected => &self.host,
+        }
+    }
+
+    fn raw_destination(&self) -> Option<&str> {
+        raw_destination(&self.action, &self.host)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +255,10 @@ impl ApprovalSession {
     }
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
-        let matched = self.offer_id_and_name_for(&req.host);
+        // Connecting a connector arms credential injection, which an opaque splice can never carry — and the offer card has no room for the RAW disclosure.
+        let matched = (req.treatment == Treatment::Inspected)
+            .then(|| self.offer_id_and_name_for(&req.host))
+            .flatten();
         let offer_ref = matched.as_ref().map(|(id, name, _)| OfferRef {
             connector_id: id.clone(),
             display_name: name.clone(),
@@ -223,6 +275,8 @@ impl ApprovalSession {
             req.id.clone(),
             PendingEntry {
                 host: req.host.clone(),
+                action: req.action.clone(),
+                treatment: req.treatment,
                 deadline: now + self.timeout,
                 offer: offer_ref,
                 reason: req.reason.clone(),
@@ -242,6 +296,7 @@ impl ApprovalSession {
             action: req.action,
             offer,
             token_fallback,
+            treatment: req.treatment,
         });
     }
 
@@ -251,9 +306,7 @@ impl ApprovalSession {
         };
         self.notifier.dismiss(id);
         self.send_decision_frame(id, decision);
-        if let Some(rule) = rule_for_always_decision(&entry.host, decision) {
-            self.apply_persistent_rule(rule);
-        }
+        self.persist_always_decision(&entry, decision);
         self.record_approval(&entry, decision);
         DecisionOutcome::Resolved
     }
@@ -268,6 +321,29 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
+    /// Writes the rule an "always" decision earns into the table its treatment belongs to; a once-decision earns none.
+    fn persist_always_decision(&self, entry: &PendingEntry, decision: Decision) {
+        match entry.treatment {
+            Treatment::Inspected => {
+                if let Some(rule) = rule_for_always_decision(&entry.host, decision) {
+                    self.apply_persistent_rule(rule);
+                }
+            }
+            Treatment::Raw => match entry.raw_destination() {
+                Some(destination) => {
+                    if let Some(rule) = tcp_rule_for_always_decision(destination, decision) {
+                        self.apply_persistent_tcp_rule(rule);
+                    }
+                }
+                None if earns_a_rule(decision) => self.report_no_rule_written(&format!(
+                    "the gate named the destination {:?}, which this lns cannot read as a rule for {:?}",
+                    entry.action, entry.host
+                )),
+                None => {}
+            },
+        }
+    }
+
     fn record_approval(&self, entry: &PendingEntry, decision: Decision) {
         let Some(recorder) = self.ledger.get() else {
             return;
@@ -277,7 +353,7 @@ impl ApprovalSession {
         };
         recorder.record(LedgerEvent::Approval {
             kind: ApprovalKind::Network,
-            target: entry.host.clone(),
+            target: entry.audit_target().to_string(),
             decision,
             reason: (!entry.reason.is_empty()).then(|| entry.reason.clone()),
             connector: entry.offer.as_ref().map(|o| o.connector_id.clone()),
@@ -495,11 +571,67 @@ impl ApprovalSession {
     }
 
     fn apply_persistent_rule(&self, rule: RouteRule) {
-        let snapshot = {
+        let (approval, snapshot) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
-            policy.add_rule(rule);
-            policy.clone()
+            (policy.add_approved_rule(rule), policy.clone())
         };
+        self.publish_if_it_stands(approval, snapshot);
+    }
+
+    /// Says the decision stands for this request but outlived nothing, because a rule the guest cannot parse force-denies the whole policy and so is never written at all.
+    fn report_no_rule_written(&self, why: &str) {
+        self.notifier.inform(&format!(
+            "decision applied to this request only; no policy rule could be written: {why}"
+        ));
+    }
+
+    fn apply_persistent_tcp_rule(&self, rule: TcpEgressRule) {
+        // One rule lens-sandbox-core cannot parse force-denies the whole policy in the guest, so a destination we cannot express is not written at all.
+        if let Err(e) = rule.validate() {
+            self.report_no_rule_written(&e);
+            return;
+        }
+        let (approval, pre_empted, snapshot) = {
+            let mut policy = self.policy.lock().expect("policy mutex poisoned");
+            let pre_empted = pre_empted_http_patterns(&policy, &rule);
+            (
+                policy.add_approved_tcp_rule(rule),
+                pre_empted,
+                policy.clone(),
+            )
+        };
+        if !self.publish_if_it_stands(approval, snapshot) {
+            return;
+        }
+        // The raw table is consulted first, so this rule is what decides that port now; the http rules it displaces would otherwise go quiet without a word.
+        if !pre_empted.is_empty() {
+            self.notifier.inform(&format!(
+                "that traffic is now spliced raw, so these HTTP rules no longer apply to it: {}",
+                pre_empted.join(", ")
+            ));
+        }
+    }
+
+    /// A rule the gate would never reach is not written, so the developer hears that the answer they gave applied to that one request — silence would read as "remembered". Answers whether the decision stands.
+    fn publish_if_it_stands(&self, approval: Approval, snapshot: Policy) -> bool {
+        let why = match approval {
+            Approval::Stands => {
+                self.publish_and_persist(snapshot);
+                return true;
+            }
+            Approval::Shadowed(pattern) => format!(
+                "the rule for {pattern:?} already decides this destination and the guest stops at the first matching rule"
+            ),
+            Approval::Unreachable(pattern) => format!(
+                "this exact rule is already in the policy file, but behind the rule for {pattern:?} that the guest reaches first — move it ahead of that rule to stop being asked"
+            ),
+        };
+        self.report_no_rule_written(&why);
+        false
+    }
+
+    /// Hands the updated policy to the running guest first and to disk second, so a file that cannot be written still leaves the decision live for the rest of the run.
+    fn publish_and_persist(&self, snapshot: Policy) {
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
             network: Some(snapshot.network.clone()),
@@ -552,6 +684,37 @@ fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule>
         Decision::DenyAlways => Some(RouteRule::deny_host(host)),
         Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
     }
+}
+
+fn pre_empted_http_patterns(policy: &Policy, rule: &TcpEgressRule) -> Vec<String> {
+    policy
+        .network
+        .http_rules_pre_empted_by(rule)
+        .iter()
+        .map(|route| format!("{:?}", route.match_pattern))
+        .collect()
+}
+
+fn tcp_rule_for_always_decision(destination: &str, decision: Decision) -> Option<TcpEgressRule> {
+    match decision {
+        Decision::AllowAlways => Some(TcpEgressRule::allow_destination(destination)),
+        Decision::DenyAlways => Some(TcpEgressRule::deny_destination(destination)),
+        Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
+    }
+}
+
+/// Whether the developer asked for a decision that outlives this request, and so is owed an explanation when none can be written.
+fn earns_a_rule(decision: Decision) -> bool {
+    matches!(decision, Decision::AllowAlways | Decision::DenyAlways)
+}
+
+/// The gate's `CONNECT <destination>` taken verbatim, and `None` unless it names the frame's own host — a rule built from a misread action force-denies the whole policy in the guest.
+fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
+    let destination = action.strip_prefix("CONNECT ")?;
+    // Whether a port is present is validation's complaint to make, and a more specific one.
+    let (named, _) = split_destination(destination);
+    // The gate strips the port from `host` before sending it, so only its brackets come off here.
+    (named == unbracketed(host)).then_some(destination)
 }
 
 #[cfg(test)]
@@ -642,16 +805,18 @@ pub(crate) mod tests {
     }
 
     fn fixture_with_timeout(timeout: Duration) -> Fixture {
+        fixture_over(Policy::default(), timeout)
+    }
+
+    fn fixture_holding(policy: Policy) -> Fixture {
+        fixture_over(policy, TEST_TIMEOUT)
+    }
+
+    fn fixture_over(policy: Policy, timeout: Duration) -> Fixture {
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let session = ApprovalSession::new(
-            Policy::default(),
-            notifier.clone(),
-            store.clone(),
-            tx,
-            timeout,
-        );
+        let session = ApprovalSession::new(policy, notifier.clone(), store.clone(), tx, timeout);
         (session, notifier, store, rx)
     }
 
@@ -661,6 +826,20 @@ pub(crate) mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             reason: "policy-ambiguous".into(),
+            treatment: Treatment::Inspected,
+        }
+    }
+
+    fn raw_pending(id: &str, destination: &str) -> RequestPending {
+        let host = destination
+            .rsplit_once(':')
+            .map_or(destination, |(host, _)| host);
+        RequestPending {
+            id: id.into(),
+            host: host.into(),
+            action: format!("CONNECT {destination}"),
+            reason: "policy-ambiguous".into(),
+            treatment: Treatment::Raw,
         }
     }
 
@@ -712,6 +891,275 @@ pub(crate) mod tests {
                 connector: None,
             }
         );
+    }
+
+    #[test]
+    fn a_raw_decision_is_recorded_against_the_port_it_actually_granted() {
+        let (session, _n, _s, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        session.set_ledger_recorder(recorder.clone());
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(
+            *only_approval(&events),
+            LedgerEvent::Approval {
+                kind: ApprovalKind::Network,
+                target: "db.internal:5432".into(),
+                decision: LedgerDecision::AllowAlways,
+                reason: Some("policy-ambiguous".into()),
+                connector: None,
+            },
+            "a raw grant is per port; recording the bare host would overstate what was audited"
+        );
+    }
+
+    #[test]
+    fn a_raw_and_an_inspected_ask_for_one_destination_each_get_their_own_card() {
+        let (session, notifier, _s, _rx) = fixture();
+        session.submit_pending(pending("r-inspected", "db.internal"), Instant::now());
+        session.submit_pending(raw_pending("r-raw", "db.internal:5432"), Instant::now());
+        let presented = notifier.presented.lock().unwrap();
+        assert_eq!(
+            presented
+                .iter()
+                .map(|p| (p.id.as_str(), p.treatment))
+                .collect::<Vec<_>>(),
+            vec![
+                ("r-inspected", Treatment::Inspected),
+                ("r-raw", Treatment::Raw)
+            ],
+            "the two grants are not interchangeable, so neither may be answered by the other's card"
+        );
+    }
+
+    #[test]
+    fn a_raw_card_leads_with_raw_and_says_what_lns_cannot_do() {
+        let (session, notifier, _s, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        let presented = notifier.presented.lock().unwrap();
+        let prompt = presented.last().expect("a card");
+        assert_eq!(prompt.badges(), vec!["RAW", "TCP", "5432"]);
+        assert_eq!(
+            prompt.caption(),
+            Some("lns cannot inspect this traffic or inject credentials.")
+        );
+    }
+
+    #[test]
+    fn an_inspected_card_carries_no_raw_badge_and_no_caption() {
+        let (session, notifier, _s, _rx) = fixture();
+        session.submit_pending(pending("r1", "api.example.test"), Instant::now());
+        let presented = notifier.presented.lock().unwrap();
+        let prompt = presented.last().expect("a card");
+        assert_eq!(prompt.badges(), vec!["TCP", "443"]);
+        assert_eq!(prompt.caption(), None);
+    }
+
+    #[test]
+    fn a_card_for_an_action_with_no_port_shows_the_action_itself() {
+        let (session, notifier, _s, _rx) = fixture();
+        let mut req = pending("r1", "api.example.test");
+        req.action = "CONNECT api.example.test".into();
+        session.submit_pending(req, Instant::now());
+        let mut raw = raw_pending("r2", "db.internal");
+        raw.action = "CONNECT db.internal".into();
+        session.submit_pending(raw, Instant::now());
+        let presented = notifier.presented.lock().unwrap();
+        assert_eq!(
+            presented[0].badges(),
+            vec!["CONNECT api.example.test"],
+            "a badge row invented from a port we do not have would be a lie about the grant"
+        );
+        assert_eq!(
+            presented[1].badges(),
+            vec!["RAW", "CONNECT db.internal"],
+            "the port is what we could not read; that the traffic is opaque is still true"
+        );
+    }
+
+    #[test]
+    fn allow_always_on_a_raw_splice_writes_the_port_scoped_destination() {
+        let (session, _n, store, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        let saved = store.saves.lock().unwrap();
+        let policy = saved.last().expect("the decision is persisted");
+        assert_eq!(
+            policy.network.egress.tcp,
+            vec![TcpEgressRule::allow_destination("db.internal:5432")]
+        );
+        assert!(
+            policy.network.egress.http.is_empty(),
+            "a raw grant in the inspected table would be silently ignored by the pre-filter"
+        );
+    }
+
+    #[test]
+    fn allow_always_on_a_bracketed_ipv6_splice_keeps_the_destination_verbatim() {
+        let (session, _n, store, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "[2001:db8::1]:5432"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        let saved = store.saves.lock().unwrap();
+        assert_eq!(
+            saved.last().expect("saved").network.egress.tcp,
+            vec![TcpEgressRule::allow_destination("[2001:db8::1]:5432")],
+            "re-deriving the pattern from host and port is how a bracketed literal gets mangled"
+        );
+    }
+
+    #[test]
+    fn a_raw_destination_that_cannot_be_expressed_is_not_written_and_is_reported() {
+        let (session, notifier, store, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "db.internal"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "one unparseable rule force-denies the whole policy inside the guest"
+        );
+        let informed = notifier.informed.lock().unwrap();
+        assert_eq!(
+            *informed,
+            vec![
+                "decision applied to this request only; no policy rule could be written: egress.tcp rule \"db.internal\" must specify a port, e.g. \"host:443\" or \"10.0.0.0/24:443\"".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_raw_action_the_host_does_not_vouch_for_writes_no_rule_and_is_reported() {
+        let (session, notifier, store, _rx) = fixture();
+        let mut req = raw_pending("r1", "db.internal:5432");
+        req.action = "TCP db.internal:5432".into();
+        session.submit_pending(req, Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "an action we misread yields a pattern core cannot parse, and one of those force-denies the whole policy"
+        );
+        assert_eq!(
+            notifier.informed.lock().unwrap().len(),
+            1,
+            "the developer has to hear that the decision outlived nothing"
+        );
+    }
+
+    #[test]
+    fn a_raw_action_naming_a_different_host_than_the_frame_writes_no_rule() {
+        let (session, _n, store, _rx) = fixture();
+        let mut req = raw_pending("r1", "db.internal:5432");
+        req.action = "CONNECT evil.example:5432".into();
+        session.submit_pending(req, Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "the two fields disagree, so neither is trustworthy enough to splice a destination open forever"
+        );
+    }
+
+    #[test]
+    fn a_raw_action_the_host_does_not_vouch_for_is_audited_against_the_host() {
+        let (session, _n, _s, _rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        session.set_ledger_recorder(recorder.clone());
+        let mut req = raw_pending("r1", "db.internal:5432");
+        req.action = "TCP db.internal:5432".into();
+        session.submit_pending(req, Instant::now());
+        session.record_decision("r1", Decision::AllowOnce);
+        let events = recorder.events.lock().unwrap();
+        assert!(
+            matches!(only_approval(&events), LedgerEvent::Approval { target, .. } if target.as_str() == "db.internal"),
+            "an unreadable action still has to leave an audit record, and the host is the part the frame vouched for: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_once_decision_on_an_unreadable_raw_action_says_nothing() {
+        let (session, notifier, _s, _rx) = fixture();
+        let mut req = raw_pending("r1", "db.internal:5432");
+        req.action = "TCP db.internal:5432".into();
+        session.submit_pending(req, Instant::now());
+        session.record_decision("r1", Decision::AllowOnce);
+        assert!(
+            notifier.informed.lock().unwrap().is_empty(),
+            "a once-decision was never going to write a rule, so there is nothing to apologise for"
+        );
+    }
+
+    #[test]
+    fn a_once_decision_on_a_raw_splice_writes_no_rule() {
+        let (session, _n, store, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        assert_eq!(
+            session.record_decision("r1", Decision::AllowOnce),
+            DecisionOutcome::Resolved
+        );
+        assert!(store.saves.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deny_always_on_a_raw_splice_writes_a_raw_deny() {
+        let (session, _n, store, _rx) = fixture();
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        session.record_decision("r1", Decision::DenyAlways);
+        let saved = store.saves.lock().unwrap();
+        assert_eq!(
+            saved.last().expect("saved").network.egress.tcp,
+            vec![TcpEgressRule::deny_destination("db.internal:5432")]
+        );
+    }
+
+    #[test]
+    fn a_second_always_decision_the_first_ones_rule_pre_empts_writes_nothing_and_says_so() {
+        let mut asking = Policy::default();
+        asking.add_rule(RouteRule {
+            verdict: Verdict::Ask,
+            ..RouteRule::allow_host("api.example.test")
+        });
+        let (session, notifier, store, _rx) = fixture_holding(asking);
+        session.submit_pending(pending("r1", "api.example.test"), Instant::now());
+        session.submit_pending(pending("r2", "api.example.test"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        session.record_decision("r2", Decision::DenyAlways);
+        let saved = store.saves.lock().unwrap();
+        assert_eq!(
+            saved
+                .last()
+                .expect("the first decision is persisted")
+                .network
+                .egress
+                .http
+                .iter()
+                .map(|r| r.verdict)
+                .collect::<Vec<_>>(),
+            vec![Verdict::Allow, Verdict::Ask],
+            "a deny written behind the allow the first card wrote never fires, so it is not written: {saved:?}"
+        );
+        assert_eq!(
+            *notifier.informed.lock().unwrap(),
+            vec![
+                "decision applied to this request only; no policy rule could be written: the rule for \"api.example.test\" already decides this destination and the guest stops at the first matching rule".to_string()
+            ],
+            "silence here reads as remembered, and the developer's always-deny was not"
+        );
+    }
+
+    #[test]
+    fn a_raw_always_deny_a_standing_raw_allow_pre_empts_writes_nothing_and_says_so() {
+        let mut standing = Policy::default();
+        standing
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.internal:5432"));
+        let (session, notifier, store, _rx) = fixture_holding(standing);
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        session.record_decision("r1", Decision::DenyAlways);
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "the standing raw allow is what the gate reaches, so a deny behind it is a line that never fires"
+        );
+        assert_eq!(notifier.informed.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1463,6 +1911,26 @@ pub(crate) mod tests {
             Some("GitHub"),
             "a held request to a connector domain offers to connect it"
         );
+    }
+
+    #[test]
+    fn a_raw_splice_to_a_connector_domain_is_never_offered_as_a_connect() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            None,
+        );
+        s.submit_pending(
+            raw_pending("r1", "api.some-oauth.example:5432"),
+            Instant::now(),
+        );
+        let presented = n.presented.lock().unwrap();
+        let prompt = &presented[0];
+        assert_eq!(
+            prompt.offer, None,
+            "connecting arms credential injection, which an opaque splice can never carry; the offer card would also hide the RAW disclosure"
+        );
+        assert_eq!(prompt.badges(), vec!["RAW", "TCP", "5432"]);
+        assert_eq!(prompt.caption(), Some(RAW_SPLICE_CAPTION));
     }
 
     #[test]

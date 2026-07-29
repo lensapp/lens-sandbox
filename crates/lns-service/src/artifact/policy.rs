@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use lns_policy::{NetworkPolicy, Policy, RouteRule, Verdict};
+use lns_policy::matching::split_destination;
+use lns_policy::{NetworkPolicy, Policy, RouteRule, TcpEgressRule, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardrailFlag {
@@ -51,13 +52,25 @@ pub fn guardrail_flags(policy: &Policy) -> Vec<GuardrailFlag> {
     if policy.network.default_verdict == Verdict::Allow {
         flags.push(GuardrailFlag::PermissiveDefaultVerdict);
     }
-    for rule in &policy.network.egress.http {
-        if rule.verdict != Verdict::Allow {
-            continue;
-        }
-        if is_broad_wildcard(&rule.match_pattern) {
+    // A raw splice is granted with no inspection at all, so a broad `egress.tcp` allow is the widest grant a policy can express and is held to the same checks.
+    let http = policy
+        .network
+        .egress
+        .http
+        .iter()
+        .map(|rule| (rule.verdict, rule.match_pattern.as_str()));
+    let tcp = policy
+        .network
+        .egress
+        .tcp
+        .iter()
+        .map(|rule| (rule.verdict, rule.match_pattern.as_str()));
+    for (_, pattern) in http.chain(tcp).filter(|(v, _)| *v == Verdict::Allow) {
+        // The breadth checks read the address a rule really covers: `0.0.0.0/0:5432` is no narrower than `0.0.0.0/0`.
+        let (address, _) = split_destination(pattern);
+        if is_broad_wildcard(address) {
             flags.push(GuardrailFlag::WildcardAllow);
-        } else if is_broad_cidr(&rule.match_pattern) {
+        } else if is_broad_cidr(address) {
             flags.push(GuardrailFlag::BroadCidrAllow);
         }
     }
@@ -101,6 +114,16 @@ fn allowed_by_every_ceiling<R>(
 /// Whether `permitted` covers `rule`: identical apart from binary scoping and the human-readable note neither layer grants anything by, and scoped no tighter than `rule` — a rule that only narrows a ceiling's grant to fewer callers grants nothing the ceiling didn't.
 fn permits(permitted: &RouteRule, rule: &RouteRule) -> bool {
     let widened = RouteRule {
+        binaries: permitted.binaries.clone(),
+        description: permitted.description.clone(),
+        ..rule.clone()
+    };
+    widened == *permitted && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
+}
+
+/// The `egress.tcp` counterpart of [`permits`], scoping included: a ceiling that splices a destination for every caller also covers a rule splicing it for some of them.
+fn tcp_permits(permitted: &TcpEgressRule, rule: &TcpEgressRule) -> bool {
+    let widened = TcpEgressRule {
         binaries: permitted.binaries.clone(),
         description: permitted.description.clone(),
         ..rule.clone()
@@ -161,6 +184,14 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
         |rule: &RouteRule| rule.verdict == Verdict::Deny,
         permits,
     );
+    // Folded independently of `http`: an inspected route in a ceiling is not consent to splice the same host raw.
+    let tcp = merge_rule_table(
+        &layers,
+        &ceilings,
+        |policy| &policy.network.egress.tcp,
+        |rule: &TcpEgressRule| rule.verdict == Verdict::Deny,
+        tcp_permits,
+    );
     let default_verdict = if layers
         .iter()
         .any(|l| l.network.default_verdict == Verdict::Deny)
@@ -171,7 +202,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     };
     Policy {
         network: NetworkPolicy {
-            egress: lns_policy::Egress { http },
+            egress: lns_policy::Egress { http, tcp },
             default_verdict,
             default_transport: overlay.network.default_transport,
         },
@@ -225,6 +256,59 @@ mod tests {
     }
 
     #[test]
+    fn a_port_suffix_does_not_hide_the_address_a_rule_really_covers() {
+        assert_eq!(
+            guardrail_flags(&tcp_allowing("[::/0]:5432")),
+            vec![GuardrailFlag::BroadCidrAllow],
+            "a bracketed range with a port is the same range; reading the pattern verbatim would miss it"
+        );
+    }
+
+    fn tcp_allowing(destination: &str) -> Policy {
+        let mut p = Policy::default();
+        p.network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination(destination));
+        p
+    }
+
+    #[test]
+    fn guardrail_flags_a_broad_raw_splice_and_leaves_a_scoped_one_alone() {
+        assert_eq!(
+            guardrail_flags(&tcp_allowing("0.0.0.0/0:5432")),
+            vec![GuardrailFlag::BroadCidrAllow],
+            "an opaque splice to every address is the widest grant a policy can express"
+        );
+        assert!(
+            guardrail_flags(&tcp_allowing("db.internal:5432")).is_empty(),
+            "one named database is exactly the least-privilege shape raw egress is for"
+        );
+    }
+
+    #[test]
+    fn guardrail_flags_a_whole_tld_raw_splice() {
+        assert_eq!(
+            guardrail_flags(&tcp_allowing("*.com:443")),
+            vec![GuardrailFlag::WildcardAllow]
+        );
+    }
+
+    #[test]
+    fn guardrail_ignores_a_raw_deny_however_broad() {
+        let mut policy = Policy::default();
+        policy
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::deny_destination("0.0.0.0/0:5432"));
+        assert!(
+            guardrail_flags(&policy).is_empty(),
+            "a broad deny narrows the sandbox; only a broad allow is a guardrail concern"
+        );
+    }
+
+    #[test]
     fn an_empty_flag_set_produces_no_summary() {
         assert!(run_summary(&[]).is_empty());
     }
@@ -248,6 +332,110 @@ mod tests {
             "a first-match gate must see the deny first: {routes:?}"
         );
         assert_eq!(merged.network.default_verdict, Verdict::Ask);
+    }
+
+    fn tcp_allow(destination: &str) -> Policy {
+        let mut p = Policy::default();
+        p.network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination(destination));
+        p
+    }
+
+    fn tcp_deny(destination: &str) -> Policy {
+        let mut p = Policy::default();
+        p.network
+            .egress
+            .tcp
+            .push(TcpEgressRule::deny_destination(destination));
+        p
+    }
+
+    #[test]
+    fn merge_carries_both_layers_tcp_rules_denies_first() {
+        let baseline = tcp_allow("db.internal:5432");
+        let overlay = tcp_deny("db.internal:5432");
+        let merged = merge_effective(Some(&baseline), &overlay);
+        assert_eq!(
+            merged
+                .network
+                .egress
+                .tcp
+                .iter()
+                .map(|r| r.verdict)
+                .collect::<Vec<_>>(),
+            vec![Verdict::Deny, Verdict::Allow],
+            "the raw table is first-match-wins too, so a deny that lands second never fires"
+        );
+    }
+
+    #[test]
+    fn a_deny_by_default_layer_clamps_the_other_layers_tcp_allow() {
+        let mut ceiling = Policy::default();
+        ceiling.network.default_verdict = Verdict::Deny;
+        let merged = merge_effective(Some(&ceiling), &tcp_allow("db.internal:5432"));
+        assert!(
+            merged.network.egress.tcp.is_empty(),
+            "a locked-down layer names every destination it permits; the user cannot widen it"
+        );
+    }
+
+    #[test]
+    fn an_http_allow_in_a_ceiling_does_not_legitimize_a_raw_splice() {
+        let mut ceiling = allow("db.internal");
+        ceiling.network.default_verdict = Verdict::Deny;
+        let merged = merge_effective(Some(&ceiling), &tcp_allow("db.internal:5432"));
+        assert!(
+            merged.network.egress.tcp.is_empty(),
+            "an inspected route is not consent to splice the same host opaquely; the tables clamp independently"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_raw_allow_that_only_narrows_which_binary_a_ceiling_already_splices() {
+        let mut overlay = tcp_allow("db.internal:5432");
+        overlay.network.egress.tcp[0].binaries = Some(vec!["/usr/bin/psql".into()]);
+        let mut ceiling = tcp_allow("db.internal:5432");
+        ceiling.network.default_verdict = Verdict::Deny;
+
+        let merged = merge_effective(Some(&ceiling), &overlay);
+
+        let scoped = merged
+            .network
+            .egress
+            .tcp
+            .iter()
+            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/psql".to_string()]));
+        let open =
+            merged.network.egress.tcp.iter().position(|rule| {
+                rule.match_pattern == "db.internal:5432" && rule.binaries.is_none()
+            });
+        assert!(
+            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
+            "narrowing a splice the ceiling already grants every caller must survive, and a first-match gate must reach the narrower rule first or the narrowing is void: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_drops_a_raw_allow_for_a_binary_the_ceilings_own_scope_excludes() {
+        let mut overlay = tcp_allow("db.internal:5432");
+        overlay.network.egress.tcp[0].binaries = Some(vec!["/usr/bin/nc".into()]);
+        let mut ceiling = tcp_allow("db.internal:5432");
+        ceiling.network.egress.tcp[0].binaries = Some(vec!["/usr/bin/psql".into()]);
+        ceiling.network.default_verdict = Verdict::Deny;
+
+        let merged = merge_effective(Some(&ceiling), &overlay);
+
+        assert!(
+            !merged
+                .network
+                .egress
+                .tcp
+                .iter()
+                .any(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/nc".to_string()])),
+            "a ceiling that splices a destination for one binary must not be widened to another by an overlay scoped to it: {merged:?}"
+        );
     }
 
     #[test]

@@ -20,3 +20,11 @@ Feature: an over-broad shipped policy is surfaced, never hidden
     Given a sandbox whose policy allows the CIDR "0.0.0.0/0"
     When the first-run summary is produced
     Then the run summary prominently flags the broad CIDR allow
+
+  # A raw-TCP allow is spliced through with no inspection at all, so a broad one is
+  # the widest grant a policy file can express — it must not be the single shape the
+  # guardrail cannot see.
+  Scenario: A sandbox policy with a broad raw-TCP allow is flagged on first run
+    Given a sandbox whose policy splices the CIDR "0.0.0.0/0:5432" raw
+    When the first-run summary is produced
+    Then the run summary prominently flags the broad CIDR allow

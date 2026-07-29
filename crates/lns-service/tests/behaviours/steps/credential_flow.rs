@@ -226,6 +226,7 @@ fn when_workload_sends_to_host_with_placeholder(world: &mut BehaviourWorld, host
             host: host.clone(),
             action: format!("CONNECT {host}:443"),
             reason: "policy-ambiguous".into(),
+            treatment: lns_service::approval_flow::protocol::Treatment::Inspected,
         };
         approval_rig.session.submit_pending(req, Instant::now());
     }

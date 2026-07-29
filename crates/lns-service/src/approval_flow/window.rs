@@ -632,6 +632,7 @@ fn read_host_fonts() -> HostFonts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::protocol::Treatment;
     use crate::credential_flow::store::CredentialEntry;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -642,6 +643,7 @@ mod tests {
             action: format!("CONNECT {host}:443"),
             offer: None,
             token_fallback: None,
+            treatment: Treatment::Inspected,
         }
     }
 
@@ -817,6 +819,7 @@ mod tests {
             action: format!("CONNECT {host}:443"),
             offer: Some(name.into()),
             token_fallback: None,
+            treatment: Treatment::Inspected,
         }
     }
 

@@ -35,6 +35,20 @@ pub struct RequestPending {
     pub host: String,
     pub action: String,
     pub reason: String,
+    /// Absent on a guest that predates the field; either way the reading that grants less is the safe default.
+    #[serde(default)]
+    pub treatment: Treatment,
+}
+
+/// What approving a held request actually permits: `action` renders identically either way, but a raw splice is opaque to the proxy — no HTTP rules, no credential injection, no per-request audit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Treatment {
+    Raw,
+    /// Also the reading of a treatment a later guest names and this lns doesn't know: failing the frame would drop the card and hang the workload until the approval times out, and of the two this is the one that grants less.
+    #[default]
+    #[serde(other)]
+    Inspected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,8 +171,31 @@ mod tests {
             .expect("a null or scalar egress makes the guest force-deny every destination");
         assert_eq!(
             egress.keys().collect::<Vec<_>>(),
-            ["http"],
+            ["http", "tcp"],
             "core denies unknown fields under egress, so one stray key fails the whole policy closed: {egress:?}"
+        );
+    }
+
+    #[test]
+    fn the_policy_frame_publishes_a_tcp_rule_without_a_transport() {
+        let mut net = NetworkPolicy::default();
+        net.egress
+            .tcp
+            .push(lns_policy::TcpEgressRule::allow_destination(
+                "db.internal:5432",
+            ));
+        let frame = HostFrame::Policy(PolicyMessage {
+            network: Some(net),
+            credentials: None,
+        });
+        let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
+        let rule = v["network"]["egress"]["tcp"][0]
+            .as_object()
+            .expect("the tcp table carries the rule");
+        assert_eq!(rule["match"], "db.internal:5432");
+        assert!(
+            !rule.contains_key("transport"),
+            "raw egress is always direct: core's TcpEgressRule has no transport and would ignore ours, so publishing one would put a routing choice on the wire that nothing honors: {rule:?}"
         );
     }
 
@@ -226,7 +263,8 @@ mod tests {
             "id": "req-42",
             "host": "api.linear.app",
             "action": "CONNECT api.linear.app:443",
-            "reason": "policy-ambiguous"
+            "reason": "policy-ambiguous",
+            "treatment": "inspected"
         }"#;
         let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
         assert!(
@@ -234,8 +272,59 @@ mod tests {
                 if rp.id == "req-42"
                     && rp.host == "api.linear.app"
                     && rp.action == "CONNECT api.linear.app:443"
-                    && rp.reason == "policy-ambiguous"),
+                    && rp.reason == "policy-ambiguous"
+                    && rp.treatment == Treatment::Inspected),
             "got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_raw_splice_prompt_parses_with_its_treatment() {
+        let raw = r#"{
+            "type": "request_pending",
+            "id": "req-43",
+            "host": "db.internal:5432",
+            "action": "CONNECT db.internal:5432",
+            "reason": "policy-ambiguous",
+            "treatment": "raw"
+        }"#;
+        let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
+        assert!(
+            matches!(&parsed, GuestFrame::RequestPending(rp) if rp.treatment == Treatment::Raw),
+            "a raw splice is the consequential approval; reading it as inspected would persist the wrong table: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_from_a_guest_that_predates_treatment_reads_as_inspected() {
+        let raw = r#"{
+            "type": "request_pending",
+            "id": "req-44",
+            "host": "api.linear.app",
+            "action": "CONNECT api.linear.app:443",
+            "reason": "policy-ambiguous"
+        }"#;
+        let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
+        assert!(
+            matches!(&parsed, GuestFrame::RequestPending(rp) if rp.treatment == Treatment::Inspected),
+            "a missing treatment must not fail the frame, and inspected is the answer that grants less: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_carrying_a_treatment_this_lns_does_not_know_still_raises_a_card() {
+        let raw = r#"{
+            "type": "request_pending",
+            "id": "req-45",
+            "host": "api.linear.app",
+            "action": "CONNECT api.linear.app:443",
+            "reason": "policy-ambiguous",
+            "treatment": "some-later-treatment"
+        }"#;
+        let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
+        assert!(
+            matches!(&parsed, GuestFrame::RequestPending(rp) if rp.treatment == Treatment::Inspected),
+            "failing the frame would drop the card entirely and hang the workload until the approval times out: {parsed:?}"
         );
     }
 

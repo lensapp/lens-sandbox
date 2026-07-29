@@ -15,6 +15,7 @@ it:
 network:
   egress:
     http: []
+    tcp: []
   defaultVerdict: ask
 ```
 
@@ -76,6 +77,63 @@ A `match` pattern can be:
 `egress.http` used to be a top-level `allowedRoutes:` list. That key is gone: a
 policy file still naming it is refused with an error rather than loaded as a
 policy with no rules. Move the list under `egress: http:`.
+
+### Raw TCP destinations
+
+Not everything a workload connects to speaks HTTP. A Postgres client, a Redis
+client, an SSH session — Lens Sandbox cannot read those, so it cannot apply
+`egress.http` rules to them. `egress.tcp` is where you name the ones you want to
+allow anyway:
+
+```yaml
+network:
+  defaultVerdict: ask
+  egress:
+    http:
+      - match: api.github.com
+        verdict: allow
+    tcp:
+      - match: db.internal:5432
+        verdict: allow
+        description: project database
+```
+
+A connection matching a `tcp` rule is **spliced through untouched**: no TLS
+interception, no HTTP rules, no credential injection, and no per-request record
+in the audit chain — only the connection itself. Everything else about the rule
+works the way an `egress.http` rule does, first match wins.
+
+Three things are worth knowing:
+
+- **`tcp` is a pre-filter, not a second policy.** It is consulted before
+  `egress.http`. A destination no `tcp` rule names is untouched by the table and
+  goes on to be matched, inspected and gated exactly as before. An empty `tcp`
+  list changes nothing.
+- **Every `tcp` rule must name a port.** `db.internal` is rejected;
+  `db.internal:5432` is a rule. Because the traffic is passed through unread,
+  "any port on this host" is not a grant Lens Sandbox will write. IPv6 uses
+  bracket notation: `[2001:db8::1]:5432`, `[2001:db8::/32]:5432`.
+- **`defaultVerdict` never sends anything here.** An unmatched destination falls
+  through to the HTTP side; it is never spliced raw by default. Which means an
+  approval card for a raw splice only appears where you asked for one:
+
+```bash
+lns policy ask-tcp db.internal:5432
+```
+
+An optional `binaries:` list scopes a rule to specific callers, matched against
+the guest's `/proc/<pid>/exe`, so the paths must be absolute:
+
+```yaml
+    tcp:
+      - match: db.internal:5432
+        verdict: allow
+        binaries: ["/usr/bin/psql"]
+```
+
+A `tcp:` block makes the file unreadable by an lns older than the release that
+introduced it. It fails loudly rather than silently dropping the rule, which for
+a rule that grants uninspected traffic is the right way round.
 
 ### Scoping a rule to specific binaries
 
@@ -218,21 +276,52 @@ range or IP literal is compared numerically, but whether a *hostname* rule resol
 into a range is DNS's answer, not the file's. A scoped rule for a host behind a
 broad CIDR allow is left where you put it, so order those by hand.
 
+### Add a raw TCP rule
+
+The `-tcp` verbs write to `egress.tcp` instead, and require a port:
+
+```bash
+lns policy allow-tcp db.internal:5432 --description "project database"
+lns policy deny-tcp  10.0.0.0/8:5432
+lns policy ask-tcp   cache.internal:6379
+```
+
+`allow-tcp` and `ask-tcp` take `--binary` the way `allow` does, which on a raw
+destination is the narrowest the grant gets — nothing between the workload and it can
+read the traffic, so the one caller allowed to open it is the whole of the control:
+
+```bash
+lns policy allow-tcp db.internal:5432 --binary /usr/bin/psql
+```
+
+The raw table is first-match-wins, so these place a rule where it will actually
+fire — in front of any rule already covering the same destination, saying so when
+they do — and refuse a rule an existing raw deny would make dead.
+
+Because `tcp` is the pre-filter, a raw rule also takes its destination over from the
+`egress.http` rules naming that host on that port: those rules stop applying to it.
+The `-tcp` verbs say which ones, and refuse outright when one of them is a `deny` —
+lifting a block you wrote is a widening of your own policy, so narrow or remove that
+deny first if that is what you mean.
+
 ### List rules
 
 ```bash
 lns policy list
 ```
 
-The `BINARIES` column shows what each rule is scoped to, and `--format json` reports
-the same under `binaries` (`null` for a rule open to every caller).
+The `TABLE` column says which table each rule is in — `http` for inspected
+routes, `tcp` for raw splices. The `BINARIES` column shows what each rule is scoped
+to. `--format json` reports both, under `table` and `binaries` (`null` for a rule
+open to every caller).
 
 ### Remove a rule
 
-Remove every rule matching a destination pattern:
+Remove every rule matching a destination pattern, from either table:
 
 ```bash
 lns policy remove api.github.com
+lns policy remove db.internal:5432
 ```
 
 Removal goes by pattern alone, so it deletes *every* rule for that destination —
@@ -250,6 +339,20 @@ approval window with the host and the action — for example
   to the policy file.
 - **Allow always** / **Deny always** — apply now *and* write a matching rule to
   the policy file, so the same question isn't asked again.
+
+**Always** writes a rule only where the guest would reach it. If some rule already
+decides that destination — an earlier answer, or a rule you wrote — the gate stops
+there, so a second one behind it would never fire. Nothing is written and the
+approval window says the decision applied to that request alone. Same if the file
+already holds the very rule the answer would write, but behind the `ask` rule that
+raised the card: rather than reorder a file you wrote, the window tells you where the
+rule is so you can move it ahead yourself.
+
+A card raised by a `verdict: ask` rule in `egress.tcp` is marked **RAW** and says
+so in as many words: Lens Sandbox cannot inspect that traffic or inject
+credentials into it. Allowing it always writes a port-scoped rule —
+`db.internal:5432`, never `db.internal` — and names any `egress.http` rule that
+stops applying to that traffic, since a raw splice is read by nothing.
 
 A denied request fails at the boundary the way a genuine network error would (a
 refused connection, a failed DNS lookup, an HTTP error). The workload never gets a
