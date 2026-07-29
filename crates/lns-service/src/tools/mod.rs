@@ -130,12 +130,27 @@ struct ToolPlan {
     hits: HashMap<String, cache::ToolManifest>,
     misses: Vec<ToolRef>,
     record_changed: bool,
+    pins: ResolvedPins,
 }
 
 impl ToolPlan {
     fn is_fully_warm(&self) -> bool {
         self.misses.is_empty() && !self.record_changed
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct ResolvedPins(Vec<ResolvedPin>);
+
+#[derive(Clone)]
+struct ResolvedPin {
+    request: String,
+    version: Option<SafeVersion>,
+}
+
+pub(crate) struct PreparedTools {
+    pub ready: Option<EnsuredTools>,
+    pub pins: ResolvedPins,
 }
 
 /// A blackholing proxy or captive portal answers neither way, so the index query is bounded: the documented fallback to the last version resolved here only holds if a stalled query becomes an error instead of a hung launch.
@@ -185,6 +200,7 @@ async fn plan_tools<R, C, P>(
     cache: &C,
     provisioner: &P,
     ask: &EnsureRequest<'_>,
+    resolved: Option<&ResolvedPins>,
 ) -> Result<ToolPlan, ProvisionError>
 where
     R: ToolRecordStore,
@@ -220,18 +236,45 @@ where
                 .map(|entry| entry.resolved.clone())
         })
         .collect();
-    let pins_and_changes = futures_util::future::join_all(
-        ask.requests
-            .iter()
-            .zip(recorded)
-            .map(|(request, recorded)| effective_pin(provisioner, request, recorded)),
-    )
-    .await;
-    let mut pins = Vec::with_capacity(pins_and_changes.len());
-    for (pinned, pin_changed) in pins_and_changes {
-        record_changed |= pin_changed;
-        pins.push(pinned);
-    }
+    let pins = match resolved {
+        Some(resolved) => {
+            if resolved.0.len() != ask.requests.len()
+                || ask
+                    .requests
+                    .iter()
+                    .zip(&resolved.0)
+                    .any(|(request, pinned)| request.to_string() != pinned.request)
+            {
+                return Err(ProvisionError::Engine(
+                    "resolved tool pins do not match the declared tool set".into(),
+                ));
+            }
+            for ((request, recorded), pinned) in ask.requests.iter().zip(&recorded).zip(&resolved.0)
+            {
+                record_changed |= request.version == LATEST && recorded != &pinned.version;
+            }
+            resolved
+                .0
+                .iter()
+                .map(|pinned| pinned.version.clone())
+                .collect()
+        }
+        None => {
+            let pins_and_changes = futures_util::future::join_all(
+                ask.requests
+                    .iter()
+                    .zip(recorded)
+                    .map(|(request, recorded)| effective_pin(provisioner, request, recorded)),
+            )
+            .await;
+            let mut pins = Vec::with_capacity(pins_and_changes.len());
+            for (pinned, pin_changed) in pins_and_changes {
+                record_changed |= pin_changed;
+                pins.push(pinned);
+            }
+            pins
+        }
+    };
 
     // What this sandbox declares is what it already trusts, so it is the yardstick for adopting a tree a neighbour shared a guest with.
     let mut declared: Vec<String> = ask.requests.iter().map(ToolRef::to_string).collect();
@@ -247,8 +290,8 @@ where
     );
     let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
     let mut misses: Vec<ToolRef> = Vec::new();
-    for (request, pinned) in ask.requests.iter().zip(pins) {
-        let manifest = match &pinned {
+    for (request, pinned) in ask.requests.iter().zip(&pins) {
+        let manifest = match pinned {
             Some(resolved) => cache
                 .lookup(
                     &ToolCacheKey {
@@ -280,6 +323,7 @@ where
             None => misses.push(ToolRef {
                 name: request.name.clone(),
                 version: pinned
+                    .clone()
                     .map(SafeVersion::into)
                     .unwrap_or_else(|| request.version.clone()),
             }),
@@ -290,6 +334,16 @@ where
         hits,
         misses,
         record_changed,
+        pins: ResolvedPins(
+            ask.requests
+                .iter()
+                .zip(pins)
+                .map(|(request, version)| ResolvedPin {
+                    request: request.to_string(),
+                    version,
+                })
+                .collect(),
+        ),
     })
 }
 
@@ -330,11 +384,30 @@ where
     C: ToolCache,
     P: ToolProvisioner,
 {
-    let plan = plan_tools(records, cache, provisioner, ask).await?;
-    if !plan.is_fully_warm() {
-        return Ok(None);
-    }
-    compose(ask.requests, &plan.hits, Vec::new()).map(Some)
+    Ok(prepare_tools(records, cache, provisioner, ask).await?.ready)
+}
+
+pub(crate) async fn prepare_tools<R, C, P>(
+    records: &R,
+    cache: &C,
+    provisioner: &P,
+    ask: &EnsureRequest<'_>,
+) -> Result<PreparedTools, ProvisionError>
+where
+    R: ToolRecordStore,
+    C: ToolCache,
+    P: ToolProvisioner,
+{
+    let plan = plan_tools(records, cache, provisioner, ask, None).await?;
+    let ready = if plan.is_fully_warm() {
+        Some(compose(ask.requests, &plan.hits, Vec::new())?)
+    } else {
+        None
+    };
+    Ok(PreparedTools {
+        ready,
+        pins: plan.pins,
+    })
 }
 
 /// Extracting and hashing a tool tree holds the thread for the length of the tar, so it moves off the async worker; a current-thread runtime (tests) has nowhere to move it and runs it inline.
@@ -363,12 +436,45 @@ where
     C: ToolCache,
     P: ToolProvisioner,
 {
+    let plan = plan_tools(records, cache, provisioner, ask, None).await?;
+    ensure_tools_from_plan(records, cache, provisioner, ask, plan).await
+}
+
+pub(crate) async fn ensure_tools_with_pins<R, C, P>(
+    records: &R,
+    cache: &C,
+    provisioner: &P,
+    ask: &EnsureRequest<'_>,
+    pins: &ResolvedPins,
+) -> Result<EnsuredTools, ProvisionError>
+where
+    R: ToolRecordStore,
+    C: ToolCache,
+    P: ToolProvisioner,
+{
+    let plan = plan_tools(records, cache, provisioner, ask, Some(pins)).await?;
+    ensure_tools_from_plan(records, cache, provisioner, ask, plan).await
+}
+
+async fn ensure_tools_from_plan<R, C, P>(
+    records: &R,
+    cache: &C,
+    provisioner: &P,
+    ask: &EnsureRequest<'_>,
+    plan: ToolPlan,
+) -> Result<EnsuredTools, ProvisionError>
+where
+    R: ToolRecordStore,
+    C: ToolCache,
+    P: ToolProvisioner,
+{
     let ToolPlan {
         mut record,
         mut hits,
         misses,
         mut record_changed,
-    } = plan_tools(records, cache, provisioner, ask).await?;
+        ..
+    } = plan;
 
     let mut provisioned = Vec::new();
     if !misses.is_empty() {
@@ -1075,6 +1181,7 @@ mod tests {
                     now_unix_secs: 1_700_000_000,
                     disclose: &discard,
                 },
+                None,
             ),
         )
         .await
@@ -1085,6 +1192,105 @@ mod tests {
             plan.misses,
             refs(&["some-tool@1.2.3", "other-tool@1.2.3"]),
             "concurrent results retain declaration order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_latest_set_queries_each_index_once_across_the_warm_check_and_install() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let provisioner = Scripted::resolving(&[("some-tool", "1.2.3"), ("other-tool", "1.2.3")])
+            .index_says("1.2.3");
+        let requests = refs(&["some-tool@latest", "other-tool@latest"]);
+        let ask = EnsureRequest {
+            requests: &requests,
+            target: &target(),
+            engine_version: "2026.7.14",
+            now_unix_secs: 1_700_000_000,
+            disclose: &discard,
+        };
+
+        let prepared = prepare_tools(&records, &cache, &provisioner, &ask)
+            .await
+            .unwrap();
+        assert!(prepared.ready.is_none());
+        ensure_tools_with_pins(&records, &cache, &provisioner, &ask, &prepared.pins)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *provisioner.index_calls.lock().unwrap(),
+            requests.len() as u32,
+            "the install recheck must reuse the pins resolved before taking the lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_install_recheck_adopts_trees_a_peer_cached_while_the_lock_was_waiting() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let requests = refs(&["some-tool@latest", "other-tool@latest"]);
+        let ask = EnsureRequest {
+            requests: &requests,
+            target: &target(),
+            engine_version: "2026.7.14",
+            now_unix_secs: 1_700_000_000,
+            disclose: &discard,
+        };
+        let waiting = Scripted::resolving(&[("some-tool", "1.2.3"), ("other-tool", "1.2.3")])
+            .index_says("1.2.3");
+        let prepared = prepare_tools(&records, &cache, &waiting, &ask)
+            .await
+            .unwrap();
+        assert!(prepared.ready.is_none());
+
+        let peer = Scripted::resolving(&[("some-tool", "1.2.3"), ("other-tool", "1.2.3")])
+            .index_says("1.2.3");
+        ensure_tools(&records, &cache, &peer, &ask).await.unwrap();
+        let ensured = ensure_tools_with_pins(&records, &cache, &waiting, &ask, &prepared.pins)
+            .await
+            .unwrap();
+
+        assert!(
+            waiting.calls.lock().unwrap().is_empty(),
+            "the locked recheck must adopt the trees the peer installed"
+        );
+        assert!(ensured.provisioned.is_empty());
+        assert_eq!(
+            *waiting.index_calls.lock().unwrap(),
+            requests.len() as u32,
+            "rechecking the peer-populated cache must not re-query the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolved_snapshot_for_another_tool_set_is_rejected() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let requests = refs(&["some-tool@latest"]);
+        let ask = EnsureRequest {
+            requests: &requests,
+            target: &target(),
+            engine_version: "2026.7.14",
+            now_unix_secs: 1_700_000_000,
+            disclose: &discard,
+        };
+        let err = ensure_tools_with_pins(
+            &records,
+            &cache,
+            &Scripted::default(),
+            &ask,
+            &ResolvedPins(vec![ResolvedPin {
+                request: "other-tool@latest".into(),
+                version: None,
+            }]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("resolved tool pins do not match the declared tool set")
         );
     }
 

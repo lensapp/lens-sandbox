@@ -788,6 +788,15 @@ fn project_declares_tools(world: &mut E2eWorld, entries: String) {
     world.project_tools = parse_tools_list(&entries);
 }
 
+#[given("a lns.yaml declaring a registry tool with an unsupported backend")]
+fn project_declares_an_unsupported_backend_tool(world: &mut E2eWorld) {
+    let tool = lns_artifact::tools::registry::backends()
+        .find(|(_, backend)| !lns_artifact::tools::registry::is_supported_backend(backend))
+        .map(|(name, _)| format!("{name}@1"))
+        .expect("the snapshot carries at least one unsupported-backend entry");
+    world.project_tools = vec![tool];
+}
+
 #[given(regex = r#"^a base image that ships node 20 and a lns\.yaml declaring tools \[(.*)\]$"#)]
 fn tools_over_node20_base(world: &mut E2eWorld, entries: String) {
     world.project_image = Some(NODE20_IMAGE.to_string());
@@ -811,6 +820,17 @@ fn run_summary_discloses_tools(world: &mut E2eWorld) {
     assert!(
         text.contains("Tools:") && text.contains("node@22"),
         "expected a Tools summary line, got:\n{text}"
+    );
+}
+
+#[then("the output names that declared tool")]
+fn output_names_declared_tool(world: &mut E2eWorld) {
+    let declared = world.project_tools.first().expect("a declared tool");
+    let result = world.result.as_ref().expect("a run result");
+    let text = format!("{}\n{}", result.stdout, result.stderr);
+    assert!(
+        text.contains(declared),
+        "expected output to name {declared}, got:\n{text}"
     );
 }
 

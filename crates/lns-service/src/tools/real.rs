@@ -2,7 +2,10 @@ use anyhow::Context;
 use tokio::sync::Mutex;
 
 use super::provisioner::real::MiseProvisioner;
-use super::{EnsuredTools, Libc, ProvisionError, ProvisionTarget, ToolRef, ensure_tools, mise};
+use super::{
+    EnsuredTools, Libc, ProvisionError, ProvisionTarget, ToolRef, ensure_tools_with_pins, mise,
+    prepare_tools,
+};
 use crate::content_store::ContentStore;
 
 static PROVISION_LOCK: Mutex<()> = Mutex::const_new(());
@@ -56,13 +59,15 @@ pub async fn ensure_for_run(
         now_unix_secs: now_unix_secs(),
         disclose,
     };
-    let warm = super::ensure_warm_tools(&records, &cache, &provisioner, &ask).await?;
-    let mut ensured = match warm {
+    let prepared = prepare_tools(&records, &cache, &provisioner, &ask).await?;
+    let mut ensured = match prepared.ready {
         Some(ensured) => ensured,
         None => {
             let _serialized = serialized_install().await;
             let scratch = ScratchGuard(cache_dir.join("runs").join(scratch_id));
-            let ensured = ensure_tools(&records, &cache, &provisioner, &ask).await?;
+            let ensured =
+                ensure_tools_with_pins(&records, &cache, &provisioner, &ask, &prepared.pins)
+                    .await?;
             drop(scratch);
             ensured
         }
