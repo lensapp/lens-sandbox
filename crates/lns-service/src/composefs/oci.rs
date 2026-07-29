@@ -3,12 +3,12 @@ use flate2::read::GzDecoder;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Cursor, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use crate::composefs::Sha256Digest;
+use crate::composefs::changeset::{PathChange, classify_path};
 use crate::composefs::vendor::generic_tree::{Directory, Inode, LeafContent, Stat};
 use crate::composefs::vendor::tree::{FileSystem, RegularFile};
 use crate::content_store::ContentStore;
@@ -130,7 +130,6 @@ fn worker_count() -> usize {
 
 // Files above this stream straight to the content store rather than buffering in RAM, so a layer of multi-GB blobs can't balloon the in-flight queue.
 const MAX_BUFFERED_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_NAME_BYTES: usize = 255;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -248,7 +247,8 @@ fn read_layer_ops<R: Read>(
     work_tx: &SyncSender<(usize, Vec<u8>)>,
     limits: Limits,
 ) -> Result<(Vec<Op>, usize)> {
-    let mut ops = Vec::new();
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
     let mut seq = 0usize;
     let mut entry_count = 0usize;
     let mut buffered_bytes = 0u64;
@@ -259,30 +259,33 @@ fn read_layer_ops<R: Read>(
         }
         let mut entry = entry.context("reading tar entry")?;
         let header_path: PathBuf = entry.path().context("entry path")?.into_owned();
-        let Some(normalized) = normalize_path(&header_path)? else {
+        let Some(change) = classify_path(&header_path)? else {
             continue;
         };
+        let normalized = match change {
+            PathChange::ClearDirectory(path) => {
+                removals.push(Op::ClearDir(path_segments(&path)));
+                continue;
+            }
+            PathChange::Remove(path) => {
+                let (parents, name) = split_path(&path);
+                removals.push(Op::Remove(parents, name));
+                continue;
+            }
+            PathChange::Entry(path) => path,
+        };
         let (parents, name) = split_path(&normalized);
-        let name_bytes = name.as_os_str().as_bytes();
-        if name_bytes == b".wh..wh..opq" {
-            ops.push(Op::ClearDir(parents));
-            continue;
-        }
-        if let Some(target) = strip_wh_prefix(name_bytes) {
-            ops.push(Op::Remove(parents, target.to_os_string()));
-            continue;
-        }
         let entry_type = entry.header().entry_type();
         let stat = stat_from_entry(&entry, entry_type.is_dir())?;
         if entry_type.is_dir() {
-            ops.push(Op::EnsureDir {
+            additions.push(Op::EnsureDir {
                 path: normalized,
                 stat,
             });
             continue;
         }
         match leaf_kind(&entry, entry_type, &normalized)? {
-            LeafKind::Inline(content) => ops.push(Op::Leaf {
+            LeafKind::Inline(content) => additions.push(Op::Leaf {
                 parents,
                 name,
                 stat,
@@ -294,7 +297,7 @@ fn read_layer_ops<R: Read>(
                     .with_context(|| format!("installing {}", normalized.display()))?;
                 let file =
                     RegularFile::External(Sha256Digest::from(installed.raw_digest), installed.size);
-                ops.push(Op::Leaf {
+                additions.push(Op::Leaf {
                     parents,
                     name,
                     stat,
@@ -317,7 +320,7 @@ fn read_layer_ops<R: Read>(
                 work_tx
                     .send((seq, bytes))
                     .expect("ingest workers stopped before the tar was fully read");
-                ops.push(Op::RegularLeaf {
+                additions.push(Op::RegularLeaf {
                     parents,
                     name,
                     stat,
@@ -328,7 +331,8 @@ fn read_layer_ops<R: Read>(
             LeafKind::Skip => {}
         }
     }
-    Ok((ops, seq))
+    removals.append(&mut additions);
+    Ok((removals, seq))
 }
 
 fn apply_ops(
@@ -382,14 +386,6 @@ fn insert_leaf(
     let leaf_id = fs.push_leaf(stat, content);
     get_or_create_dir(fs, parents)?.insert(name, Inode::leaf(leaf_id));
     Ok(())
-}
-
-fn strip_wh_prefix(name: &[u8]) -> Option<&OsStr> {
-    let stripped = name.strip_prefix(b".wh.")?;
-    if stripped.starts_with(b".wh.") {
-        return None;
-    }
-    Some(OsStr::from_bytes(stripped))
 }
 
 fn leaf_kind<R: Read>(
@@ -500,30 +496,8 @@ fn stat_from_entry<R: Read>(entry: &tar::Entry<R>, is_dir: bool) -> Result<Stat>
     })
 }
 
-fn normalize_path(p: &Path) -> Result<Option<PathBuf>> {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::Normal(seg) => {
-                if seg.as_bytes().len() > MAX_NAME_BYTES {
-                    bail!(
-                        "tar entry path component exceeds the {MAX_NAME_BYTES}-byte name limit: {}",
-                        p.display()
-                    );
-                }
-                out.push(seg);
-            }
-            Component::CurDir | Component::RootDir | Component::Prefix(_) => continue,
-            Component::ParentDir => {
-                bail!("tar entry path contains `..`: {}", p.display())
-            }
-        }
-    }
-    if out.as_os_str().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(out))
-    }
+fn path_segments(path: &Path) -> Vec<OsString> {
+    path.iter().map(OsStr::to_os_string).collect()
 }
 
 fn split_path(path: &Path) -> (Vec<OsString>, OsString) {
@@ -538,6 +512,7 @@ fn split_path(path: &Path) -> (Vec<OsString>, OsString) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::composefs::changeset::{MAX_NAME_BYTES, normalize_path, strip_wh_prefix};
     use std::io::Cursor;
     use tar::{Builder, EntryType, Header};
 
@@ -680,6 +655,27 @@ mod tests {
     }
 
     #[test]
+    fn whiteout_only_removes_the_lower_layer_version_of_a_same_layer_file() {
+        let d = tempdir();
+        let s = store(&d);
+        let layer1 = build_tar(|b| {
+            write_dir_entry(b, "etc/", 0o755);
+            write_file_entry(b, "etc/version", 0o644, b"old");
+        });
+        let layer2 = build_tar(|b| {
+            write_file_entry(b, "etc/version", 0o644, b"newer");
+            write_whiteout(b, "etc/.wh.version");
+        });
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
+        let leaf_id = etc.leaf_id(OsStr::new("version")).unwrap();
+        assert!(matches!(
+            &fs.leaves[leaf_id.0].content,
+            LeafContent::Regular(RegularFile::External(_, 5))
+        ));
+    }
+
+    #[test]
     fn opaque_whiteout_clears_directory_contents() {
         let d = tempdir();
         let s = store(&d);
@@ -697,6 +693,24 @@ mod tests {
         assert!(var.leaf_id(OsStr::new("a")).is_err());
         assert!(var.leaf_id(OsStr::new("b")).is_err());
         assert!(var.leaf_id(OsStr::new("c")).is_ok());
+    }
+
+    #[test]
+    fn opaque_whiteout_preserves_same_layer_entries_that_precede_the_marker() {
+        let d = tempdir();
+        let s = store(&d);
+        let layer1 = build_tar(|b| {
+            write_dir_entry(b, "var/", 0o755);
+            write_file_entry(b, "var/old", 0o644, b"old");
+        });
+        let layer2 = build_tar(|b| {
+            write_file_entry(b, "var/new", 0o644, b"new");
+            write_whiteout(b, "var/.wh..wh..opq");
+        });
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let var = fs.root.get_directory_mut(OsStr::new("var")).unwrap();
+        assert!(var.leaf_id(OsStr::new("old")).is_err());
+        assert!(var.leaf_id(OsStr::new("new")).is_ok());
     }
 
     #[test]
@@ -850,6 +864,15 @@ mod tests {
         assert_eq!(strip_wh_prefix(b".wh..wh..future"), None);
         assert_eq!(strip_wh_prefix(b".wh.secret"), Some(OsStr::new("secret")));
         assert_eq!(strip_wh_prefix(b"normal"), None);
+    }
+
+    #[test]
+    fn a_whiteout_without_a_target_is_rejected() {
+        let d = tempdir();
+        let s = store(&d);
+        let layer = build_tar(|b| write_whiteout(b, "etc/.wh."));
+        let err = build_filesystem_from_layer_bytes(&s, &[layer]).unwrap_err();
+        assert!(format!("{err:#}").contains("whiteout path has no target"));
     }
 
     #[test]

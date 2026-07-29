@@ -3,6 +3,7 @@ use std::fmt;
 use sha2::{Sha256, digest::Output};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+pub(crate) mod changeset;
 pub mod descriptor;
 pub(crate) mod inject_path;
 pub mod oci;
