@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug)]
 pub(crate) struct VmmBinaries {
@@ -26,6 +26,26 @@ pub(crate) fn resolve(env_get: impl Fn(&str) -> Option<OsString>) -> Result<VmmB
             &virtiofsd_fallback_dirs(),
         )?,
     })
+}
+
+pub(crate) fn require_read_only_support(
+    virtiofsd: &Path,
+    help: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<()> {
+    let help = help(virtiofsd)
+        .with_context(|| format!("checking virtiofsd capabilities at {}", virtiofsd.display()))?;
+    if !help
+        .windows(b"--readonly".len())
+        .any(|w| w == b"--readonly")
+    {
+        bail!(
+            "virtiofsd at {} does not support read-only shares (--readonly). Install a newer \
+             virtiofsd with --readonly support, or set \
+             LNS_VIRTIOFSD_BIN=/path/to/virtiofsd.",
+            virtiofsd.display()
+        );
+    }
+    Ok(())
 }
 
 /// Distros ship the Rust virtiofsd off PATH (Debian/Ubuntu under /usr/libexec); search these so a stock apt install needs no override.
