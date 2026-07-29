@@ -177,11 +177,15 @@ impl Catalog {
             i.validate()?;
         }
         NetworkPolicy {
-            allowed_routes: self
-                .connectors
-                .iter()
-                .flat_map(|connector| connector.routes.iter().map(ConnectorRoute::to_route_rule))
-                .collect(),
+            egress: crate::Egress {
+                http: self
+                    .connectors
+                    .iter()
+                    .flat_map(|connector| {
+                        connector.routes.iter().map(ConnectorRoute::to_route_rule)
+                    })
+                    .collect(),
+            },
             ..NetworkPolicy::default()
         }
         .validate_local_transport()

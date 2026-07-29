@@ -646,7 +646,7 @@ pub(super) async fn start(
         &declared_connectors,
         &catalog,
     );
-    policy.network.allowed_routes.extend(applied.routes);
+    policy.network.egress.http.extend(applied.routes);
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let run =
@@ -1557,7 +1557,7 @@ mod tests {
         let json = serde_json::to_value(&frame).expect("serialise");
         assert_eq!(json["type"], "policy");
         assert_eq!(
-            json["network"]["allowedRoutes"][0]["match"],
+            json["network"]["egress"]["http"][0]["match"],
             "api.linear.app"
         );
         let ids: Vec<&str> = json["credentials"]
@@ -1832,7 +1832,8 @@ mod tests {
             session
                 .current_policy()
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "gitlab.com"),
             "the connector's route is allowed live"

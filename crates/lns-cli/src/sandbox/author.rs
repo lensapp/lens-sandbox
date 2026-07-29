@@ -21,7 +21,8 @@ spec:
     memory: 512Mi
   policy:
     defaultVerdict: ask
-    allowedRoutes: []
+    egress:
+      http: []
   connectors: []
   credentials: []
   volumes:
@@ -230,7 +231,7 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         out,
         "  policy:       defaultVerdict={} ({} route(s))",
         verdict.trim_matches('"'),
-        def.spec.policy.allowed_routes.len()
+        def.spec.policy.egress.http.len()
     )?;
     if !def.spec.connectors.is_empty() {
         writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;

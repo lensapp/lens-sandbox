@@ -137,20 +137,42 @@ mod tests {
             v["network"]["defaultTransport"], "direct",
             "lens-sandbox-core fail-closes a non-deny verdict to deny when defaultTransport is missing"
         );
-        assert_eq!(v["network"]["allowedRoutes"], json!([]));
+        assert_eq!(v["network"]["egress"]["http"], json!([]));
+    }
+
+    #[test]
+    fn the_policy_frame_publishes_one_egress_table_and_not_the_deprecated_list() {
+        let frame = HostFrame::Policy(PolicyMessage {
+            network: Some(NetworkPolicy::default()),
+            credentials: None,
+        });
+        let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
+        let network = v["network"].as_object().expect("network is an object");
+        assert!(
+            !network.contains_key("allowedRoutes"),
+            "an egress block supersedes allowedRoutes in the guest, so a route sent in both is a route sent in neither: {network:?}"
+        );
+        let egress = network["egress"]
+            .as_object()
+            .expect("a null or scalar egress makes the guest force-deny every destination");
+        assert_eq!(
+            egress.keys().collect::<Vec<_>>(),
+            ["http"],
+            "core denies unknown fields under egress, so one stray key fails the whole policy closed: {egress:?}"
+        );
     }
 
     #[test]
     fn every_route_in_the_frame_carries_its_transport_even_when_direct() {
         let mut net = NetworkPolicy::default();
-        net.allowed_routes.push(RouteRule::allow_host("10.0.0.0/8"));
+        net.egress.http.push(RouteRule::allow_host("10.0.0.0/8"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(net),
             credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(
-            v["network"]["allowedRoutes"][0]["transport"], "direct",
+            v["network"]["egress"]["http"][0]["transport"], "direct",
             "core's route schema has no transport default — one missing transport fails the whole route parse and clears every route"
         );
     }
@@ -158,7 +180,8 @@ mod tests {
     #[test]
     fn policy_frame_round_trips() {
         let mut net = NetworkPolicy::default();
-        net.allowed_routes
+        net.egress
+            .http
             .push(RouteRule::allow_host("api.linear.app"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(net),
@@ -245,7 +268,7 @@ mod tests {
     #[test]
     fn network_policy_in_frame_serializes_route_rule_with_match_key() {
         let mut net = NetworkPolicy::default();
-        net.allowed_routes.push(RouteRule {
+        net.egress.http.push(RouteRule {
             match_pattern: "api.linear.app".into(),
             verdict: Verdict::Allow,
             transport: Transport::Upstream,

@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","allowedRoutes":[{"match":"api.example.test","verdict":"allow"}]},"connectors":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}},"connectors":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
         assert_eq!(def.metadata.name, "hermes");
@@ -491,7 +491,7 @@ mod tests {
             Some("research")
         );
         assert_eq!(def.spec.policy.default_verdict, Verdict::Deny);
-        assert_eq!(def.spec.policy.allowed_routes.len(), 1);
+        assert_eq!(def.spec.policy.egress.http.len(), 1);
         assert_eq!(def.spec.connectors, vec!["some-provider".to_string()]);
         assert_eq!(def.spec.credentials[0].env, "SOME_TOKEN");
         assert_eq!(def.spec.volumes[0].source(), ".");
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn parse_rejects_an_upstream_route_transport() {
         let err = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","transport":"upstream"}]}}"#,
+            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","transport":"upstream"}]}}}"#,
         ))
         .unwrap_err();
         assert!(
@@ -1136,8 +1136,8 @@ mod tests {
             r#"{"image":"x:1","unexpected":true}"#,
             r#"{"image":"x:1","resources":{"cpu":1,"unexpected":true}}"#,
             r#"{"image":"x:1","policy":{"unexpected":true}}"#,
-            r#"{"image":"x:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","unexpected":true}]}}"#,
-            r#"{"image":"x:1","policy":{"allowedRoutes":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}"#,
+            r#"{"image":"x:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","unexpected":true}]}}}"#,
+            r#"{"image":"x:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}}"#,
             r#"{"image":"x:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","requred":true}]}"#,
             r#"{"image":"x:1","volumes":[{"name":"data","target":"/data","readOlny":true}]}"#,
             r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills","unexpected":true}]}"#,

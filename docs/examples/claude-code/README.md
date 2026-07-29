@@ -27,7 +27,7 @@ lns run
 ```
 
 The first boot runs `npm install -g @anthropic-ai/claude-code`; the microVM is
-ephemeral, so each cold start reinstalls it (the `allowedRoutes` keep
+ephemeral, so each cold start reinstalls it (the `egress.http` rules keep
 `registry.npmjs.org` open for that reason).
 
 On first run, an approval card asks for your Claude subscription token and shows

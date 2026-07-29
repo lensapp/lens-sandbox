@@ -45,7 +45,8 @@ fn load(world: &mut BehaviourWorld, file: &str) -> Policy {
 fn has_rule(policy: &Policy, pattern: &str, verdict: Verdict) -> bool {
     policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.match_pattern == pattern && r.verdict == verdict)
 }
@@ -84,6 +85,18 @@ fn policy_has_allow(world: &mut BehaviourWorld, file: String, pattern: String) {
     let mut policy = Policy::default();
     policy.add_rule(RouteRule::allow_host(pattern));
     policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(regex = r#"^"([^"]+)" uses the removed allowedRoutes key for "([^"]+)"$"#)]
+fn policy_uses_the_removed_key(world: &mut BehaviourWorld, file: String, pattern: String) {
+    let dir = cwd(world);
+    std::fs::write(
+        dir.join(file),
+        format!(
+            "network:\n  allowedRoutes:\n    - match: {pattern}\n      verdict: allow\n  defaultVerdict: ask\n"
+        ),
+    )
+    .expect("seed a policy file in the pre-egress shape");
 }
 
 #[given(regex = r#"^"([^"]+)" has no rule for "([^"]+)"$"#)]
@@ -260,13 +273,28 @@ fn file_contains_described_rule(world: &mut BehaviourWorld, file: String) -> Res
     let policy = load(world, &file);
     let described = policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.verdict == Verdict::Allow && r.description.is_some());
     if described {
         Ok(())
     } else {
         Err(format!("{file} has no allow rule carrying a description"))
+    }
+}
+
+#[then(regex = r#"^the error names "([^"]+)"$"#)]
+fn error_names(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    if out.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!("error does not name {needle:?}:\n{out}"))
     }
 }
 
@@ -294,7 +322,8 @@ fn file_no_longer_contains(
     let policy = load(world, &file);
     if policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.match_pattern == pattern)
     {
@@ -315,7 +344,7 @@ fn command_fails(world: &mut BehaviourWorld) -> Result<(), String> {
 #[then(regex = r"^the policy file is unchanged$")]
 fn policy_file_unchanged(world: &mut BehaviourWorld) -> Result<(), String> {
     let policy = load(world, "lns-policy.yaml");
-    if policy.network.allowed_routes.is_empty() {
+    if policy.network.egress.http.is_empty() {
         Ok(())
     } else {
         Err("policy file was modified by a failed remove".to_string())

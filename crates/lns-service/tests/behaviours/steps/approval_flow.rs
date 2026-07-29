@@ -80,7 +80,7 @@ fn given_launched_with_policy(world: &mut BehaviourWorld, _filename: String) {
 #[given(regex = r#"^the policy has no rule for "([^"]+)"$"#)]
 fn given_no_rule_for(world: &mut BehaviourWorld, host: String) {
     let rig = world.approval();
-    let routes = &rig.session.current_policy().network.allowed_routes;
+    let routes = &rig.session.current_policy().network.egress.http;
     assert!(
         !routes.iter().any(|r| r.match_pattern == host),
         "expected no rule for {host}, but found one"
@@ -357,10 +357,10 @@ fn then_request_failed_as_undecided(world: &mut BehaviourWorld) -> Result<(), St
 fn then_running_policy_unchanged(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.approval();
     let p = rig.session.current_policy();
-    if !p.network.allowed_routes.is_empty() {
+    if !p.network.egress.http.is_empty() {
         return Err(format!(
             "expected no rules in running policy, got {:?}",
-            p.network.allowed_routes
+            p.network.egress.http
         ));
     }
     Ok(())
@@ -373,10 +373,10 @@ fn then_policy_file_unchanged(world: &mut BehaviourWorld) -> Result<(), String> 
         return Ok(());
     }
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
-    if !on_disk.network.allowed_routes.is_empty() {
+    if !on_disk.network.egress.http.is_empty() {
         return Err(format!(
             "policy file gained rules: {:?}",
-            on_disk.network.allowed_routes
+            on_disk.network.egress.http
         ));
     }
     Ok(())
@@ -436,7 +436,8 @@ fn assert_host_rule(
     let p = rig.session.current_policy();
     let matched = p
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .find(|r| r.match_pattern == host)
         .ok_or_else(|| format!("no rule for {host} in running policy"))?;
@@ -476,7 +477,8 @@ fn assert_file_rule(
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
     let matched = on_disk
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .find(|r| r.match_pattern == host)
         .ok_or_else(|| format!("no rule for {host} in policy file"))?;
@@ -494,10 +496,10 @@ fn then_running_contains_same_rule(world: &mut BehaviourWorld) -> Result<(), Str
     let rig = world.approval();
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
     let in_memory = rig.session.current_policy();
-    if on_disk.network.allowed_routes != in_memory.network.allowed_routes {
+    if on_disk.network.egress.http != in_memory.network.egress.http {
         return Err(format!(
             "running policy diverges from file:\n  file: {:?}\n  mem:  {:?}",
-            on_disk.network.allowed_routes, in_memory.network.allowed_routes
+            on_disk.network.egress.http, in_memory.network.egress.http
         ));
     }
     Ok(())
@@ -509,13 +511,14 @@ fn then_running_contains_new_allow_rule(world: &mut BehaviourWorld) -> Result<()
     let p = rig.session.current_policy();
     if !p
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .any(|r| r.verdict == Verdict::Allow)
     {
         return Err(format!(
             "expected an allow rule in running policy, got {:?}",
-            p.network.allowed_routes
+            p.network.egress.http
         ));
     }
     Ok(())

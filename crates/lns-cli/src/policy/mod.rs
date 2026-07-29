@@ -100,7 +100,7 @@ fn add_rule(
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
-    policy.network.allowed_routes.push(RouteRule {
+    policy.network.egress.http.push(RouteRule {
         match_pattern: args.pattern.clone(),
         verdict,
         transport: Transport::Direct,
@@ -128,7 +128,8 @@ fn list_rules(args: &PolicyScopeArgs, cwd: &Path, writer: &mut impl Write) -> Re
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let rows: Vec<RuleRow> = policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .iter()
         .map(RuleRow::new)
         .collect();
@@ -171,12 +172,13 @@ fn remove_rule(args: &PolicyRemoveArgs, cwd: &Path, writer: &mut impl Write) -> 
     let path = policy_path(args.policy.as_deref(), cwd);
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
-    let before = policy.network.allowed_routes.len();
+    let before = policy.network.egress.http.len();
     policy
         .network
-        .allowed_routes
+        .egress
+        .http
         .retain(|rule| rule.match_pattern != args.pattern);
-    if policy.network.allowed_routes.len() == before {
+    if policy.network.egress.http.len() == before {
         bail!("no rule matching {:?} in {}", args.pattern, path.display());
     }
     policy
@@ -235,12 +237,9 @@ mod tests {
         let code = add_rule(&args, Verdict::Allow, dir.path(), &mut out).unwrap();
         assert_eq!(code, 0);
         let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
-        assert_eq!(policy.network.allowed_routes.len(), 1);
-        assert_eq!(policy.network.allowed_routes[0].verdict, Verdict::Allow);
-        assert_eq!(
-            policy.network.allowed_routes[0].transport,
-            Transport::Direct
-        );
+        assert_eq!(policy.network.egress.http.len(), 1);
+        assert_eq!(policy.network.egress.http[0].verdict, Verdict::Allow);
+        assert_eq!(policy.network.egress.http[0].transport, Transport::Direct);
     }
 
     #[test]
@@ -258,7 +257,8 @@ mod tests {
         assert!(
             policy
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "evil.example" && r.verdict == Verdict::Deny)
         );
@@ -284,7 +284,8 @@ mod tests {
         assert!(
             policy
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "api.acme.corp" && r.verdict == Verdict::Allow)
         );
