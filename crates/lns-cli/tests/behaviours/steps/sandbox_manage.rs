@@ -1,6 +1,6 @@
 use cucumber::{given, then};
 use lns_ipc::{
-    ArtifactInspection, ImageInfo, Response, RunConfig, RunDetails, RunStatus, RunSummary,
+    ArtifactInspection, ImageInfo, Request, Response, RunConfig, RunDetails, RunStatus, RunSummary,
     SandboxView,
 };
 
@@ -109,6 +109,16 @@ fn running_sandbox_kept(w: &mut BehaviourWorld) -> Result<(), String> {
         Err(format!(
             "prune must remove only the two cached sandboxes, got: {out:?}"
         ))
+    }
+}
+
+#[then("the service received a PruneImages request")]
+fn service_received_prune_images(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::PruneImages) {
+        Ok(())
+    } else {
+        Err(format!("expected PruneImages among {requests:?}"))
     }
 }
 

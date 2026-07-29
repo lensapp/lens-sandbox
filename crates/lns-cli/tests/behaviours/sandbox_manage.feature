@@ -48,6 +48,15 @@ Feature: managing cached sandboxes
     Then the exit code is 0
     And the output reports reclaimed bytes
     And the running sandbox and its layers are kept
+    And the service received a PruneImages request
+
+  Scenario: prune without force refuses before touching the cache
+    Given two cached sandboxes and one running sandbox
+    When the user runs sandbox command "prune"
+    Then the command fails with an exit code other than 0
+    And the output contains "--force"
+    And the output contains "provisioned tool cache"
+    And the service received no request
 
   Scenario: prune never removes a named volume
     Given a cached sandbox that names a volume "claude-home"

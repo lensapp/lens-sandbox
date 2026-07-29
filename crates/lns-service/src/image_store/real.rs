@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::traits::{Caches, Fs};
+use super::traits::{Caches, Fs, RuntimeCacheFs};
 use crate::image::manifest_cache::ManifestCache;
 use crate::oci_layer_cache::LayerCache;
 
@@ -33,6 +33,12 @@ impl Fs for RealFs {
 
     async fn remove_file(&self, p: &Path) -> io::Result<()> {
         tokio::fs::remove_file(p).await
+    }
+}
+
+impl RuntimeCacheFs for RealFs {
+    async fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        tokio::fs::remove_dir_all(p).await
     }
 }
 

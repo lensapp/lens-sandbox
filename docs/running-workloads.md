@@ -480,12 +480,11 @@ spec:
   your image ships its own newer copies the injected ones replace them for that
   run, and the image's own C++ binaries can then fail with a `GLIBCXX_…` version
   error; use a glibc base image if that matters.
-- The per-machine tool cache is **not reclaimed automatically**, and `lns prune`
-  does not touch it: it sweeps images and volumes only. Every version a tool
-  resolves to keeps its tree, so a long-lived `node@latest` accumulates one per
-  upstream release. To reclaim the space today, stop the service and remove
-  `tools/` and `content/` under the cache root (`~/Library/Caches/lns` on macOS,
-  `$XDG_CACHE_HOME/lns` on Linux); the next run re-provisions what it needs.
+- The per-machine tool cache is **not reclaimed automatically**. Every version
+  a tool resolves to keeps its tree, so a long-lived `node@latest` accumulates
+  one per upstream release. `lns sandbox prune --force` reclaims the provisioned
+  tool cache when no sandbox is running; while any run is live it keeps the
+  shared tool content intact. The next run re-provisions what it needs.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
   copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
   `/etc/profile`, which on most images resets `PATH` outright and so discards the
@@ -795,9 +794,10 @@ shares and refuses a reference that a run is still using:
 lns rm ghcr.io/acme/reviewer:1.0.0
 ```
 
-`lns sandbox prune` removes every cached sandbox not held by a running one,
-reclaiming the disk at once. It requires `-f`/`--force` — there is no interactive
-prompt, so nothing is swept until you ask for it explicitly:
+`lns sandbox prune` removes every cached sandbox not held by a running one. When
+no sandbox is running, it also reclaims the provisioned tool cache. It requires
+`-f`/`--force` — there is no interactive prompt, so nothing is swept until you
+ask for it explicitly:
 
 ```bash
 lns sandbox prune --force
