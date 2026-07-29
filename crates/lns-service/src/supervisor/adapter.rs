@@ -906,8 +906,8 @@ mod tests {
                 assert_eq!(d.id, "r1");
                 assert_eq!(
                     d.decision,
-                    Decision::DenyOnce,
-                    "the held request still fails closed"
+                    Decision::Timeout,
+                    "the held request still fails closed, as an undecided card rather than a deny"
                 );
             }
             other => panic!("expected RequestDecision, got {other:?}"),

@@ -257,13 +257,13 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
-    /// Fails a held request because its card was closed: no rule, and no audit line claiming a deny-once the developer never picked.
+    /// Fails a held request because its card was closed: no rule, no audit line, and `Timeout` on the wire because a dismissal is the absence of a decision rather than a deny the developer picked.
     pub fn dismiss_request(&self, id: &str) -> DecisionOutcome {
         if self.remove_pending(id).is_none() {
             return DecisionOutcome::UnknownId;
         }
         self.notifier.dismiss(id);
-        self.send_decision_frame(id, Decision::DenyOnce);
+        self.send_decision_frame(id, Decision::Timeout);
         DecisionOutcome::Resolved
     }
 
@@ -857,7 +857,11 @@ pub(crate) mod tests {
         assert_eq!(s.dismiss_request("r1"), DecisionOutcome::Resolved);
 
         assert_eq!(before, s.current_policy());
-        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            Decision::Timeout,
+            "a closed card reads on the wire as no decision, so it cannot arrive as a deny-once the developer picked"
+        );
         assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
         assert!(store.saves.lock().unwrap().is_empty());
         assert!(
