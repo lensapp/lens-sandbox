@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 
 use super::Libc;
+use crate::composefs::changeset::{PathChange, classify_path};
 
 /// Gunzipping and walking every layer is CPU work on borrowed data, so it moves off the async worker rather than holding one for the length of the scan; a current-thread runtime (tests) has nowhere to move it and runs it inline.
 pub fn detect_libc_off_runtime(
@@ -44,38 +45,80 @@ pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) ->
     Ok(verdict)
 }
 
-/// Decide the image's libc flavor from its layer tars so tool builds match the workload: musl wins wherever it appears (overlay semantics are per-path, so a later gcompat-style shim never removes the base loader), and a loaderless image is gnu.
+/// Decide the image's libc flavor from the loaders visible after applying its layer changesets, with musl winning when a gcompat-style loader is also present.
 pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
-    let mut verdict = None;
+    let mut visible: BTreeMap<PathBuf, Libc> = BTreeMap::new();
     for (idx, layer) in layers.iter().enumerate() {
-        match scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))? {
-            Some(Libc::Musl) => return Ok(Libc::Musl),
-            Some(Libc::Gnu) => verdict = Some(Libc::Gnu),
-            None => {}
+        let changes =
+            scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))?;
+        for target in changes.removals {
+            visible.retain(|path, _| !path.starts_with(&target));
+        }
+        for entry in changes.entries {
+            if entry.is_directory {
+                visible.remove(&entry.path);
+            } else {
+                visible.retain(|path, _| !path.starts_with(&entry.path));
+                if let Some(flavor) = loader_flavor(&entry.path) {
+                    visible.insert(entry.path, flavor);
+                }
+            }
         }
     }
-    Ok(verdict.unwrap_or(Libc::Gnu))
+    Ok(if visible.values().any(|flavor| *flavor == Libc::Musl) {
+        Libc::Musl
+    } else {
+        Libc::Gnu
+    })
 }
 
-/// Only the loader at a path a loader actually lives at counts; a tool tree or source checkout that merely mentions one must not decide the flavor.
-fn scan_layer(bytes: &[u8]) -> Result<Option<Libc>> {
+struct LayerChanges {
+    removals: Vec<PathBuf>,
+    entries: Vec<LayerEntry>,
+}
+
+struct LayerEntry {
+    path: PathBuf,
+    is_directory: bool,
+}
+
+fn scan_layer(bytes: &[u8]) -> Result<LayerChanges> {
     let reader: Box<dyn Read> = if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         Box::new(GzDecoder::new(Cursor::new(bytes)))
     } else {
         Box::new(Cursor::new(bytes))
     };
     let mut archive = tar::Archive::new(reader);
-    let mut found = None;
+    let mut removals = Vec::new();
+    let mut entries = Vec::new();
     for entry in archive.entries().context("reading layer tar")? {
         let entry = entry.context("reading layer entry")?;
         let path = entry.path().context("reading layer entry path")?;
-        match loader_flavor(path.as_ref()) {
-            Some(Libc::Musl) => return Ok(Some(Libc::Musl)),
-            Some(Libc::Gnu) => found = Some(Libc::Gnu),
-            None => {}
+        match classify_path(path.as_ref())? {
+            Some(PathChange::Entry(path)) if materializes(entry.header().entry_type()) => {
+                entries.push(LayerEntry {
+                    path,
+                    is_directory: entry.header().entry_type().is_dir(),
+                });
+            }
+            Some(PathChange::Remove(target) | PathChange::ClearDirectory(target)) => {
+                removals.push(target);
+            }
+            Some(PathChange::Entry(_)) | None => {}
         }
     }
-    Ok(found)
+    Ok(LayerChanges { removals, entries })
+}
+
+fn materializes(entry_type: tar::EntryType) -> bool {
+    entry_type.is_dir()
+        || matches!(
+            entry_type,
+            tar::EntryType::Regular
+                | tar::EntryType::Continuous
+                | tar::EntryType::Symlink
+                | tar::EntryType::Fifo
+        )
 }
 
 const LOADER_DIRS: &[&str] = &["lib", "lib64", "usr/lib", "usr/lib64"];
@@ -104,13 +147,37 @@ mod tests {
     fn layer_with(paths: &[&str]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         for path in paths {
+            let body: &[u8] = if path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with(".wh."))
+            {
+                b""
+            } else {
+                b"x"
+            };
             let mut header = tar::Header::new_gnu();
             header.set_path(path).unwrap();
-            header.set_size(1);
+            header.set_size(body.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
-            builder.append(&header, &b"x"[..]).unwrap();
+            builder.append(&header, body).unwrap();
         }
+        builder.into_inner().unwrap()
+    }
+
+    fn layer_with_typed(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(entry_type);
+        if entry_type == tar::EntryType::Link {
+            header.set_link_name("elsewhere").unwrap();
+        }
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
         builder.into_inner().unwrap()
     }
 
@@ -186,20 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn a_musl_layer_stops_scanning_at_the_loader() {
-        // Nothing later in the layer can change a musl verdict, so a big rootfs tar is not walked to the end.
-        let mut builder = tar::Builder::new(Vec::new());
-        for path in ["lib/ld-musl-aarch64.so.1", "usr/lib/libc.so.6"] {
-            let mut header = tar::Header::new_gnu();
-            header.set_path(path).unwrap();
-            header.set_size(1);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder.append(&header, &b"x"[..]).unwrap();
-        }
-        let mut layer = builder.into_inner().unwrap();
-        layer.extend_from_slice(b"trailing garbage that would fail a full walk");
-        assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Musl);
+    fn a_musl_loader_does_not_hide_a_corrupt_later_entry() {
+        let mut layer = layer_with(&["lib/ld-musl-aarch64.so.1", "usr/lib/libc.so.6"]);
+        layer[1024] ^= 0xff;
+        assert!(detect_libc(&[layer]).is_err());
     }
 
     #[test]
@@ -218,10 +275,38 @@ mod tests {
     }
 
     #[test]
+    fn a_later_whiteout_can_replace_a_lower_musl_loader_with_gnu() {
+        let musl = layer_with(&["lib/ld-musl-x86_64.so.1"]);
+        let gnu = layer_with(&["lib/.wh.ld-musl-x86_64.so.1", "lib64/ld-linux-x86-64.so.2"]);
+        assert_eq!(detect_libc(&[musl, gnu]).unwrap(), Libc::Gnu);
+    }
+
+    #[test]
+    fn an_opaque_whiteout_preserves_a_same_layer_gnu_loader() {
+        let musl = layer_with(&["lib/ld-musl-x86_64.so.1"]);
+        let gnu = layer_with(&["lib/ld-linux-x86-64.so.2", "lib/.wh..wh..opq"]);
+        assert_eq!(detect_libc(&[musl, gnu]).unwrap(), Libc::Gnu);
+    }
+
+    #[test]
     fn a_later_layer_can_still_add_the_only_loader_in_the_image() {
         let scratch = layer_with(&["app/server"]);
         let runtime = layer_with(&["lib/ld-musl-aarch64.so.1"]);
         assert_eq!(detect_libc(&[scratch, runtime]).unwrap(), Libc::Musl);
+    }
+
+    #[test]
+    fn a_directory_replacing_a_loader_path_removes_that_loader() {
+        let musl = layer_with(&["lib/ld-musl-x86_64.so.1"]);
+        let replacement = layer_with_typed("lib/ld-musl-x86_64.so.1", tar::EntryType::Directory);
+        assert_eq!(detect_libc(&[musl, replacement]).unwrap(), Libc::Gnu);
+    }
+
+    #[test]
+    fn an_entry_type_the_materializer_skips_does_not_hide_a_loader() {
+        let musl = layer_with(&["lib/ld-musl-x86_64.so.1"]);
+        let skipped = layer_with_typed("lib/ld-musl-x86_64.so.1", tar::EntryType::Link);
+        assert_eq!(detect_libc(&[musl, skipped]).unwrap(), Libc::Musl);
     }
 
     #[test]
