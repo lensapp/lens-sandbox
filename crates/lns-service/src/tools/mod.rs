@@ -372,21 +372,7 @@ fn compose(
     })
 }
 
-/// A run whose tools are all cached and whose record needs no update: `Some` means it can be injected without touching the provisioner, so the caller never has to queue behind another run's install.
-pub async fn ensure_warm_tools<R, C, P>(
-    records: &R,
-    cache: &C,
-    provisioner: &P,
-    ask: &EnsureRequest<'_>,
-) -> Result<Option<EnsuredTools>, ProvisionError>
-where
-    R: ToolRecordStore,
-    C: ToolCache,
-    P: ToolProvisioner,
-{
-    Ok(prepare_tools(records, cache, provisioner, ask).await?.ready)
-}
-
+/// The read-only pass: `ready` is `Some` when every tool is cached and the record needs no update, so the run can be injected without touching the provisioner or queueing behind another run's install; the pins carry the `@latest` answers forward so the install pass does not re-ask the index.
 pub(crate) async fn prepare_tools<R, C, P>(
     records: &R,
     cache: &C,
@@ -966,7 +952,7 @@ mod tests {
         .unwrap();
 
         let warm = Scripted::default();
-        let ensured = ensure_warm_tools(
+        let ensured = prepare_tools(
             &records,
             &cache,
             &warm,
@@ -980,6 +966,7 @@ mod tests {
         )
         .await
         .unwrap()
+        .ready
         .expect("a cached set needs no install");
         assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/1.2.3/bin"]);
         assert!(ensured.provisioned.is_empty(), "nothing was fetched");
@@ -997,7 +984,7 @@ mod tests {
         let cache = MemCache::default();
         let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
         assert!(
-            ensure_warm_tools(
+            prepare_tools(
                 &records,
                 &cache,
                 &cold,
@@ -1011,6 +998,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .ready
             .is_none(),
             "an uncached tool is not warm"
         );
@@ -1092,7 +1080,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            ensure_warm_tools(
+            prepare_tools(
                 &records,
                 &cache,
                 &Scripted::default(),
@@ -1106,6 +1094,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .ready
             .is_none(),
             "the record still names the old engine, so the write has to happen under the lock"
         );

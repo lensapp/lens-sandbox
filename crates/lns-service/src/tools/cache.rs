@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{StagedTar, StagedTool, ToolCacheKey};
+use crate::archive_limits::{ArchiveLimits, LimitedReader};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
@@ -232,11 +233,25 @@ fn open_staged_tar(path: &Path) -> Result<std::fs::File> {
 
 /// Expand a staged tool tar into content-store entries. Fail-closed like fileset ingestion — escaping paths and exotic entry types are refused — but tool trees legitimately carry symlinks (`bin/node -> ../lib/...`) and hardlinks (JDK layouts), so those are preserved as manifest entries.
 fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<ManifestEntry>> {
+    ingest_tar_entries_with_limits(tar, store, ArchiveLimits::PRODUCTION)
+}
+
+fn ingest_tar_entries_with_limits<R: Read>(
+    tar: R,
+    store: &ContentStore,
+    limits: ArchiveLimits,
+) -> Result<Vec<ManifestEntry>> {
     let mut entries = Vec::new();
     let mut by_path: std::collections::HashMap<String, EntryKind> =
         std::collections::HashMap::new();
-    let mut archive = tar::Archive::new(tar);
+    let limited = LimitedReader::new(tar, limits.bytes, "staged tool tar");
+    let mut archive = tar::Archive::new(limited);
+    let mut entry_count = 0usize;
     for entry in archive.entries().context("reading staged tool tar")? {
+        entry_count += 1;
+        if entry_count > limits.entries {
+            bail!("staged tool tar exceeds the {}-entry cap", limits.entries);
+        }
         let mut entry = entry.context("reading staged tool entry")?;
         let entry_type = entry.header().entry_type();
         if entry_type.is_dir() {
@@ -502,6 +517,36 @@ mod tests {
         assert_eq!(cache.lookup(&key(), &[]).unwrap(), Some(manifest.clone()));
         assert_eq!(manifest.entries.len(), 2, "dirs are skipped");
         assert_eq!(manifest.engine_version, "2026.7.14");
+    }
+
+    #[test]
+    fn staged_tool_tar_over_the_entry_cap_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = ingest_tar_entries_with_limits(
+            &tool_tar()[..],
+            &ContentStore::new(dir.path().join("content")),
+            ArchiveLimits {
+                bytes: u64::MAX,
+                entries: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("2-entry cap"), "got: {err:#}");
+    }
+
+    #[test]
+    fn staged_tool_tar_over_the_byte_cap_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = ingest_tar_entries_with_limits(
+            &tool_tar()[..],
+            &ContentStore::new(dir.path().join("content")),
+            ArchiveLimits {
+                bytes: 512,
+                entries: usize::MAX,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("512-byte cap"), "got: {err:#}");
     }
 
     #[test]
