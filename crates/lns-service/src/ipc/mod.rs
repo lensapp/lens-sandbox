@@ -180,14 +180,15 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }))
         }
-        Request::PullImage { image } => {
-            image_response(crate::image_store::pull(image).await.map(|outcome| {
-                Response::ImagePulled {
-                    image: outcome.image,
-                    warnings: outcome.warnings,
-                }
-            }))
-        }
+        Request::PullImage {
+            image,
+            expected_digest,
+        } => image_response(crate::image_store::pull(image, expected_digest).await.map(
+            |outcome| Response::ImagePulled {
+                image: outcome.image,
+                warnings: outcome.warnings,
+            },
+        )),
         Request::ListImages => image_response(
             crate::image_store::list()
                 .await
@@ -2003,6 +2004,7 @@ mod tests {
             handle_request(
                 &Request::PullImage {
                     image: "###".into(),
+                    expected_digest: format!("sha256:{}", "a".repeat(64)),
                 },
                 Instant::now(),
             )
@@ -2171,6 +2173,7 @@ mod tests {
             handle_request(
                 &Request::PullImage {
                     image: reference.clone(),
+                    expected_digest: manifest_digest.clone(),
                 },
                 now,
             )
@@ -2340,6 +2343,7 @@ mod tests {
             handle_request(
                 &Request::PullImage {
                     image: artifact_ref.clone(),
+                    expected_digest: artifact_digest.clone(),
                 },
                 now,
             )

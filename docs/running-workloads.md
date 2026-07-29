@@ -458,10 +458,11 @@ spec:
   run — including rebuilt microVMs — reuses the cache without touching the
   network. The one exception is a `@latest` entry, which asks the version index
   each run; when the index is unreachable it falls back to the last version
-  resolved here, so an offline start still works. Declaring the tool is the
-  consent, so acquisition needs no approval card and no policy route. What the
-  tools *do* at runtime (npm, pip, go traffic) stays inside the normal policy
-  cage.
+  resolved here, so an offline start still works. In a local `lns.yaml`,
+  declaring the tool is the consent. A published sandbox instead discloses its
+  tool installers and asks the consumer before provisioning them; `--yes`
+  accepts them in a non-interactive run or pull. What the tools *do* at runtime
+  (npm, pip, go traffic) stays inside the normal policy cage.
 - **Provisioning runs the tool's own install code, not just a download.** It
   happens in a disposable guest of its own — separate from your workload, thrown
   away when the install finishes, and never sharing your workload's writable
@@ -696,7 +697,10 @@ Consumers resolve relative binds against their own project directory, not the
 publisher's. Preflight pins the resolved artifact digest; after `lns pull` has
 cached that artifact and its referenced OCI content, and the service has
 provisioned its declared tools once, the published sandbox can start offline
-from the cached snapshot.
+from the cached snapshot. If the artifact declares tools, `lns pull` prints
+them and asks before running their installers in the disposable provisioning
+guest. A non-interactive pull must pass `--yes`; approval applies to the digest
+shown by preflight, so a tag that changes before the pull is refused.
 
 Re-reference a cached sandbox under another tag with `lns tag` (docker-tag style):
 

@@ -269,16 +269,17 @@ pub async fn run_image(
             &consumer_mount_targets,
         );
         let reference = target.image();
-        let mounts = crate::run::pull_confirm::PulledMounts {
+        let effects = crate::run::pull_confirm::PulledEffects {
             reference: &reference,
             binds: &declared_binds,
             volumes: &declared_volumes,
             filesets: &args.filesets,
+            tools: &args.tools,
         };
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
-        crate::run::pull_confirm::confirm_pulled_mounts(
-            &mounts,
+        crate::run::pull_confirm::confirm_pulled_effects(
+            &effects,
             args.assume_yes,
             interactive,
             &mut input,

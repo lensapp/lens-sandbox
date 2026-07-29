@@ -373,7 +373,18 @@ pub async fn dispatch(args: super::SandboxArgs) -> Result<i32> {
         stdout_is_terminal: std::io::stdout().is_terminal(),
     };
     let mut out = std::io::stdout();
+    let input = std::io::stdin();
+    let mut input = input.lock();
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
-    run_with_writers(&command, &svc, term, &mut out, &mut stdout, &mut stderr).await
+    run_with_writers(
+        &command,
+        &svc,
+        term,
+        &mut input,
+        &mut out,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await
 }
