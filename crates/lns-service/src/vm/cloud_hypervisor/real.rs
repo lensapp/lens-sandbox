@@ -91,6 +91,7 @@ impl VmmBackend for CloudHypervisor {
             &process::RealSpawner,
             spec,
             |k| std::env::var_os(k),
+            process::virtiofsd_help,
             real_kvm_check,
             real_read_console_tail,
             &orchestrate::LaunchTimeouts::default(),

@@ -231,11 +231,30 @@ fi
 # On Linux lns drives an out-of-process cloud-hypervisor + virtiofsd; probe PATH (honoring the
 # LNS_*_BIN overrides) so users get a clear pointer instead of a run-time "not found on PATH" error.
 if [ "$OS" = "linux" ]; then
+  find_virtiofsd() {
+    if [ -n "${LNS_VIRTIOFSD_BIN:-}" ] && [ -x "${LNS_VIRTIOFSD_BIN}" ]; then
+      printf '%s\n' "${LNS_VIRTIOFSD_BIN}"
+      return
+    fi
+    if command -v virtiofsd >/dev/null 2>&1; then
+      command -v virtiofsd
+      return
+    fi
+    for dir in /usr/libexec /usr/lib/virtiofsd /usr/lib/qemu; do
+      if [ -x "$dir/virtiofsd" ]; then
+        printf '%s\n' "$dir/virtiofsd"
+        return
+      fi
+    done
+    return 1
+  }
+
   MISSING_VMM=""
   if [ -z "${LNS_CLOUD_HYPERVISOR_BIN:-}" ] && ! command -v cloud-hypervisor >/dev/null 2>&1; then
     MISSING_VMM="${MISSING_VMM} cloud-hypervisor"
   fi
-  if [ -z "${LNS_VIRTIOFSD_BIN:-}" ] && ! command -v virtiofsd >/dev/null 2>&1; then
+  VIRTIOFSD_PATH="$(find_virtiofsd || true)"
+  if [ -z "$VIRTIOFSD_PATH" ]; then
     MISSING_VMM="${MISSING_VMM} virtiofsd"
   fi
   if [ -n "$MISSING_VMM" ]; then
@@ -243,6 +262,11 @@ if [ "$OS" = "linux" ]; then
     echo "  Missing:${MISSING_VMM}"
     echo "  Install them from your distro or a static build, or point lns at existing binaries with"
     echo "    LNS_CLOUD_HYPERVISOR_BIN=/path/to/cloud-hypervisor LNS_VIRTIOFSD_BIN=/path/to/virtiofsd"
+    echo ""
+  fi
+  if [ -n "$VIRTIOFSD_PATH" ] && ! "$VIRTIOFSD_PATH" --help 2>&1 | grep -q -- "--readonly"; then
+    warn "virtiofsd at ${VIRTIOFSD_PATH} does not support read-only shares. \`${BINARY_NAME} run\` requires --readonly support."
+    echo "  Install a newer virtiofsd or set LNS_VIRTIOFSD_BIN=/path/to/virtiofsd."
     echo ""
   fi
 fi

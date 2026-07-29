@@ -40,6 +40,7 @@ pub(super) async fn run_async_with<S: process::Spawner>(
     spawner: &S,
     spec: VmSpec,
     env_get: impl Fn(&str) -> Option<OsString>,
+    virtiofsd_help: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
     kvm_check: impl Fn() -> KvmStatus,
     read_console_tail: impl Fn(&Path) -> Option<String>,
     timeouts: &orchestrate::LaunchTimeouts,
@@ -68,6 +69,7 @@ pub(super) async fn run_async_with<S: process::Spawner>(
         .unwrap_or_else(|| PathBuf::from("."));
     let layout = launch::SocketLayout::for_run_dir(&run_dir);
     let bins = vmm_bin::resolve(env_get)?;
+    vmm_bin::require_read_only_support(&bins.virtiofsd, virtiofsd_help)?;
     let relay_fd_tx = spec.vsock.as_ref().map(|c| c.fd_tx.clone());
     let running =
         orchestrate::launch(spawner, &spec, &bins, &layout, relay_fd_tx, timeouts).await?;
@@ -226,6 +228,10 @@ mod tests {
         None
     }
 
+    fn readonly_help(_: &Path) -> std::io::Result<Vec<u8>> {
+        Ok(b"Usage: virtiofsd [OPTIONS] --readonly".to_vec())
+    }
+
     #[test]
     fn name_is_cloud_hypervisor() {
         assert_eq!(CloudHypervisor.name(), "cloud-hypervisor");
@@ -239,6 +245,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
+            readonly_help,
             || KvmStatus::Missing,
             no_console_tail,
             &fast(),
@@ -267,6 +274,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
+            readonly_help,
             || KvmStatus::NotAccessible,
             no_console_tail,
             &fast(),
@@ -294,6 +302,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             |_| None,
+            readonly_help,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -317,6 +326,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_refuses_a_virtiofsd_without_read_only_share_support() {
+        let d = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(d.path().join("disk")).unwrap();
+        let ch = tempfile::NamedTempFile::new().unwrap();
+        let vfsd = tempfile::NamedTempFile::new().unwrap();
+        let env = override_env(ch.path().to_path_buf(), vfsd.path().to_path_buf());
+        let spawner = idle_spawner();
+        let err = run_async_with(
+            &spawner,
+            spec(d.path()),
+            env,
+            |_| Ok(b"Usage: virtiofsd [OPTIONS]".to_vec()),
+            kvm_ok,
+            no_console_tail,
+            &fast(),
+        )
+        .await
+        .expect_err("a writable-only virtiofsd must be refused before boot");
+
+        assert_eq!(
+            *spawner.spawned.lock().unwrap(),
+            0,
+            "an unsupported virtiofsd must be refused before any process starts"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does not support read-only shares"),
+            "got {msg}"
+        );
+        assert!(msg.contains("LNS_VIRTIOFSD_BIN"), "got {msg}");
+    }
+
+    #[tokio::test]
+    async fn run_reports_when_virtiofsd_capabilities_cannot_be_checked() {
+        let d = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(d.path().join("disk")).unwrap();
+        let ch = tempfile::NamedTempFile::new().unwrap();
+        let vfsd = tempfile::NamedTempFile::new().unwrap();
+        let vfsd_path = vfsd.path().display().to_string();
+        let env = override_env(ch.path().to_path_buf(), vfsd.path().to_path_buf());
+        let spawner = idle_spawner();
+        let err = run_async_with(
+            &spawner,
+            spec(d.path()),
+            env,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))
+            },
+            kvm_ok,
+            no_console_tail,
+            &fast(),
+        )
+        .await
+        .expect_err("an unreadable virtiofsd must be refused before boot");
+
+        assert_eq!(*spawner.spawned.lock().unwrap(), 0);
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!("checking virtiofsd capabilities at {vfsd_path}")),
+            "got {msg}"
+        );
+        assert!(msg.contains("denied"), "got {msg}");
+    }
+
+    #[tokio::test]
     async fn run_boots_waits_and_reports_a_clean_exit() {
         let d = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(d.path().join("disk")).unwrap();
@@ -330,6 +407,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
+            readonly_help,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -363,6 +441,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
+            readonly_help,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -392,6 +471,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
+            readonly_help,
             kvm_ok,
             |_| Some("Error: KvmCheck failed".to_string()),
             &fast(),
@@ -424,6 +504,7 @@ mod tests {
             &spawner,
             spec(d.path()),
             env,
+            readonly_help,
             kvm_ok,
             no_console_tail,
             &fast(),
@@ -458,9 +539,17 @@ mod tests {
             virtiofsd_waited: Arc::new(AtomicBool::new(false)),
             spawned: Arc::new(Mutex::new(0)),
         };
-        run_async_with(&spawner, s, env, kvm_ok, no_console_tail, &fast())
-            .await
-            .expect("clean boot+exit");
+        run_async_with(
+            &spawner,
+            s,
+            env,
+            readonly_help,
+            kvm_ok,
+            no_console_tail,
+            &fast(),
+        )
+        .await
+        .expect("clean boot+exit");
         assert!(
             connector_rx.await.is_ok(),
             "the orchestrator must receive the guest connector"
