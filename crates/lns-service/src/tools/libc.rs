@@ -45,9 +45,9 @@ pub fn detect_libc_for(layer_digests: &[String], layers: &[impl AsRef<[u8]>]) ->
     Ok(verdict)
 }
 
-/// Decide the image's libc flavor from the loaders visible after applying its layer changesets, with musl winning when a gcompat-style loader is also present.
+/// Decide the image's libc flavor from the loaders and compatibility runtime visible after applying its layer changesets.
 pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
-    let mut visible: BTreeMap<PathBuf, Libc> = BTreeMap::new();
+    let mut visible: BTreeMap<PathBuf, LibcEvidence> = BTreeMap::new();
     for (idx, layer) in layers.iter().enumerate() {
         let changes =
             scan_layer(layer.as_ref()).with_context(|| format!("scanning layer {idx}"))?;
@@ -59,13 +59,22 @@ pub fn detect_libc(layers: &[impl AsRef<[u8]>]) -> Result<Libc> {
                 visible.remove(&entry.path);
             } else {
                 visible.retain(|path, _| !path.starts_with(&entry.path));
-                if let Some(flavor) = loader_flavor(&entry.path) {
-                    visible.insert(entry.path, flavor);
+                if let Some(evidence) = libc_evidence(&entry.path) {
+                    visible.insert(entry.path, evidence);
                 }
             }
         }
     }
-    Ok(if visible.values().any(|flavor| *flavor == Libc::Musl) {
+    let has_musl_loader = visible
+        .values()
+        .any(|evidence| *evidence == LibcEvidence::Loader(Libc::Musl));
+    let has_gnu_loader = visible
+        .values()
+        .any(|evidence| *evidence == LibcEvidence::Loader(Libc::Gnu));
+    let has_gcompat = visible
+        .values()
+        .any(|evidence| *evidence == LibcEvidence::Gcompat);
+    Ok(if has_musl_loader && (!has_gnu_loader || has_gcompat) {
         Libc::Musl
     } else {
         Libc::Gnu
@@ -123,7 +132,13 @@ fn materializes(entry_type: tar::EntryType) -> bool {
 
 const LOADER_DIRS: &[&str] = &["lib", "lib64", "usr/lib", "usr/lib64"];
 
-fn loader_flavor(path: &Path) -> Option<Libc> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibcEvidence {
+    Loader(Libc),
+    Gcompat,
+}
+
+fn libc_evidence(path: &Path) -> Option<LibcEvidence> {
     let rel = path.to_string_lossy();
     let rel = rel.trim_start_matches("./").trim_start_matches('/');
     let (dir, name) = rel.rsplit_once('/')?;
@@ -132,10 +147,13 @@ fn loader_flavor(path: &Path) -> Option<Libc> {
         return None;
     }
     if name.starts_with("ld-musl-") {
-        return Some(Libc::Musl);
+        return Some(LibcEvidence::Loader(Libc::Musl));
     }
     if name.starts_with("ld-linux") || name == "libc.so.6" {
-        return Some(Libc::Gnu);
+        return Some(LibcEvidence::Loader(Libc::Gnu));
+    }
+    if name.starts_with("libgcompat.so") {
+        return Some(LibcEvidence::Gcompat);
     }
     None
 }
@@ -320,9 +338,23 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_carrying_both_loaders_counts_as_musl() {
-        let layer = layer_with(&["lib/ld-musl-x86_64.so.1", "usr/lib64/libc.so.6"]);
+    fn a_layer_carrying_both_loaders_and_gcompat_counts_as_musl() {
+        let layer = layer_with(&[
+            "lib/ld-musl-x86_64.so.1",
+            "lib/ld-linux-x86-64.so.2",
+            "lib/libgcompat.so.0",
+        ]);
         assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Musl);
+    }
+
+    #[test]
+    fn a_glibc_image_with_a_co_installed_musl_loader_stays_gnu() {
+        let layer = layer_with(&[
+            "lib64/ld-linux-x86-64.so.2",
+            "usr/lib/x86_64-linux-gnu/libc.so.6",
+            "lib/ld-musl-x86_64.so.1",
+        ]);
+        assert_eq!(detect_libc(&[layer]).unwrap(), Libc::Gnu);
     }
 
     #[test]
