@@ -81,6 +81,7 @@ pub enum Request {
     PruneVolumes,
     PullImage {
         image: String,
+        expected_digest: String,
     },
     ListImages,
     RemoveImage {
@@ -1256,6 +1257,7 @@ mod tests {
         for req in [
             Request::PullImage {
                 image: "registry.example.test/some/image:1.0".into(),
+                expected_digest: format!("sha256:{}", "a".repeat(64)),
             },
             Request::ListImages,
             Request::RemoveImage {

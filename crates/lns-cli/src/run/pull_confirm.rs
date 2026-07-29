@@ -3,17 +3,20 @@ use std::io::{BufRead, Write};
 
 use anyhow::{Result, bail};
 
-/// What a pulled-by-reference sandbox will mount into the workload: host binds it declared (resolved against this machine), named volumes from this machine's shared volume store, and author-published filesets.
-pub struct PulledMounts<'a> {
+pub struct PulledEffects<'a> {
     pub reference: &'a str,
     pub binds: &'a [lns_ipc::BindSpec],
     pub volumes: &'a [lns_ipc::VolumeMount],
     pub filesets: &'a [(String, String, String)],
+    pub tools: &'a [String],
 }
 
-impl PulledMounts<'_> {
+impl PulledEffects<'_> {
     fn is_empty(&self) -> bool {
-        self.binds.is_empty() && self.volumes.is_empty() && self.filesets.is_empty()
+        self.binds.is_empty()
+            && self.volumes.is_empty()
+            && self.filesets.is_empty()
+            && self.tools.is_empty()
     }
 }
 
@@ -34,21 +37,21 @@ pub fn artifact_declared_mounts(
     crate::cli::split_mounts(&declared)
 }
 
-pub fn confirm_pulled_mounts(
-    mounts: &PulledMounts,
+pub fn confirm_pulled_effects(
+    effects: &PulledEffects,
     assume_yes: bool,
     interactive: bool,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<()> {
-    if mounts.is_empty() || assume_yes {
+    if effects.is_empty() || assume_yes {
         return Ok(());
     }
-    output.write_all(disclosure(mounts).as_bytes())?;
+    output.write_all(disclosure(effects).as_bytes())?;
     if !interactive {
         bail!(
-            "{} mounts the paths above into the workload and there is no terminal to confirm — run interactively, or pass --yes to accept them",
-            mounts.reference
+            "{} declares the effects above and there is no terminal to confirm — run interactively, or pass --yes to accept them",
+            effects.reference
         );
     }
     write!(output, "Continue? [y/N]: ")?;
@@ -59,14 +62,14 @@ pub fn confirm_pulled_mounts(
     if answer == "y" || answer == "yes" {
         Ok(())
     } else {
-        bail!("run declined; nothing was mounted or started");
+        bail!("declined; nothing was installed, mounted, or started");
     }
 }
 
-fn disclosure(mounts: &PulledMounts) -> String {
+fn disclosure(effects: &PulledEffects) -> String {
     let mut s = String::new();
-    writeln!(s, "{} mounts into the workload:", mounts.reference).unwrap();
-    for bind in mounts.binds {
+    writeln!(s, "{} declares these effects:", effects.reference).unwrap();
+    for bind in effects.binds {
         let mode = if bind.read_only {
             "read"
         } else {
@@ -79,7 +82,7 @@ fn disclosure(mounts: &PulledMounts) -> String {
         )
         .unwrap();
     }
-    for volume in mounts.volumes {
+    for volume in effects.volumes {
         let mode = if volume.read_only {
             "read"
         } else {
@@ -92,7 +95,7 @@ fn disclosure(mounts: &PulledMounts) -> String {
         )
         .unwrap();
     }
-    for (source, mount_path, owner) in mounts.filesets {
+    for (source, mount_path, owner) in effects.filesets {
         let mode = if owner == "workload" {
             "read and write"
         } else {
@@ -101,6 +104,13 @@ fn disclosure(mounts: &PulledMounts) -> String {
         writeln!(
             s,
             "  Fileset:   {source} → {mount_path} — author-published files the workload can {mode} (owner: {owner})"
+        )
+        .unwrap();
+    }
+    for tool in effects.tools {
+        writeln!(
+            s,
+            "  Tool:       {tool} — its installer runs as root in a disposable microVM with unrestricted network access"
         )
         .unwrap();
     }
@@ -120,14 +130,14 @@ mod tests {
     }
 
     fn confirm(
-        mounts: &PulledMounts,
+        effects: &PulledEffects,
         assume_yes: bool,
         interactive: bool,
         answer: &str,
     ) -> (Result<()>, String) {
         let mut input = std::io::Cursor::new(answer.to_string());
         let mut out = Vec::new();
-        let r = confirm_pulled_mounts(mounts, assume_yes, interactive, &mut input, &mut out);
+        let r = confirm_pulled_effects(effects, assume_yes, interactive, &mut input, &mut out);
         (r, String::from_utf8(out).unwrap())
     }
 
@@ -142,7 +152,7 @@ mod tests {
     fn mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
         filesets: &'a [(String, String, String)],
-    ) -> PulledMounts<'a> {
+    ) -> PulledEffects<'a> {
         volume_mounts(binds, &[], filesets)
     }
 
@@ -150,12 +160,13 @@ mod tests {
         binds: &'a [lns_ipc::BindSpec],
         volumes: &'a [lns_ipc::VolumeMount],
         filesets: &'a [(String, String, String)],
-    ) -> PulledMounts<'a> {
-        PulledMounts {
+    ) -> PulledEffects<'a> {
+        PulledEffects {
             reference: "ghcr.io/team/hermes:1",
             binds,
             volumes,
             filesets,
+            tools: &[],
         }
     }
 
@@ -239,7 +250,7 @@ mod tests {
         let (r, out) = confirm(&mounts(&binds, &[]), false, true, "y\n");
         r.unwrap();
         assert!(
-            out.contains("ghcr.io/team/hermes:1 mounts into the workload:"),
+            out.contains("ghcr.io/team/hermes:1 declares these effects:"),
             "got: {out}"
         );
         assert!(
@@ -354,5 +365,47 @@ mod tests {
             out.contains("Fileset:"),
             "the refusal must still disclose what it refused: {out}"
         );
+    }
+
+    #[test]
+    fn a_publisher_declared_tool_requires_consent_and_discloses_what_executes() {
+        let tools = ["node@22".to_string()];
+        let effects = PulledEffects {
+            reference: "ghcr.io/team/hermes:1",
+            binds: &[],
+            volumes: &[],
+            filesets: &[],
+            tools: &tools,
+        };
+
+        let mut input = std::io::Cursor::new("n\n");
+        let mut out = Vec::new();
+        let err = confirm_pulled_effects(&effects, false, true, &mut input, &mut out).unwrap_err();
+        let out = String::from_utf8(out).unwrap();
+
+        assert!(err.to_string().contains("declined"), "got: {err}");
+        assert!(out.contains("Tool:       node@22"), "got: {out}");
+        assert!(
+            out.contains("installer runs as root in a disposable microVM"),
+            "got: {out}"
+        );
+        assert!(out.contains("unrestricted network access"), "got: {out}");
+    }
+
+    #[test]
+    fn a_tool_free_pulled_sandbox_still_needs_no_prompt() {
+        let effects = PulledEffects {
+            reference: "ghcr.io/team/hermes:1",
+            binds: &[],
+            volumes: &[],
+            filesets: &[],
+            tools: &[],
+        };
+
+        let mut input = std::io::Cursor::new("");
+        let mut out = Vec::new();
+        confirm_pulled_effects(&effects, false, false, &mut input, &mut out).unwrap();
+
+        assert!(out.is_empty());
     }
 }

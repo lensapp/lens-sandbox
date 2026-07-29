@@ -101,6 +101,7 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
         }),
         &svc,
         TermInfo::default(),
+        &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
         &mut stderr,

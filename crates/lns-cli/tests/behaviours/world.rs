@@ -112,6 +112,8 @@ pub struct SandboxCliRig {
     pub policy: Option<serde_json::Value>,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub workload_stdout: Vec<u8>,
+    pub prompt_answer: Option<String>,
+    pub stdin_is_tty: bool,
 }
 
 #[derive(Debug, Default)]
