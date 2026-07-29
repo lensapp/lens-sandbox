@@ -2114,7 +2114,7 @@ mod tests {
         assert_eq!(deny_decision(true), Decision::DenyAlways);
     }
 
-    /// Drives `render_stack` through headless egui passes, hovers the stack so hover-only affordances appear, clicks the control labelled `label`, and returns whatever that click fired. `expanded` fans the pile out first so its header controls exist.
+    /// Clicks the control labelled `label` in a headless `render_stack` and returns what it fired, hovering first so hover-only affordances exist and fanning the pile out when `expanded`.
     fn click_labelled_control(
         snapshot: Snapshot,
         label: &str,
