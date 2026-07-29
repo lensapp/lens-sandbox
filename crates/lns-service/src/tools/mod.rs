@@ -153,6 +153,32 @@ async fn newest_within_budget<P: ToolProvisioner>(
     }
 }
 
+async fn effective_pin<P: ToolProvisioner>(
+    provisioner: &P,
+    request: &ToolRef,
+    recorded: Option<SafeVersion>,
+) -> (Option<SafeVersion>, bool) {
+    match request.version.as_str() {
+        LATEST => match newest_within_budget(provisioner, &request.name).await {
+            Ok(newest) => {
+                let changed = recorded.as_ref() != Some(&newest);
+                (Some(newest), changed)
+            }
+            Err(e) => {
+                crate::log::warn!(
+                    "could not re-check the newest {} ({e:#}); using the last version resolved here",
+                    request.name
+                );
+                (recorded, false)
+            }
+        },
+        version if lns_artifact::tools::is_exact_version(version) => {
+            (recorded.or_else(|| version.parse().ok()), false)
+        }
+        _ => (recorded, false),
+    }
+}
+
 /// The read-only half: consult the record and the cache for each request, re-asking the index for `@latest`. Nothing is written and no guest boots, so this is safe to run without holding the provision lock.
 async fn plan_tools<R, C, P>(
     records: &R,
@@ -185,34 +211,31 @@ where
     record.schema_version = record::RECORD_SCHEMA_VERSION;
     record.engine_version = ask.engine_version.to_string();
 
-    // What this sandbox declares is what it already trusts, so it is the yardstick for adopting a tree a neighbour shared a guest with.
-    let declared: Vec<String> = ask.requests.iter().map(ToolRef::to_string).collect();
-    let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
-    let mut misses: Vec<ToolRef> = Vec::new();
+    let mut pins = Vec::with_capacity(ask.requests.len());
     for request in ask.requests {
         let recorded = record
             .recorded(&request.to_string())
             .map(|entry| entry.resolved.clone());
-        let pinned = match request.version.as_str() {
-            LATEST => match newest_within_budget(provisioner, &request.name).await {
-                Ok(newest) => {
-                    record_changed |= recorded.as_ref() != Some(&newest);
-                    Some(newest)
-                }
-                Err(e) => {
-                    crate::log::warn!(
-                        "could not re-check the newest {} ({e:#}); using the last version resolved here",
-                        request.name
-                    );
-                    recorded
-                }
-            },
-            // An exact request is its own pin, so a pulled sandbox starts from the cache even when the record was lost.
-            version if lns_artifact::tools::is_exact_version(version) => {
-                recorded.or_else(|| version.parse().ok())
-            }
-            _ => recorded,
-        };
+        let (pinned, pin_changed) = effective_pin(provisioner, request, recorded).await;
+        record_changed |= pin_changed;
+        pins.push(pinned);
+    }
+
+    // What this sandbox declares is what it already trusts, so it is the yardstick for adopting a tree a neighbour shared a guest with.
+    let mut declared: Vec<String> = ask.requests.iter().map(ToolRef::to_string).collect();
+    declared.extend(
+        ask.requests
+            .iter()
+            .zip(&pins)
+            .filter_map(|(request, pinned)| {
+                pinned
+                    .as_ref()
+                    .map(|resolved| format!("{}@{resolved}", request.name))
+            }),
+    );
+    let mut hits: HashMap<String, cache::ToolManifest> = HashMap::new();
+    let mut misses: Vec<ToolRef> = Vec::new();
+    for (request, pinned) in ask.requests.iter().zip(pins) {
         let manifest = match &pinned {
             Some(resolved) => cache
                 .lookup(
@@ -548,7 +571,10 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let scheduled = self.scheduled.lock().unwrap().take().expect("one ingest");
             let proof = scheduled.recv_timeout(std::time::Duration::from_millis(500));
-            anyhow::ensure!(proof.is_ok(), "no other task ran while this ingest held its thread");
+            anyhow::ensure!(
+                proof.is_ok(),
+                "no other task ran while this ingest held its thread"
+            );
             self.inner.ingest(key, staged)
         }
     }
@@ -1047,6 +1073,71 @@ mod tests {
         assert!(
             unchanged.calls.lock().unwrap().is_empty(),
             "an unchanged @latest is a cache hit — no guest boots"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_latest_neighbours_reuse_the_trees_they_shared() {
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let requests = refs(&["some-tool@latest", "other-tool@latest"]);
+        let first = Scripted::resolving(&[("some-tool", "1.2.3"), ("other-tool", "1.2.3")])
+            .index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &first,
+            &EnsureRequest {
+                requests: &requests,
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+
+        let unchanged = Scripted::resolving(&[("some-tool", "1.2.3"), ("other-tool", "1.2.3")])
+            .index_says("1.2.3");
+        ensure_tools(
+            &records,
+            &cache,
+            &unchanged,
+            &EnsureRequest {
+                requests: &requests,
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            unchanged.calls.lock().unwrap().is_empty(),
+            "unchanged @latest neighbours should trust and reuse the exact trees they shared"
+        );
+
+        let offline = Scripted::default();
+        ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &EnsureRequest {
+                requests: &requests,
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_018,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "recorded @latest neighbours should reuse their cached trees while offline"
         );
     }
 
