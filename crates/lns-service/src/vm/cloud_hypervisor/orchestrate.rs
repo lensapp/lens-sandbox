@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::launch::{BindIdMap, SocketLayout, cloud_hypervisor_args, virtiofsd_args};
+use super::launch::{BindIdMap, ShareAccess, SocketLayout, cloud_hypervisor_args, virtiofsd_args};
 use super::process::{Child, Spawner};
 use super::vmm_bin::VmmBinaries;
 use super::vsock;
@@ -50,6 +50,7 @@ pub(crate) async fn launch<S: Spawner>(
         &layout.virtiofsd,
         &spec.content_share,
         None,
+        ShareAccess::ReadOnly,
         timeouts.virtiofsd,
     )
     .await?;
@@ -133,6 +134,10 @@ async fn prepare_bind<S: Spawner>(
         &layout.bind_virtiofsd(index),
         &bind.host_source,
         id_map,
+        match bind.read_only {
+            true => ShareAccess::ReadOnly,
+            false => ShareAccess::ReadWrite,
+        },
         timeout,
     )
     .await
@@ -160,9 +165,10 @@ async fn spawn_virtiofsd<S: Spawner>(
     socket: &Path,
     shared_dir: &Path,
     id_map: Option<BindIdMap>,
+    access: ShareAccess,
     timeout: Duration,
 ) -> Result<S::Child> {
-    let args = virtiofsd_args(socket, shared_dir, id_map);
+    let args = virtiofsd_args(socket, shared_dir, id_map, access);
     let mut child = spawner.spawn(bin, &args).context("spawning virtiofsd")?;
     if let Err(e) = wait_for_socket(socket, timeout).await {
         let _ = child.start_kill();
@@ -603,6 +609,19 @@ mod tests {
         assert!(
             maps_workload_uid(&recs[1]) && maps_workload_uid(&recs[2]),
             "every bind maps the workload uid to the host user so an unprivileged workload can reach it"
+        );
+        let rejects_guest_writes = |r: &Spawned| r.args.iter().any(|a| a == "--readonly");
+        assert!(
+            rejects_guest_writes(&recs[0]),
+            "the content store must reject guest writes"
+        );
+        assert!(
+            !rejects_guest_writes(&recs[1]),
+            "a writable bind must accept guest writes"
+        );
+        assert!(
+            rejects_guest_writes(&recs[2]),
+            "a read-only bind must reject guest writes"
         );
     }
 
