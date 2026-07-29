@@ -1,9 +1,67 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BinaryIdentity {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl BinaryIdentity {
+    pub(crate) fn new(
+        device: u64,
+        inode: u64,
+        length: u64,
+        modified: (i64, i64),
+        changed: (i64, i64),
+    ) -> Self {
+        Self {
+            device,
+            inode,
+            length,
+            modified_seconds: modified.0,
+            modified_nanoseconds: modified.1,
+            changed_seconds: changed.0,
+            changed_nanoseconds: changed.1,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReadOnlySupportCache {
+    validated: Mutex<HashSet<BinaryIdentity>>,
+}
+
+impl ReadOnlySupportCache {
+    pub(crate) fn require(
+        &self,
+        virtiofsd: &Path,
+        identity: BinaryIdentity,
+        help: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> Result<()> {
+        let mut validated = self
+            .validated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if validated.contains(&identity) {
+            return Ok(());
+        }
+        require_read_only_support(virtiofsd, help)?;
+        validated.insert(identity);
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct VmmBinaries {
@@ -256,5 +314,70 @@ mod tests {
             format!("{err:#}").contains("virtiofsd was not found"),
             "got {err:#}"
         );
+    }
+
+    fn identity(version: i64) -> BinaryIdentity {
+        BinaryIdentity::new(1, 2, 3, (version, 0), (version, 0))
+    }
+
+    #[test]
+    fn a_successful_read_only_check_is_reused_for_the_same_binary() {
+        let cache = ReadOnlySupportCache::default();
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let help = |_: &Path| {
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(b"Usage: virtiofsd [OPTIONS] --readonly".to_vec())
+        };
+
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(1), help)
+            .unwrap();
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(1), help)
+            .unwrap();
+
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_replaced_virtiofsd_is_checked_again() {
+        let cache = ReadOnlySupportCache::default();
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let help = |_: &Path| {
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(b"Usage: virtiofsd [OPTIONS] --readonly".to_vec())
+        };
+
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(1), help)
+            .unwrap();
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(2), help)
+            .unwrap();
+
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_read_only_check_is_retried() {
+        let cache = ReadOnlySupportCache::default();
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let help = |_: &Path| {
+            let attempt = probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if attempt == 0 {
+                b"Usage: virtiofsd [OPTIONS]".to_vec()
+            } else {
+                b"Usage: virtiofsd [OPTIONS] --readonly".to_vec()
+            })
+        };
+
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(1), help)
+            .expect_err("the unsupported binary must be refused");
+        cache
+            .require(Path::new("/usr/bin/virtiofsd"), identity(1), help)
+            .expect("a corrected binary at the same identity must be retried");
+
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
