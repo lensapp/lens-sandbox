@@ -1,32 +1,100 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 /// mise's published minisign key (checked into the mise repo as minisign.pub); every SHASUMS256.txt must verify against it before a pin lands.
 pub const MISE_MINISIGN_PUBKEY: &str = "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ";
 
-/// Stage every payload before moving any live file: the failure that actually happens is a full disk on the larger write, and a bumped engine pin against last release's snapshot is the one state worse than no bump.
-pub fn write_all_atomically(files: &[(&std::path::Path, Vec<u8>)]) -> Result<()> {
-    let mut staged = Vec::with_capacity(files.len());
-    for (path, bytes) in files {
-        let tmp = path.with_extension("bump-tmp");
-        if let Err(e) = std::fs::write(&tmp, bytes) {
-            for (tmp, _) in &staged {
-                let _ = std::fs::remove_file(tmp);
-            }
-            return Err(e).with_context(|| format!("writing {}", tmp.display()));
-        }
-        staged.push((tmp, *path));
+trait Fs {
+    fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()>;
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn remove_file(&self, path: &Path) -> std::io::Result<()>;
+}
+
+struct RealFs;
+
+impl Fs for RealFs {
+    fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::write(path, bytes)
     }
-    for (tmp, path) in &staged {
-        if let Err(e) = std::fs::rename(tmp, path) {
-            for (tmp, _) in &staged {
-                let _ = std::fs::remove_file(tmp);
-            }
-            return Err(e).with_context(|| format!("replacing {}", path.display()));
+
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+}
+
+struct StagedFile<'a> {
+    live: &'a Path,
+    temporary: PathBuf,
+    backup: PathBuf,
+}
+
+pub fn replace_all_transactionally(files: &[(&Path, Vec<u8>)]) -> Result<()> {
+    replace_all_with(&RealFs, files)
+}
+
+fn replace_all_with<'a>(fs: &impl Fs, files: &'a [(&'a Path, Vec<u8>)]) -> Result<()> {
+    let staged: Vec<_> = files
+        .iter()
+        .map(|(live, _)| StagedFile {
+            live,
+            temporary: live.with_extension("bump-tmp"),
+            backup: live.with_extension("bump-backup"),
+        })
+        .collect();
+
+    for (file, (_, bytes)) in staged.iter().zip(files) {
+        if let Err(e) = fs.write(&file.temporary, bytes) {
+            remove_temporaries(fs, &staged);
+            return Err(e).with_context(|| format!("writing {}", file.temporary.display()));
         }
+    }
+
+    for (backed_up, file) in staged.iter().enumerate() {
+        if let Err(e) = fs.rename(file.live, &file.backup) {
+            restore_backups(fs, &staged[..backed_up]);
+            remove_temporaries(fs, &staged);
+            return Err(e).with_context(|| format!("backing up {}", file.live.display()));
+        }
+    }
+
+    for (installed, file) in staged.iter().enumerate() {
+        if let Err(e) = fs.rename(&file.temporary, file.live) {
+            remove_installed(fs, &staged[..installed]);
+            restore_backups(fs, &staged);
+            remove_temporaries(fs, &staged);
+            return Err(e).with_context(|| format!("replacing {}", file.live.display()));
+        }
+    }
+
+    for file in &staged {
+        fs.remove_file(&file.backup)
+            .with_context(|| format!("removing {}", file.backup.display()))?;
     }
     Ok(())
+}
+
+fn remove_temporaries(fs: &impl Fs, staged: &[StagedFile<'_>]) {
+    for file in staged {
+        let _ = fs.remove_file(&file.temporary);
+    }
+}
+
+fn remove_installed(fs: &impl Fs, installed: &[StagedFile<'_>]) {
+    for file in installed.iter().rev() {
+        let _ = fs.remove_file(file.live);
+    }
+}
+
+fn restore_backups(fs: &impl Fs, backed_up: &[StagedFile<'_>]) {
+    for file in backed_up.iter().rev() {
+        let _ = fs.rename(&file.backup, file.live);
+    }
 }
 
 /// The engine pin as `show` reports it, so a hand-edited manifest missing the section is named rather than indexed into.
@@ -199,6 +267,7 @@ pub fn source_tarball_url(version: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     const MANIFEST: &str = r#"# header comment survives
 [engine]
@@ -212,6 +281,39 @@ x86_64 = "bbbb"
 gnu = "docker.io/library/debian@sha256:cccc"
 musl = "docker.io/library/alpine@sha256:dddd"
 "#;
+
+    struct FailRenameFs {
+        fail_on: usize,
+        calls: Cell<usize>,
+    }
+
+    impl FailRenameFs {
+        fn on(call: usize) -> Self {
+            Self {
+                fail_on: call,
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl Fs for FailRenameFs {
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            std::fs::write(path, bytes)
+        }
+
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if call == self.fail_on {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            std::fs::rename(from, to)
+        }
+
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            std::fs::remove_file(path)
+        }
+    }
 
     #[test]
     fn musl_binary_shas_reads_both_arches_from_the_shasums() {
@@ -331,7 +433,7 @@ musl = "docker.io/library/alpine@sha256:dddd"
         // A directory where the second temp file has to go makes staging it fail without touching the first.
         std::fs::create_dir(snapshot.with_extension("bump-tmp")).unwrap();
 
-        let err = write_all_atomically(&[
+        let err = replace_all_transactionally(&[
             (manifest.as_path(), b"new-manifest".to_vec()),
             (snapshot.as_path(), b"new-snapshot".to_vec()),
         ])
@@ -354,7 +456,7 @@ musl = "docker.io/library/alpine@sha256:dddd"
         std::fs::write(&manifest, b"old-manifest").unwrap();
         std::fs::write(&snapshot, b"old-snapshot").unwrap();
 
-        write_all_atomically(&[
+        replace_all_transactionally(&[
             (manifest.as_path(), b"new-manifest".to_vec()),
             (snapshot.as_path(), b"new-snapshot".to_vec()),
         ])
@@ -437,22 +539,73 @@ musl = "docker.io/library/alpine@sha256:dddd"
         // The operator's only recovery signal is `git status`, so a half-finished bump must not leave a stray file to puzzle over.
         let dir = tempfile::TempDir::new().unwrap();
         let occupied = dir.path().join("snapshot");
-        std::fs::create_dir(&occupied).unwrap();
-        std::fs::write(occupied.join("keep"), b"in the way").unwrap();
+        std::fs::write(&occupied, b"old").unwrap();
 
-        let err = write_all_atomically(&[(occupied.as_path(), b"new".to_vec())]).unwrap_err();
+        let err = replace_all_with(
+            &FailRenameFs::on(2),
+            &[(occupied.as_path(), b"new".to_vec())],
+        )
+        .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("snapshot"),
             "the error names the file: {err:#}"
         );
-        assert!(occupied.join("keep").exists(), "the old state survives");
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"old");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name != "snapshot")
             .collect();
         assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_second_rename_failure_rolls_back_the_first_replacement() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = dir.path().join("mise.toml");
+        let snapshot = dir.path().join("registry.snapshot");
+        std::fs::write(&manifest, b"old-manifest").unwrap();
+        std::fs::write(&snapshot, b"old-snapshot").unwrap();
+
+        let err = replace_all_with(
+            &FailRenameFs::on(4),
+            &[
+                (manifest.as_path(), b"new-manifest".to_vec()),
+                (snapshot.as_path(), b"new-snapshot".to_vec()),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("registry.snapshot"));
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"old-manifest");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"old-snapshot");
+        for path in [&manifest, &snapshot] {
+            assert!(!path.with_extension("bump-tmp").exists());
+            assert!(!path.with_extension("bump-backup").exists());
+        }
+    }
+
+    #[test]
+    fn a_backup_failure_restores_earlier_backups_before_installing_anything() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = dir.path().join("mise.toml");
+        let snapshot = dir.path().join("registry.snapshot");
+        std::fs::write(&manifest, b"old-manifest").unwrap();
+        std::fs::write(&snapshot, b"old-snapshot").unwrap();
+
+        let err = replace_all_with(
+            &FailRenameFs::on(2),
+            &[
+                (manifest.as_path(), b"new-manifest".to_vec()),
+                (snapshot.as_path(), b"new-snapshot".to_vec()),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("registry.snapshot"));
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"old-manifest");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"old-snapshot");
     }
 
     #[test]

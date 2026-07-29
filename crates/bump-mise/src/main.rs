@@ -83,7 +83,7 @@ fn bump(version: &str) -> Result<()> {
     let entries = operations::registry_entries_from_tarball(&tarball)?;
     let snapshot = operations::render_registry_snapshot(&entries)?;
 
-    operations::write_all_atomically(&[
+    operations::replace_all_transactionally(&[
         (manifest_path.as_path(), bumped.into_bytes()),
         (snapshot_path.as_path(), snapshot.into_bytes()),
     ])?;
