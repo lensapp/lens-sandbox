@@ -77,6 +77,7 @@ impl Notifier for WindowNotifier {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::approval_flow::protocol::Treatment;
 
     fn prompt(id: &str, host: &str) -> PendingPrompt {
         PendingPrompt {
@@ -85,6 +86,7 @@ pub(crate) mod tests {
             action: format!("CONNECT {host}:443"),
             offer: None,
             token_fallback: None,
+            treatment: Treatment::Inspected,
         }
     }
 

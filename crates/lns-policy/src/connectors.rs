@@ -186,6 +186,7 @@ impl Catalog {
                         connector.routes.iter().map(ConnectorRoute::to_route_rule)
                     })
                     .collect(),
+                ..crate::Egress::default()
             },
             ..NetworkPolicy::default()
         }

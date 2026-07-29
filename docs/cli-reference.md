@@ -296,33 +296,42 @@ Edit network rules in a policy file. All subcommands accept `--policy <PATH>`
 (default `lns-policy.yaml` in the current directory).
 
 ```bash
-lns policy allow  <PATTERN> [--description <TEXT>] [--binary <PATH>]…
-lns policy deny   <PATTERN> [--description <TEXT>]
-lns policy list   [--format <table|json>]
-lns policy remove <PATTERN>
+lns policy allow     <PATTERN> [--description <TEXT>] [--binary <PATH>]…
+lns policy deny      <PATTERN> [--description <TEXT>]
+lns policy allow-tcp <HOST:PORT> [--description <TEXT>] [--binary <PATH>]…
+lns policy deny-tcp  <HOST:PORT> [--description <TEXT>]
+lns policy ask-tcp   <HOST:PORT> [--description <TEXT>] [--binary <PATH>]…
+lns policy list      [--format <table|json>]
+lns policy remove    <PATTERN>
 ```
 
-| Subcommand | Meaning                                                          |
-| ---------- | ---------------------------------------------------------------- |
-| `allow`    | Add an allow rule for a destination pattern.                     |
-| `deny`     | Add a deny rule for a destination pattern.                       |
-| `list`     | List the rules in the policy file, including what each is scoped to. |
-| `remove`   | Remove every rule for a destination pattern, binary-scoped ones included. |
+| Subcommand  | Meaning                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| `allow`     | Add an allow rule for a destination pattern.                       |
+| `deny`      | Add a deny rule for a destination pattern.                         |
+| `allow-tcp` | Allow a raw TCP destination, spliced through without inspection.   |
+| `deny-tcp`  | Deny a raw TCP destination.                                        |
+| `ask-tcp`   | Prompt on first use of a raw TCP destination.                      |
+| `list`      | List the rules in the policy file, with the table each is in and what each is scoped to. |
+| `remove`    | Remove every rule for a destination pattern, from either table and binary-scoped ones included. |
 
-`PATTERN` is a host, wildcard (`*.github.com`), CIDR, or `host:port`.
+`PATTERN` is a host, wildcard (`*.github.com`), CIDR, or `host:port`. The
+`-tcp` verbs write to the raw table and always require a port.
 
-`--binary` restricts an allow rule to callers running that guest binary, named by
-absolute path and repeatable. The filter fails closed — once a scoped rule claims a
-destination, callers not on the list are denied it rather than asked. `deny` does not
-take the flag: it would block the listed callers by verdict and the rest by that same
-fail-closed filter, which is a plain deny by another name.
+`--binary` restricts a rule to callers running that guest binary, named by absolute
+path and repeatable. The filter fails closed — once a scoped rule claims a
+destination, callers not on the list are denied it rather than asked. Neither deny
+verb takes the flag: it would block the listed callers by verdict and the rest by that
+same fail-closed filter, which is a plain deny by another name.
 
 Since the guest stops at the first matching rule, both `allow` and `deny` place the
 new rule ahead of any existing rule that covers the same destination and report where
 it landed. Where that placement would widen egress instead — an `allow` behind a
 `deny`, an unrestricted `allow` behind a binary-scoped rule, or an `allow` behind a
 rule that restricts which requests it permits — the command is refused and nothing is
-written. See [Policy and approvals](policy.md).
+written. The `-tcp` verbs apply the same rule across the tables: the raw table is the
+pre-filter, so they name the `http` rules that stop applying to the destination and
+refuse when one of them is a `deny`. See [Policy and approvals](policy.md).
 
 ## `lns connector`
 

@@ -849,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_delivery_loop_applies_each_delivery_and_exits_on_tx_drop() {
-        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending, Treatment};
         let (session, mut frame_rx) = fixture_session();
         let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
         session.submit_pending(
@@ -858,6 +858,7 @@ mod tests {
                 host: "api.linear.app".into(),
                 action: "CONNECT api.linear.app:443".into(),
                 reason: "policy-ambiguous".into(),
+                treatment: Treatment::Inspected,
             },
             std::time::Instant::now(),
         );
@@ -888,6 +889,7 @@ mod tests {
                 id: "r1".into(),
                 host: "api.linear.app".into(),
                 action: "CONNECT api.linear.app:443".into(),
+                treatment: Default::default(),
                 reason: "policy-ambiguous".into(),
             },
             std::time::Instant::now(),
@@ -917,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_connect_action_to_connect_offer() {
-        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending, Treatment};
         use crate::approval_flow::session::OfferableConnector;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
 
@@ -947,6 +949,7 @@ mod tests {
                 host: "api.some-oauth.example".into(),
                 action: "CONNECT api.some-oauth.example:443".into(),
                 reason: "policy-ambiguous".into(),
+                treatment: Treatment::Inspected,
             },
             std::time::Instant::now(),
         );
@@ -980,7 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_delivery_loop_routes_a_use_token_action_to_connect_offer_with_token() {
-        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending, Treatment};
         use crate::approval_flow::session::OfferableConnector;
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
 
@@ -1010,6 +1013,7 @@ mod tests {
                 host: "api.some-oauth.example".into(),
                 action: "CONNECT api.some-oauth.example:443".into(),
                 reason: "policy-ambiguous".into(),
+                treatment: Treatment::Inspected,
             },
             std::time::Instant::now(),
         );
@@ -2582,7 +2586,7 @@ mod tests {
 
     #[test]
     fn sweep_once_drives_session_tick_timeouts() {
-        use crate::approval_flow::protocol::{HostFrame, RequestPending};
+        use crate::approval_flow::protocol::{HostFrame, RequestPending, Treatment};
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
         use lns_policy::Policy;
         let notifier = Arc::new(RecordingNotifier::default());
@@ -2601,6 +2605,7 @@ mod tests {
                 host: "api.linear.app".into(),
                 action: "CONNECT api.linear.app:443".into(),
                 reason: "policy-ambiguous".into(),
+                treatment: Treatment::Inspected,
             },
             std::time::Instant::now() - std::time::Duration::from_secs(1),
         );

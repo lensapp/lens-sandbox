@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use lns_policy::connectors::TokenFallback;
+use lns_service::approval_flow::protocol::Treatment;
 use lns_service::approval_flow::session::PendingPrompt;
 use lns_service::approval_flow::window::{
     CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,
@@ -149,6 +150,7 @@ fn seed_one() -> Snapshot {
             action: "CONNECT pypi.org:443".into(),
             offer: None,
             token_fallback: None,
+            treatment: Treatment::Inspected,
         }],
         pending_credentials: vec![],
         sign_ins: vec![],
@@ -167,6 +169,7 @@ fn seed_all() -> Snapshot {
                 action: "CONNECT pypi.org:443".into(),
                 offer: None,
                 token_fallback: None,
+                treatment: Treatment::Inspected,
             },
             PendingPrompt {
                 id: "net-offer".into(),
@@ -174,6 +177,7 @@ fn seed_all() -> Snapshot {
                 action: "CONNECT openrouter.ai:443".into(),
                 offer: Some("OpenRouter".into()),
                 token_fallback: None,
+                treatment: Treatment::Inspected,
             },
         ],
         pending_credentials: vec![

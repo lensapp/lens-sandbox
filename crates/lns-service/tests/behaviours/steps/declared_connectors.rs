@@ -458,7 +458,7 @@ fn overlay_denies_by_default(w: &mut BehaviourWorld) {
 
 #[when(regex = r#"^the developer approves a new destination "([^"]+)" with "always allow"$"#)]
 fn developer_approves_destination(w: &mut BehaviourWorld, host: String) {
-    use lns_service::approval_flow::protocol::{Decision, RequestPending};
+    use lns_service::approval_flow::protocol::{Decision, RequestPending, Treatment};
     let rig = w.approval();
     rig.session.submit_pending(
         RequestPending {
@@ -466,6 +466,7 @@ fn developer_approves_destination(w: &mut BehaviourWorld, host: String) {
             host: host.clone(),
             action: format!("CONNECT {host}:443"),
             reason: "policy-ambiguous".into(),
+            treatment: Treatment::Inspected,
         },
         std::time::Instant::now(),
     );

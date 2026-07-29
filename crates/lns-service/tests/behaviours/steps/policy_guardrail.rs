@@ -1,6 +1,6 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_policy::{RouteRule, Verdict};
+use lns_policy::{RouteRule, TcpEgressRule, Verdict};
 use lns_service::artifact::policy::{guardrail_flags, run_summary};
 
 #[given(r#"a sandbox whose policy has defaultVerdict "allow""#)]
@@ -22,6 +22,17 @@ async fn allows_host(world: &mut BehaviourWorld, host: String) {
     let rig = world.policy();
     rig.sandbox_ships_policy = true;
     rig.sandbox_policy.add_rule(RouteRule::allow_host(host));
+}
+
+#[given(regex = r#"^a sandbox whose policy splices the CIDR "([^"]+)" raw$"#)]
+async fn splices_cidr_raw(world: &mut BehaviourWorld, cidr: String) {
+    let rig = world.policy();
+    rig.sandbox_ships_policy = true;
+    rig.sandbox_policy
+        .network
+        .egress
+        .tcp
+        .push(TcpEgressRule::allow_destination(cidr));
 }
 
 #[when("the first-run summary is produced")]

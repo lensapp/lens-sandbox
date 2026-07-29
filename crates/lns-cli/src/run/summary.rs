@@ -19,6 +19,7 @@ const DEFAULT_POLICY_YAML: &str = "\
 network:
   egress:
     http: []
+    tcp: []
   defaultVerdict: ask
 ";
 

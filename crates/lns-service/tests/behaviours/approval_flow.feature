@@ -98,6 +98,92 @@ Feature: lns-service approval flow
     Then a subsequent request from the workload to "api.linear.app" is allowed without prompting
     And no restart of the workload is required
 
+  # The gate stops at the first matching rule and the ask rule that raised the card
+  # sits earlier in the file, so an approval appended behind it would never be reached.
+  Scenario: An approved rule lands ahead of the ask rule that raised the card
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy asks about "api.example.test"
+    And an approval entry is visible for a request to "api.example.test"
+    When the developer picks "always allow"
+    Then "lns-policy.yaml" contains a new allow rule for "api.example.test"
+    And the allow rule sits ahead of the ask rule for "api.example.test"
+
+  # Approving says "stop asking", not "treat this destination differently". The new
+  # rule decides the destination from now on, so anything the ask rule restricted has
+  # to come with it or the approval quietly grants more than was on the card.
+  Scenario: An approved rule keeps the restrictions the ask rule it answers carried
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy asks about "api.example.test" with TLS interception
+    And an approval entry is visible for a request to "api.example.test"
+    When the developer picks "always allow"
+    Then "lns-policy.yaml" contains a new allow rule for "api.example.test"
+    And the new allow rule still terminates TLS
+
+  # One ask rule raises one card per request, so a second answer can arrive after the
+  # first has already written the rule that decides the destination. The gate stops at
+  # the first match, so writing the second answer behind it would be a line that never
+  # fires — and silence would leave the developer believing their deny stuck.
+  Scenario: A second, contradicting always-decision is not written behind the rule the first one wrote
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy asks about "api.example.test"
+    And an approval entry is visible for a request to "api.example.test"
+    When the developer picks "always allow"
+    And the workload makes a request to "api.example.test"
+    And the developer picks "always deny"
+    Then "lns-policy.yaml" contains a new allow rule for "api.example.test"
+    And "lns-policy.yaml" holds no deny rule for "api.example.test"
+    And the approval window informs the developer that a rule already decides the destination
+
+  # A raw splice is passed through untouched, so the rule has to name the port the
+  # developer was shown; the bare host would grant every other port on that host too.
+  Scenario: Always allow on a raw splice writes the port-scoped destination to the raw table
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy asks about the raw destination "db.internal:5432"
+    And an approval entry is visible for a raw splice to "db.internal:5432"
+    When the developer picks "always allow"
+    Then "lns-policy.yaml" contains a new raw allow rule for "db.internal:5432"
+    And the raw allow rule sits ahead of the raw ask rule for "db.internal:5432"
+    And the workload's request proceeds
+
+  Scenario: Always deny on a raw splice writes a raw deny rule
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And an approval entry is visible for a raw splice to "db.internal:5432"
+    When the developer picks "always deny"
+    Then "lns-policy.yaml" contains a new raw deny rule for "db.internal:5432"
+    And the workload's request is denied always
+
+  # The developer's own file can already hold the answer they just gave, behind the ask
+  # rule where the gate never reaches it. Moving a rule they placed themselves is the
+  # bigger surprise, so the card keeps coming back — but they have to be told why, or
+  # "always allow" reads as remembered while nothing changed.
+  Scenario: An always-decision the file already holds behind the ask rule is reported, not silently dropped
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy asks about "api.example.test" and holds an allow rule for it behind that
+    And an approval entry is visible for a request to "api.example.test"
+    When the developer picks "always allow"
+    Then the approval window informs the developer that the rule it would write is unreachable
+    And the workload's request proceeds
+
+  # The raw table is the pre-filter, so an approved splice takes the destination over
+  # from the HTTP rules naming that host — silently, unless the card says so.
+  Scenario: Approving a raw splice says which HTTP rule stops applying to it
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And the policy allows "db.internal"
+    And an approval entry is visible for a raw splice to "db.internal:5432"
+    When the developer picks "always allow"
+    Then "lns-policy.yaml" contains a new raw allow rule for "db.internal:5432"
+    And the approval window informs the developer that the HTTP rule for "db.internal" no longer applies
+
+  # One unparseable rule force-denies the whole policy inside the guest, so a
+  # destination we cannot express has to leave the file alone and say so.
+  Scenario: A raw destination that cannot be expressed as a rule is not written to the policy file
+    Given the sandbox was launched with --policy "lns-policy.yaml"
+    And an approval entry is visible for a raw splice to "db.internal"
+    When the developer picks "always allow"
+    Then the workload's request proceeds
+    And the raw table in "lns-policy.yaml" stays empty
+    And the approval window informs the developer that the destination could not be turned into a rule
+
   Scenario: A failed policy-file write keeps the rule in memory and notifies the developer
     Given an approval entry is visible for a request to "api.linear.app"
     And the policy file cannot be written

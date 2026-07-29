@@ -1377,7 +1377,15 @@ fn render_network_card(
                     .color(window::TEXT_ACCENT),
             );
             ui.add_space(8.0);
-            crate::ui::badges(ui, connection_badges(&prompt.action));
+            crate::ui::badges(ui, prompt.badges());
+            if let Some(caption) = prompt.caption() {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(caption)
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
         },
         |ui| {
             remember_toggle(ui, remember);
@@ -1399,15 +1407,6 @@ fn render_network_card(
             .map(|decision| CardAction::Decide { id, decision }),
         out.response,
     )
-}
-
-fn connection_badges(action: &str) -> Vec<String> {
-    match action.rsplit_once(':') {
-        Some((_, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
-            vec!["TCP".to_string(), port.to_string()]
-        }
-        _ => vec![action.to_string()],
-    }
 }
 
 fn allow_decision(remember: bool) -> Decision {
@@ -2071,6 +2070,7 @@ fn whiten_template(mut rgba: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::protocol::Treatment;
 
     #[test]
     fn embedded_icon_decodes_successfully() {
@@ -2237,6 +2237,7 @@ mod tests {
                 action: "CONNECT api.example.test:443".into(),
                 offer: None,
                 token_fallback: None,
+                treatment: Treatment::Inspected,
             }],
             pending_credentials: Vec::new(),
             sign_ins: Vec::new(),
@@ -2354,6 +2355,7 @@ mod tests {
                 action: "CONNECT api.example.test:443".into(),
                 offer: None,
                 token_fallback: None,
+                treatment: Treatment::Inspected,
             },
             net_tx,
         );
@@ -2438,6 +2440,7 @@ mod tests {
             action: format!("CONNECT {host}:443"),
             offer: offer.map(str::to_string),
             token_fallback: None,
+            treatment: Treatment::Inspected,
         };
         Snapshot {
             pending: vec![net("n0", "a.test", None), net("n1", "b.test", Some("Svc"))],
