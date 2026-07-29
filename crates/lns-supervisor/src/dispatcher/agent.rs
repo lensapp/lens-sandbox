@@ -61,7 +61,8 @@ impl AgentDispatcher {
         reaper: Arc<OrphanReaper>,
         runner: Arc<dyn AgentRunner>,
     ) -> Self {
-        let exec_manager = ExecManager::new(sandbox_creds.clone(), config.core.is_root);
+        let exec_manager =
+            ExecManager::new(sandbox_creds.clone(), config.core.is_root, reaper.guard());
         let activity = ActivityStream::new();
         spawn_activity_to_stdout(&activity);
         Self {
