@@ -3,7 +3,9 @@ use lns_policy::connectors::{AuthKind, Connector};
 use lns_policy::providers::ProviderDef;
 
 use crate::credential_flow::providers::DefProvider;
-use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
+use crate::credential_flow::session::{
+    CredentialDecisionRequest, CredentialPendingPrompt, DenyScope,
+};
 use crate::credential_flow::store::CredentialEntry;
 
 /// The connect-time value-decision card for a credential connector; an oauth id signs in instead, and a blockless entry has nothing to bind.
@@ -23,6 +25,8 @@ pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
         is_project_defined: false,
         // A bind card exists to make the machine binding, so it never offers to reuse one.
         bound_value_available: false,
+        // The bind card holds no request and speaks for the machine, so its deny is the standing one.
+        deny_scope: DenyScope::Machine,
     })
 }
 
@@ -56,8 +60,12 @@ pub fn resolve_bind_decision(request: CredentialDecisionRequest) -> BindResoluti
             };
             BindResolution::Persist(entry, decision)
         }
-        CredentialDecisionRequest::Deny => {
+        CredentialDecisionRequest::DenyAlways => {
             BindResolution::Persist(CredentialEntry::Deny, CredentialBindDecision::Denied)
+        }
+        // Only a DenyScope::Machine card can bind a standing refusal, so a run-scoped deny arriving here is a misrouted card rather than a decision to persist.
+        CredentialDecisionRequest::Deny => {
+            BindResolution::Failed("a deny scoped to one run cannot bind a standing refusal".into())
         }
         // A bind card never offers it (there is no binding to reuse yet), so reaching here means no value was decided.
         CredentialDecisionRequest::AllowBound => {
@@ -177,7 +185,7 @@ mod tests {
     #[test]
     fn a_deny_persists_the_deny_so_the_launch_gate_reports_it_distinctly() {
         for request in [
-            CredentialDecisionRequest::Deny,
+            CredentialDecisionRequest::DenyAlways,
             CredentialDecisionRequest::Allow(CredentialEntry::Deny),
         ] {
             assert_eq!(
@@ -185,6 +193,28 @@ mod tests {
                 BindResolution::Persist(CredentialEntry::Deny, CredentialBindDecision::Denied)
             );
         }
+    }
+
+    #[test]
+    fn a_run_scoped_deny_cannot_bind_a_standing_refusal() {
+        assert_eq!(
+            resolve_bind_decision(CredentialDecisionRequest::Deny),
+            BindResolution::Failed(
+                "a deny scoped to one run cannot bind a standing refusal".into()
+            ),
+            "only a card that speaks for the machine may write a machine-wide deny; a run's deny reaching here is a misroute, not a decision to persist"
+        );
+    }
+
+    #[test]
+    fn the_bind_card_is_the_only_one_entitled_to_a_standing_deny() {
+        let prompt = bind_prompt(&credential_connector("some-provider", "SOME_TOKEN"))
+            .expect("a credential connector is bindable");
+        assert_eq!(
+            prompt.deny_scope,
+            DenyScope::Machine,
+            "the bind card holds no request, so its deny is the standing one the run cards must never be able to ask for"
+        );
     }
 
     #[test]

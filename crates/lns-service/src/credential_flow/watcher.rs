@@ -152,6 +152,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: crate::credential_flow::session::DenyScope::Workload,
         });
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         n.present_sign_in(
