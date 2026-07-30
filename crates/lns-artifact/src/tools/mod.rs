@@ -80,6 +80,11 @@ pub fn is_exact_version(version: &str) -> bool {
             >= 3
 }
 
+/// Whether the index publishes this version verbatim today — the best-effort membership half of push verification, never a resolution.
+pub fn index_lists_exact(body: &str, version: &str) -> bool {
+    body.lines().any(|line| line.trim() == version)
+}
+
 const VERSION_INDEX_URL: &str = "https://mise-versions.jdx.dev";
 
 /// The public index a fuzzy version resolves against; the override is what the e2e suite points at a local fixture.
@@ -221,6 +226,16 @@ mod tests {
         for fuzzy in ["22", "22.11", LATEST, "", "22.x.0", "22..0", "temurin-21"] {
             assert!(!is_exact_version(fuzzy), "{fuzzy}");
         }
+    }
+
+    #[test]
+    fn the_index_membership_check_is_verbatim() {
+        let body = "21.0.2\ntemurin-21.0.5+11.0.LTS\n 22.11.0 \n";
+        assert!(index_lists_exact(body, "temurin-21.0.5+11.0.LTS"));
+        assert!(index_lists_exact(body, "22.11.0"), "lines are trimmed");
+        assert!(!index_lists_exact(body, "21"), "a prefix is not membership");
+        assert!(!index_lists_exact(body, "21.0"), "nor a dotted prefix");
+        assert!(!index_lists_exact("", "21.0.2"));
     }
 
     #[test]

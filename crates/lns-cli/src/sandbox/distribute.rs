@@ -28,6 +28,19 @@ pub trait ToolResolver {
         &'a self,
         tool: &'a lns_artifact::tools::ToolRef,
     ) -> LocalBoxFuture<'a, Result<String>>;
+
+    fn verify<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> LocalBoxFuture<'a, IndexVerification>;
+}
+
+/// What the index said about an already-exact pin: best-effort only, because a required answer would break offline re-push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexVerification {
+    Confirmed,
+    Absent,
+    Unavailable,
 }
 
 /// What a declared entry was published as, so the publisher sees the version they shipped rather than having to read it back out of the registry.
@@ -35,6 +48,7 @@ pub trait ToolResolver {
 pub struct PinnedTool {
     pub declared: String,
     pub published: String,
+    pub verification: Option<IndexVerification>,
 }
 
 /// Rewrite `spec.tools` so every entry carries the exact version the index resolves today — the tool analogue of digest-pinning path filesets at push.
@@ -54,19 +68,20 @@ pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
     for entry in entries {
         let declared = entry.as_str().context("spec.tools entry is not a string")?;
         let tool = lns_artifact::tools::parse(declared)?;
-        // An entry that already names an exact version is its own pin; re-publishing must not need the index, which may be blocked or may have dropped that version.
-        let published = if lns_artifact::tools::is_exact_version(&tool.version) {
-            declared.to_string()
+        // An entry that already names an exact version is its own pin; re-publishing must not need the index, which may be blocked or may have dropped that version — so its verification is best-effort, never a veto.
+        let (published, verification) = if lns_artifact::tools::is_exact_version(&tool.version) {
+            (declared.to_string(), Some(resolver.verify(&tool).await))
         } else {
             let exact = resolver
                 .resolve(&tool)
                 .await
                 .with_context(|| format!("resolving {declared} for publishing"))?;
-            format!("{}@{exact}", tool.name)
+            (format!("{}@{exact}", tool.name), None)
         };
         pinned.push(PinnedTool {
             declared: declared.to_string(),
             published: published.clone(),
+            verification,
         });
         *entry = serde_json::Value::String(published);
     }
@@ -196,6 +211,13 @@ where
         writeln!(out, "pushed fileset {}", fileset.reference)?;
     }
     for tool in &pinned_tools {
+        if tool.verification == Some(IndexVerification::Absent) {
+            writeln!(
+                out,
+                "warning: the version index does not list {} today; consumers will provision it exactly as declared",
+                tool.published
+            )?;
+        }
         writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
     let digest = producer.build_and_push(&doc, reference).await?;
@@ -312,6 +334,7 @@ mod tests {
 
     struct FakeResolver {
         versions: std::collections::HashMap<String, String>,
+        verifications: std::collections::HashMap<String, IndexVerification>,
     }
 
     impl FakeResolver {
@@ -321,7 +344,13 @@ mod tests {
                     .iter()
                     .map(|(spec, exact)| (spec.to_string(), exact.to_string()))
                     .collect(),
+                verifications: std::collections::HashMap::new(),
             }
+        }
+
+        fn verifying(mut self, spec: &str, verification: IndexVerification) -> Self {
+            self.verifications.insert(spec.to_string(), verification);
+            self
         }
     }
 
@@ -338,6 +367,18 @@ mod tests {
                     anyhow::anyhow!("tool {:?} is unknown to the version index", tool.name)
                 });
             Box::pin(async move { outcome })
+        }
+
+        fn verify<'a>(
+            &'a self,
+            tool: &'a lns_artifact::tools::ToolRef,
+        ) -> LocalBoxFuture<'a, IndexVerification> {
+            let verification = self
+                .verifications
+                .get(&tool.to_string())
+                .copied()
+                .unwrap_or(IndexVerification::Unavailable);
+            Box::pin(async move { verification })
         }
     }
 
@@ -623,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_already_exact_pin_publishes_without_consulting_the_index() {
+    async fn an_already_exact_pin_publishes_when_the_index_is_unavailable() {
         // Re-publishing must not fail because the index is blocked or has dropped that version.
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
@@ -654,7 +695,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_vendor_exact_pin_publishes_without_consulting_the_index() {
+    async fn an_exact_pin_the_index_no_longer_lists_warns_and_still_publishes() {
+        // Best-effort verification: the publisher hears about a likely typo, but the index has no veto — it also drops old valid versions.
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let resolver =
+            FakeResolver::with(&[]).verifying("java@temurin-9.9.9+9", IndexVerification::Absent);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-9.9.9+9"]}}"#;
+        let mut out = Vec::new();
+        let code = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &resolver,
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0, "the warning never blocks the push");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("warning") && text.contains("java@temurin-9.9.9+9"),
+            "got: {text}"
+        );
+        let docs = producer.docs.borrow();
+        let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
+        assert_eq!(
+            published["spec"]["tools"],
+            serde_json::json!(["java@temurin-9.9.9+9"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_exact_pin_publishes_silently() {
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let resolver = FakeResolver::with(&[])
+            .verifying("java@temurin-21.0.5+11.0.LTS", IndexVerification::Confirmed);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
+        let mut out = Vec::new();
+        push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &resolver,
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("warning"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_vendor_exact_pin_publishes_when_the_index_is_unavailable() {
         // The resolver itself emits vendor versions, so a re-push of its own output must not need the index back.
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
@@ -675,6 +771,10 @@ mod tests {
         assert_eq!(
             published["spec"]["tools"],
             serde_json::json!(["java@temurin-21.0.5+11.0.LTS"])
+        );
+        assert!(
+            !String::from_utf8_lossy(&out).contains("warning"),
+            "an unanswerable index is not the publisher's problem"
         );
     }
 

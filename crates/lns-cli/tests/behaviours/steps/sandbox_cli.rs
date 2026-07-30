@@ -275,6 +275,7 @@ impl distribute::Producer for StepProducer {
 
 struct StepResolver {
     versions: HashMap<String, String>,
+    unlisted: std::collections::HashSet<String>,
 }
 
 impl distribute::ToolResolver for StepResolver {
@@ -288,6 +289,18 @@ impl distribute::ToolResolver for StepResolver {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("tool {:?} is unknown to the version index", tool.name));
         Box::pin(async move { outcome })
+    }
+
+    fn verify<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> LocalBoxFuture<'a, distribute::IndexVerification> {
+        let verification = if self.unlisted.contains(&tool.to_string()) {
+            distribute::IndexVerification::Absent
+        } else {
+            distribute::IndexVerification::Unavailable
+        };
+        Box::pin(async move { verification })
     }
 }
 
@@ -360,6 +373,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             Ok(doc) => {
                 let resolver = StepResolver {
                     versions: w.tool_index.clone(),
+                    unlisted: w.unlisted_pins.clone(),
                 };
                 distribute::push(
                     &fs,
