@@ -229,6 +229,30 @@ mod tests {
     }
 
     #[test]
+    fn every_line_the_real_index_publishes_is_a_usable_stable_pin() {
+        // The bodies under index_snapshots/ are the real index (refreshed by bump-mise), so this is the contract's reality check: every published line must be a safe version whose resolution is a fixed point — a pin the resolver answered once re-answers identically on the next push.
+        for (tool, body) in [
+            ("java", include_str!("index_snapshots/java.txt")),
+            ("go", include_str!("index_snapshots/go.txt")),
+            ("jq", include_str!("index_snapshots/jq.txt")),
+            ("python", include_str!("index_snapshots/python.txt")),
+            ("node", include_str!("index_snapshots/node.txt")),
+            ("ruby", include_str!("index_snapshots/ruby.txt")),
+        ] {
+            for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                assert!(is_safe_version(line), "{tool}: {line:?}");
+                let answer = resolve_from_index(tool, line, body)
+                    .unwrap_or_else(|e| panic!("{tool}: {line:?}: {e:#}"));
+                // resolve is pure, so `answer == line` is already the fixed point; only a differing answer needs the second resolution.
+                if answer != line {
+                    let again = resolve_from_index(tool, &answer, body).unwrap();
+                    assert_eq!(again, answer, "{tool}: {line:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_index_membership_check_is_verbatim() {
         let body = "21.0.2\ntemurin-21.0.5+11.0.LTS\n 22.11.0 \n";
         assert!(index_lists_exact(body, "temurin-21.0.5+11.0.LTS"));
@@ -245,13 +269,18 @@ mod tests {
     }
 
     #[test]
-    fn a_resolver_answer_is_always_an_exact_pin() {
-        // push writes the answer into the published artifact, so it must skip the index on the next push and address the cache on run.
-        let body = "21.0.2\ntemurin-21.0.4+7\ntemurin-21.0.5+11.0.LTS\n22.9.0\n22.11.0\n";
-        for request in ["temurin-21", "21", "22", "22.11.0", LATEST] {
-            let resolved = resolve_from_index("some-tool", request, body).unwrap();
-            assert!(is_exact_version(&resolved), "{request} → {resolved}");
+    fn a_resolver_answer_republishes_to_the_same_pin() {
+        // jq ships `1.6` as a finished release, so no shape rule can promise every answer is exact; the durable contract is stability — re-resolving a published pin returns that pin, so a re-push with the index up reproduces the artifact, and offline re-push narrows to exact-classified pins.
+        let body = "1.5\n1.6\n21.0.2\ntemurin-21.0.4+7\ntemurin-21.0.5+11.0.LTS\n22.9.0\n22.11.0\n";
+        for request in ["1.6", "temurin-21", "21", "22", "22.11.0", LATEST] {
+            let answer = resolve_from_index("some-tool", request, body).unwrap();
+            let again = resolve_from_index("some-tool", &answer, body).unwrap();
+            assert_eq!(again, answer, "{request} → {answer}");
         }
+        assert!(
+            is_exact_version("temurin-21.0.5+11.0.LTS") && !is_exact_version("1.6"),
+            "the vendor answer re-pushes offline; the two-run answer needs the index back"
+        );
     }
 
     #[test]
