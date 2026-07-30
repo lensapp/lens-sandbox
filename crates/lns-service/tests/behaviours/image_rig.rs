@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lns_service::image_store::{
-    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RemovedImage, RuntimeCacheFs,
+    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RemovedImage, RuntimeCacheEntryKind,
+    RuntimeCacheFs, RuntimeCacheMetadata,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -57,6 +58,23 @@ impl Fs for IndexFs {
 }
 
 impl RuntimeCacheFs for IndexFs {
+    async fn metadata(&self, p: &Path) -> std::io::Result<RuntimeCacheMetadata> {
+        let files = self.files.lock().unwrap();
+        if let Some(bytes) = files.get(p) {
+            return Ok(RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::RegularFile,
+                len: bytes.len() as u64,
+            });
+        }
+        if files.keys().any(|path| path.starts_with(p)) {
+            return Ok(RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::Directory,
+                len: 0,
+            });
+        }
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
     async fn remove_dir_all(&self, p: &Path) -> std::io::Result<()> {
         let mut files = self.files.lock().unwrap();
         let before = files.len();
