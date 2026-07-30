@@ -2,11 +2,27 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::traits::{Caches, Fs, RuntimeCacheFs};
+use super::traits::{Caches, Fs, RuntimeCacheEntryKind, RuntimeCacheFs, RuntimeCacheMetadata};
 use crate::image::manifest_cache::ManifestCache;
 use crate::oci_layer_cache::LayerCache;
 
 pub(super) struct RealFs;
+
+pub(super) fn runtime_cache_kind(
+    is_dir: bool,
+    is_file: bool,
+    is_symlink: bool,
+) -> RuntimeCacheEntryKind {
+    if is_dir {
+        RuntimeCacheEntryKind::Directory
+    } else if is_file {
+        RuntimeCacheEntryKind::RegularFile
+    } else if is_symlink {
+        RuntimeCacheEntryKind::Symlink
+    } else {
+        RuntimeCacheEntryKind::Other
+    }
+}
 
 impl Fs for RealFs {
     async fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -37,6 +53,20 @@ impl Fs for RealFs {
 }
 
 impl RuntimeCacheFs for RealFs {
+    async fn metadata(&self, p: &Path) -> io::Result<RuntimeCacheMetadata> {
+        let metadata = tokio::fs::symlink_metadata(p).await?;
+        let file_type = metadata.file_type();
+        let kind = runtime_cache_kind(
+            file_type.is_dir(),
+            file_type.is_file(),
+            file_type.is_symlink(),
+        );
+        Ok(RuntimeCacheMetadata {
+            kind,
+            len: metadata.len(),
+        })
+    }
+
     async fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
         tokio::fs::remove_dir_all(p).await
     }

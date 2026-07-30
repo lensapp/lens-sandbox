@@ -1,7 +1,7 @@
 mod real;
 mod traits;
 
-pub use traits::{Caches, Fs, RuntimeCacheFs};
+pub use traits::{Caches, Fs, RuntimeCacheEntryKind, RuntimeCacheFs, RuntimeCacheMetadata};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -402,19 +402,31 @@ async fn tree_bytes<F: RuntimeCacheFs>(fs: &F, root: &Path) -> Result<u64> {
     let mut total = 0u64;
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
-        match fs.read_dir(&path).await {
-            Ok(entries) => pending.extend(entries),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
-                total = total.saturating_add(
-                    fs.read(&path)
-                        .await
-                        .with_context(|| format!("reading runtime cache {}", path.display()))?
-                        .len() as u64,
-                );
-            }
+        let metadata = match fs.metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                return Err(e).with_context(|| format!("listing runtime cache {}", path.display()));
+                return Err(e)
+                    .with_context(|| format!("inspecting runtime cache {}", path.display()));
+            }
+        };
+        match metadata.kind {
+            RuntimeCacheEntryKind::Directory => match fs.read_dir(&path).await {
+                Ok(entries) => pending.extend(entries),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("listing runtime cache {}", path.display()));
+                }
+            },
+            RuntimeCacheEntryKind::RegularFile | RuntimeCacheEntryKind::Symlink => {
+                total = total.saturating_add(metadata.len);
+            }
+            RuntimeCacheEntryKind::Other => {
+                bail!(
+                    "runtime cache entry {} has an unsupported file type",
+                    path.display()
+                );
             }
         }
     }
@@ -709,9 +721,12 @@ mod tests {
     #[derive(Default)]
     struct FakeFs {
         files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+        metadata_overrides: Mutex<HashMap<PathBuf, RuntimeCacheMetadata>>,
+        read_calls: Mutex<Vec<PathBuf>>,
         fail_read_dir: bool,
         read_dir_missing: bool,
         fail_read: bool,
+        fail_metadata: bool,
         fail_write: bool,
         fail_remove: bool,
     }
@@ -737,6 +752,13 @@ mod tests {
 
         fn has(&self, p: &Path) -> bool {
             self.files.lock().unwrap().contains_key(p)
+        }
+
+        fn put_metadata(&self, p: &Path, metadata: RuntimeCacheMetadata) {
+            self.metadata_overrides
+                .lock()
+                .unwrap()
+                .insert(p.to_path_buf(), metadata);
         }
     }
 
@@ -851,15 +873,25 @@ mod tests {
             if self.read_dir_missing {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
-            let g = self.files.lock().unwrap();
-            if g.contains_key(dir) {
+            let files = self.files.lock().unwrap();
+            if files.contains_key(dir) {
                 return Err(io::Error::from(io::ErrorKind::NotADirectory));
             }
-            let entries: Vec<PathBuf> = g
+            let mut entries: Vec<PathBuf> = files
                 .keys()
                 .filter(|p| p.parent() == Some(dir))
                 .cloned()
                 .collect();
+            entries.extend(
+                self.metadata_overrides
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|p| p.parent() == Some(dir))
+                    .cloned(),
+            );
+            entries.sort();
+            entries.dedup();
             if entries.is_empty() {
                 Err(io::Error::from(io::ErrorKind::NotFound))
             } else {
@@ -868,6 +900,7 @@ mod tests {
         }
 
         async fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+            self.read_calls.lock().unwrap().push(p.to_path_buf());
             if self.fail_read {
                 return Err(io::Error::other("read boom"));
             }
@@ -897,6 +930,38 @@ mod tests {
     }
 
     impl RuntimeCacheFs for FakeFs {
+        async fn metadata(&self, p: &Path) -> io::Result<RuntimeCacheMetadata> {
+            if self.fail_metadata {
+                return Err(io::Error::other("metadata boom"));
+            }
+            {
+                let overrides = self.metadata_overrides.lock().unwrap();
+                if let Some(metadata) = overrides.get(p) {
+                    return Ok(*metadata);
+                }
+                if overrides.keys().any(|path| path.starts_with(p)) {
+                    return Ok(RuntimeCacheMetadata {
+                        kind: RuntimeCacheEntryKind::Directory,
+                        len: 0,
+                    });
+                }
+            }
+            let files = self.files.lock().unwrap();
+            if let Some(bytes) = files.get(p) {
+                return Ok(RuntimeCacheMetadata {
+                    kind: RuntimeCacheEntryKind::RegularFile,
+                    len: bytes.len() as u64,
+                });
+            }
+            if files.keys().any(|path| path.starts_with(p)) {
+                return Ok(RuntimeCacheMetadata {
+                    kind: RuntimeCacheEntryKind::Directory,
+                    len: 0,
+                });
+            }
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+
         async fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
             if self.fail_remove {
                 return Err(io::Error::other("remove boom"));
@@ -1753,6 +1818,7 @@ mod tests {
             fail_read_dir: true,
             ..Default::default()
         };
+        fs.put(Path::new("/cache/composefs/descriptor"), b"descriptor");
         let err = clear_runtime_cache(&fs, Path::new("/cache"))
             .await
             .unwrap_err();
@@ -1786,6 +1852,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_cache_size_uses_metadata_without_reading_file_contents() {
+        let fs = FakeFs {
+            fail_read: true,
+            ..Default::default()
+        };
+        fs.put(Path::new("/cache/content/blob"), b"content");
+
+        let reclaimed = tree_bytes(&fs, Path::new("/cache/content"))
+            .await
+            .expect("metadata must be sufficient to size the cache");
+
+        assert_eq!(reclaimed, 7);
+        assert!(
+            fs.read_calls.lock().unwrap().is_empty(),
+            "cache sizing must not read file bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_symlink_is_counted_without_traversing_its_target() {
+        let fs = FakeFs::default();
+        fs.put_metadata(
+            Path::new("/cache/content/link"),
+            RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::Symlink,
+                len: 14,
+            },
+        );
+        fs.put(Path::new("/outside/large-blob"), &[0; 100]);
+
+        let reclaimed = tree_bytes(&fs, Path::new("/cache/content")).await.unwrap();
+
+        assert_eq!(reclaimed, 14);
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_special_entry_is_refused_with_its_path() {
+        let fs = FakeFs::default();
+        fs.put_metadata(
+            Path::new("/cache/content/socket"),
+            RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::Other,
+                len: 0,
+            },
+        );
+
+        let err = tree_bytes(&fs, Path::new("/cache/content"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("/cache/content/socket")
+                && format!("{err:#}").contains("unsupported file type"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_fs_read_dir_of_a_file_is_not_a_directory() {
+        let fs = FakeFs::default();
+        let path = Path::new("/cache/content/blob");
+        fs.put(path, b"x");
+
+        let error = fs.read_dir(path).await.unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[tokio::test]
     async fn pull_time_runtime_cache_leases_can_overlap() {
         let first = lock_runtime_cache_shared().await;
         let second = tokio::time::timeout(
@@ -1798,9 +1933,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cache_blob_read_failure_names_the_blob() {
+    async fn runtime_cache_metadata_failure_names_the_entry() {
         let fs = FakeFs {
-            fail_read: true,
+            fail_metadata: true,
             ..Default::default()
         };
         fs.put(Path::new("/cache/composefs/descriptor"), b"descriptor");
@@ -1808,7 +1943,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("reading runtime cache /cache/composefs/descriptor"),
+            format!("{err:#}").contains("inspecting runtime cache /cache/composefs"),
             "got: {err:#}"
         );
     }
@@ -1864,6 +1999,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index").join("entry.json");
         real::RealFs.write(&path, b"{\"k\":1}").await.unwrap();
+        assert_eq!(
+            real::RealFs.metadata(path.parent().unwrap()).await.unwrap(),
+            RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::Directory,
+                len: std::fs::symlink_metadata(path.parent().unwrap())
+                    .unwrap()
+                    .len(),
+            }
+        );
+        assert_eq!(
+            real::RealFs.metadata(&path).await.unwrap(),
+            RuntimeCacheMetadata {
+                kind: RuntimeCacheEntryKind::RegularFile,
+                len: 7,
+            }
+        );
+        let link = dir.path().join("entry-link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(
+            real::RealFs.metadata(&link).await.unwrap().kind,
+            RuntimeCacheEntryKind::Symlink,
+            "metadata must describe the link itself rather than following its target"
+        );
         let listed = real::RealFs.read_dir(path.parent().unwrap()).await.unwrap();
         assert_eq!(listed, vec![path.clone()]);
         assert_eq!(real::RealFs.read(&path).await.unwrap(), b"{\"k\":1}");
@@ -1882,6 +2040,26 @@ mod tests {
         assert!(!path.parent().unwrap().exists());
     }
 
+    #[test]
+    fn runtime_cache_kind_classifies_every_host_file_type() {
+        assert_eq!(
+            real::runtime_cache_kind(true, false, false),
+            RuntimeCacheEntryKind::Directory
+        );
+        assert_eq!(
+            real::runtime_cache_kind(false, true, false),
+            RuntimeCacheEntryKind::RegularFile
+        );
+        assert_eq!(
+            real::runtime_cache_kind(false, false, true),
+            RuntimeCacheEntryKind::Symlink
+        );
+        assert_eq!(
+            real::runtime_cache_kind(false, false, false),
+            RuntimeCacheEntryKind::Other
+        );
+    }
+
     #[tokio::test]
     async fn real_fs_write_replaces_an_existing_record_atomically() {
         let dir = tempfile::tempdir().unwrap();
@@ -1896,10 +2074,10 @@ mod tests {
     #[tokio::test]
     async fn real_fs_read_dir_of_a_missing_dir_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let err = real::RealFs
-            .read_dir(&dir.path().join("absent"))
-            .await
-            .unwrap_err();
+        let absent = dir.path().join("absent");
+        let err = real::RealFs.read_dir(&absent).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let err = real::RealFs.metadata(&absent).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
