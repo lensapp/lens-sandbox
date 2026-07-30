@@ -484,7 +484,9 @@ spec:
   a tool resolves to keeps its tree, so a long-lived `node@latest` accumulates
   one per upstream release. `lns sandbox prune --force` reclaims the provisioned
   tool cache when no sandbox is running; while any run is live it keeps the
-  shared tool content intact. The next run re-provisions what it needs.
+  shared tool content intact. The next run re-provisions what it needs — to the
+  same versions, because prune reclaims the cached trees without touching what
+  this machine already resolved.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
   copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
   `/etc/profile`, which on most images resets `PATH` outright and so discards the

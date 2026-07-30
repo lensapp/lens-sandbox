@@ -28,6 +28,11 @@ fn provisioned_tool_cache(w: &mut BehaviourWorld, bytes: u64) {
     w.image().seed_tool_cache(bytes);
 }
 
+#[given(expr = "{string} was resolved once on this machine")]
+fn resolved_tool_record(w: &mut BehaviourWorld, spec: String) {
+    w.image().seed_tool_record(&spec);
+}
+
 #[when(expr = "image {string} with layer {string} of {int} bytes is pulled")]
 async fn image_pulled(w: &mut BehaviourWorld, reference: String, digest: String, size: u64) {
     w.image().pull(&reference, &digest, size).await;
@@ -192,6 +197,14 @@ fn tool_cache_gone(w: &mut BehaviourWorld) {
     assert!(
         !w.image().has_tool_cache(),
         "the provisioned tool cache should be gone"
+    );
+}
+
+#[then(expr = "the machine still remembers what {string} resolved to")]
+fn tool_record_remains(w: &mut BehaviourWorld, spec: String) {
+    assert!(
+        w.image().has_tool_record(),
+        "reclaiming disk must not re-open {spec} to a newer upstream version"
     );
 }
 

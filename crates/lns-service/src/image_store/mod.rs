@@ -383,8 +383,13 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
 
 async fn clear_runtime_cache<F: RuntimeCacheFs>(fs: &F, cache_root: &Path) -> Result<u64> {
     let mut reclaimed = 0;
-    for name in ["composefs", "tools", "content"] {
-        let root = cache_root.join(name);
+    for root in [
+        cache_root.join("composefs"),
+        cache_root
+            .join("tools")
+            .join(crate::tools::cache::TREES_DIR),
+        cache_root.join("content"),
+    ] {
         let bytes = tree_bytes(fs, &root).await?;
         match fs.remove_dir_all(&root).await {
             Ok(()) => reclaimed += bytes,
@@ -1848,13 +1853,29 @@ mod tests {
     async fn runtime_cache_clear_counts_and_removes_each_coordinated_root() {
         let fs = FakeFs::default();
         fs.put(Path::new("/cache/composefs/descriptor"), b"meta");
-        fs.put(Path::new("/cache/tools/tree"), b"tool");
+        fs.put(Path::new("/cache/tools/trees/tree"), b"tool");
         fs.put(Path::new("/cache/content/blob"), b"content");
         let reclaimed = clear_runtime_cache(&fs, Path::new("/cache")).await.unwrap();
         assert_eq!(reclaimed, 15);
         assert!(!fs.has(Path::new("/cache/composefs/descriptor")));
         assert!(!fs.has(Path::new("/cache/tools/tree")));
         assert!(!fs.has(Path::new("/cache/content/blob")));
+    }
+
+    #[tokio::test]
+    async fn clearing_the_tool_cache_keeps_the_resolution_record() {
+        let fs = FakeFs::default();
+        fs.put(Path::new("/cache/tools/trees/node"), b"binary");
+        fs.put(Path::new("/cache/tools/resolved.json"), b"{}");
+
+        let reclaimed = clear_runtime_cache(&fs, Path::new("/cache")).await.unwrap();
+
+        assert!(
+            fs.has(Path::new("/cache/tools/resolved.json")),
+            "reclaiming disk must not unpin what this machine already resolved"
+        );
+        assert!(!fs.has(Path::new("/cache/tools/trees/node")));
+        assert_eq!(reclaimed, 6, "the record is not reclaimable space");
     }
 
     #[tokio::test]
