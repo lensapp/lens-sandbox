@@ -541,12 +541,21 @@ pub enum ProvisionError {
     Engine(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PullProvisionDisposition {
+    RetryOnRun,
+    PermanentRefusal,
+}
+
 impl ProvisionError {
-    /// Whether trying again on a working network could change the answer; a refusal by name or libc flavor never will.
-    pub fn is_transient(&self) -> bool {
+    pub(crate) fn pull_disposition(&self) -> PullProvisionDisposition {
         match self {
-            ProvisionError::Unprovisionable(_) | ProvisionError::LibcUnsupported { .. } => false,
-            ProvisionError::FetchFailed { .. } | ProvisionError::Engine(_) => true,
+            ProvisionError::Unprovisionable(_) | ProvisionError::LibcUnsupported { .. } => {
+                PullProvisionDisposition::PermanentRefusal
+            }
+            ProvisionError::FetchFailed { .. } | ProvisionError::Engine(_) => {
+                PullProvisionDisposition::RetryOnRun
+            }
         }
     }
 }
@@ -1963,5 +1972,37 @@ mod tests {
             msg.contains("infrastructure failed") && msg.contains("did not boot"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn pull_provision_disposition_distinguishes_retries_from_refusals() {
+        let retryable = [
+            ProvisionError::FetchFailed {
+                tool: "node@22".into(),
+                cause: "connection timed out".into(),
+            },
+            ProvisionError::Engine("virtiofsd is unsupported".into()),
+        ];
+        assert!(
+            retryable
+                .iter()
+                .all(|error| error.pull_disposition() == PullProvisionDisposition::RetryOnRun)
+        );
+
+        let permanent = [
+            ProvisionError::Unprovisionable(lns_artifact::tools::registry::ToolRefusal::Unknown {
+                entry: "some-tool@1".into(),
+                name: "some-tool".into(),
+            }),
+            ProvisionError::LibcUnsupported {
+                tool: "deno@2".into(),
+                name: "deno".into(),
+                image: "alpine:3.20".into(),
+                reason: "Deno publishes no musl builds".into(),
+            },
+        ];
+        assert!(permanent.iter().all(|error| {
+            error.pull_disposition() == PullProvisionDisposition::PermanentRefusal
+        }));
     }
 }
