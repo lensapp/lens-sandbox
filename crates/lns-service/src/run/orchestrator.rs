@@ -94,6 +94,7 @@ async fn orchestrate(
     let mut signed_in = Vec::new();
     let mut revocations_at_gate = std::collections::HashMap::new();
     if let Some(plan) = &sandbox_plan {
+        crate::run_registry::set_credential_slots(&run_id, &plan.workload.credentials);
         crate::artifact::real::refuse_unknown_connectors(
             plan.workload.policy.as_ref(),
             &plan.workload.credentials,

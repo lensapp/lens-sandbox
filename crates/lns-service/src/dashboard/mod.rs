@@ -1,9 +1,23 @@
+mod commands;
+mod credentials;
 mod filter;
 mod format;
 pub mod live;
 mod sandboxes;
+mod snapshot;
+mod state;
+mod unified;
 
+pub use credentials::{
+    CredentialBinding, CredentialOperation, CredentialStatus, CredentialSummary,
+    PendingCredentialRequest, SandboxAccess,
+};
 pub use filter::{Filters, KINDS, visible_indices};
+pub use state::{
+    CredentialReviewChoice, DashboardCommand, DashboardCredential, DashboardSandbox, DashboardView,
+    UnifiedDashboardAction, UnifiedDashboardState,
+};
+pub use unified::{render_unified_dashboard, unified_viewport_builder};
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Layout, Margin,
@@ -13,17 +27,21 @@ use egui_material_icons::{MaterialIcon, icons};
 use lns_audit::TimelineRow;
 
 use crate::approval_flow::window::{
-    ACCENT_GREEN, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER, CATEGORY, STATUS_WARNING,
-    TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_GREEN, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER, CATEGORY, STATUS_CRITICAL,
+    STATUS_WARNING, TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::ui::theme;
 
+/// Distinguishes a sign-in card's request id from a credential prompt's, so a decision reaches the flow that raised it.
+const SIGN_IN_REQUEST_PREFIX: &str = "sign-in:";
+
 const TRAFFIC_LIGHT_INSET: f32 = 80.0;
 const SIDEBAR_WIDTH: f32 = 216.0;
-const ROW_HEIGHT: f32 = 26.0;
+const ROW_HEIGHT: f32 = 38.0;
 const ICON_COL: f32 = 22.0;
 const W_TIME: f32 = 92.0;
 const DETAIL_WIDTH: f32 = 344.0;
+const CLOSE_BUTTON_RESERVE: f32 = 32.0;
 
 const CHROME_FILL: Color32 = BG_SECONDARY;
 const CONTENT_FILL: Color32 = BG_PRIMARY;
@@ -146,39 +164,357 @@ fn dashboard_visuals() -> egui::Visuals {
     v
 }
 
-pub fn load(state: &mut DashboardState) {
-    let runs = match lns_ipc::audit_runs_root() {
-        Ok(path) => path,
-        Err(e) => return set_error(state, e),
-    };
-    let ledger = match lns_ipc::connection_ledger() {
-        Ok(path) => path,
-        Err(e) => return set_error(state, e),
-    };
-    match lns_audit::collect_timeline(&runs, &ledger, None) {
-        Ok(timeline) => {
-            state.sandboxes = sandboxes::merge_sandboxes(&active_sandboxes(), &timeline.rows);
-            state.rows = timeline.rows;
-            state.warnings = timeline.warnings;
-            state.last_error = None;
-            if state.selected.is_some_and(|i| i >= state.rows.len()) {
-                state.selected = None;
-            }
+pub fn load_unified(
+    window_state: &crate::approval_flow::window::WindowState,
+) -> UnifiedDashboardState {
+    let data = collect_unified_data(window_state);
+    UnifiedDashboardState::live(
+        data.sandboxes,
+        data.credentials,
+        data.rows,
+        data.warnings,
+        data.last_error,
+    )
+}
+
+pub fn execute_unified_command(
+    command: &DashboardCommand,
+    window_state: &crate::approval_flow::window::WindowState,
+) -> anyhow::Result<String> {
+    commands::execute(command, window_state, &FileCommandStores::default_paths())
+}
+
+/// The production [`commands::CommandStores`]: the same per-machine files the CLI edits, with each failure naming the file it came from.
+struct FileCommandStores {
+    credentials: std::path::PathBuf,
+    grants: std::path::PathBuf,
+}
+
+impl FileCommandStores {
+    fn default_paths() -> Self {
+        Self {
+            credentials: lns_policy::credentials::default_credentials_path(),
+            grants: lns_policy::grants::default_workload_grants_path(),
         }
-        Err(e) => state.last_error = Some(format!("{e:#}")),
     }
 }
 
-fn active_sandboxes() -> Vec<Sandbox> {
-    crate::run_registry::snapshot()
+impl commands::CommandStores for FileCommandStores {
+    fn load_credentials(&self) -> anyhow::Result<lns_policy::credentials::CredentialStateFile> {
+        use anyhow::Context;
+        use lns_policy::credentials::CredentialStore;
+        lns_policy::credentials::JsonFileCredentialStore::new(self.credentials.clone())
+            .load()
+            .with_context(|| format!("reading credential state {}", self.credentials.display()))
+    }
+
+    fn save_credentials(
+        &self,
+        state: &lns_policy::credentials::CredentialStateFile,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use lns_policy::credentials::CredentialStore;
+        lns_policy::credentials::JsonFileCredentialStore::new(self.credentials.clone())
+            .save(state)
+            .with_context(|| format!("saving credential state {}", self.credentials.display()))
+    }
+
+    fn revoke_project_grants(&self, project: &str, connector_id: &str) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use lns_policy::grants::GrantStore;
+        lns_policy::grants::JsonFileGrantStore::new(self.grants.clone())
+            .update(&mut |file| {
+                file.revoke_project_connector(project, connector_id);
+                true
+            })
+            .map(|_| ())
+            .with_context(|| format!("updating grants at {}", self.grants.display()))
+    }
+
+    fn load_policy(&self, policy_path: &std::path::Path) -> anyhow::Result<lns_policy::Policy> {
+        use anyhow::Context;
+        lns_policy::Policy::load_or_default(policy_path)
+            .with_context(|| format!("reading policy {}", policy_path.display()))
+    }
+
+    fn save_policy(
+        &self,
+        policy_path: &std::path::Path,
+        policy: &lns_policy::Policy,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        policy
+            .save_atomic(policy_path)
+            .with_context(|| format!("saving policy {}", policy_path.display()))
+    }
+}
+
+pub fn reload_unified(
+    state: &mut UnifiedDashboardState,
+    window_state: &crate::approval_flow::window::WindowState,
+) {
+    let data = collect_unified_data(window_state);
+    state.replace_live_data(
+        data.sandboxes,
+        data.credentials,
+        data.rows,
+        data.warnings,
+        data.last_error,
+    );
+}
+
+struct UnifiedData {
+    sandboxes: Vec<DashboardSandbox>,
+    credentials: Vec<DashboardCredential>,
+    rows: Vec<TimelineRow>,
+    warnings: Vec<String>,
+    last_error: Option<String>,
+}
+
+fn collect_unified_data(window_state: &crate::approval_flow::window::WindowState) -> UnifiedData {
+    use lns_policy::credentials::CredentialStore;
+
+    let mut warnings = Vec::new();
+    let (rows, audit_warnings, last_error) = collect_audit_rows();
+    warnings.extend(audit_warnings);
+
+    let user_catalog_path = lns_policy::connectors::default_connectors_path();
+    let user_catalog = match lns_policy::connectors::Catalog::load_or_default(&user_catalog_path) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            warnings.push(format!(
+                "Could not read connector catalog {}: {error}",
+                user_catalog_path.display()
+            ));
+            lns_policy::connectors::Catalog::default()
+        }
+    };
+    let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
+
+    let credential_path = lns_policy::credentials::default_credentials_path();
+    let credential_store =
+        lns_policy::credentials::JsonFileCredentialStore::new(credential_path.clone());
+    let credential_state = match credential_store.load() {
+        Ok(state) => state,
+        Err(error) => {
+            warnings.push(format!(
+                "Could not read credential state {}: {error}",
+                credential_path.display()
+            ));
+            lns_policy::credentials::CredentialStateFile::new()
+        }
+    };
+
+    let (active, projects, run_access, policy_warnings) = active_dashboard_sources();
+    warnings.extend(policy_warnings);
+    let merged = sandboxes::merge_sandboxes(&active, &rows);
+    let sandboxes = merged
         .into_iter()
-        .map(|s| Sandbox {
-            id: s.id,
-            name: s.name,
-            image: s.image,
-            status: status_word(&s.status),
+        .map(|sandbox| DashboardSandbox {
+            project: projects.get(&sandbox.id).cloned().unwrap_or_default(),
+            run_ids: vec![sandbox.id.clone()],
+            id: sandbox.id,
+            name: sandbox.name,
+            image: sandbox.image,
+            status: sandbox.status,
+        })
+        .collect::<Vec<_>>();
+    let window_snapshot = window_state.snapshot();
+    let pending = window_snapshot
+        .pending_credentials
+        .into_iter()
+        .map(|prompt| {
+            let origin = prompt.origin.unwrap_or_else(unknown_prompt_origin);
+            snapshot::PendingCredential {
+                id: prompt.id,
+                connector_id: prompt.credential_id,
+                action: prompt.action,
+                sandbox_id: origin.sandbox_id,
+                sandbox_name: origin.sandbox_name,
+                project: display_project(&origin.project),
+                host_value_available: prompt.host_value_available,
+                bound_value_available: prompt.bound_value_available,
+                oauth: prompt.oauth_display_name.is_some(),
+                token_fallback: prompt.token_fallback.is_some(),
+                verification_uri: None,
+                user_code: None,
+            }
+        })
+        .chain(window_snapshot.sign_ins.into_iter().map(|sign_in| {
+            let origin = sign_in.origin.unwrap_or_else(unknown_prompt_origin);
+            snapshot::PendingCredential {
+                id: format!("{SIGN_IN_REQUEST_PREFIX}{}", sign_in.credential_id),
+                connector_id: sign_in.credential_id,
+                action: "complete sign-in".to_string(),
+                sandbox_id: origin.sandbox_id,
+                sandbox_name: origin.sandbox_name,
+                project: display_project(&origin.project),
+                host_value_available: false,
+                bound_value_available: false,
+                oauth: true,
+                token_fallback: sign_in.token_fallback.is_some(),
+                verification_uri: Some(sign_in.verification_uri),
+                user_code: sign_in.user_code,
+            }
+        }))
+        .collect();
+    let credentials = snapshot::build_credentials(snapshot::SnapshotInput {
+        catalog: &catalog,
+        credential_state: &credential_state,
+        sandboxes: sandboxes.clone(),
+        run_access,
+        pending,
+        host_values: host_detected_values(&catalog, &credential_state),
+        rows: &rows,
+        now: now_unix_secs().max(0) as u64,
+    });
+    UnifiedData {
+        sandboxes,
+        credentials,
+        rows,
+        warnings,
+        last_error,
+    }
+}
+
+/// Resolves each host-detect binding through the same detector the boundary uses, so the dashboard reports and reveals the value a request would actually carry.
+fn host_detected_values(
+    catalog: &[lns_policy::connectors::Connector],
+    credential_state: &lns_policy::credentials::CredentialStateFile,
+) -> std::collections::HashMap<String, zeroize::Zeroizing<String>> {
+    use crate::credential_flow::detection::{EnvVarDetector, HostDetector};
+
+    catalog
+        .iter()
+        .filter(|connector| {
+            matches!(
+                credential_state.get(&connector.id),
+                Some(lns_policy::credentials::CredentialEntry::HostDetect)
+            )
+        })
+        .filter_map(|connector| {
+            let env_var = match connector.auth_kind {
+                lns_policy::connectors::AuthKind::Credential => connector
+                    .credential
+                    .as_ref()
+                    .map(|credential| credential.env_var.as_str()),
+                lns_policy::connectors::AuthKind::Oauth => {
+                    connector.oauth.as_ref().map(|oauth| oauth.env_var.as_str())
+                }
+            }?;
+            let value = EnvVarDetector::new(env_var).detect()?;
+            Some((connector.id.clone(), zeroize::Zeroizing::new(value)))
         })
         .collect()
+}
+
+fn collect_audit_rows() -> (Vec<TimelineRow>, Vec<String>, Option<String>) {
+    let runs = match lns_ipc::audit_runs_root() {
+        Ok(path) => path,
+        Err(error) => return (Vec::new(), Vec::new(), Some(error.to_string())),
+    };
+    let ledger = match lns_ipc::connection_ledger() {
+        Ok(path) => path,
+        Err(error) => return (Vec::new(), Vec::new(), Some(error.to_string())),
+    };
+    match lns_audit::collect_timeline(&runs, &ledger, None) {
+        Ok(timeline) => (timeline.rows, timeline.warnings, None),
+        Err(error) => (Vec::new(), Vec::new(), Some(format!("{error:#}"))),
+    }
+}
+
+fn active_dashboard_sources() -> (
+    Vec<Sandbox>,
+    std::collections::HashMap<String, String>,
+    Vec<snapshot::RunCredentialAccess>,
+    Vec<String>,
+) {
+    let summaries = crate::run_registry::snapshot();
+    let mut active = Vec::with_capacity(summaries.len());
+    let mut projects = std::collections::HashMap::new();
+    let mut access = Vec::new();
+    let mut warnings = Vec::new();
+    for summary in summaries {
+        let id = summary.id.clone();
+        active.push(Sandbox {
+            id: id.clone(),
+            name: summary.name,
+            image: summary.image,
+            status: status_word(&summary.status),
+        });
+        let Some(details) = crate::run_registry::inspect(&id) else {
+            continue;
+        };
+        let mut grants = Vec::new();
+        if let Some(policy_path) = details.config.policy_path.map(std::path::PathBuf::from) {
+            projects.insert(id.clone(), project_label(&policy_path));
+            match lns_policy::Policy::load_or_default(&policy_path) {
+                Ok(policy) => grants.extend(policy.connectors.into_iter().map(|connector_id| {
+                    snapshot::RunCredentialGrant {
+                        connector_id,
+                        reason: "Connected by project policy".to_string(),
+                        revocable: true,
+                    }
+                })),
+                Err(error) => warnings.push(format!(
+                    "Could not read policy {}: {error}",
+                    policy_path.display()
+                )),
+            }
+        }
+        for slot in crate::run_registry::credential_slots(&id) {
+            grants.retain(|grant| grant.connector_id != slot.name);
+            grants.push(snapshot::RunCredentialGrant {
+                connector_id: slot.name,
+                reason: if slot.required {
+                    "Required by sandbox definition".to_string()
+                } else {
+                    "Declared by sandbox definition".to_string()
+                },
+                revocable: false,
+            });
+        }
+        if !grants.is_empty() {
+            access.push(snapshot::RunCredentialAccess {
+                sandbox_id: id,
+                grants,
+            });
+        }
+    }
+    (active, projects, access, warnings)
+}
+
+fn project_label(policy_path: &std::path::Path) -> String {
+    let project = policy_path.parent().unwrap_or(policy_path);
+    display_project_path(project)
+}
+
+fn display_project(project: &str) -> String {
+    display_project_path(std::path::Path::new(project))
+}
+
+fn display_project_path(project: &std::path::Path) -> String {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return project.display().to_string();
+    };
+    project.strip_prefix(&home).map_or_else(
+        |_| project.display().to_string(),
+        |relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        },
+    )
+}
+
+fn unknown_prompt_origin() -> crate::approval_flow::window::CredentialPromptOrigin {
+    crate::approval_flow::window::CredentialPromptOrigin {
+        sandbox_id: String::new(),
+        sandbox_name: "A sandbox".to_string(),
+        project: "this machine".to_string(),
+    }
 }
 
 fn status_word(status: &lns_ipc::RunStatus) -> String {
@@ -205,10 +541,6 @@ pub fn viewport_builder() -> egui::ViewportBuilder {
         .with_min_inner_size([640.0, 400.0])
 }
 
-fn set_error(state: &mut DashboardState, e: impl std::fmt::Display) {
-    state.last_error = Some(e.to_string());
-}
-
 pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction {
     ui.ctx().set_visuals(dashboard_visuals());
     sidebar_toggle(ui, state);
@@ -219,6 +551,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
     );
     let detail_open = state.selected.is_some() || detail_reveal > 0.002;
     let action = if detail_open {
+        if floating_close_button(ui, "dashboard-detail-close") {
+            state.selected = None;
+        }
         DashboardAction::None
     } else {
         refresh_button(ui)
@@ -227,7 +562,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
         sidebar(ui, state);
     }
     if detail_open {
-        detail_panel(ui, state, detail_reveal);
+        let _ = detail_panel(ui, state, detail_reveal, false);
     }
     central(ui, state);
     let reveal = ui.ctx().animate_bool_with_time(
@@ -239,6 +574,18 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
         search_modal(ui, state, reveal);
     }
     action
+}
+
+fn floating_close_button(ui: &mut egui::Ui, id: &str) -> bool {
+    egui::Area::new(egui::Id::new(id))
+        .anchor(Align2::RIGHT_TOP, vec2(-6.0, 5.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            icon_button(ui, icons::ICON_CLOSE)
+                .on_hover_text("Close")
+                .clicked()
+        })
+        .inner
 }
 
 fn refresh_button(ui: &mut egui::Ui) -> DashboardAction {
@@ -414,9 +761,23 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
                 .inner_margin(Margin::same(theme::STACK_MARGIN)),
         )
         .show_inside(ui, |ui| {
-            ui.add_space(16.0);
-            kind_chooser(ui, state);
             ui.add_space(12.0);
+            dashboard_page_header(
+                ui,
+                "Audit",
+                "Review sandbox activity and decisions across every run.",
+            );
+            if let Some(error) = state.last_error.as_deref() {
+                ui.add_space(10.0);
+                dashboard_banner(ui, error, STATUS_CRITICAL);
+            }
+            for warning in &state.warnings {
+                ui.add_space(10.0);
+                dashboard_banner(ui, warning, STATUS_WARNING);
+            }
+            ui.add_space(14.0);
+            kind_chooser(ui, state);
+            ui.add_space(14.0);
             let filters = Filters {
                 kinds: state.kinds.iter().cloned().collect(),
                 sandbox: state.selected_sandbox.clone().unwrap_or_default(),
@@ -431,6 +792,7 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
                         ui.colored_label(TEXT_MUTED, "No audit events.");
                         return;
                     }
+                    dashboard_section_label(ui, "ACTIVITY");
                     for &i in &visible {
                         event_row(ui, state, i);
                     }
@@ -578,7 +940,7 @@ fn event_row(ui: &mut egui::Ui, state: &mut DashboardState, i: usize) {
     let response = Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(6, 5))
+        .inner_margin(Margin::symmetric(6, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -608,10 +970,14 @@ fn event_row(ui: &mut egui::Ui, state: &mut DashboardState, i: usize) {
     }
 }
 
-fn detail_panel(ui: &mut egui::Ui, state: &mut DashboardState, reveal: f32) {
-    let Some(row) = state.detail_row.clone() else {
-        return;
-    };
+fn detail_panel(
+    ui: &mut egui::Ui,
+    state: &mut DashboardState,
+    reveal: f32,
+    credential_link: bool,
+) -> Option<String> {
+    let row = state.detail_row.clone()?;
+    let mut open_credential = None;
     egui::Panel::right("dashboard-detail")
         .resizable(false)
         .exact_size(DETAIL_WIDTH * reveal)
@@ -623,32 +989,39 @@ fn detail_panel(ui: &mut egui::Ui, state: &mut DashboardState, reveal: f32) {
                 .inner_margin(Margin::same(theme::STACK_MARGIN))
                 .show(ui, |ui| {
                     ui.set_width(DETAIL_WIDTH - 2.0 * theme::STACK_MARGIN as f32);
-                    detail_body(ui, state, &row);
+                    detail_body(ui, state, &row, credential_link, &mut open_credential);
                 });
         });
+    open_credential
 }
 
-fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow) {
+fn detail_body(
+    ui: &mut egui::Ui,
+    state: &mut DashboardState,
+    row: &TimelineRow,
+    credential_link: bool,
+    open_credential: &mut Option<String>,
+) {
     let accent = kind_color(&row.kind);
     ui.horizontal(|ui| {
         glyph(ui, kind_icon(&row.kind), accent, 18.0);
         ui.add_space(8.0);
-        ui.label(
-            RichText::new(row.kind.to_uppercase())
-                .size(FS_LABEL)
-                .color(accent),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, icons::ICON_CLOSE)
-                .on_hover_text("Close")
-                .clicked()
-            {
-                state.selected = None;
-            }
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - CLOSE_BUTTON_RESERVE);
+            ui.add(
+                egui::Label::new(RichText::new(&row.detail).size(FS_BODY).color(TEXT_PRIMARY))
+                    .truncate(),
+            );
+            ui.label(
+                RichText::new(row.kind.to_uppercase())
+                    .size(FS_LABEL)
+                    .color(accent),
+            );
         });
     });
     ui.add_space(12.0);
 
+    ui.spacing_mut().scroll.floating_allocated_width = 14.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -665,7 +1038,11 @@ fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow)
             );
             sandbox_field(ui, state, &row.run);
             if let Some(connector) = &row.connector {
-                field(ui, state, "Connector", connector, None);
+                if credential_link && credential_field(ui, connector, accent) {
+                    *open_credential = Some(connector.clone());
+                } else if !credential_link {
+                    field(ui, state, "Connector", connector, None);
+                }
             }
             if let Some(obj) = row.raw.as_object() {
                 for (key, value) in obj {
@@ -693,6 +1070,20 @@ fn detail_body(ui: &mut egui::Ui, state: &mut DashboardState, row: &TimelineRow)
                 &serde_json::to_string_pretty(&row.raw).unwrap_or_default(),
             );
         });
+}
+
+fn credential_field(ui: &mut egui::Ui, connector: &str, accent: Color32) -> bool {
+    ui.label(RichText::new("Credential").size(FS_LABEL).color(TEXT_MUTED));
+    ui.add_space(2.0);
+    let response = ui
+        .add(
+            egui::Label::new(RichText::new(connector).size(FS_BODY).color(accent))
+                .sense(Sense::click()),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Open credential");
+    ui.add_space(10.0);
+    response.clicked()
 }
 
 const RAW_SKIP: &[&str] = &[
@@ -1004,4 +1395,113 @@ fn kind_color(kind: &str) -> Color32 {
         "connection" => ACCENT_GREEN,
         _ => CATEGORY,
     }
+}
+
+fn dashboard_page_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(RichText::new(title).size(20.0).color(TEXT_PRIMARY));
+    ui.label(
+        RichText::new(description)
+            .size(FS_SECONDARY)
+            .color(TEXT_MUTED),
+    );
+}
+
+fn dashboard_banner(ui: &mut egui::Ui, text: &str, color: Color32) {
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            20,
+        ))
+        .stroke(Stroke::new(1.0, color))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(text).size(FS_SECONDARY).color(TEXT_PRIMARY));
+        });
+}
+
+fn credential_status_badge(ui: &mut egui::Ui, status: CredentialStatus) {
+    let color = credential_status_color(status);
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            22,
+        ))
+        .corner_radius(CornerRadius::same(5))
+        .inner_margin(Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(status.label()).size(FS_LABEL).color(color));
+        });
+}
+
+fn credential_status_color(status: CredentialStatus) -> Color32 {
+    match status {
+        CredentialStatus::Active => ACCENT_GREEN,
+        CredentialStatus::Pending | CredentialStatus::Expiring => STATUS_WARNING,
+        CredentialStatus::Expired | CredentialStatus::Denied | CredentialStatus::Unavailable => {
+            STATUS_CRITICAL
+        }
+    }
+}
+
+fn dashboard_section_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(RichText::new(label).size(FS_LABEL).color(TEXT_MUTED));
+    ui.add_space(5.0);
+}
+
+fn credential_access_row(
+    ui: &mut egui::Ui,
+    access: &SandboxAccess,
+    navigable: bool,
+) -> egui::Response {
+    let response = Frame::new()
+        .fill(INPUT_FILL)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::same(9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                status_dot(ui, if access.active { "running" } else { "exited" });
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(&access.sandbox_name)
+                            .size(FS_BODY)
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&access.project)
+                                .size(FS_LABEL)
+                                .color(TEXT_MUTED),
+                        )
+                        .truncate(),
+                    );
+                    ui.label(
+                        RichText::new(&access.reason)
+                            .size(FS_LABEL)
+                            .color(TEXT_MUTED),
+                    );
+                });
+                if navigable {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        glyph(ui, icons::ICON_CHEVRON_RIGHT, TEXT_MUTED, 16.0);
+                    });
+                }
+            });
+        })
+        .response;
+    let response = if navigable {
+        let response = response.interact(Sense::click());
+        row_click(&response);
+        response
+    } else {
+        response
+    };
+    ui.add_space(6.0);
+    response
 }

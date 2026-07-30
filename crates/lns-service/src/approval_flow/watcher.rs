@@ -40,6 +40,7 @@ fn handle_event(res: notify::Result<Event>, target: &Path, session: &ApprovalSes
     }
     if let Ok(p) = Policy::load_or_default(target) {
         session.apply_external_policy(p);
+        crate::dashboard::live::note_write();
     }
 }
 

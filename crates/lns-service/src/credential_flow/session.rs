@@ -41,6 +41,16 @@ pub enum DenyScope {
     Machine,
 }
 
+impl DenyScope {
+    /// The refusal a card's "Deny" is entitled to ask for, so durability follows the card that asked rather than the flow that happens to answer.
+    pub fn deny_request(self) -> CredentialDecisionRequest {
+        match self {
+            Self::Workload => CredentialDecisionRequest::Deny,
+            Self::Machine => CredentialDecisionRequest::DenyAlways,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPendingPrompt {
     pub id: String,

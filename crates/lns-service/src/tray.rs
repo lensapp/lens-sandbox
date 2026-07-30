@@ -14,10 +14,10 @@ use crate::approval_flow::session::PendingPrompt;
 use crate::approval_flow::window::{
     self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
 };
-use crate::credential_flow::session::{CredentialDecisionRequest, DenyScope};
+use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
-use crate::ui::{Button, ButtonKind, theme};
+use crate::ui::{Button, ButtonKind, secret_input, theme};
 use lns_policy::connectors::TokenFallback;
 
 pub const WINDOW_WIDTH: f32 = 380.0;
@@ -46,10 +46,10 @@ fn build_tray_icon(
     on_event: impl Fn() + Send + Sync + 'static,
 ) -> anyhow::Result<tray_icon::TrayIcon> {
     let menu = Menu::new();
-    let audit_item = MenuItem::new("Audit", true, None);
-    menu.append(&audit_item)
-        .context("failed to append audit menu item")?;
-    let audit_id = audit_item.id().clone();
+    let dashboard_item = MenuItem::new("Dashboard", true, None);
+    menu.append(&dashboard_item)
+        .context("failed to append dashboard menu item")?;
+    let dashboard_id = dashboard_item.id().clone();
     let quit_item = MenuItem::new(
         "Quit Lens Sandbox",
         true,
@@ -70,7 +70,7 @@ fn build_tray_icon(
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == audit_id {
+        if event.id == dashboard_id {
             crate::dashboard::live::request_open();
             if let Some(ctx) = window::ctx() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -210,13 +210,13 @@ struct TrayApp {
     credential_inputs: HashMap<String, String>,
     token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
-    audit: Arc<Mutex<AuditWindow>>,
-    audit_open: Arc<AtomicBool>,
+    dashboard: Arc<Mutex<DashboardWindow>>,
+    dashboard_open: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
-struct AuditWindow {
-    state: crate::dashboard::DashboardState,
+struct DashboardWindow {
+    state: Option<crate::dashboard::UnifiedDashboardState>,
     last_gen: u64,
     focused: bool,
 }
@@ -263,17 +263,16 @@ impl TrayApp {
             credential_inputs: HashMap::new(),
             token_drafts: HashMap::new(),
             remember: HashMap::new(),
-            audit: Arc::new(Mutex::new(AuditWindow::default())),
-            audit_open: Arc::new(AtomicBool::new(false)),
+            dashboard: Arc::new(Mutex::new(DashboardWindow::default())),
+            dashboard_open: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
+    fn render_dashboard(&mut self, ctx: &egui::Context) {
         if crate::dashboard::live::take_open_request() {
-            self.audit_open.store(true, Ordering::Relaxed);
-            if let Ok(mut w) = self.audit.lock() {
-                w.state = crate::dashboard::DashboardState::new();
-                crate::dashboard::load(&mut w.state);
+            self.dashboard_open.store(true, Ordering::Relaxed);
+            if let Ok(mut w) = self.dashboard.lock() {
+                w.state = Some(crate::dashboard::load_unified(&self.window_state));
                 w.last_gen = crate::dashboard::live::generation();
                 w.focused = false;
             }
@@ -282,20 +281,28 @@ impl TrayApp {
                 egui::ViewportCommand::Focus,
             );
         }
-        if !self.audit_open.load(Ordering::Relaxed) {
+        if !self.dashboard_open.load(Ordering::Relaxed) {
             return;
         }
-        let audit = self.audit.clone();
-        let audit_open = self.audit_open.clone();
+        let dashboard = self.dashboard.clone();
+        let dashboard_open = self.dashboard_open.clone();
+        let window_state = self.window_state.clone();
         ctx.show_viewport_deferred(
             crate::dashboard::live::viewport_id(),
-            crate::dashboard::viewport_builder(),
-            move |ui, _class| audit_frame(ui, &audit, &audit_open),
+            crate::dashboard::unified_viewport_builder(),
+            move |ui, _class| {
+                dashboard_frame(ui, &dashboard, &dashboard_open, &window_state);
+            },
         );
     }
 }
 
-fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &AtomicBool) {
+fn dashboard_frame(
+    ui: &mut egui::Ui,
+    dashboard: &Mutex<DashboardWindow>,
+    dashboard_open: &AtomicBool,
+    window_state: &WindowState,
+) {
     let saved_style = ui.ctx().global_style();
     crate::dashboard::apply_theme(ui.ctx());
     ui.set_style(ui.ctx().global_style());
@@ -304,21 +311,42 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
         (vp.focused.unwrap_or(false), vp.close_requested())
     });
     crate::dashboard::live::set_watching(focused);
-    if let Ok(mut w) = audit.lock() {
+    if let Ok(mut window) = dashboard.lock() {
         let generation = crate::dashboard::live::generation();
-        if (focused && !w.focused) || generation != w.last_gen {
-            crate::dashboard::load(&mut w.state);
-            w.last_gen = crate::dashboard::live::generation();
+        let should_reload = (focused && !window.focused) || generation != window.last_gen;
+        if should_reload && let Some(state) = window.state.as_mut() {
+            crate::dashboard::reload_unified(state, window_state);
+            window.last_gen = crate::dashboard::live::generation();
         }
-        w.focused = focused;
-        if crate::dashboard::render(ui, &mut w.state) == crate::dashboard::DashboardAction::Refresh
-        {
-            crate::dashboard::load(&mut w.state);
-            w.last_gen = crate::dashboard::live::generation();
+        window.focused = focused;
+        if let Some(state) = window.state.as_mut() {
+            match crate::dashboard::render_unified_dashboard(ui, state) {
+                crate::dashboard::UnifiedDashboardAction::None => {}
+                crate::dashboard::UnifiedDashboardAction::Refresh => {
+                    crate::dashboard::reload_unified(state, window_state);
+                    window.last_gen = crate::dashboard::live::generation();
+                }
+                crate::dashboard::UnifiedDashboardAction::Command(command) => {
+                    let result = crate::dashboard::execute_unified_command(&command, window_state);
+                    crate::dashboard::reload_unified(state, window_state);
+                    match result {
+                        Ok(notice) => state.notice = Some(notice),
+                        Err(error) => {
+                            state.notice = None;
+                            state.audit.last_error = Some(format!("{error:#}"));
+                        }
+                    }
+                    window.last_gen = crate::dashboard::live::generation();
+                }
+            }
         }
     }
     if close_requested {
-        audit_open.store(false, Ordering::Relaxed);
+        dashboard_open.store(false, Ordering::Relaxed);
+        // Dropping the state zeroizes the credential values it carries; reopening rebuilds it from the stores anyway.
+        if let Ok(mut window) = dashboard.lock() {
+            window.state = None;
+        }
         crate::dashboard::live::set_watching(false);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
@@ -425,7 +453,7 @@ impl eframe::App for TrayApp {
             .filter(|d| d.is_revealed())
             .count();
         self.placement.sync_visibility(ctx, &order, revealed);
-        self.render_audit_dashboard(ctx);
+        self.render_dashboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -552,14 +580,6 @@ pub enum CardAction {
         credential_id: String,
         value: String,
     },
-}
-
-/// The refusal a card's "Deny" is entitled to ask for, so durability follows the card that asked rather than the flow that happens to answer.
-fn deny_request(scope: DenyScope) -> CredentialDecisionRequest {
-    match scope {
-        DenyScope::Workload => CredentialDecisionRequest::Deny,
-        DenyScope::Machine => CredentialDecisionRequest::DenyAlways,
-    }
 }
 
 /// Every way a card can leave the stack without a verdict; closed as a type so adding a card kind fails to compile in [`apply_dismissal`] rather than silently hanging its held request.
@@ -1645,7 +1665,7 @@ fn render_credential_card(
                     }));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(deny_request(prompt.deny_scope));
+                    chosen = Some(prompt.deny_scope.deny_request());
                 }
             });
             chosen.map(|request| CardAction::DecideCredential {
@@ -1717,7 +1737,7 @@ fn render_oauth_consent_card(
                     ));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(deny_request(prompt.deny_scope));
+                    chosen = Some(prompt.deny_scope.deny_request());
                 }
             });
             if chosen.is_none()
@@ -1879,22 +1899,6 @@ fn help_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
         )
         .sense(Sense::click()),
     )
-}
-
-fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
-    ui.scope(|ui| {
-        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, window::BORDER);
-        ui.style_mut().visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(96));
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .password(true)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(10, 9))
-                .desired_width(f32::INFINITY),
-        )
-    })
-    .inner
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -2071,6 +2075,7 @@ fn whiten_template(mut rgba: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credential_flow::session::DenyScope;
 
     #[test]
     fn embedded_icon_decodes_successfully() {
@@ -2368,6 +2373,7 @@ mod tests {
                 env_var: None,
                 injection_domains: vec![],
                 is_project_defined: false,
+                origin: None,
             },
             cancel_tx,
         );
@@ -2396,6 +2402,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             deny_scope: DenyScope::Workload,
+            origin: None,
         }
     }
 

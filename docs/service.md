@@ -25,6 +25,52 @@ You can also quit it from the **Quit** item in its tray menu.
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.
 
+## The dashboard
+
+The **Dashboard** item in the tray menu opens a window with two views over
+everything the service knows:
+
+- **Credentials** — every [connector](connectors.md) this machine has a value
+  decision for, what it is bound to, which sandboxes can spend it, and what
+  destinations it reaches. Requests waiting for you appear at the top and can be
+  answered here instead of from the approval window.
+- **Audit** — the same [audit](audit.md) timeline `lns audit` prints, filtered by
+  event kind or by sandbox.
+
+Selecting a sandbox in the sidebar scopes both views to it. `⌘K` searches
+credentials and activity together.
+
+### Seeing a credential's value
+
+A credential's detail panel shows what is bound — signed in, stored on this
+machine, host value — with the account, scopes, expiry, and the fake placeholder
+the workload holds.
+
+Both the real value and the placeholder are masked until you press **Reveal**,
+and both can be copied. A revealed value hides itself again after 15 seconds, or
+as soon as the window loses focus, so a dashboard left open doesn't leave a
+secret on screen. **Copy** puts the value on the system clipboard, which any
+process on your machine can read and which Lens Sandbox does not clear —
+paste it where you meant to and copy something else after.
+
+The value is only ever read for the screen: it is never written to the audit
+log, never printed to the developer trace stream, and is scrubbed from memory
+when the window refreshes or closes. It continues to live in
+`~/.lns-credentials.json` and is injected at the boundary.
+
+Three actions write through to the same files the CLI edits:
+
+| Action | Equivalent to |
+| --- | --- |
+| **Replace** a stored value | `lns connector connect <id>` with a new value |
+| **Remove credential** | forgetting the machine-wide value decision |
+| **Disconnect** | `lns connector disconnect <id>` for that sandbox's project |
+
+**Disconnect** removes the connector from the project's `lns-policy.yaml` and
+forgets that project's per-workload grants, so the next use asks again. A
+connector a sandbox definition *requires* can't be disconnected this way — the
+launch depends on it.
+
 ### Socket and binary locations
 
 On macOS the service listens on a local Unix socket at

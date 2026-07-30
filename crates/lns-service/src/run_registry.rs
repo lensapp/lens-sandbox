@@ -30,6 +30,7 @@ pub struct RunHandle {
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
     pub config: lns_ipc::RunConfig,
+    pub credential_slots: Vec<lns_artifact::spec::CredentialSlot>,
 }
 
 pub fn allocate_run_id() -> String {
@@ -280,6 +281,23 @@ pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
         })
 }
 
+pub fn set_credential_slots(run_id: &str, credential_slots: &[lns_artifact::spec::CredentialSlot]) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(handle) = g.as_mut().and_then(|runs| runs.get_mut(run_id)) {
+        handle.credential_slots = credential_slots.to_vec();
+        drop(g);
+        crate::dashboard::live::note_write();
+    }
+}
+
+pub fn credential_slots(run_id: &str) -> Vec<lns_artifact::spec::CredentialSlot> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|runs| runs.get(run_id))
+        .map(|handle| handle.credential_slots.clone())
+        .unwrap_or_default()
+}
+
 pub fn cancel(run_id: &str) -> bool {
     let removed = {
         let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
@@ -389,6 +407,7 @@ mod tests {
                 status: std::sync::Mutex::new(RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
+                credential_slots: Vec::new(),
             },
             cancel_rx,
         )
@@ -418,6 +437,22 @@ mod tests {
         .unwrap();
         assert_eq!(name, "reviewer");
         assert_eq!(map.get("aa01").unwrap().name, "reviewer");
+    }
+
+    #[tokio::test]
+    async fn credential_slots_follow_the_registered_run() {
+        let run_id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(run_id.clone(), handle);
+        let slots = vec![lns_artifact::spec::CredentialSlot {
+            name: "some-provider".into(),
+            env: "SOME_TOKEN".into(),
+            required: true,
+        }];
+        set_credential_slots(&run_id, &slots);
+        assert_eq!(credential_slots(&run_id), slots);
+        assert!(cancel(&run_id));
+        assert!(credential_slots(&run_id).is_empty());
     }
 
     #[tokio::test]

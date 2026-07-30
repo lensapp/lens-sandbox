@@ -190,7 +190,7 @@ fn main() -> eframe::Result {
             lns_service::ui::texture_delta_guard::install(&cc.egui_ctx);
             install_system_fonts(&cc.egui_ctx);
             install_icon_font(&cc.egui_ctx);
-            dashboard::style(&cc.egui_ctx);
+            dashboard::apply_theme(&cc.egui_ctx);
             Ok(Box::new(Preview {
                 state: DashboardState::seeded(seed_rows(), seed_warnings(), seed_sandboxes()),
             }))

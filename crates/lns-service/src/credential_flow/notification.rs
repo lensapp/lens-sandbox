@@ -3,7 +3,9 @@ use std::sync::Arc;
 use eframe::egui;
 use tokio::sync::mpsc;
 
-use crate::approval_flow::window::{CredentialDecisionDelivery, SignInCard, WindowState};
+use crate::approval_flow::window::{
+    CredentialDecisionDelivery, CredentialPromptOrigin, SignInCard, WindowState,
+};
 use crate::credential_flow::providers::DefProvider;
 use crate::credential_flow::registry;
 use crate::credential_flow::session::{CredentialNotifier, CredentialPendingPrompt, SignInPrompt};
@@ -22,6 +24,7 @@ pub struct WindowCredentialNotifier {
     decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
     detect_host: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     ctx: Option<egui::Context>,
+    origin: Option<CredentialPromptOrigin>,
 }
 
 impl WindowCredentialNotifier {
@@ -36,6 +39,7 @@ impl WindowCredentialNotifier {
             decision_tx,
             detect_host,
             ctx,
+            origin: None,
         }
     }
 
@@ -54,6 +58,11 @@ impl WindowCredentialNotifier {
         )
     }
 
+    pub fn with_origin(mut self, origin: CredentialPromptOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
     fn wake(&self) {
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint();
@@ -64,10 +73,11 @@ impl WindowCredentialNotifier {
 impl CredentialNotifier for WindowCredentialNotifier {
     fn present(&self, prompt: &CredentialPendingPrompt) {
         let host_value_available = (self.detect_host)(&prompt.credential_id);
-        self.state.insert_credential_pending(
+        self.state.try_insert_credential_pending_with_origin(
             prompt.clone(),
             host_value_available,
             self.decision_tx.clone(),
+            self.origin.clone(),
         );
         self.wake();
     }
@@ -102,6 +112,7 @@ impl CredentialNotifier for WindowCredentialNotifier {
                 env_var: prompt.env_var.clone(),
                 injection_domains: prompt.injection_domains.clone(),
                 is_project_defined: prompt.is_project_defined,
+                origin: self.origin.clone(),
             },
             cancel,
         );
@@ -174,6 +185,23 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.pending_credentials.len(), 1);
         assert!(!snap.pending_credentials[0].host_value_available);
+    }
+
+    #[test]
+    fn origin_is_attached_to_credential_and_sign_in_cards() {
+        let (notifier, state, _rx) = fixture(false, false);
+        let origin = CredentialPromptOrigin {
+            sandbox_id: "run-1".into(),
+            sandbox_name: "calm-finch".into(),
+            project: "/projects/example".into(),
+        };
+        let notifier = notifier.with_origin(origin.clone());
+        notifier.present(&prompt("c1", "some-provider"));
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        notifier.present_sign_in(&sign_in_prompt(), cancel_tx);
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.pending_credentials[0].origin, Some(origin.clone()));
+        assert_eq!(snapshot.sign_ins[0].origin, Some(origin));
     }
 
     #[test]

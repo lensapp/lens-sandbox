@@ -46,6 +46,7 @@ fn handle_event(res: notify::Result<Event>, target: &Path, session: &CredentialS
     let store = JsonFileCredentialStore::new(target.to_path_buf());
     if let Ok(state) = store.load() {
         session.apply_external_state(state);
+        crate::dashboard::live::note_write();
     }
 }
 

@@ -189,6 +189,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.openai.com".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                origin: None,
             },
             CredentialCardPrompt {
                 id: "cred-novalue".into(),
@@ -205,6 +206,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.some-provider.example".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                origin: None,
             },
             CredentialCardPrompt {
                 id: "cred-oauth".into(),
@@ -221,6 +223,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.github.com".into(), "github.com".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                origin: None,
             },
         ],
         sign_ins: vec![SignInCard {
@@ -235,6 +238,7 @@ fn seed_all() -> Snapshot {
             env_var: None,
             injection_domains: vec!["api.github.com".into(), "github.com".into()],
             is_project_defined: false,
+            origin: None,
         }],
         informs: vec!["sign-in to GitHub failed: device code expired".into()],
         connecting: vec!["OpenRouter".into()],
