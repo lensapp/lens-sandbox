@@ -194,7 +194,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run,
     announces_update_check: true,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 pub async fn run(

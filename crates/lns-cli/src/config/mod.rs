@@ -173,7 +173,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: run_command,
     announces_update_check: true,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {

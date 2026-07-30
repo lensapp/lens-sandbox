@@ -69,7 +69,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: orchestrator::service_command,
     announces_update_check: true,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 fn require_running_check(alive: bool) -> Result<(), &'static str> {
