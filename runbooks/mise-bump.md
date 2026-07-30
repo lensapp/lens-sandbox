@@ -19,6 +19,15 @@ it, so a bump never re-provisions installed tools.
    regenerates `registry.snapshot` (names, aliases, and preferred download
    backends) from the release's `registry/` directory.
 
+   It also refreshes `crates/lns-artifact/src/tools/index_snapshots/*.txt` —
+   real version-index bodies for a shape-diverse tool set
+   (`INDEX_SNAPSHOT_TOOLS` in `bump-mise/src/operations.rs`). These are the
+   fixtures behind the resolver's reality contract test
+   (`every_line_the_real_index_publishes_is_a_usable_stable_pin`): if upstream
+   starts publishing a version shape our pinning rules mishandle, the refresh
+   turns that test red at the bump instead of at a user's push. A red run here
+   is the mechanism working — fix the rule, not the fixture.
+
    **What the signature does and does not cover.** The minisign check covers the
    engine binary's sha256 — the bytes that reach a guest. It does **not** cover
    the source tarball the snapshot is generated from: upstream publishes no sum

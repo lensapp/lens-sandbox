@@ -102,6 +102,15 @@ Feature: distributing a sandbox
     When the user runs sandbox command "push ghcr.io/acme/agent:1.0.0"
     Then the published artifact carries the exact resolved versions
 
+  Scenario: push warns about an exact pin the version index does not list
+    Given a lns.yaml declaring tools ["node@99.99.99"]
+    And the version index does not list "node@99.99.99"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/acme/agent:1.0.0"
+    Then the exit code is 0
+    And the output contains "warning"
+    And the output contains "node@99.99.99"
+
   Scenario: pull hands the reference to the service and reports the digest
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
     When the user runs sandbox command "pull ghcr.io/team/hermes:1.4.0"

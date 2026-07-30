@@ -13,6 +13,11 @@ fn version_index_resolves(w: &mut BehaviourWorld, spec: String, exact: String) {
     w.tool_index.insert(spec, exact);
 }
 
+#[given(regex = r#"^the version index does not list "([^"]+)"$"#)]
+fn version_index_does_not_list(w: &mut BehaviourWorld, spec: String) {
+    w.unlisted_pins.insert(spec);
+}
+
 #[then("the published artifact carries the exact resolved versions")]
 fn published_carries_exact_versions(w: &mut BehaviourWorld) -> Result<(), String> {
     let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;

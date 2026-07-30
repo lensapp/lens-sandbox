@@ -40,6 +40,8 @@ pub struct BehaviourWorld {
     /// The definition doc the push handed to build_and_push, when it got that far.
     pub pushed_doc: Option<Vec<u8>>,
     pub tool_index: std::collections::HashMap<String, String>,
+    /// Exact pins the scripted index answers "not listed" for at push verification.
+    pub unlisted_pins: std::collections::HashSet<String>,
     pub host_bind: HostBindRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
