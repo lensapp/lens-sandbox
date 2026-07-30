@@ -33,7 +33,7 @@ pub async fn run_from_matches(matches: clap::ArgMatches, debug: bool) -> Result<
     if spec.announces_update_check && update_check::announce_enabled(|k| std::env::var(k).ok()) {
         let _ = update_check::real::run_announce();
     }
-    if spec.owns_terminal {
+    if (spec.owns_terminal)(sub) {
         // run/exec drive the tty over tokio stdin/stdout, whose blocking threads take the std stdin/stdout locks; holding those locks here would deadlock the interactive session.
         let mut input = std::io::empty();
         let mut out = std::io::sink();

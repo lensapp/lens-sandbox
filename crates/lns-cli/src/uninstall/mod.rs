@@ -43,7 +43,7 @@ pub const SPEC: CommandSpec = CommandSpec {
     augment,
     run: real::run_command,
     announces_update_check: false,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 /// Sends one request to the running service; `None` means the service did not answer.
