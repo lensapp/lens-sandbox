@@ -224,6 +224,12 @@ mod tests {
     }
 
     #[test]
+    fn build_metadata_numerals_count_toward_exactness_by_decision() {
+        // `21+11.0` names one release component yet counts as exact; the accepted consequence is that push keeps it verbatim and provisioning fails loud, whereas narrowing the rule would re-open the vendor-pin drift this predicate exists to prevent.
+        assert!(is_exact_version("21+11.0"));
+    }
+
+    #[test]
     fn a_resolver_answer_is_always_an_exact_pin() {
         // push writes the answer into the published artifact, so it must skip the index on the next push and address the cache on run.
         let body = "21.0.2\ntemurin-21.0.4+7\ntemurin-21.0.5+11.0.LTS\n22.9.0\n22.11.0\n";

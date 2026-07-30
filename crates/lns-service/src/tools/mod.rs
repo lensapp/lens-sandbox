@@ -1634,6 +1634,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_recorded_pin_wins_over_the_literal_request_key() {
+        // A tree keyed by the raw request string can exist on a machine; the record names what this machine resolved, so it must pick the tree.
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::resolving(&[("some-tool", "1.2.3")]);
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+        cache
+            .ingest(
+                &ToolCacheKey {
+                    name: "some-tool".into(),
+                    resolved: version("1"),
+                    arch: Arch::Aarch64,
+                    libc: Libc::Gnu,
+                },
+                &StagedTool {
+                    name: "some-tool".into(),
+                    co_installed: Vec::new(),
+                    resolved: version("1"),
+                    backend: "core:some-tool".into(),
+                    source_host: None,
+                    tar: StagedTar::Bytes(Vec::new()),
+                    bin_paths: vec!["bin".into()],
+                },
+            )
+            .unwrap();
+        let offline = Scripted::default();
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@1"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(offline.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            ensured.bin_paths,
+            vec!["/.lens/tools/some-tool/1.2.3/bin"],
+            "the record, not the literal key, names the tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_set_with_no_record_recovers_to_warm_without_the_provisioner() {
+        // Losing resolved.json costs exactly one deferred record write; no phase reinstalls, and the set is warm again afterwards.
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::default();
+        let requests = refs(&["some-tool@vendor-1.0.5+11.0.LTS"]);
+        let target = target();
+        let ask = |now: u64| EnsureRequest {
+            requests: &requests,
+            target: &target,
+            engine_version: "2026.7.14",
+            now_unix_secs: now,
+            disclose: &discard,
+        };
+        ensure_tools(&records, &cache, &cold, &ask(1_700_000_000))
+            .await
+            .unwrap();
+
+        *records.record.lock().unwrap() = None;
+        let offline = Scripted::default();
+        let deferred = prepare_tools(&records, &cache, &offline, &ask(1_700_000_009))
+            .await
+            .unwrap();
+        assert!(
+            deferred.ready.is_none(),
+            "re-establishing the record defers to the serialized install"
+        );
+        ensure_tools(&records, &cache, &offline, &ask(1_700_000_009))
+            .await
+            .unwrap();
+        let warm = prepare_tools(&records, &cache, &offline, &ask(1_700_000_010))
+            .await
+            .unwrap();
+        assert!(
+            warm.ready.is_some(),
+            "with the record back, the set injects without the install queue"
+        );
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "nothing reinstalls"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unfamiliar_version_shape_is_still_its_own_cache_key() {
         // The runtime tries every non-latest request as a cache key; a fuzzy one simply misses, so an unrecognized exact format never reinstalls.
         let records = MemRecords::default();
