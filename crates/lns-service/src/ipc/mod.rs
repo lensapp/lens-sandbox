@@ -1902,7 +1902,7 @@ mod tests {
 
     #[test]
     fn build_session_params_asks_the_broker_to_confine_the_exec() {
-        let params = build_session_params(exec_args(vec!["nft".into()], false, false));
+        let params = build_session_params(exec_args(vec!["nft".into()], false, false), "1");
         assert!(
             params.confine,
             "an exec reaches the broker, not the supervisor, so the broker is the only place its identity and capabilities can be capped"

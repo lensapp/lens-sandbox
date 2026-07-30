@@ -890,6 +890,15 @@ static PUBLISHED_TOOLS_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::
 
 #[given("a published sandbox declaring pinned tools")]
 async fn published_sandbox_with_pinned_tools(world: &mut E2eWorld) {
+    publish_tools_sandbox(world, "node@22").await;
+}
+
+#[given(regex = r#"^a published sandbox declaring tools \["([^"]+)"\]$"#)]
+async fn published_sandbox_with_declared_tool(world: &mut E2eWorld, entry: String) {
+    publish_tools_sandbox(world, &entry).await;
+}
+
+async fn publish_tools_sandbox(world: &mut E2eWorld, entry: &str) {
     let host = world
         .registry
         .get_or_insert_with(crate::registry::LocalRegistry::start)
@@ -899,7 +908,7 @@ async fn published_sandbox_with_pinned_tools(world: &mut E2eWorld) {
     let reference = format!("{host}/e2e-tools-sandbox:{seq}");
     let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - node@22\n"
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - {entry}\n"
     );
     std::fs::write(publisher.path().join("lns.yaml"), definition)
         .expect("write published tools lns.yaml");
@@ -917,14 +926,41 @@ async fn published_sandbox_with_pinned_tools(world: &mut E2eWorld) {
     world.pushed_ref = Some(reference);
 }
 
+#[given("the tool resolution record is lost")]
+fn tool_resolution_record_is_lost(world: &mut E2eWorld) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home first")
+        .path();
+    let cache_root = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches")
+    } else {
+        home.join(".cache")
+    };
+    let record = cache_root.join("lns").join("tools").join("resolved.json");
+    assert!(
+        record.is_file(),
+        "the pull must have written {} before this step deletes it",
+        record.display()
+    );
+    std::fs::remove_file(&record).expect("delete resolved.json");
+}
+
 #[given(regex = r#"^I ran "lns pull" on its reference while online$"#)]
 fn pulled_tools_reference_online(world: &mut E2eWorld) {
     let reference = world.pushed_ref.clone().expect("a published reference");
-    let pulled = world.run_with_service_env(&["pull", &reference]);
+    // The publisher-declared installer consent is a real prompt since 7624f31e; the harness consents explicitly.
+    let pulled = world.run_with_service_env(&["pull", "--yes", &reference]);
     assert_eq!(
         pulled.exit_code, 0,
         "pull tools sandbox:\n{}\n{}",
         pulled.stdout, pulled.stderr
+    );
+    assert!(
+        !pulled.stderr.contains("warning:"),
+        "the pull must pre-provision cleanly — a warning here means the offline-start promise is already broken:\n{}",
+        pulled.stderr
     );
     world.pushed_digest = extract_pull_digest(&pulled.stdout);
 }
@@ -941,6 +977,15 @@ fn extract_pull_digest(stdout: &str) -> Option<String> {
 
 #[when("I run the sandbox with no network available")]
 fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
+    run_pulled_sandbox_offline(world, "node --version");
+}
+
+#[when(regex = r#"^I run the sandbox offline with "([^"]*)"$"#)]
+fn run_sandbox_offline_with(world: &mut E2eWorld, cmd_line: String) {
+    run_pulled_sandbox_offline(world, &cmd_line);
+}
+
+fn run_pulled_sandbox_offline(world: &mut E2eWorld, cmd_line: &str) {
     world
         .registry
         .as_ref()
@@ -969,7 +1014,7 @@ fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
         reference,
         "--".to_string(),
     ];
-    args.extend(split_args("node --version"));
+    args.extend(split_args(cmd_line));
     let result =
         run_cli_with_timeout_in_dir(&consumer, args, socket_env(world), MICROVM_RUN_TIMEOUT);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
@@ -980,6 +1025,23 @@ fn run_sandbox_with_registry_offline(world: &mut E2eWorld) {
 fn tools_available_offline(world: &mut E2eWorld) {
     prints_a_node_22_version(world);
     // Tool bodies come from the live network, not the local registry, so "offline" is proven by the run having fetched nothing — which is exactly what the pull is for.
+    nothing_provisioned_again(world);
+}
+
+#[then(regex = r#"^it starts, prints "([^"]*)", and nothing is provisioned$"#)]
+fn starts_prints_and_provisions_nothing(world: &mut E2eWorld, needle: String) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "run failed:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    assert!(
+        result.stdout.contains(&needle),
+        "expected {needle:?} in:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
     nothing_provisioned_again(world);
 }
 

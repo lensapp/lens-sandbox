@@ -12,7 +12,7 @@ Feature: declared developer tools are provisioned once per machine, outside work
   policy cage (covered against a live guest by the @microvm suite).
 
   Scenario: The strictest policy does not gate provisioning
-    Given a lns.yaml declaring tools ["node@22"] with defaultVerdict deny and no allowedRoutes
+    Given a lns.yaml declaring tools ["node@22"] with defaultVerdict deny and no egress rules
     When I run the sandbox for the first time
     Then the tools are provisioned under it anyway
 

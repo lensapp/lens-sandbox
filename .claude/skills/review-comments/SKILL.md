@@ -187,6 +187,15 @@ Before changing anything, make sure you understand:
 
 Apply the code change. This is real production code — treat it with the same care as any other change:
 
+- **Defect or behavior change → red test first.** When the comment describes a
+  bug or asks for different behavior, invoke the `red-first` skill (Skill tool)
+  for that fix: state the claim, write the test that would have caught it,
+  watch it fail for the claimed reason, then fix. The red run doubles as your
+  verification that the reviewer's finding is real — if the test won't go red,
+  report that in the reply instead of "fixing" a non-bug. If `red-first` is not
+  installed, follow its core rule anyway: failing test before production code.
+  Mechanical comments (typo, rename, comment wording, style) don't need the
+  loop — just fix them.
 - **Write or update tests.** If the fix changes behavior, there must be a test that covers it. If the reviewer pointed out a bug, write a test that would have caught it. Check for existing test files for the module and add to them.
 - **Follow existing patterns.** Match the code style, error handling approach, and architecture of the surrounding code.
 - **Don't over-fix.** Address what the reviewer asked for. Don't refactor the neighborhood.
