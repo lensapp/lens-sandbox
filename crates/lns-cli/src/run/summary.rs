@@ -483,30 +483,6 @@ mod tests {
         );
     }
 
-    fn allow(host: &str) -> RouteRule {
-        RouteRule {
-            match_pattern: host.to_string(),
-            verdict: Verdict::Allow,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-        }
-    }
-
-    fn deny(host: &str) -> RouteRule {
-        RouteRule {
-            match_pattern: host.to_string(),
-            verdict: Verdict::Deny,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-        }
-    }
-
     #[test]
     fn summary_lists_image_resources_flags_and_policy_block() {
         let args = run_args(Some("ubuntu"));
@@ -775,6 +751,7 @@ mod tests {
             description: None,
             tls_terminate: false,
             rules: Vec::new(),
+            binaries: None,
         });
         let s = format_summary(
             &run_args(Some("ubuntu")),
@@ -803,10 +780,10 @@ mod tests {
     #[test]
     fn policy_block_shows_file_path_default_verdict_and_rule_summary() {
         let mut policy = Policy::default();
-        policy.add_rule(allow("api.linear.app"));
-        policy.add_rule(allow("api.example.com"));
-        policy.add_rule(allow("registry.npmjs.org"));
-        policy.add_rule(deny("evil.example"));
+        policy.add_rule(RouteRule::allow_host("api.linear.app"));
+        policy.add_rule(RouteRule::allow_host("api.example.com"));
+        policy.add_rule(RouteRule::allow_host("registry.npmjs.org"));
+        policy.add_rule(RouteRule::deny_host("evil.example"));
         let s = format_summary(
             &run_args(Some("ubuntu")),
             &policy,
@@ -835,8 +812,8 @@ mod tests {
     #[test]
     fn rules_line_uses_singular_counts_at_one() {
         let mut policy = Policy::default();
-        policy.add_rule(allow("api.linear.app"));
-        policy.add_rule(deny("evil.example"));
+        policy.add_rule(RouteRule::allow_host("api.linear.app"));
+        policy.add_rule(RouteRule::deny_host("evil.example"));
         let s = format_summary(
             &run_args(Some("ubuntu")),
             &policy,

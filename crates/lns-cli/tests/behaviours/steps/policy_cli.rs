@@ -1,8 +1,10 @@
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_cli::policy::{self, PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs};
-use lns_policy::{Policy, RouteRule, Verdict};
+use lns_cli::policy::{
+    self, PolicyAllowArgs, PolicyCommand, PolicyRemoveArgs, PolicyRuleArgs, PolicyScopeArgs,
+};
+use lns_policy::{HttpRule, Policy, RouteRule, Verdict};
 use std::path::{Path, PathBuf};
 
 fn cwd(world: &mut BehaviourWorld) -> PathBuf {
@@ -34,6 +36,24 @@ fn rule_args(world: &mut BehaviourWorld, pattern: &str, policy: Option<PathBuf>)
         pattern: pattern.to_string(),
         description: None,
         policy,
+    }
+}
+
+fn allow_args(
+    world: &mut BehaviourWorld,
+    pattern: &str,
+    policy: Option<PathBuf>,
+) -> PolicyAllowArgs {
+    PolicyAllowArgs {
+        rule: rule_args(world, pattern, policy),
+        binary: Vec::new(),
+    }
+}
+
+fn scoped_rule(pattern: &str, binaries: &[&str]) -> RouteRule {
+    RouteRule {
+        binaries: Some(binaries.iter().map(|b| (*b).to_string()).collect()),
+        ..RouteRule::allow_host(pattern)
     }
 }
 
@@ -87,6 +107,165 @@ fn policy_has_allow(world: &mut BehaviourWorld, file: String, pattern: String) {
     policy.save_atomic(&dir.join(file)).expect("seed policy");
 }
 
+#[given(regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" described as "([^"]+)"$"#)]
+fn policy_has_described_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    description: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        description: Some(description),
+        ..RouteRule::allow_host(pattern)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(regex = r#"^"([^"]+)" has a deny rule for "([^"]+)"$"#)]
+fn policy_has_deny(world: &mut BehaviourWorld, file: String, pattern: String) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule::deny_host(pattern));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has a deny rule for "([^"]+)" ahead of an allow rule for "([^"]+)"$"#
+)]
+fn policy_has_deny_ahead_of_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    denied: String,
+    allowed: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule::deny_host(denied));
+    policy.add_rule(RouteRule::allow_host(allowed));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" ahead of a deny rule for "([^"]+)"$"#
+)]
+fn policy_has_allow_ahead_of_deny(
+    world: &mut BehaviourWorld,
+    file: String,
+    allowed: String,
+    denied: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule::allow_host(allowed));
+    policy.add_rule(RouteRule::deny_host(denied));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(regex = r#"^"([^"]+)" has a TLS-terminating allow rule for "([^"]+)"$"#)]
+fn policy_has_tls_terminating_allow(world: &mut BehaviourWorld, file: String, pattern: String) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        tls_terminate: true,
+        ..RouteRule::allow_host(pattern)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has a TLS-terminating allow rule for "([^"]+)" described as "([^"]+)"$"#
+)]
+fn policy_has_described_tls_terminating_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    description: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        tls_terminate: true,
+        description: Some(description),
+        ..RouteRule::allow_host(pattern)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" ahead of a deny rule for "([^"]+)" described as "([^"]+)"$"#
+)]
+fn policy_has_allow_ahead_of_described_deny(
+    world: &mut BehaviourWorld,
+    file: String,
+    allowed: String,
+    denied: String,
+    description: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule::allow_host(allowed));
+    policy.add_rule(RouteRule {
+        description: Some(description),
+        ..RouteRule::deny_host(denied)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" scoped to "([^"]+)" ahead of an unscoped allow rule for "([^"]+)"$"#
+)]
+fn policy_has_scoped_ahead_of_unscoped_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    scoped: String,
+    binary: String,
+    unscoped: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(scoped_rule(&scoped, &[&binary]));
+    policy.add_rule(RouteRule::allow_host(unscoped));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" restricted to GET requests ahead of an unrestricted allow rule for "([^"]+)"$"#
+)]
+fn policy_has_restricted_ahead_of_unrestricted_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    restricted: String,
+    unrestricted: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        rules: vec![HttpRule {
+            method: Some("GET".into()),
+            path: None,
+        }],
+        ..RouteRule::allow_host(restricted)
+    });
+    policy.add_rule(RouteRule::allow_host(unrestricted));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" restricted to GET requests$"#)]
+fn policy_has_get_restricted_allow(world: &mut BehaviourWorld, file: String, pattern: String) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        rules: vec![HttpRule {
+            method: Some("GET".into()),
+            path: None,
+        }],
+        ..RouteRule::allow_host(pattern)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
 #[given(regex = r#"^"([^"]+)" uses the removed allowedRoutes key for "([^"]+)"$"#)]
 fn policy_uses_the_removed_key(world: &mut BehaviourWorld, file: String, pattern: String) {
     let dir = cwd(world);
@@ -109,13 +288,13 @@ fn policy_has_no_rule(world: &mut BehaviourWorld, file: String, _pattern: String
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" to "([^"]+)"$"#)]
 fn add_allow_to_file(world: &mut BehaviourWorld, pattern: String, file: String) {
-    let args = rule_args(world, &pattern, Some(PathBuf::from(file)));
+    let args = allow_args(world, &pattern, Some(PathBuf::from(file)));
     run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" without passing --policy$"#)]
 fn add_allow_default_path(world: &mut BehaviourWorld, pattern: String) {
-    let args = rule_args(world, &pattern, None);
+    let args = allow_args(world, &pattern, None);
     run_policy(world, PolicyCommand::Allow(args));
 }
 
@@ -127,15 +306,92 @@ fn add_allow_explicit_path(world: &mut BehaviourWorld, pattern: String, path: St
         .file_name()
         .expect("explicit path has a file name");
     let explicit = cwd(world).join(basename);
-    let args = rule_args(world, &pattern, Some(explicit));
+    let args = allow_args(world, &pattern, Some(explicit));
     run_policy(world, PolicyCommand::Allow(args));
 }
 
 #[when(regex = r#"^the developer adds an allow rule for "([^"]+)" with description "([^"]+)"$"#)]
 fn add_allow_with_description(world: &mut BehaviourWorld, pattern: String, description: String) {
+    let mut args = allow_args(world, &pattern, None);
+    args.rule.description = Some(description);
+    run_policy(world, PolicyCommand::Allow(args));
+}
+
+#[given(regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" scoped to "([^"]+)"$"#)]
+fn policy_has_scoped_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    binary: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(scoped_rule(&pattern, &[&binary]));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" scoped to "([^"]+)" and "([^"]+)"$"#)]
+fn policy_has_multi_scoped_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    first: String,
+    second: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(scoped_rule(&pattern, &[&first, &second]));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[given(
+    regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" and a scoped allow rule for "([^"]+)"$"#
+)]
+fn policy_has_open_and_scoped_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    open: String,
+    scoped: String,
+) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule::allow_host(open));
+    policy.add_rule(scoped_rule(&scoped, &["/usr/bin/git"]));
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[when(regex = r#"^the developer adds an allow rule for "([^"]+)" scoped to "([^"]+)"$"#)]
+fn add_scoped_allow(world: &mut BehaviourWorld, pattern: String, binary: String) {
+    let mut args = allow_args(world, &pattern, None);
+    args.binary = vec![binary];
+    run_policy(world, PolicyCommand::Allow(args));
+}
+
+#[when(
+    regex = r#"^the developer adds an allow rule for "([^"]+)" scoped to "([^"]+)" and "([^"]+)"$"#
+)]
+fn add_multi_scoped_allow(
+    world: &mut BehaviourWorld,
+    pattern: String,
+    first: String,
+    second: String,
+) {
+    let mut args = allow_args(world, &pattern, None);
+    args.binary = vec![first, second];
+    run_policy(world, PolicyCommand::Allow(args));
+}
+
+#[when(regex = r#"^the developer denies "([^"]+)"$"#)]
+fn add_deny(world: &mut BehaviourWorld, pattern: String) {
+    let args = rule_args(world, &pattern, None);
+    run_policy(world, PolicyCommand::Deny(args));
+}
+
+#[when(regex = r#"^the developer denies "([^"]+)" with description "([^"]+)"$"#)]
+fn add_deny_with_description(world: &mut BehaviourWorld, pattern: String, description: String) {
     let mut args = rule_args(world, &pattern, None);
     args.description = Some(description);
-    run_policy(world, PolicyCommand::Allow(args));
+    run_policy(world, PolicyCommand::Deny(args));
 }
 
 #[when(regex = r"^the developer lists rules$")]
@@ -331,6 +587,462 @@ fn file_no_longer_contains(
     } else {
         Ok(())
     }
+}
+
+#[then(regex = r#"^"([^"]+)" scopes the allow rule for "([^"]+)" to "([^"]+)"$"#)]
+fn file_scopes_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    binaries: String,
+) -> Result<(), String> {
+    let expected: Vec<String> = binaries.split(',').map(str::to_string).collect();
+    let policy = load(world, &file);
+    let found = policy
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|r| r.match_pattern == pattern && r.verdict == Verdict::Allow)
+        .ok_or_else(|| format!("{file} has no allow rule for {pattern}"))?;
+    if found.binaries.as_deref() == Some(expected.as_slice()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {pattern} scoped to {expected:?}, got {:?}",
+            found.binaries
+        ))
+    }
+}
+
+#[then(regex = r"^the failure says a relative path can never match the kernel-resolved path$")]
+fn failure_explains_relative_path(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "is not an absolute path")?;
+    output_mentions(world, "kernel-resolved /proc/<pid>/exe")
+}
+
+#[then(regex = r"^the failure says a \.\. segment can never match the kernel-resolved path$")]
+fn failure_explains_parent_segment(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "climbs through a \"..\" segment")?;
+    output_mentions(world, "kernel-resolved /proc/<pid>/exe")
+}
+
+fn output_mentions(world: &BehaviourWorld, needle: &str) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    if out.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!("failure output missing {needle:?}:\n{out}"))
+    }
+}
+
+#[then(regex = r#"^the output shows the rule scoped to "([^"]+)"$"#)]
+fn output_shows_scoping(world: &mut BehaviourWorld, binary: String) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    for needle in ["BINARIES", binary.as_str()] {
+        if !out.contains(needle) {
+            return Err(format!("list output missing {needle:?}:\n{out}"));
+        }
+    }
+    Ok(())
+}
+
+fn position_of(
+    world: &mut BehaviourWorld,
+    file: &str,
+    of: impl Fn(&RouteRule) -> bool,
+    what: &str,
+) -> Result<usize, String> {
+    load(world, file)
+        .network
+        .egress
+        .http
+        .iter()
+        .position(of)
+        .ok_or_else(|| format!("{file} has no {what}"))
+}
+
+fn scoped_to(binaries: String) -> impl Fn(&RouteRule) -> bool {
+    let binaries: Vec<String> = binaries.split(',').map(str::to_string).collect();
+    move |rule| rule.binaries.as_deref() == Some(binaries.as_slice())
+}
+
+fn open_rule_for(pattern: String) -> impl Fn(&RouteRule) -> bool {
+    move |rule| rule.match_pattern == pattern && rule.binaries.is_none()
+}
+
+fn deny_rule_for(pattern: String) -> impl Fn(&RouteRule) -> bool {
+    move |rule| rule.match_pattern == pattern && rule.verdict == Verdict::Deny
+}
+
+#[then(
+    regex = r#"^"([^"]+)" lists the deny rule for "([^"]+)" before the rule scoped to "([^"]+)"$"#
+)]
+fn deny_comes_first(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+    binary: String,
+) -> Result<(), String> {
+    let deny = position_of(
+        world,
+        &file,
+        deny_rule_for(pattern.clone()),
+        &format!("deny rule for {pattern}"),
+    )?;
+    let scoped = position_of(
+        world,
+        &file,
+        scoped_to(binary.clone()),
+        &format!("rule scoped to {binary}"),
+    )?;
+    if deny < scoped {
+        Ok(())
+    } else {
+        Err(format!(
+            "the scoped allow at {scoped} still serves its listed callers, so the deny at {deny} never blocks them"
+        ))
+    }
+}
+
+fn allow_rule_for(pattern: String) -> impl Fn(&RouteRule) -> bool {
+    move |rule| rule.match_pattern == pattern && rule.verdict == Verdict::Allow
+}
+
+#[then(
+    regex = r#"^"([^"]+)" lists the deny rule for "([^"]+)" before the allow rule for "([^"]+)"$"#
+)]
+fn deny_comes_before_the_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    denied: String,
+    allowed: String,
+) -> Result<(), String> {
+    let deny = position_of(
+        world,
+        &file,
+        deny_rule_for(denied.clone()),
+        &format!("deny rule for {denied}"),
+    )?;
+    let allow = position_of(
+        world,
+        &file,
+        allow_rule_for(allowed.clone()),
+        &format!("allow rule for {allowed}"),
+    )?;
+    if deny < allow {
+        Ok(())
+    } else {
+        Err(format!(
+            "the gate stops at the first match, so the allow at {allow} serves the destination and the deny at {deny} blocks nobody"
+        ))
+    }
+}
+
+#[then(regex = r#"^"([^"]+)" terminates TLS on the rule scoped to "([^"]+)"$"#)]
+fn file_terminates_tls_on_the_scoped_rule(
+    world: &mut BehaviourWorld,
+    file: String,
+    binary: String,
+) -> Result<(), String> {
+    let scoped = scoped_to(binary.clone());
+    let found = load(world, &file)
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|rule| scoped(rule))
+        .cloned()
+        .ok_or_else(|| format!("{file} has no rule scoped to {binary}"))?;
+    if found.tls_terminate {
+        Ok(())
+    } else {
+        Err(format!(
+            "the rule it was placed in front of terminates TLS, so dropping it here stops intercepting the destination for {binary}: {found:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^"([^"]+)" does not terminate TLS on the deny rule for "([^"]+)"$"#)]
+fn file_does_not_terminate_tls_on_the_deny(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+) -> Result<(), String> {
+    let deny = deny_rule_for(pattern.clone());
+    let found = load(world, &file)
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|rule| deny(rule))
+        .cloned()
+        .ok_or_else(|| format!("{file} has no deny rule for {pattern}"))?;
+    if found.tls_terminate {
+        Err(format!(
+            "a deny blocks the request before there is anything to intercept, so terminating TLS on it is noise in the file: {found:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then(regex = r#"^"([^"]+)" describes the (allow|deny) rule for "([^"]+)" as "([^"]+)"$"#)]
+fn file_describes_rule(
+    world: &mut BehaviourWorld,
+    file: String,
+    verdict: String,
+    pattern: String,
+    description: String,
+) -> Result<(), String> {
+    let wanted = match verdict.as_str() {
+        "allow" => Verdict::Allow,
+        _ => Verdict::Deny,
+    };
+    let found = load(world, &file)
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|rule| rule.match_pattern == pattern && rule.verdict == wanted)
+        .cloned()
+        .ok_or_else(|| format!("{file} has no {verdict} rule for {pattern}"))?;
+    if found.description.as_deref() == Some(description.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "a command passing no --description is not a request to forget the note the rule carries, got {:?}",
+            found.description
+        ))
+    }
+}
+
+#[then(regex = r"^the output says the placed rule terminates TLS too$")]
+fn output_reports_inherited_tls(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "terminates TLS as that rule does")
+}
+
+#[then(regex = r#"^"([^"]+)" lists the rule scoped to "([^"]+)" before the rule for "([^"]+)"$"#)]
+fn scoped_rule_comes_first(
+    world: &mut BehaviourWorld,
+    file: String,
+    binary: String,
+    pattern: String,
+) -> Result<(), String> {
+    let scoped = position_of(
+        world,
+        &file,
+        scoped_to(binary.clone()),
+        &format!("rule scoped to {binary}"),
+    )?;
+    let open = position_of(
+        world,
+        &file,
+        open_rule_for(pattern.clone()),
+        &format!("open rule for {pattern}"),
+    )?;
+    if scoped < open {
+        Ok(())
+    } else {
+        Err(format!(
+            "the gate stops at the first match, so the scoped rule at {scoped} never fires behind the open rule for {pattern} at {open}"
+        ))
+    }
+}
+
+#[then(regex = r#"^"([^"]+)" still holds (\d+) rules?$"#)]
+fn file_still_holds(
+    world: &mut BehaviourWorld,
+    file: String,
+    expected: usize,
+) -> Result<(), String> {
+    let found = load(world, &file).network.egress.http.len();
+    if found == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {expected} rules in {file}, found {found}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the output says it was placed before the rule for "([^"]+)"$"#)]
+fn output_reports_placement(world: &mut BehaviourWorld, pattern: String) -> Result<(), String> {
+    output_mentions(world, &format!("before the existing rule for {pattern:?}"))
+}
+
+#[then(
+    regex = r#"^"([^"]+)" lists the rule scoped to "([^"]+)" before the rule scoped to "([^"]+)"$"#
+)]
+fn narrower_scope_comes_first(
+    world: &mut BehaviourWorld,
+    file: String,
+    narrower: String,
+    wider: String,
+) -> Result<(), String> {
+    let first = position_of(
+        world,
+        &file,
+        scoped_to(narrower.clone()),
+        &format!("rule scoped to {narrower}"),
+    )?;
+    let second = position_of(
+        world,
+        &file,
+        scoped_to(wider.clone()),
+        &format!("rule scoped to {wider}"),
+    )?;
+    if first < second {
+        Ok(())
+    } else {
+        Err(format!(
+            "the gate stops at the first match, so the rule at {first} narrows nothing behind the rule scoped to {wider} at {second}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the output says every other caller is now denied "([^"]+)"$"#)]
+fn output_reports_the_destination_is_claimed(
+    world: &mut BehaviourWorld,
+    pattern: String,
+) -> Result<(), String> {
+    output_mentions(
+        world,
+        &format!("Every other caller is now denied {pattern:?} without being asked"),
+    )
+}
+
+#[then(
+    regex = r#"^"([^"]+)" lists the deny rule for "([^"]+)" before the rule restricted to GET requests$"#
+)]
+fn deny_comes_before_the_restricted_rule(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+) -> Result<(), String> {
+    let deny = position_of(
+        world,
+        &file,
+        deny_rule_for(pattern.clone()),
+        &format!("deny rule for {pattern}"),
+    )?;
+    let restricted = position_of(
+        world,
+        &file,
+        |rule| !rule.rules.is_empty(),
+        "rule restricted to GET requests",
+    )?;
+    if deny < restricted {
+        Ok(())
+    } else {
+        Err(format!(
+            "the restricted allow at {restricted} still serves the requests it names, so the deny at {deny} never blocks them"
+        ))
+    }
+}
+
+#[then(regex = r"^the failure says the rule would lift the request restriction$")]
+fn failure_reports_a_lifted_restriction(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "allows only the requests its rules list names")?;
+    output_mentions(world, "would lift that restriction")
+}
+
+#[then(regex = r"^the failure says the rule would open the destination to every caller$")]
+fn failure_reports_a_widening(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "open the destination to every caller")
+}
+
+#[then(regex = r"^the output does not claim any scoping is spent$")]
+fn output_does_not_claim_spent_scoping(world: &mut BehaviourWorld) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    if out.contains("no longer applies") {
+        return Err(format!(
+            "the rule it was placed in front of still serves the callers it lists, so nothing about its scoping is spent:\n{out}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the output says the scoped rule for "([^"]+)" no longer applies$"#)]
+fn output_reports_spent_scoping(world: &mut BehaviourWorld, pattern: String) -> Result<(), String> {
+    output_mentions(world, &format!("no longer applies to {pattern:?}"))
+}
+
+#[then(regex = r"^the output does not claim any caller is denied$")]
+fn output_does_not_claim_a_denied_caller(world: &mut BehaviourWorld) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    if out.contains("is now denied") {
+        return Err(format!(
+            "an unscoped rule denies nobody, so claiming it does would send the developer looking for a filter that isn't there:\n{out}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the output says (\d+) rules? (?:were|was) removed for "([^"]+)"$"#)]
+fn output_reports_the_removal_count(
+    world: &mut BehaviourWorld,
+    count: usize,
+    pattern: String,
+) -> Result<(), String> {
+    let noun = if count == 1 { "rule" } else { "rules" };
+    output_mentions(world, &format!("Removed {count} {noun} for {pattern:?}"))
+}
+
+#[then(regex = r"^the output says the description was updated$")]
+fn output_reports_a_described_rule(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "Updated the description of")
+}
+
+#[then(regex = r"^the output says the rule is already there$")]
+fn output_reports_already_present(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "is already in")
+}
+
+#[then(regex = r"^the command succeeds$")]
+fn command_succeeds(world: &mut BehaviourWorld) -> Result<(), String> {
+    match world.result.as_ref() {
+        Some(run) if run.exit_code == 0 => Ok(()),
+        Some(run) => Err(format!("exited {}:\n{}", run.exit_code, run.output)),
+        None => Err("the command did not run".to_string()),
+    }
+}
+
+#[then(regex = r"^the output says the deny adds nothing$")]
+fn output_reports_deny_adds_nothing(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "already blocks")?;
+    output_mentions(world, "adds nothing")
+}
+
+#[then(regex = r"^the failure does not tell the developer to remove the deny$")]
+fn failure_does_not_advise_removing_the_deny(world: &mut BehaviourWorld) -> Result<(), String> {
+    let out = world
+        .result
+        .as_ref()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+    if out.contains("policy remove") {
+        return Err(format!(
+            "removing the deny widens egress for every destination it covers, so the refusal must not propose it:\n{out}"
+        ));
+    }
+    Ok(())
 }
 
 #[then(regex = r"^the command fails with an exit code other than 0$")]
