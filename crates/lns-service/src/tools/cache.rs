@@ -107,6 +107,9 @@ pub trait ToolCache {
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest>;
 }
 
+/// The reclaimable half of `<cache>/tools` — `resolved.json` sits beside it and outlives a prune.
+pub const TREES_DIR: &str = "trees";
+
 pub struct RealToolCache {
     trees_root: PathBuf,
     store: ContentStore,
@@ -116,7 +119,7 @@ pub struct RealToolCache {
 impl RealToolCache {
     pub fn new(tools_root: &Path, store: ContentStore, engine_version: &str) -> Self {
         Self {
-            trees_root: tools_root.join("trees"),
+            trees_root: tools_root.join(TREES_DIR),
             store,
             engine_version: engine_version.to_string(),
         }

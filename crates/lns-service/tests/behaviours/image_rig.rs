@@ -123,6 +123,7 @@ pub struct ImageRig {
     pub caches: CacheFake,
     pub images_root: PathBuf,
     tool_cache_paths: Vec<PathBuf>,
+    tool_record_path: PathBuf,
     pub active: Vec<lns_ipc::RunSummary>,
     pub holder_run_id: Option<String>,
     next_run_id: u32,
@@ -141,6 +142,7 @@ impl ImageRig {
             caches: CacheFake::default(),
             images_root: PathBuf::from("/images"),
             tool_cache_paths: Vec::new(),
+            tool_record_path: PathBuf::new(),
             active: Vec::new(),
             holder_run_id: None,
             next_run_id: 1,
@@ -156,7 +158,7 @@ impl ImageRig {
     pub fn seed_tool_cache(&mut self, bytes: u64) {
         let cache_root = self.images_root.parent().unwrap_or_else(|| Path::new(""));
         let portions = [bytes / 3, bytes / 3, bytes - 2 * (bytes / 3)];
-        self.tool_cache_paths = ["tools", "content", "composefs"]
+        self.tool_cache_paths = ["tools/trees", "content", "composefs"]
             .into_iter()
             .zip(portions)
             .map(|(name, size)| {
@@ -169,6 +171,23 @@ impl ImageRig {
                 path
             })
             .collect();
+    }
+
+    pub fn seed_tool_record(&mut self, spec: &str) {
+        let cache_root = self.images_root.parent().unwrap_or_else(|| Path::new(""));
+        self.tool_record_path = cache_root.join("tools").join("resolved.json");
+        self.fs.files.lock().unwrap().insert(
+            self.tool_record_path.clone(),
+            format!("{{\"tools\":{{\"{spec}\":{{}}}}}}").into_bytes(),
+        );
+    }
+
+    pub fn has_tool_record(&self) -> bool {
+        self.fs
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&self.tool_record_path)
     }
 
     pub fn has_tool_cache(&self) -> bool {
