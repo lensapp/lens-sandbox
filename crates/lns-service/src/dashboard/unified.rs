@@ -15,7 +15,8 @@ use super::state::{
 use super::{
     ACCENT_GREEN, BORDER, CATEGORY, CHROME_FILL, CONTENT_FILL, CredentialBinding,
     CredentialOperation, CredentialSummary, DETAIL_WIDTH, FS_BODY, FS_LABEL, FS_SECONDARY,
-    INPUT_FILL, MODAL_FILL, SELECT_FILL, SIDEBAR_WIDTH, STATUS_WARNING, TEXT_MUTED, TEXT_PRIMARY,
+    INPUT_FILL, MODAL_FILL, SELECT_FILL, SIDEBAR_WIDTH, STATUS_CRITICAL, STATUS_WARNING,
+    TEXT_MUTED, TEXT_PRIMARY,
     TRAFFIC_LIGHT_INSET, dashboard_banner, dashboard_section_label, detail_panel, glyph,
     icon_button, row_click, status_dot,
 };
@@ -268,6 +269,10 @@ fn unified_central(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
         .show_inside(ui, |ui| {
             ui.add_space(12.0);
             view_tabs(ui, state);
+            if let Some(error) = state.audit.last_error.as_deref() {
+                ui.add_space(12.0);
+                dashboard_banner(ui, error, STATUS_CRITICAL);
+            }
             if let Some(notice) = state.notice.as_deref() {
                 ui.add_space(12.0);
                 inline_notice(ui, notice);

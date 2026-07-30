@@ -331,7 +331,10 @@ fn dashboard_frame(
                     crate::dashboard::reload_unified(state, window_state);
                     match result {
                         Ok(notice) => state.notice = Some(notice),
-                        Err(error) => state.audit.last_error = Some(format!("{error:#}")),
+                        Err(error) => {
+                            state.notice = None;
+                            state.audit.last_error = Some(format!("{error:#}"));
+                        }
                     }
                     window.last_gen = crate::dashboard::live::generation();
                 }
