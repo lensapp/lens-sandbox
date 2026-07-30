@@ -187,10 +187,8 @@ async fn effective_pin<P: ToolProvisioner>(
                 (recorded, false)
             }
         },
-        version if lns_artifact::tools::is_exact_version(version) => {
-            (recorded.or_else(|| version.parse().ok()), false)
-        }
-        _ => (recorded, false),
+        // Any bounded request is tried as its own cache key — a fuzzy one simply misses — so no version shape ever needs a record to find its cached tree.
+        version => (recorded.or_else(|| version.parse().ok()), false),
     }
 }
 
@@ -1586,6 +1584,97 @@ mod tests {
             "the request itself determines the cache key"
         );
         assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/1.2.3/bin"]);
+    }
+
+    #[tokio::test]
+    async fn a_vendor_exact_request_starts_from_the_cache_with_no_record_at_all() {
+        // push pins vendor versions like temurin-21.0.5+11.0.LTS; losing resolved.json must not force a reinstall of a tree that is already cached.
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::default();
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@vendor-1.0.5+11.0.LTS"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+
+        *records.record.lock().unwrap() = None;
+        let offline = Scripted::default();
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@vendor-1.0.5+11.0.LTS"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "the request itself determines the cache key"
+        );
+        assert_eq!(
+            ensured.bin_paths,
+            vec!["/.lens/tools/some-tool/vendor-1.0.5+11.0.LTS/bin"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unfamiliar_version_shape_is_still_its_own_cache_key() {
+        // The runtime tries every non-latest request as a cache key; a fuzzy one simply misses, so an unrecognized exact format never reinstalls.
+        let records = MemRecords::default();
+        let cache = MemCache::default();
+        let cold = Scripted::default();
+        ensure_tools(
+            &records,
+            &cache,
+            &cold,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@odd-5"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_000,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+
+        *records.record.lock().unwrap() = None;
+        let offline = Scripted::default();
+        let ensured = ensure_tools(
+            &records,
+            &cache,
+            &offline,
+            &EnsureRequest {
+                requests: &refs(&["some-tool@odd-5"]),
+                target: &target(),
+                engine_version: "2026.7.14",
+                now_unix_secs: 1_700_000_009,
+                disclose: &discard,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            offline.calls.lock().unwrap().is_empty(),
+            "the request itself determines the cache key"
+        );
+        assert_eq!(ensured.bin_paths, vec!["/.lens/tools/some-tool/odd-5/bin"]);
     }
 
     #[tokio::test]
