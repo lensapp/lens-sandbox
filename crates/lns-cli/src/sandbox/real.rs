@@ -27,7 +27,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             return push_local(&reference, push_args.dry_run, file.as_deref(), ctx.cwd()?).await;
         }
         crate::service::require_running().await;
-        dispatch(args).await
+        dispatch(args, ctx.input).await
     })
 }
 
@@ -52,36 +52,39 @@ pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
     Box::pin(async move { run_author(&super::SandboxCommand::Init, ctx) })
 }
 
-pub fn run_ps<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_ps<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::PsArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Ps(args)).await
+        dispatch_command(super::SandboxCommand::Ps(args), ctx.input).await
     })
 }
 
-async fn dispatch_command(command: super::SandboxCommand) -> Result<i32> {
+async fn dispatch_command(
+    command: super::SandboxCommand,
+    input: &mut dyn std::io::BufRead,
+) -> Result<i32> {
     crate::service::require_running().await;
-    dispatch(super::SandboxArgs { command }).await
+    dispatch(super::SandboxArgs { command }, input).await
 }
 
-pub fn run_stop<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_stop<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxStopArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Stop(args)).await
+        dispatch_command(super::SandboxCommand::Stop(args), ctx.input).await
     })
 }
 
-pub fn run_kill<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_kill<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = crate::cli::KillArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Kill(args)).await
+        dispatch_command(super::SandboxCommand::Kill(args), ctx.input).await
     })
 }
 
-pub fn run_rm<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxRmArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Rm(args)).await
+        dispatch_command(super::SandboxCommand::Rm(args), ctx.input).await
     })
 }
 
@@ -92,21 +95,21 @@ pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
         if super::author::is_offline(&command) {
             return run_author(&command, ctx);
         }
-        dispatch_command(command).await
+        dispatch_command(command, ctx.input).await
     })
 }
 
-pub fn run_logs<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_logs<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxLogsArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Logs(args)).await
+        dispatch_command(super::SandboxCommand::Logs(args), ctx.input).await
     })
 }
 
-pub fn run_attach<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_attach<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxAttachArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Attach(args)).await
+        dispatch_command(super::SandboxCommand::Attach(args), ctx.input).await
     })
 }
 
@@ -123,18 +126,18 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
     })
 }
 
-pub fn run_pull<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let mut args = super::SandboxPullArgs::from_arg_matches(matches)?;
         args.reference = qualified_reference(&args.reference)?;
-        dispatch_command(super::SandboxCommand::Pull(args)).await
+        dispatch_command(super::SandboxCommand::Pull(args), ctx.input).await
     })
 }
 
-pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxTagArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Tag(args)).await
+        dispatch_command(super::SandboxCommand::Tag(args), ctx.input).await
     })
 }
 
@@ -392,7 +395,8 @@ impl SandboxService for RealSandboxService {
     }
 }
 
-pub async fn dispatch(args: super::SandboxArgs) -> Result<i32> {
+// The caller already holds the process-wide stdin lock (run_from_matches), so this must borrow it — a second Stdin::lock on the same thread deadlocks every dispatched verb.
+pub async fn dispatch(args: super::SandboxArgs, input: &mut dyn std::io::BufRead) -> Result<i32> {
     let command = match args.command {
         super::SandboxCommand::Exec(exec_args) => {
             return crate::service::exec_image(exec_args).await;
@@ -407,10 +411,9 @@ pub async fn dispatch(args: super::SandboxArgs) -> Result<i32> {
         stdout_is_terminal: std::io::stdout().is_terminal(),
     };
     let mut out = std::io::stdout();
-    let input = std::io::stdin();
-    let mut input = input.lock();
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
+    let mut input = input;
     run_with_writers(
         &command,
         &svc,

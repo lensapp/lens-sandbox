@@ -38,3 +38,12 @@ Feature: declared developer tools reach a real guest
     And I ran "lns pull" on its reference while online
     When I run the sandbox with no network available
     Then it starts and the declared tools are available to the workload
+
+  Scenario: A pulled sandbox addresses its cached tools from the published pin alone
+    Given a clean lns cache home
+    And the Lens Sandbox service is running in that home
+    And a published sandbox declaring tools ["jq@1.7.1"]
+    And I ran "lns pull" on its reference while online
+    And the tool resolution record is lost
+    When I run the sandbox offline with "jq --version"
+    Then it starts, prints "jq-1.7.1", and nothing is provisioned

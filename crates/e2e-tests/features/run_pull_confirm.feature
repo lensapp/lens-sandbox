@@ -14,7 +14,7 @@ Feature: running a pulled sandbox asks before mounting into the workload
     Given the user pushes a sandbox built from ./lns.yaml in one step
     When I run "run <pushed-ref>" in the project directory
     Then the exit code is non-zero
-    And the output contains "mounts into the workload:"
+    And the output contains "declares these effects:"
     And the output contains "the workload can read and write this host directory"
     And the output contains "this machine's persistent volume"
     And the output contains "no terminal to confirm"
@@ -25,7 +25,7 @@ Feature: running a pulled sandbox asks before mounting into the workload
     When the user pushes a sandbox declaring a path fileset in one step
     And I run "run <pushed-ref>" in the project directory
     Then the exit code is non-zero
-    And the output contains "mounts into the workload:"
+    And the output contains "declares these effects:"
     And the output contains "author-published files the workload can read and write"
     And the output contains "no terminal to confirm"
     And the output does not contain "started run"
