@@ -340,6 +340,10 @@ fn dashboard_frame(
     }
     if close_requested {
         dashboard_open.store(false, Ordering::Relaxed);
+        // Dropping the state zeroizes the credential values it carries; reopening rebuilds it from the stores anyway.
+        if let Ok(mut window) = dashboard.lock() {
+            window.state = None;
+        }
         crate::dashboard::live::set_watching(false);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
