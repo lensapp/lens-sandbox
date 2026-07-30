@@ -58,11 +58,11 @@ pub fn source_host(name: &str, backend: &str) -> Option<String> {
     let reference = backend.split_once(':').map(|(_, rest)| rest).unwrap_or("");
     match backend_kind(backend) {
         "core" => core_source_host(name).map(str::to_string),
-        // An aqua package is `owner/repo` on GitHub unless its first segment is a domain, which is how aqua spells a vendor-hosted release (`aqua:oracle.com/sqlcl`).
-        "aqua" => Some(match reference.split('/').next() {
-            Some(vendor) if vendor.contains('.') => vendor.to_string(),
-            _ => "github.com".to_string(),
-        }),
+        "aqua" => reference
+            .split('/')
+            .next()
+            .filter(|vendor| vendor.contains('.'))
+            .map(str::to_string),
         "ubi" | "github" => Some("github.com".to_string()),
         "gitlab" => Some("gitlab.com".to_string()),
         "http" => reference
@@ -179,10 +179,7 @@ mod tests {
             source_host("node", "core:node").as_deref(),
             Some("nodejs.org")
         );
-        assert_eq!(
-            source_host("jq", "aqua:jqlang/jq").as_deref(),
-            Some("github.com")
-        );
+        assert_eq!(source_host("jq", "aqua:jqlang/jq"), None);
         assert_eq!(
             source_host("some", "gitlab:owner/repo").as_deref(),
             Some("gitlab.com")
@@ -195,6 +192,22 @@ mod tests {
         assert_eq!(source_host("elixir", "core:elixir"), None);
         assert_eq!(source_host("dart", "http:dart"), None);
         assert_eq!(source_host("some", "npm:some"), None);
+    }
+
+    #[test]
+    fn http_backed_aqua_packages_do_not_attest_their_github_project_as_the_download_host() {
+        for (name, expected_backend) in [
+            ("terraform", "aqua:hashicorp/terraform"),
+            ("kubectl", "aqua:kubernetes/kubernetes/kubectl"),
+        ] {
+            let backend = backend_for(name).unwrap_or_else(|| panic!("{name} left the snapshot"));
+            assert_eq!(backend, expected_backend, "the upstream fixture changed");
+            assert_eq!(
+                source_host(name, backend),
+                None,
+                "{name} downloads outside GitHub, but {backend} does not carry that host"
+            );
+        }
     }
 
     #[test]
