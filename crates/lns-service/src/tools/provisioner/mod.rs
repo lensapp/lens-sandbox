@@ -774,6 +774,8 @@ mod tests {
         );
         assert_eq!(staged[1].name, "jq");
         assert_eq!(staged[1].bin_paths, vec![".".to_string()]);
+        assert_eq!(staged[1].backend, "aqua:jqlang/jq");
+        assert_eq!(staged[1].source_host, None);
 
         let err =
             staged_tools_from_results(&requests, &results[..1], Path::new("/staging")).unwrap_err();
