@@ -93,7 +93,7 @@ async fn main() {
     let features_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("features");
     let microvm_only = std::env::var_os("LNS_E2E_MICROVM").is_some();
 
-    // Optional dev filter: run only features whose name contains this substring.
+    // Optional dev filter: run only features or scenarios whose name contains this substring.
     let only_feature = std::env::var("LNS_E2E_FEATURE")
         .ok()
         .filter(|s| !s.is_empty());
@@ -110,6 +110,7 @@ async fn main() {
             }
             if let Some(needle) = &only_feature
                 && !feat.name.contains(needle.as_str())
+                && !sc.name.contains(needle.as_str())
             {
                 return false;
             }
