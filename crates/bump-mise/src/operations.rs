@@ -256,6 +256,39 @@ pub fn registry_entries_from_tarball(tarball: &[u8]) -> Result<Vec<(String, Stri
     Ok(entries)
 }
 
+/// The tools whose real index bodies are snapshotted as contract-test fixtures in lns-artifact; chosen for shape diversity (vendor prefixes, two-run releases, dev heads, plain numerics).
+pub const INDEX_SNAPSHOT_TOOLS: [&str; 6] = ["java", "go", "jq", "python", "node", "ruby"];
+
+pub fn index_snapshot_url(tool: &str) -> String {
+    format!("https://mise-versions.jdx.dev/{tool}")
+}
+
+pub fn index_snapshot_path(root: &Path, tool: &str) -> std::path::PathBuf {
+    root.join(format!(
+        "crates/lns-artifact/src/tools/index_snapshots/{tool}.txt"
+    ))
+}
+
+/// A refreshed snapshot must stay a usable fixture: refuse an empty body or any line the version allowlist would reject, before it replaces the one in the tree.
+pub fn validate_index_snapshot(tool: &str, body: &str) -> Result<()> {
+    let mut lines = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .peekable();
+    anyhow::ensure!(
+        lines.peek().is_some(),
+        "the index answered an empty body for {tool}; not replacing the snapshot"
+    );
+    for line in lines {
+        anyhow::ensure!(
+            lns_artifact::tools::is_safe_version(line),
+            "the index body for {tool} carries the unusable line {line:?}; not replacing the snapshot"
+        );
+    }
+    Ok(())
+}
+
 pub fn shasums_url(version: &str) -> String {
     format!("https://github.com/jdx/mise/releases/download/v{version}/SHASUMS256.txt")
 }
@@ -683,5 +716,79 @@ musl = "docker.io/library/alpine@sha256:dddd"
             "https://github.com/jdx/mise/releases/download/v2026.8.0/SHASUMS256.txt"
         );
         assert!(source_tarball_url("2026.8.0").ends_with("tags/v2026.8.0.tar.gz"));
+    }
+
+    #[test]
+    fn the_index_snapshot_refresh_names_the_index_and_the_fixture_path() {
+        assert_eq!(
+            index_snapshot_url("java"),
+            "https://mise-versions.jdx.dev/java"
+        );
+        assert_eq!(
+            index_snapshot_path(Path::new("/repo"), "java"),
+            Path::new("/repo/crates/lns-artifact/src/tools/index_snapshots/java.txt")
+        );
+    }
+
+    #[test]
+    fn a_refreshed_snapshot_that_is_no_usable_fixture_is_refused() {
+        for (body, why) in [
+            ("", "an empty body would gut the contract test"),
+            ("\n \n", "whitespace-only is empty"),
+            (
+                "21.0.2\n../escape\n",
+                "a traversal line must never land in the tree",
+            ),
+            (
+                "21.0.2\nnot a version\n",
+                "a space is outside the version allowlist",
+            ),
+        ] {
+            let err = validate_index_snapshot("some-tool", body).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("some-tool"),
+                "{why}: got: {err:#}"
+            );
+        }
+        validate_index_snapshot("some-tool", "1.6\ntemurin-21.0.5+11.0.LTS\n").unwrap();
+    }
+
+    #[test]
+    fn the_snapshot_set_matches_the_fixtures_the_contract_test_reads() {
+        // include_str! fails the build if a fixture disappears, so the set and the files cannot drift apart silently.
+        let fixtures = [
+            (
+                "java",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/java.txt"),
+            ),
+            (
+                "go",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/go.txt"),
+            ),
+            (
+                "jq",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/jq.txt"),
+            ),
+            (
+                "python",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/python.txt"),
+            ),
+            (
+                "node",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/node.txt"),
+            ),
+            (
+                "ruby",
+                include_str!("../../lns-artifact/src/tools/index_snapshots/ruby.txt"),
+            ),
+        ];
+        assert_eq!(
+            fixtures.map(|(tool, _)| tool),
+            INDEX_SNAPSHOT_TOOLS,
+            "the refresh set and the fixture set are one list"
+        );
+        for (tool, body) in fixtures {
+            validate_index_snapshot(tool, body).unwrap_or_else(|e| panic!("{tool}: {e:#}"));
+        }
     }
 }

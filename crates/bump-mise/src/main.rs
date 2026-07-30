@@ -83,10 +83,26 @@ fn bump(version: &str) -> Result<()> {
     let entries = operations::registry_entries_from_tarball(&tarball)?;
     let snapshot = operations::render_registry_snapshot(&entries)?;
 
-    operations::replace_all_transactionally(&[
+    println!("==> refreshing the version-index snapshots the contract tests read");
+    let root = std::env::current_dir().context("resolving the working directory")?;
+    let mut index_snapshots = Vec::new();
+    for tool in operations::INDEX_SNAPSHOT_TOOLS {
+        let body = String::from_utf8(curl_bytes(&operations::index_snapshot_url(tool))?)
+            .with_context(|| format!("the index body for {tool} is not UTF-8"))?;
+        operations::validate_index_snapshot(tool, &body)?;
+        index_snapshots.push((operations::index_snapshot_path(&root, tool), body));
+    }
+
+    let mut files = vec![
         (manifest_path.as_path(), bumped.into_bytes()),
         (snapshot_path.as_path(), snapshot.into_bytes()),
-    ])?;
+    ];
+    files.extend(
+        index_snapshots
+            .iter()
+            .map(|(path, body)| (path.as_path(), body.clone().into_bytes())),
+    );
+    operations::replace_all_transactionally(&files)?;
 
     println!(
         "==> done. Next: re-validate the companion pins in mise.toml if the alpine branch moved,\n\

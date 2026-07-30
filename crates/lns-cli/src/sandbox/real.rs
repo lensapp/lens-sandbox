@@ -198,6 +198,40 @@ impl super::distribute::ToolResolver for RealToolResolver {
             lns_artifact::tools::resolve_from_index(&tool.name, &tool.version, &body)
         })
     }
+
+    fn verify<'a>(
+        &'a self,
+        tool: &'a lns_artifact::tools::ToolRef,
+    ) -> crate::connector::LocalBoxFuture<'a, super::distribute::IndexVerification> {
+        use super::distribute::IndexVerification;
+        Box::pin(async move {
+            let url = lns_artifact::tools::version_index_url(&tool.name);
+            let Ok(client) = reqwest::Client::builder()
+                .timeout(TOOL_INDEX_TIMEOUT)
+                .build()
+            else {
+                return IndexVerification::Unavailable;
+            };
+            match client.get(&url).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                    IndexVerification::Absent
+                }
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => match capped_body(response, &url, MAX_TOOL_INDEX_BYTES).await {
+                        Ok(body)
+                            if lns_artifact::tools::index_lists_exact(&body, &tool.version) =>
+                        {
+                            IndexVerification::Confirmed
+                        }
+                        Ok(_) => IndexVerification::Absent,
+                        Err(_) => IndexVerification::Unavailable,
+                    },
+                    Err(_) => IndexVerification::Unavailable,
+                },
+                Err(_) => IndexVerification::Unavailable,
+            }
+        })
+    }
 }
 
 async fn capped_body(response: reqwest::Response, url: &str, max_bytes: usize) -> Result<String> {
