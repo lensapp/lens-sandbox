@@ -70,13 +70,14 @@ impl AsRef<std::path::Path> for SafeVersion {
     }
 }
 
-/// A version already names every component of a release, so nothing is left for the index to resolve and its cache key is fully determined by the request. `push` uses it to skip the index; the run path uses it to address the cache without a record — they are two halves of one contract and must not drift.
+/// Whether a version already names a full release, so `push` keeps it verbatim without the index; counting numeric runs admits the vendor shapes the resolver itself emits (`temurin-21.0.5+11.0.LTS`), and any answer of [`resolve_from_index`] must satisfy it.
 pub fn is_exact_version(version: &str) -> bool {
     version != LATEST
-        && version.split('.').count() >= 3
         && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().next().is_some_and(char::is_numeric))
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|run| !run.is_empty())
+            .count()
+            >= 3
 }
 
 const VERSION_INDEX_URL: &str = "https://mise-versions.jdx.dev";
@@ -206,11 +207,35 @@ mod tests {
     #[test]
     fn an_exact_version_is_the_pin_both_sides_recognize() {
         // push skips the index on these and the run path addresses the cache with them, so the two halves must agree.
-        for exact in ["22.11.0", "3.12.6", "1.0.0.1"] {
+        for exact in [
+            "22.11.0",
+            "3.12.6",
+            "1.0.0.1",
+            "temurin-21.0.5+11.0.LTS",
+            "v1.2.3",
+            "1.22.0-rc1",
+            "3.13.0rc1",
+        ] {
             assert!(is_exact_version(exact), "{exact}");
         }
-        for fuzzy in ["22", "22.11", LATEST, "", "22.x.0", "22..0"] {
+        for fuzzy in ["22", "22.11", LATEST, "", "22.x.0", "22..0", "temurin-21"] {
             assert!(!is_exact_version(fuzzy), "{fuzzy}");
+        }
+    }
+
+    #[test]
+    fn build_metadata_numerals_count_toward_exactness_by_decision() {
+        // `21+11.0` names one release component yet counts as exact; the accepted consequence is that push keeps it verbatim and provisioning fails loud, whereas narrowing the rule would re-open the vendor-pin drift this predicate exists to prevent.
+        assert!(is_exact_version("21+11.0"));
+    }
+
+    #[test]
+    fn a_resolver_answer_is_always_an_exact_pin() {
+        // push writes the answer into the published artifact, so it must skip the index on the next push and address the cache on run.
+        let body = "21.0.2\ntemurin-21.0.4+7\ntemurin-21.0.5+11.0.LTS\n22.9.0\n22.11.0\n";
+        for request in ["temurin-21", "21", "22", "22.11.0", LATEST] {
+            let resolved = resolve_from_index("some-tool", request, body).unwrap();
+            assert!(is_exact_version(&resolved), "{request} → {resolved}");
         }
     }
 

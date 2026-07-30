@@ -654,6 +654,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_vendor_exact_pin_publishes_without_consulting_the_index() {
+        // The resolver itself emits vendor versions, so a re-push of its own output must not need the index back.
+        let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
+        let mut out = Vec::new();
+        push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let docs = producer.docs.borrow();
+        let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
+        assert_eq!(
+            published["spec"]["tools"],
+            serde_json::json!(["java@temurin-21.0.5+11.0.LTS"])
+        );
+    }
+
+    #[tokio::test]
     async fn push_refuses_when_the_index_lacks_the_tool() {
         let producer = FakeProducer::err("must not reach the producer");
         let resolver = FakeResolver::with(&[]);
@@ -726,7 +751,7 @@ mod tests {
     #[test]
     fn a_dry_run_of_already_pinned_tools_promises_the_digest_it_previewed() {
         // push short-circuits exact pins without consulting the index, so the real push produces the same bytes — warning otherwise defeats the point of an offline preview.
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6","java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
         push_dry_run(
             &fs_with_skills(),
