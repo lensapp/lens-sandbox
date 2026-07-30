@@ -463,6 +463,15 @@ impl WindowState {
         true
     }
 
+    /// What a "Deny" of this pending card is entitled to mean, read from the card that asked so an answering flow cannot widen or narrow the refusal.
+    pub fn pending_deny_scope(&self, id: &str) -> Option<DenyScope> {
+        self.lock()
+            .pending_credentials
+            .iter()
+            .find(|e| e.prompt.id == id)
+            .map(|e| e.prompt.deny_scope)
+    }
+
     /// Drops every connecting placeholder for `display_name` once its connect has resolved.
     pub fn clear_connecting(&self, display_name: &str) {
         self.lock()

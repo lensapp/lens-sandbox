@@ -111,7 +111,10 @@ fn decide_credential(
                 value: value.to_string(),
             })
         }
-        CredentialReviewChoice::Deny => CredentialDecisionRequest::Deny,
+        CredentialReviewChoice::Deny => window_state
+            .pending_deny_scope(request_id)
+            .unwrap_or_default()
+            .deny_request(),
     };
     if !window_state.decide_credential(request_id, request) {
         bail!("credential request is no longer pending");
@@ -240,6 +243,13 @@ mod tests {
         }
 
         fn pending(&self) -> mpsc::UnboundedReceiver<CredentialDecisionDelivery> {
+            self.pending_with_scope(DenyScope::Workload)
+        }
+
+        fn pending_with_scope(
+            &self,
+            deny_scope: DenyScope,
+        ) -> mpsc::UnboundedReceiver<CredentialDecisionDelivery> {
             let (tx, rx) = mpsc::unbounded_channel();
             self.window.insert_credential_pending(
                 CredentialPendingPrompt {
@@ -252,7 +262,7 @@ mod tests {
                     injection_domains: vec!["api.some-provider.example".into()],
                     is_project_defined: false,
                     bound_value_available: true,
-                    deny_scope: DenyScope::Workload,
+                    deny_scope,
                 },
                 true,
                 tx,
@@ -388,6 +398,29 @@ mod tests {
         assert_eq!(
             rx.try_recv().expect("decision").request,
             CredentialDecisionRequest::Deny
+        );
+    }
+
+    #[test]
+    fn a_deny_reaches_as_far_as_the_card_that_asked() {
+        let fixture = Fixture::new();
+        let mut rx = fixture.pending_with_scope(DenyScope::Workload);
+        fixture
+            .run(&review(CredentialReviewChoice::Deny))
+            .expect("workload deny");
+        assert_eq!(
+            rx.try_recv().expect("decision").request,
+            CredentialDecisionRequest::Deny
+        );
+
+        let fixture = Fixture::new();
+        let mut rx = fixture.pending_with_scope(DenyScope::Machine);
+        fixture
+            .run(&review(CredentialReviewChoice::Deny))
+            .expect("machine deny");
+        assert_eq!(
+            rx.try_recv().expect("decision").request,
+            CredentialDecisionRequest::DenyAlways
         );
     }
 
