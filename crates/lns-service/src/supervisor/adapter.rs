@@ -1110,14 +1110,17 @@ mod tests {
             .expect("ticker exits promptly once session drops");
     }
 
-    #[tokio::test]
-    async fn tick_timeouts_loop_invokes_sweep_while_session_alive() {
+    #[tokio::test(start_paused = true)]
+    async fn tick_timeouts_loop_keeps_sweeping_across_ticks_while_session_alive() {
         let (session, _frame_rx) = fixture_session();
-        let weak = Arc::downgrade(&session);
-        let handle = tokio::spawn(tick_timeouts_loop(weak));
-        tokio::task::yield_now().await;
+        let handle = tokio::spawn(tick_timeouts_loop(Arc::downgrade(&session)));
+        tokio::time::sleep(APPROVAL_TICK * 3).await;
+        assert!(
+            !handle.is_finished(),
+            "a live session must keep the sweeper alive past its first tick, or a card only ever times out on the tick that created it"
+        );
         drop(session);
-        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        tokio::time::timeout(APPROVAL_TICK * 2, handle)
             .await
             .expect("ticker exits after session drop")
             .expect("ticker task panicked");
@@ -2544,6 +2547,22 @@ mod tests {
         )
         .await
         .expect("ticker exits promptly once session drops");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credential_tick_timeouts_loop_keeps_sweeping_across_ticks_while_session_alive() {
+        let (session, _frame_rx) = fixture_credential_session();
+        let handle = tokio::spawn(credential_tick_timeouts_loop(Arc::downgrade(&session)));
+        tokio::time::sleep(APPROVAL_TICK * 3).await;
+        assert!(
+            !handle.is_finished(),
+            "a live session must keep the sweeper alive past its first tick, or a credential prompt only ever times out on the tick that created it"
+        );
+        drop(session);
+        tokio::time::timeout(APPROVAL_TICK * 2, handle)
+            .await
+            .expect("ticker exits after session drop")
+            .expect("ticker task panicked");
     }
 
     #[test]
