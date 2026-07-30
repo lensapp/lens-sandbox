@@ -489,7 +489,7 @@ pub async fn pull_with<F: Fs>(
     Ok(info_from(record, active))
 }
 
-/// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a failure must not throw away a pull whose layers already landed — but a refusal no network will fix must not read as an offline-readiness note either.
+/// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a failure must not throw away a pull whose layers already landed.
 fn warn_if_tools_unprovisioned(
     image: &str,
     outcome: Result<(), crate::tools::ProvisionError>,
@@ -497,12 +497,13 @@ fn warn_if_tools_unprovisioned(
     let Err(e) = outcome else {
         return Vec::new();
     };
-    let warning = if e.is_transient() {
-        format!(
-            "could not provision the declared tools of {image} ({e}); the sandbox is cached, but its first run needs the network"
-        )
-    } else {
-        format!("the declared tools of {image} cannot be provisioned on this machine: {e}")
+    let warning = match e.pull_disposition() {
+        crate::tools::PullProvisionDisposition::RetryOnRun => format!(
+            "Could not pre-provision the declared tools of {image} ({e}); the sandbox is cached, and the first run will retry tool provisioning."
+        ),
+        crate::tools::PullProvisionDisposition::PermanentRefusal => {
+            format!("the declared tools of {image} cannot be provisioned on this machine: {e}")
+        }
     };
     crate::log::warn!("{warning}");
     vec![warning]
@@ -688,20 +689,24 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_tool_pre_provision_warns_with_the_image_and_the_cause() {
+    fn a_local_tool_pre_provision_failure_promises_a_retry_without_prescribing_network() {
         let warned = warnings_from(|| {
             warn_if_tools_unprovisioned(
                 "ghcr.io/team/hermes:1.4.0",
                 Err(crate::tools::ProvisionError::Engine(
-                    "the version index is unreachable".into(),
+                    "virtiofsd does not support read-only shares".into(),
                 )),
             );
         });
         assert!(
             warned.contains("ghcr.io/team/hermes:1.4.0")
-                && warned.contains("the version index is unreachable")
-                && warned.contains("first run needs the network"),
-            "the operator learns which sandbox and why: {warned}"
+                && warned.contains("virtiofsd does not support read-only shares")
+                && warned.contains("the first run will retry tool provisioning"),
+            "the operator learns which sandbox will retry and why: {warned}"
+        );
+        assert!(
+            !warned.contains("network"),
+            "networking cannot repair this local failure: {warned}"
         );
     }
 
@@ -855,7 +860,8 @@ mod tests {
         assert!(
             outcome.warnings.iter().any(|warning| warning
                 .contains("the version index is unreachable")
-                && warning.contains("first run needs the network")),
+                && warning.contains("the first run will retry tool provisioning")
+                && !warning.contains("needs the network")),
             "the successful pull must carry its offline-readiness warning: {:?}",
             outcome.warnings
         );
