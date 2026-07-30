@@ -8,9 +8,9 @@ use egui_material_icons::icons;
 
 use super::state::{
     AuditColumns, CredentialColumns, CredentialReviewChoice, DashboardMode, DashboardView,
-    RevealedKind, TABLE_CHEVRON_WIDTH, TABLE_RESIZER_WIDTH, TableColumnWidths,
-    UnifiedDashboardAction, UnifiedDashboardState, authorization_detail, credential_access_label,
-    credential_machine_label, credential_row_icon_color,
+    TABLE_CHEVRON_WIDTH, TABLE_RESIZER_WIDTH, TableColumnWidths, UnifiedDashboardAction,
+    UnifiedDashboardState, authorization_detail, credential_access_label, credential_machine_label,
+    credential_row_icon_color,
 };
 use super::{
     ACCENT_GREEN, BORDER, CATEGORY, CHROME_FILL, CONTENT_FILL, CredentialBinding,
@@ -42,7 +42,21 @@ pub fn render_unified_dashboard(
         state.audit.search_open = true;
     }
     unified_sidebar_toggle(ui, state);
-    let action = unified_refresh_button(ui, state.mode);
+    let detail_open = match state.view {
+        DashboardView::Credentials => state.selected_connector.is_some(),
+        DashboardView::Audit => state.audit.selected.is_some(),
+    };
+    let action = if detail_open {
+        if super::floating_close_button(ui, "unified-dashboard-detail-close") {
+            match state.view {
+                DashboardView::Credentials => state.select_connector(None),
+                DashboardView::Audit => state.audit.selected = None,
+            }
+        }
+        UnifiedDashboardAction::None
+    } else {
+        unified_refresh_button(ui, state.mode)
+    };
     if state.sidebar_open {
         unified_sidebar(ui, state);
     }
@@ -272,7 +286,11 @@ fn unified_central(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
                 ui.add_space(12.0);
                 dashboard_banner(ui, error, STATUS_CRITICAL);
             }
-            if let Some(notice) = state.notice.as_deref() {
+            let notice_in_detail =
+                state.view == DashboardView::Credentials && state.selected_connector.is_some();
+            if let Some(notice) = state.notice.as_deref()
+                && !notice_in_detail
+            {
                 ui.add_space(12.0);
                 inline_notice(ui, notice);
             }
@@ -323,7 +341,7 @@ fn view_tab(ui: &mut egui::Ui, view: DashboardView, selected: bool) -> egui::Res
 fn inline_notice(ui: &mut egui::Ui, notice: &str) {
     ui.horizontal(|ui| {
         glyph(ui, icons::ICON_CHECK_CIRCLE, ACCENT_GREEN, 15.0);
-        ui.label(RichText::new(notice).size(FS_SECONDARY).color(TEXT_MUTED));
+        ui.add(egui::Label::new(RichText::new(notice).size(FS_SECONDARY).color(TEXT_MUTED)).wrap());
     });
 }
 
@@ -934,10 +952,14 @@ fn credential_detail(
         );
         ui.add_space(8.0);
         ui.vertical(|ui| {
-            ui.label(
-                RichText::new(&credential.summary.display_name)
-                    .size(FS_BODY)
-                    .color(TEXT_PRIMARY),
+            ui.set_max_width(ui.available_width() - super::CLOSE_BUTTON_RESERVE);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&credential.summary.display_name)
+                        .size(FS_BODY)
+                        .color(TEXT_PRIMARY),
+                )
+                .truncate(),
             );
             ui.label(
                 RichText::new(&credential.summary.connector_id)
@@ -946,18 +968,15 @@ fn credential_detail(
                     .color(TEXT_MUTED),
             );
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, icons::ICON_CLOSE)
-                .on_hover_text("Close credential details")
-                .clicked()
-            {
-                state.select_connector(None);
-            }
-        });
     });
     ui.add_space(10.0);
     super::credential_status_badge(ui, credential.summary.status);
+    if let Some(notice) = state.notice.as_deref() {
+        ui.add_space(10.0);
+        inline_notice(ui, notice);
+    }
     ui.add_space(14.0);
+    ui.spacing_mut().scroll.floating_allocated_width = 14.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -982,24 +1001,7 @@ fn credential_detail(
                 detail_field(ui, "Scopes", &credential.summary.scopes.join(", "));
             }
             if let Some(value) = credential.value.as_deref() {
-                sensitive_value(
-                    ui,
-                    state,
-                    &credential.summary.connector_id,
-                    "Real machine credential",
-                    value,
-                    RevealedKind::Value,
-                );
-            }
-            if let Some(placeholder) = credential.placeholder.as_deref() {
-                sensitive_value(
-                    ui,
-                    state,
-                    &credential.summary.connector_id,
-                    "Fake workload placeholder",
-                    placeholder,
-                    RevealedKind::Placeholder,
-                );
+                sensitive_value(ui, state, &credential.summary.connector_id, "Value", value);
             }
             if !credential.summary.sandboxes.is_empty() {
                 ui.add_space(8.0);
@@ -1041,9 +1043,8 @@ fn sensitive_value(
     connector_id: &str,
     label: &str,
     value: &str,
-    kind: RevealedKind,
 ) {
-    let revealed = state.is_revealed(connector_id, kind);
+    let revealed = state.is_revealed(connector_id);
     ui.label(RichText::new(label).size(FS_LABEL).color(TEXT_MUTED));
     Frame::new()
         .fill(INPUT_FILL)
@@ -1078,7 +1079,7 @@ fn sensitive_value(
                     .show(ui)
                     .clicked()
                     {
-                        state.toggle_reveal(connector_id, kind, ui.input(|input| input.time));
+                        state.toggle_reveal(connector_id, ui.input(|input| input.time));
                     }
                 });
             });
@@ -1109,7 +1110,7 @@ fn pending_detail(
             18,
         ))
         .stroke(Stroke::new(1.0, STATUS_WARNING))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1207,7 +1208,7 @@ fn confirmation_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
     };
     let mut confirmed = false;
     let modal = egui::Modal::new(egui::Id::new("unified-dashboard-confirmation"))
-        .backdrop_color(Color32::from_black_alpha(80))
+        .backdrop_color(Color32::from_rgba_premultiplied(0, 0, 0, 14))
         .frame(modal_frame())
         .show(ui.ctx(), |ui| {
             ui.set_width(400.0);
@@ -1255,26 +1256,44 @@ fn review_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
     };
     let mut decision = None;
     let modal = egui::Modal::new(egui::Id::new("unified-dashboard-review"))
-        .backdrop_color(Color32::from_black_alpha(80))
+        .backdrop_color(Color32::from_rgba_premultiplied(0, 0, 0, 14))
         .frame(modal_frame())
         .show(ui.ctx(), |ui| {
             ui.set_width(440.0);
+            if request.oauth {
+                crate::ui::eyebrow(ui, icons::ICON_LINK, "CONNECT");
+            } else {
+                crate::ui::eyebrow(ui, icons::ICON_KEY, "CREDENTIAL");
+            }
+            ui.add_space(6.0);
+            let title = if request.oauth {
+                format!("Connect to {display_name}?")
+            } else {
+                format!("Provide {display_name}?")
+            };
             ui.label(
-                RichText::new(format!("Review {display_name}"))
-                    .size(18.0)
-                    .color(TEXT_PRIMARY),
+                RichText::new(title)
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(crate::approval_flow::window::TEXT_ACCENT),
             );
-            ui.add_space(8.0);
+            ui.add_space(2.0);
             ui.label(
                 RichText::new(format!(
                     "{} in {} wants to {}.",
                     request.sandbox_name, request.project, request.action
                 ))
                 .size(FS_BODY)
-                .color(TEXT_PRIMARY),
+                .color(TEXT_MUTED),
             );
             if let Some(code) = &request.user_code {
                 ui.add_space(10.0);
+                ui.label(
+                    RichText::new("Enter this code in your browser to finish signing in:")
+                        .size(FS_SECONDARY)
+                        .color(TEXT_MUTED),
+                );
+                ui.add_space(4.0);
                 ui.label(
                     RichText::new(code)
                         .size(18.0)
@@ -1283,28 +1302,22 @@ fn review_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
                 );
             }
             if let Some(uri) = &request.verification_uri {
-                ui.hyperlink_to("Open sign-in", uri);
+                ui.hyperlink_to(format!("Open {display_name} sign-in"), uri);
             }
-            ui.add_space(16.0);
-            if !request.oauth || request.token_fallback {
+            ui.add_space(12.0);
+            for hint in review_hints(&request, &display_name) {
                 ui.add(
-                    egui::TextEdit::singleline(&mut *state.review_value)
-                        .password(true)
-                        .hint_text("Credential value")
-                        .desired_width(f32::INFINITY),
+                    egui::Label::new(RichText::new(hint).size(FS_SECONDARY).color(TEXT_MUTED))
+                        .wrap(),
                 );
+                ui.add_space(4.0);
+            }
+            ui.add_space(8.0);
+            if !request.oauth || request.token_fallback {
+                crate::ui::secret_input(ui, &mut state.review_value, "Paste a token");
                 ui.add_space(12.0);
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                decision = review_buttons(ui, &request, &state.review_value);
-                if Button::new("Cancel", ButtonKind::Secondary)
-                    .show(ui)
-                    .clicked()
-                {
-                    state.reviewing_request = None;
-                    state.review_value.clear();
-                }
-            });
+            decision = review_action_row(ui, &request, &state.review_value);
         });
     if let Some(choice) = decision {
         state.resolve_review(&request, choice);
@@ -1314,66 +1327,118 @@ fn review_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
     }
 }
 
-/// Mirrors the approval card's choices, so answering here is never a worse decision than answering there: an already-bound value can be granted without re-entering it, and a fresh sign-in is labelled as the replacement it is.
-fn review_buttons(
+/// One line per offered action, so the decision explains itself instead of assuming the user knows the credential flow.
+fn review_hints(request: &super::PendingCredentialRequest, display_name: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    if request.bound_value_available {
+        hints.push(format!(
+            "Reuse — grant the {display_name} connection already saved on this machine."
+        ));
+    }
+    if request.oauth && request.verification_uri.is_none() {
+        if request.bound_value_available {
+            hints.push(format!(
+                "Reconnect — start a fresh {display_name} sign-in in your browser and replace the saved connection."
+            ));
+        } else {
+            hints.push(format!(
+                "Connect — sign in to {display_name} in your browser; you'll approve a code shown here."
+            ));
+        }
+    }
+    if !request.oauth && request.host_value_available {
+        hints.push("Import — use the value detected in this machine's environment.".to_string());
+    }
+    if !request.oauth || request.token_fallback {
+        hints.push("Submit — use a token you paste below.".to_string());
+    }
+    hints.push(
+        "Whatever you choose, the real value stays on this machine — the sandbox only sees a placeholder.".to_string(),
+    );
+    hints
+}
+
+/// Mirrors the approval card's choices while keeping one visually-primary action: a typed value wins, then an already-bound connection, then a fresh sign-in, then a host-detected value; every other available choice demotes to secondary so the recommended answer is obvious.
+fn review_action_row(
     ui: &mut egui::Ui,
     request: &super::PendingCredentialRequest,
     typed: &str,
 ) -> Option<CredentialReviewChoice> {
-    let mut decision = None;
-    if Button::new("Deny", ButtonKind::Danger).show(ui).clicked() {
-        decision = Some(CredentialReviewChoice::Deny);
+    #[derive(Clone, Copy, PartialEq)]
+    enum Slot {
+        Submit,
+        Reuse,
+        Connect,
+        Import,
+        Deny,
     }
-    if !typed.trim().is_empty()
-        && Button::new(
-            if request.oauth {
-                "Use token"
-            } else {
-                "Use value"
-            },
-            ButtonKind::Primary,
-        )
-        .show(ui)
-        .clicked()
-    {
-        decision = Some(CredentialReviewChoice::UseValue(typed.to_string().into()));
+    let typed_ok = !typed.trim().is_empty();
+    let mut available = Vec::new();
+    if !request.oauth || request.token_fallback {
+        available.push(Slot::Submit);
     }
-    if request.oauth {
-        if request.verification_uri.is_none()
-            && Button::new(
-                if request.bound_value_available {
-                    "Reconnect"
-                } else {
-                    "Connect"
-                },
-                ButtonKind::Primary,
-            )
-            .show(ui)
-            .clicked()
-        {
-            decision = Some(CredentialReviewChoice::Connect);
+    if request.bound_value_available {
+        available.push(Slot::Reuse);
+    }
+    if request.oauth && request.verification_uri.is_none() {
+        available.push(Slot::Connect);
+    }
+    if !request.oauth && request.host_value_available {
+        available.push(Slot::Import);
+    }
+    let primary = if typed_ok && available.contains(&Slot::Submit) {
+        Slot::Submit
+    } else {
+        *available
+            .iter()
+            .find(|slot| **slot != Slot::Submit)
+            .unwrap_or(&Slot::Submit)
+    };
+    let mut slots: Vec<(Slot, ButtonKind, bool)> = vec![(Slot::Deny, ButtonKind::Danger, true)];
+    for slot in available {
+        if slot == primary {
+            continue;
         }
-    } else if request.host_value_available
-        && Button::new("Use host", ButtonKind::Primary)
-            .show(ui)
-            .clicked()
-    {
-        decision = Some(CredentialReviewChoice::UseHost);
+        let enabled = slot != Slot::Submit || typed_ok;
+        slots.push((slot, ButtonKind::Secondary, enabled));
     }
-    if request.bound_value_available
-        && Button::new(
-            if request.oauth {
-                "Use connection"
+    slots.push((
+        primary,
+        ButtonKind::Primary,
+        primary != Slot::Submit || typed_ok,
+    ));
+    let label = |slot: Slot| match slot {
+        Slot::Submit => "Submit",
+        Slot::Reuse => "Reuse",
+        Slot::Connect => {
+            if request.bound_value_available {
+                "Reconnect"
             } else {
-                "Use connected value"
-            },
-            ButtonKind::Primary,
-        )
-        .show(ui)
-        .clicked()
-    {
-        decision = Some(CredentialReviewChoice::UseBound);
-    }
+                "Connect"
+            }
+        }
+        Slot::Import => "Import",
+        Slot::Deny => "Deny",
+    };
+    let mut decision = None;
+    ui.columns(slots.len(), |cols| {
+        for (col, (slot, kind, enabled)) in cols.iter_mut().zip(&slots) {
+            if Button::new(label(*slot), *kind)
+                .enabled(*enabled)
+                .min_size(vec2(col.available_width(), 0.0))
+                .show(col)
+                .clicked()
+            {
+                decision = Some(match slot {
+                    Slot::Submit => CredentialReviewChoice::UseValue(typed.to_string().into()),
+                    Slot::Reuse => CredentialReviewChoice::UseBound,
+                    Slot::Connect => CredentialReviewChoice::Connect,
+                    Slot::Import => CredentialReviewChoice::UseHost,
+                    Slot::Deny => CredentialReviewChoice::Deny,
+                });
+            }
+        }
+    });
     decision
 }
 
@@ -1383,7 +1448,7 @@ fn replace_modal(ui: &mut egui::Ui, state: &mut UnifiedDashboardState) {
     };
     let mut save = false;
     let modal = egui::Modal::new(egui::Id::new("unified-dashboard-replace"))
-        .backdrop_color(Color32::from_black_alpha(80))
+        .backdrop_color(Color32::from_rgba_premultiplied(0, 0, 0, 14))
         .frame(modal_frame())
         .show(ui.ctx(), |ui| {
             ui.set_width(400.0);
@@ -1449,6 +1514,12 @@ fn modal_frame() -> Frame {
         .fill(MODAL_FILL)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(CornerRadius::same(12))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 32,
+            spread: 2,
+            color: Color32::from_black_alpha(160),
+        })
         .inner_margin(Margin::same(18))
 }
 

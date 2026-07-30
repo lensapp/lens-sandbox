@@ -17,7 +17,7 @@ use crate::approval_flow::window::{
 use crate::credential_flow::session::CredentialDecisionRequest;
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
-use crate::ui::{Button, ButtonKind, theme};
+use crate::ui::{Button, ButtonKind, secret_input, theme};
 use lns_policy::connectors::TokenFallback;
 
 pub const WINDOW_WIDTH: f32 = 380.0;
@@ -1899,22 +1899,6 @@ fn help_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
         )
         .sense(Sense::click()),
     )
-}
-
-fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
-    ui.scope(|ui| {
-        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, window::BORDER);
-        ui.style_mut().visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(96));
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .password(true)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(10, 9))
-                .desired_width(f32::INFINITY),
-        )
-    })
-    .inner
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {

@@ -98,7 +98,7 @@ fn build_credential(connector_id: &str, input: &SnapshotInput<'_>) -> DashboardC
         input.host_values.contains_key(connector_id),
         input.now,
     );
-    let (environment_variable, placeholder, destinations) = connector_disclosure(connector);
+    let (environment_variable, destinations) = connector_disclosure(connector);
     let (value, account, scopes, expires_at) =
         entry_disclosure(entry, input.host_values.get(connector_id), input.now);
     DashboardCredential {
@@ -119,7 +119,6 @@ fn build_credential(connector_id: &str, input: &SnapshotInput<'_>) -> DashboardC
             pending: pending.map(pending_request),
         },
         value,
-        placeholder,
     }
 }
 
@@ -173,24 +172,22 @@ fn credential_status(
     }
 }
 
-fn connector_disclosure(
-    connector: Option<&Connector>,
-) -> (Option<String>, Option<String>, Vec<String>) {
+fn connector_disclosure(connector: Option<&Connector>) -> (Option<String>, Vec<String>) {
     let Some(connector) = connector else {
-        return (None, None, Vec::new());
+        return (None, Vec::new());
     };
-    let (environment_variable, placeholder, injections) = match connector.auth_kind {
+    let (environment_variable, injections) = match connector.auth_kind {
         AuthKind::Credential => connector
             .credential
             .as_ref()
-            .map(|auth| (&auth.env_var, &auth.placeholder, auth.injections.as_slice())),
+            .map(|auth| (&auth.env_var, auth.injections.as_slice())),
         AuthKind::Oauth => connector
             .oauth
             .as_ref()
-            .map(|auth| (&auth.env_var, &auth.placeholder, auth.injections.as_slice())),
+            .map(|auth| (&auth.env_var, auth.injections.as_slice())),
     }
-    .map_or((None, None, &[][..]), |(env, placeholder, injections)| {
-        (Some(env.clone()), Some(placeholder.clone()), injections)
+    .map_or((None, &[][..]), |(env, injections)| {
+        (Some(env.clone()), injections)
     });
     let destinations = injections
         .iter()
@@ -198,7 +195,7 @@ fn connector_disclosure(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    (environment_variable, placeholder, destinations)
+    (environment_variable, destinations)
 }
 
 /// The usable value alongside what identifies it: the account, scopes, and expiry a user needs to recognize the binding. A host-detect entry's value is whatever the host resolves right now, so it comes from `host_value` rather than the file.
@@ -499,10 +496,6 @@ mod tests {
             credential.value.as_deref().map(String::as_str),
             Some("some-secret")
         );
-        assert_eq!(
-            credential.placeholder.as_deref(),
-            Some("some-LNSPLACEHOLDER")
-        );
         assert_eq!(credential.summary.sandboxes.len(), 3);
         let access: HashMap<_, _> = credential
             .summary
@@ -716,7 +709,6 @@ mod tests {
         }
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("person@example.test"));
-        assert!(rendered.contains("some-LNSPLACEHOLDER"));
     }
 
     #[test]

@@ -41,6 +41,7 @@ const ROW_HEIGHT: f32 = 38.0;
 const ICON_COL: f32 = 22.0;
 const W_TIME: f32 = 92.0;
 const DETAIL_WIDTH: f32 = 344.0;
+const CLOSE_BUTTON_RESERVE: f32 = 32.0;
 
 const CHROME_FILL: Color32 = BG_SECONDARY;
 const CONTENT_FILL: Color32 = BG_PRIMARY;
@@ -550,6 +551,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
     );
     let detail_open = state.selected.is_some() || detail_reveal > 0.002;
     let action = if detail_open {
+        if floating_close_button(ui, "dashboard-detail-close") {
+            state.selected = None;
+        }
         DashboardAction::None
     } else {
         refresh_button(ui)
@@ -570,6 +574,18 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
         search_modal(ui, state, reveal);
     }
     action
+}
+
+fn floating_close_button(ui: &mut egui::Ui, id: &str) -> bool {
+    egui::Area::new(egui::Id::new(id))
+        .anchor(Align2::RIGHT_TOP, vec2(-6.0, 5.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            icon_button(ui, icons::ICON_CLOSE)
+                .on_hover_text("Close")
+                .clicked()
+        })
+        .inner
 }
 
 fn refresh_button(ui: &mut egui::Ui) -> DashboardAction {
@@ -991,6 +1007,7 @@ fn detail_body(
         glyph(ui, kind_icon(&row.kind), accent, 18.0);
         ui.add_space(8.0);
         ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - CLOSE_BUTTON_RESERVE);
             ui.add(
                 egui::Label::new(RichText::new(&row.detail).size(FS_BODY).color(TEXT_PRIMARY))
                     .truncate(),
@@ -1001,17 +1018,10 @@ fn detail_body(
                     .color(accent),
             );
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, icons::ICON_CLOSE)
-                .on_hover_text("Close")
-                .clicked()
-            {
-                state.selected = None;
-            }
-        });
     });
     ui.add_space(12.0);
 
+    ui.spacing_mut().scroll.floating_allocated_width = 14.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {

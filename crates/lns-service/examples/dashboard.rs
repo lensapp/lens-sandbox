@@ -111,7 +111,6 @@ struct CredentialDetails<'a> {
     destinations: &'a [&'a str],
     sandboxes: Vec<SandboxAccess>,
     value: Option<&'a str>,
-    placeholder: Option<&'a str>,
 }
 
 fn credential(
@@ -142,32 +141,30 @@ fn credential(
             pending: None,
         },
         value: details.value.map(|value| value.to_string().into()),
-        placeholder: details.placeholder.map(str::to_string),
     }
 }
 
 fn seed_credentials() -> Vec<DashboardCredential> {
     let mut pending = credential(
-        "some-oauth",
-        "Some OAuth",
+        "github",
+        "GitHub",
         CredentialBinding::Unbound,
         CredentialStatus::Pending,
-        "SOME_OAUTH_TOKEN",
+        "GH_TOKEN",
         CredentialDetails {
-            destinations: &["api.some-oauth.example"],
+            destinations: &["api.github.com", "github.com"],
             sandboxes: Vec::new(),
-            value: Some("oauth-LNS-DEMO-TOKEN-00000001"),
-            placeholder: Some("oauth-LNSPLACEHOLDER0000000000000001"),
+            value: Some("gho_DEMO00000000000000000000000000000001"),
         },
     );
-    pending.summary.scopes = vec!["read:items".into(), "write:items".into()];
+    pending.summary.scopes = vec!["repo".into(), "read:org".into()];
     pending.summary.recent_activity = Some("Requested just now".into());
     pending.summary.pending = Some(PendingCredentialRequest {
         id: "request-01".into(),
         sandbox_id: "forecast-agent".into(),
         sandbox_name: "forecast-agent".into(),
         project: "~/projects/forecast-agent".into(),
-        action: "connect to api.some-oauth.example".into(),
+        action: "connect to api.github.com".into(),
         host_value_available: false,
         bound_value_available: true,
         oauth: true,
@@ -177,13 +174,13 @@ fn seed_credentials() -> Vec<DashboardCredential> {
     });
 
     let mut stored = credential(
-        "some-provider",
-        "Some Provider",
+        "openai",
+        "OpenAI",
         CredentialBinding::Stored,
         CredentialStatus::Active,
-        "SOME_TOKEN",
+        "OPENAI_API_KEY",
         CredentialDetails {
-            destinations: &["api.some-provider.example", "uploads.some-provider.example"],
+            destinations: &["api.openai.com"],
             sandboxes: vec![
                 access(
                     "forecast-agent",
@@ -200,20 +197,19 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                     true,
                 ),
             ],
-            value: Some("sk-LNS-DEMO-SECRET-0000000000000001"),
-            placeholder: Some("sk-LNSPLACEHOLDER000000000000000001"),
+            value: Some("sk-DEMO000000000000000000000000000000000000000001"),
         },
     );
     stored.summary.recent_activity = Some("Used 12 min ago".into());
 
     let mut sign_in = credential(
-        "some-sign-in",
-        "Some Sign-in",
+        "google",
+        "Google",
         CredentialBinding::OAuth,
         CredentialStatus::Expiring,
-        "SOME_SIGN_IN_TOKEN",
+        "GOOGLE_OAUTH_ACCESS_TOKEN",
         CredentialDetails {
-            destinations: &["api.some-sign-in.example"],
+            destinations: &["www.googleapis.com"],
             sandboxes: vec![access(
                 "forecast-agent",
                 "forecast-agent",
@@ -221,23 +217,22 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 "Connected by project policy",
                 true,
             )],
-            value: Some("oauth-LNS-DEMO-TOKEN-00000002"),
-            placeholder: Some("oauth-LNSPLACEHOLDER0000000000000002"),
+            value: Some("ya29.DEMO0000000000000000000000000000000"),
         },
     );
-    sign_in.summary.account = Some("@sample-user".into());
-    sign_in.summary.scopes = vec!["read:projects".into(), "read:profile".into()];
+    sign_in.summary.account = Some("sample-dev@gmail.com".into());
+    sign_in.summary.scopes = vec!["openid".into(), "email".into(), "profile".into()];
     sign_in.summary.expires_at = Some("Tomorrow at 09:00".into());
     sign_in.summary.recent_activity = Some("Used yesterday".into());
 
     let mut host = credential(
-        "some-host-tool",
-        "Some Host Tool",
+        "anthropic",
+        "Anthropic",
         CredentialBinding::HostDetected,
         CredentialStatus::Active,
-        "SOME_HOST_TOKEN",
+        "ANTHROPIC_API_KEY",
         CredentialDetails {
-            destinations: &["api.some-host-tool.example"],
+            destinations: &["api.anthropic.com"],
             sandboxes: vec![access(
                 "release-agent",
                 "release-agent",
@@ -245,20 +240,19 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 "Granted by sandbox definition",
                 true,
             )],
-            value: Some("host-LNS-DEMO-TOKEN-00000003"),
-            placeholder: Some("host-LNSPLACEHOLDER0000000000000003"),
+            value: Some("sk-ant-api03-DEMO000000000000000000000000-DEMO01"),
         },
     );
     host.summary.recent_activity = Some("Used 3 days ago".into());
 
     let mut denied = credential(
-        "some-blocked-provider",
-        "Some Blocked Provider",
+        "linear",
+        "Linear",
         CredentialBinding::Denied,
         CredentialStatus::Denied,
-        "SOME_BLOCKED_TOKEN",
+        "LINEAR_API_KEY",
         CredentialDetails {
-            destinations: &["api.some-blocked-provider.example"],
+            destinations: &["api.linear.app"],
             sandboxes: vec![access(
                 "research-helper",
                 "research-helper",
@@ -267,7 +261,6 @@ fn seed_credentials() -> Vec<DashboardCredential> {
                 false,
             )],
             value: None,
-            placeholder: Some("blocked-LNSPLACEHOLDER00000000000004"),
         },
     );
     denied.summary.recent_activity = Some("Denied 6 days ago".into());
@@ -308,15 +301,15 @@ fn seed_rows() -> Vec<TimelineRow> {
             "2026-07-27 11:48:00",
             FORECAST_RUN,
             "credential",
-            "Used Some Provider at api.some-provider.example",
-            Some("some-provider"),
+            "Used OpenAI at api.openai.com",
+            Some("openai"),
         ),
         audit_row(
             "2026-07-27T11:43:00Z",
             "2026-07-27 11:43:00",
             FORECAST_RUN,
             "approval",
-            "Allowed GET api.weather.example once",
+            "Allowed GET pypi.org once",
             None,
         ),
         audit_row(
@@ -324,7 +317,7 @@ fn seed_rows() -> Vec<TimelineRow> {
             "2026-07-27 11:41:00",
             FORECAST_RUN,
             "egress",
-            "GET api.weather.example:443 returned 200",
+            "GET pypi.org:443 returned 200",
             None,
         ),
         audit_row(
@@ -332,16 +325,16 @@ fn seed_rows() -> Vec<TimelineRow> {
             "2026-07-27 10:20:00",
             RELEASE_RUN,
             "credential",
-            "Used Some Host Tool at api.some-host-tool.example",
-            Some("some-host-tool"),
+            "Used Anthropic at api.anthropic.com",
+            Some("anthropic"),
         ),
         audit_row(
             "2026-07-26T15:12:00Z",
             "2026-07-26 15:12:00",
             RESEARCH_RUN,
             "credential",
-            "Denied Some Blocked Provider",
-            Some("some-blocked-provider"),
+            "Denied Linear",
+            Some("linear"),
         ),
         audit_row(
             "2026-07-26T15:00:00Z",
@@ -355,12 +348,16 @@ fn seed_rows() -> Vec<TimelineRow> {
 }
 
 fn seed_state() -> UnifiedDashboardState {
-    UnifiedDashboardState::seeded(
+    let mut state = UnifiedDashboardState::seeded(
         seed_sandboxes(),
         seed_credentials(),
         seed_rows(),
         Vec::new(),
-    )
+    );
+    if std::env::var_os("DASHBOARD_PREVIEW_OPEN_DETAIL").is_some() {
+        state.open_connector("github".into());
+    }
+    state
 }
 
 fn main() -> eframe::Result {

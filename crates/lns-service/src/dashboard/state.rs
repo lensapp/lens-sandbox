@@ -51,7 +51,6 @@ pub struct DashboardSandbox {
 pub struct DashboardCredential {
     pub summary: CredentialSummary,
     pub value: Option<Zeroizing<String>>,
-    pub placeholder: Option<String>,
 }
 
 impl std::fmt::Debug for DashboardCredential {
@@ -60,22 +59,13 @@ impl std::fmt::Debug for DashboardCredential {
             .debug_struct("DashboardCredential")
             .field("summary", &self.summary)
             .field("value", &self.value.as_ref().map(|_| "<redacted>"))
-            .field("placeholder", &self.placeholder)
             .finish()
     }
-}
-
-/// Which of a credential's two values a reveal is showing, so revealing one hides the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RevealedKind {
-    Value,
-    Placeholder,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct RevealedValue {
     pub(super) connector_id: String,
-    pub(super) kind: RevealedKind,
     pub(super) at: f64,
 }
 
@@ -293,28 +283,36 @@ impl UnifiedDashboardState {
         self.select_connector(None);
     }
 
+    /// Opens the credential detail panel, so a preview harness can start on the state it wants to show.
+    pub fn open_connector(&mut self, id: String) {
+        self.view = DashboardView::Credentials;
+        self.select_connector(Some(id));
+    }
+
     pub(super) fn select_connector(&mut self, id: Option<String>) {
+        if self.selected_connector.is_some() && id.is_none() {
+            self.notice = None;
+        }
         self.selected_connector = id;
         self.revealed = None;
     }
 
     /// Reveals a value, or hides the one already showing; `at` is the frame time the countdown runs from.
-    pub(super) fn toggle_reveal(&mut self, connector_id: &str, kind: RevealedKind, at: f64) {
-        if self.is_revealed(connector_id, kind) {
+    pub(super) fn toggle_reveal(&mut self, connector_id: &str, at: f64) {
+        if self.is_revealed(connector_id) {
             self.revealed = None;
         } else {
             self.revealed = Some(RevealedValue {
                 connector_id: connector_id.to_string(),
-                kind,
                 at,
             });
         }
     }
 
-    pub(super) fn is_revealed(&self, connector_id: &str, kind: RevealedKind) -> bool {
+    pub(super) fn is_revealed(&self, connector_id: &str) -> bool {
         self.revealed
             .as_ref()
-            .is_some_and(|revealed| revealed.connector_id == connector_id && revealed.kind == kind)
+            .is_some_and(|revealed| revealed.connector_id == connector_id)
     }
 
     pub(super) fn hide_expired_reveal(&mut self, now: f64, focused: bool) -> bool {
@@ -947,7 +945,6 @@ mod tests {
         DashboardCredential {
             summary: summary(id, status),
             value: Some(Zeroizing::new("some-secret".into())),
-            placeholder: Some("safe-placeholder".into()),
         }
     }
 
@@ -1107,41 +1104,39 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_debug_redacts_the_usable_value_and_keeps_the_placeholder() {
+    fn a_credential_debug_redacts_the_usable_value() {
         let debug = format!("{:?}", credential("alpha", CredentialStatus::Active));
         assert!(!debug.contains("some-secret"));
         assert!(debug.contains("<redacted>"));
-        assert!(debug.contains("safe-placeholder"));
     }
 
     #[test]
-    fn revealing_one_value_hides_the_other_and_toggling_hides_it_again() {
+    fn revealing_one_credential_hides_the_previous_and_toggling_hides_it_again() {
         let mut state = state();
-        state.toggle_reveal("alpha", RevealedKind::Value, 10.0);
-        assert!(state.is_revealed("alpha", RevealedKind::Value));
-        assert!(!state.is_revealed("alpha", RevealedKind::Placeholder));
-        assert!(!state.is_revealed("beta", RevealedKind::Value));
+        state.toggle_reveal("alpha", 10.0);
+        assert!(state.is_revealed("alpha"));
+        assert!(!state.is_revealed("beta"));
 
-        state.toggle_reveal("alpha", RevealedKind::Placeholder, 11.0);
-        assert!(state.is_revealed("alpha", RevealedKind::Placeholder));
-        assert!(!state.is_revealed("alpha", RevealedKind::Value));
+        state.toggle_reveal("beta", 11.0);
+        assert!(state.is_revealed("beta"));
+        assert!(!state.is_revealed("alpha"));
 
-        state.toggle_reveal("alpha", RevealedKind::Placeholder, 12.0);
+        state.toggle_reveal("beta", 12.0);
         assert!(state.revealed.is_none());
     }
 
     #[test]
     fn a_revealed_value_is_hidden_by_time_or_by_losing_focus() {
         let mut state = state();
-        state.toggle_reveal("alpha", RevealedKind::Value, 100.0);
+        state.toggle_reveal("alpha", 100.0);
 
         assert!(state.hide_expired_reveal(100.0 + VALUE_REVEAL_SECONDS - 0.5, true));
-        assert!(state.is_revealed("alpha", RevealedKind::Value));
+        assert!(state.is_revealed("alpha"));
 
         assert!(!state.hide_expired_reveal(100.5, false));
         assert!(state.revealed.is_none());
 
-        state.toggle_reveal("alpha", RevealedKind::Value, 100.0);
+        state.toggle_reveal("alpha", 100.0);
         assert!(!state.hide_expired_reveal(100.0 + VALUE_REVEAL_SECONDS, true));
         assert!(state.revealed.is_none());
         assert!(!state.hide_expired_reveal(200.0, true));
@@ -1151,19 +1146,44 @@ mod tests {
     fn a_revealed_value_never_outlives_the_panel_that_showed_it() {
         let mut state = state();
         state.select_connector(Some("alpha".into()));
-        state.toggle_reveal("alpha", RevealedKind::Value, 10.0);
+        state.toggle_reveal("alpha", 10.0);
         state.select_connector(Some("beta".into()));
         assert!(state.revealed.is_none());
 
-        state.toggle_reveal("beta", RevealedKind::Value, 10.0);
+        state.toggle_reveal("beta", 10.0);
         state.select_sandbox(Some("run-1".into()));
         assert!(state.revealed.is_none());
         assert!(state.selected_connector.is_none());
 
         state.select_connector(Some("beta".into()));
-        state.toggle_reveal("beta", RevealedKind::Value, 10.0);
+        state.toggle_reveal("beta", 10.0);
         state.replace_live_data(Vec::new(), Vec::new(), Vec::new(), Vec::new(), None);
         assert!(state.revealed.is_none());
+    }
+
+    #[test]
+    fn a_notice_dies_with_the_detail_panel_that_showed_it() {
+        let mut state = state();
+        state.select_connector(Some("alpha".into()));
+        state.notice = Some("Value copied.".into());
+        state.select_connector(Some("beta".into()));
+        assert_eq!(state.notice.as_deref(), Some("Value copied."));
+
+        state.select_connector(None);
+        assert!(state.notice.is_none());
+
+        state.notice = Some("Removed.".into());
+        state.select_connector(None);
+        assert_eq!(state.notice.as_deref(), Some("Removed."));
+    }
+
+    #[test]
+    fn open_connector_lands_on_the_credentials_view_with_the_panel_open() {
+        let mut state = state();
+        state.view = DashboardView::Audit;
+        state.open_connector("beta".into());
+        assert_eq!(state.view, DashboardView::Credentials);
+        assert_eq!(state.selected_connector.as_deref(), Some("beta"));
     }
 
     #[test]
@@ -1654,7 +1674,7 @@ mod tests {
     fn preview_forget_unbinds_the_credential_and_every_grant() {
         let mut state = state();
         state.credentials[0].summary.sandboxes = vec![access("run-1", true)];
-        state.toggle_reveal("beta", RevealedKind::Value, 10.0);
+        state.toggle_reveal("beta", 10.0);
 
         state.resolve_confirmation(CredentialOperation::ForgetEverywhere {
             connector_id: "beta".into(),
