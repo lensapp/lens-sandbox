@@ -180,11 +180,72 @@ pub fn execute_unified_command(
     command: &DashboardCommand,
     window_state: &crate::approval_flow::window::WindowState,
 ) -> anyhow::Result<String> {
-    commands::execute(
-        command,
-        window_state,
-        &commands::CommandStores::default_paths(),
-    )
+    commands::execute(command, window_state, &FileCommandStores::default_paths())
+}
+
+/// The production [`commands::CommandStores`]: the same per-machine files the CLI edits, with each failure naming the file it came from.
+struct FileCommandStores {
+    credentials: std::path::PathBuf,
+    grants: std::path::PathBuf,
+}
+
+impl FileCommandStores {
+    fn default_paths() -> Self {
+        Self {
+            credentials: lns_policy::credentials::default_credentials_path(),
+            grants: lns_policy::grants::default_workload_grants_path(),
+        }
+    }
+}
+
+impl commands::CommandStores for FileCommandStores {
+    fn load_credentials(&self) -> anyhow::Result<lns_policy::credentials::CredentialStateFile> {
+        use anyhow::Context;
+        use lns_policy::credentials::CredentialStore;
+        lns_policy::credentials::JsonFileCredentialStore::new(self.credentials.clone())
+            .load()
+            .with_context(|| format!("reading credential state {}", self.credentials.display()))
+    }
+
+    fn save_credentials(
+        &self,
+        state: &lns_policy::credentials::CredentialStateFile,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use lns_policy::credentials::CredentialStore;
+        lns_policy::credentials::JsonFileCredentialStore::new(self.credentials.clone())
+            .save(state)
+            .with_context(|| format!("saving credential state {}", self.credentials.display()))
+    }
+
+    fn revoke_project_grants(&self, project: &str, connector_id: &str) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use lns_policy::grants::GrantStore;
+        lns_policy::grants::JsonFileGrantStore::new(self.grants.clone())
+            .update(&mut |file| {
+                file.revoke_project_connector(project, connector_id);
+                true
+            })
+            .map(|_| ())
+            .with_context(|| format!("updating grants at {}", self.grants.display()))
+    }
+
+    fn load_policy(&self, policy_path: &std::path::Path) -> anyhow::Result<lns_policy::Policy> {
+        use anyhow::Context;
+        lns_policy::Policy::load_or_default(policy_path)
+            .with_context(|| format!("reading policy {}", policy_path.display()))
+    }
+
+    fn save_policy(
+        &self,
+        policy_path: &std::path::Path,
+        policy: &lns_policy::Policy,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        policy
+            .save_atomic(policy_path)
+            .with_context(|| format!("saving policy {}", policy_path.display()))
+    }
 }
 
 pub fn reload_unified(

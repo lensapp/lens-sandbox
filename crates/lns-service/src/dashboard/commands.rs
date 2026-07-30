@@ -1,34 +1,27 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lns_policy::credentials::{
-    CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
-};
-use lns_policy::grants::{GrantStore, JsonFileGrantStore, project_key};
+use lns_policy::Policy;
+use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
+use lns_policy::grants::project_key;
 
 use super::{CredentialReviewChoice, DashboardCommand};
 use crate::approval_flow::window::WindowState;
 use crate::credential_flow::session::CredentialDecisionRequest;
 
-/// Where a command writes: the per-machine credential values and the per-workload grant sidecar, both outside anything a project commits.
-pub(super) struct CommandStores {
-    pub credentials: PathBuf,
-    pub grants: PathBuf,
-}
-
-impl CommandStores {
-    pub(super) fn default_paths() -> Self {
-        Self {
-            credentials: lns_policy::credentials::default_credentials_path(),
-            grants: lns_policy::grants::default_workload_grants_path(),
-        }
-    }
+/// Where a command writes — the per-machine credential values, the per-workload grant sidecar, and project policies — behind a seam so command behaviour is pinned without touching disk.
+pub(super) trait CommandStores {
+    fn load_credentials(&self) -> Result<CredentialStateFile>;
+    fn save_credentials(&self, state: &CredentialStateFile) -> Result<()>;
+    fn revoke_project_grants(&self, project: &str, connector_id: &str) -> Result<()>;
+    fn load_policy(&self, policy_path: &Path) -> Result<Policy>;
+    fn save_policy(&self, policy_path: &Path, policy: &Policy) -> Result<()>;
 }
 
 pub(super) fn execute(
     command: &DashboardCommand,
     window_state: &WindowState,
-    stores: &CommandStores,
+    stores: &dyn CommandStores,
 ) -> Result<String> {
     let notice = match command {
         DashboardCommand::ReviewCredential { request_id, choice } => {
@@ -41,15 +34,13 @@ pub(super) fn execute(
             connector_id,
             value,
         } => {
-            update_credentials(&stores.credentials, |state| {
+            update_credentials(stores, |state| {
                 replace_saved_credential(state, connector_id, value)
             })?;
             format!("{connector_id} was replaced.")
         }
         DashboardCommand::RemoveCredential { connector_id } => {
-            update_credentials(&stores.credentials, |state| {
-                remove_saved_credential(state, connector_id)
-            })?;
+            update_credentials(stores, |state| remove_saved_credential(state, connector_id))?;
             format!("{connector_id} was removed from this machine.")
         }
         DashboardCommand::DisconnectProject {
@@ -57,7 +48,7 @@ pub(super) fn execute(
             sandbox_id,
         } => {
             let policy_path = project_policy_path(sandbox_id, connector_id)?;
-            disconnect_project(&policy_path, &stores.grants, connector_id)?;
+            disconnect_project(stores, &policy_path, connector_id)?;
             format!(
                 "{connector_id} was disconnected from {}.",
                 super::project_label(&policy_path)
@@ -145,35 +136,26 @@ fn project_policy_path(sandbox_id: &str, connector_id: &str) -> Result<PathBuf> 
 }
 
 /// Same two-step forget as `lns connector disconnect`: the grants go first, so a run still holding a card cannot record one against the id being dropped, and a later reconnect asks again instead of inheriting a stale grant.
-fn disconnect_project(policy_path: &Path, grants_path: &Path, connector_id: &str) -> Result<()> {
-    let mut policy = lns_policy::Policy::load_or_default(policy_path)
-        .with_context(|| format!("reading policy {}", policy_path.display()))?;
+fn disconnect_project(
+    stores: &dyn CommandStores,
+    policy_path: &Path,
+    connector_id: &str,
+) -> Result<()> {
+    let mut policy = stores.load_policy(policy_path)?;
     if !policy.disconnect(connector_id) {
         bail!("{connector_id} is no longer connected to this project");
     }
-    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
-    GrantStore::update(&store, &mut |file| {
-        file.revoke_project_connector(&project_key(policy_path), connector_id);
-        true
-    })
-    .with_context(|| format!("updating grants at {}", grants_path.display()))?;
-    policy
-        .save_atomic(policy_path)
-        .with_context(|| format!("saving policy {}", policy_path.display()))
+    stores.revoke_project_grants(&project_key(policy_path), connector_id)?;
+    stores.save_policy(policy_path, &policy)
 }
 
 fn update_credentials(
-    path: &Path,
+    stores: &dyn CommandStores,
     mutate: impl FnOnce(&mut CredentialStateFile) -> Result<()>,
 ) -> Result<()> {
-    let store = JsonFileCredentialStore::new(path.to_path_buf());
-    let mut state = store
-        .load()
-        .with_context(|| format!("reading credential state {}", path.display()))?;
+    let mut state = stores.load_credentials()?;
     mutate(&mut state)?;
-    store
-        .save(&state)
-        .with_context(|| format!("saving credential state {}", path.display()))
+    stores.save_credentials(&state)
 }
 
 fn replace_saved_credential(
@@ -206,22 +188,71 @@ mod tests {
     use std::collections::HashMap;
     use tokio::sync::mpsc;
 
+    /// In-memory [`CommandStores`]: state lives in mutexes and `ops` records the write order the disconnect contract depends on.
+    #[derive(Default)]
+    struct MemoryStores {
+        credentials: std::sync::Mutex<CredentialStateFile>,
+        credential_load_error: Option<String>,
+        grants: std::sync::Mutex<WorkloadGrantFile>,
+        policies: std::sync::Mutex<HashMap<PathBuf, Policy>>,
+        ops: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandStores for MemoryStores {
+        fn load_credentials(&self) -> Result<CredentialStateFile> {
+            if let Some(error) = &self.credential_load_error {
+                bail!("reading credential state: {error}");
+            }
+            Ok(self.credentials.lock().unwrap().clone())
+        }
+
+        fn save_credentials(&self, state: &CredentialStateFile) -> Result<()> {
+            *self.credentials.lock().unwrap() = state.clone();
+            Ok(())
+        }
+
+        fn revoke_project_grants(&self, project: &str, connector_id: &str) -> Result<()> {
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("revoke grants for {connector_id}"));
+            self.grants
+                .lock()
+                .unwrap()
+                .revoke_project_connector(project, connector_id);
+            Ok(())
+        }
+
+        fn load_policy(&self, policy_path: &Path) -> Result<Policy> {
+            Ok(self
+                .policies
+                .lock()
+                .unwrap()
+                .get(policy_path)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn save_policy(&self, policy_path: &Path, policy: &Policy) -> Result<()> {
+            self.ops.lock().unwrap().push("save policy".to_string());
+            self.policies
+                .lock()
+                .unwrap()
+                .insert(policy_path.to_path_buf(), policy.clone());
+            Ok(())
+        }
+    }
+
     struct Fixture {
-        dir: tempfile::TempDir,
-        stores: CommandStores,
+        stores: MemoryStores,
         window: std::sync::Arc<WindowState>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let dir = tempfile::tempdir().expect("tempdir");
             Self {
-                stores: CommandStores {
-                    credentials: dir.path().join("credentials.json"),
-                    grants: dir.path().join("grants.json"),
-                },
+                stores: MemoryStores::default(),
                 window: WindowState::new(),
-                dir,
             }
         }
 
@@ -230,16 +261,21 @@ mod tests {
         }
 
         fn seed_credentials(&self, entries: impl IntoIterator<Item = (String, CredentialEntry)>) {
-            let store = JsonFileCredentialStore::new(self.stores.credentials.clone());
-            store
-                .save(&CredentialStateFile::from_iter(entries))
-                .expect("seed credentials");
+            *self.stores.credentials.lock().unwrap() = CredentialStateFile::from_iter(entries);
         }
 
         fn credentials(&self) -> CredentialStateFile {
-            JsonFileCredentialStore::new(self.stores.credentials.clone())
-                .load()
-                .expect("load credentials")
+            self.stores.credentials.lock().unwrap().clone()
+        }
+
+        fn policy(&self, policy_path: &Path) -> Policy {
+            self.stores
+                .policies
+                .lock()
+                .unwrap()
+                .get(policy_path)
+                .cloned()
+                .expect("policy present")
         }
 
         fn pending(&self) -> mpsc::UnboundedReceiver<CredentialDecisionDelivery> {
@@ -290,12 +326,16 @@ mod tests {
         }
 
         fn project_policy(&self, connectors: &[&str]) -> PathBuf {
-            let path = self.dir.path().join("lns-policy.yaml");
-            let mut policy = lns_policy::Policy::load_or_default(&path).expect("policy");
+            let path = PathBuf::from("/projects/example/lns-policy.yaml");
+            let mut policy = Policy::default();
             for connector in connectors {
                 policy.connect(*connector);
             }
-            policy.save_atomic(&path).expect("save policy");
+            self.stores
+                .policies
+                .lock()
+                .unwrap()
+                .insert(path.clone(), policy);
             path
         }
 
@@ -311,16 +351,12 @@ mod tests {
                 "SOME_TOKEN",
                 vec![],
             ));
-            JsonFileGrantStore::new(self.stores.grants.clone())
-                .save(&file)
-                .expect("seed grants");
+            *self.stores.grants.lock().unwrap() = file;
             project
         }
 
         fn grants(&self) -> WorkloadGrantFile {
-            JsonFileGrantStore::new(self.stores.grants.clone())
-                .load()
-                .expect("load grants")
+            self.stores.grants.lock().unwrap().clone()
         }
     }
 
@@ -580,9 +616,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_credential_store_reports_its_path() {
-        let fixture = Fixture::new();
-        std::fs::create_dir(&fixture.stores.credentials).expect("directory in the store's place");
+    fn a_failing_credential_store_aborts_the_command_with_its_error() {
+        let mut fixture = Fixture::new();
+        fixture.stores.credential_load_error = Some("store offline".into());
         let error = fixture
             .run(&DashboardCommand::RemoveCredential {
                 connector_id: "some-provider".into(),
@@ -606,11 +642,15 @@ mod tests {
             .expect("disconnect succeeds");
 
         assert!(notice.starts_with("some-provider was disconnected from "));
-        let policy = lns_policy::Policy::load_or_default(&policy_path).expect("reload policy");
-        assert_eq!(policy.connectors, ["some-other"]);
+        assert_eq!(fixture.policy(&policy_path).connectors, ["some-other"]);
         let grants = fixture.grants();
         assert!(grants.grants.is_empty());
         assert_eq!(grants.revocations_of(&project, "some-provider"), 1);
+        assert_eq!(
+            *fixture.stores.ops.lock().unwrap(),
+            ["revoke grants for some-provider", "save policy"],
+            "grants must be forgotten before the id is dropped"
+        );
         crate::run_registry::cancel(&run_id);
     }
 
@@ -628,8 +668,7 @@ mod tests {
             .expect_err("declared by the definition");
 
         assert!(error.to_string().contains("cannot be revoked"));
-        let policy = lns_policy::Policy::load_or_default(&policy_path).expect("reload policy");
-        assert_eq!(policy.connectors, ["some-provider"]);
+        assert_eq!(fixture.policy(&policy_path).connectors, ["some-provider"]);
         crate::run_registry::cancel(&run_id);
     }
 
@@ -669,12 +708,7 @@ mod tests {
             .expect_err("not connected");
 
         assert!(error.to_string().contains("no longer connected"));
-        assert_eq!(
-            lns_policy::Policy::load_or_default(&policy_path)
-                .expect("reload policy")
-                .connectors,
-            ["some-other"]
-        );
+        assert_eq!(fixture.policy(&policy_path).connectors, ["some-other"]);
         crate::run_registry::cancel(&run_id);
     }
 
@@ -714,7 +748,7 @@ mod tests {
 
     #[test]
     fn the_default_stores_are_the_per_machine_files() {
-        let stores = CommandStores::default_paths();
+        let stores = super::super::FileCommandStores::default_paths();
         assert_eq!(
             stores.credentials,
             lns_policy::credentials::default_credentials_path()
