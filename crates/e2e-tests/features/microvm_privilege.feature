@@ -20,6 +20,56 @@ Feature: the workload runs unprivileged inside a locked-down guest
     Then the exit code is 0
     And the output contains "who=sandbox"
 
+  Scenario: a root run-as is honoured as an identity
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo uid=$(/.lens/guest-tools/bin/busybox id -u)'" as user "root"
+    Then the exit code is 0
+    And the output contains "uid=0"
+
+  Scenario: a root run-as keeps HOME and USER
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo home=[$HOME] user=[$USER]'" as user "root"
+    Then the exit code is 0
+    And the output does not contain "home=[]"
+    And the output does not contain "user=[]"
+
+  Scenario: a root workload cannot tear down the network cage
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/nft flush ruleset'" as user "root"
+    Then the exit code is non-zero
+    And the output contains "Operation not permitted"
+
+  Scenario: a root workload keeps only the identity-management capabilities
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep CapEff /proc/self/status'" as user "root"
+    Then the exit code is 0
+    And the output contains "00000000000000fb"
+
+  Scenario: an exec lands on the workload's identity, not the broker's root
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c 'echo uid=$(/.lens/guest-tools/bin/busybox id -u)'" in that run
+    Then the exit code is 0
+    And the output contains "uid=65534"
+
+  Scenario: an exec into a root sandbox is capped like the workload it joins
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'" as user "root"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c '/.lens/guest-tools/bin/busybox grep CapEff /proc/self/status'" in that run
+    Then the exit code is 0
+    And the output contains "00000000000000fb"
+
+  Scenario: an exec does not inherit the supervisor's relay credentials
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c '/.lens/guest-tools/bin/busybox env'" in that run
+    Then the exit code is 0
+    And the output does not contain "LENS_SANDBOX_TOKEN"
+    And the output does not contain "LENS_SANDBOX_WS_URL"
+
   Scenario: /run is a fresh tmpfs, not the workload's persistent root
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox grep /run /proc/mounts'"
@@ -31,3 +81,5 @@ Feature: the workload runs unprivileged inside a locked-down guest
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox true && echo tooling-ok-$((7*6))'"
     Then the exit code is 0
     And the output contains "tooling-ok-42"
+
+

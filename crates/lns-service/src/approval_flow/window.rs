@@ -5,7 +5,9 @@ use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::credential_flow::session::{CredentialDecisionRequest, CredentialPendingPrompt};
+use crate::credential_flow::session::{
+    CredentialDecisionRequest, CredentialPendingPrompt, DenyScope,
+};
 use crate::credential_flow::store::CredentialEntry;
 use crate::oauth::SignInPivot;
 use lns_policy::connectors::TokenFallback;
@@ -20,8 +22,12 @@ pub struct DecisionDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
+    /// A closed card: fail the held request, but record nothing — the developer made no decision.
+    Dismiss,
     ConnectConnector,
-    UseToken { value: String },
+    UseToken {
+        value: String,
+    },
 }
 
 /// Carries the full [`CredentialDecisionRequest`] rather than a bare enum so the typed credential value threads through to `record_decision`.
@@ -45,6 +51,8 @@ pub struct CredentialCardPrompt {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::deny_scope`]: how far this card's "Deny" reaches.
+    pub deny_scope: DenyScope,
 }
 
 /// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
@@ -217,6 +225,7 @@ impl WindowState {
                 env_var: prompt.env_var,
                 injection_domains: prompt.injection_domains,
                 is_project_defined: prompt.is_project_defined,
+                deny_scope: prompt.deny_scope,
             },
             decision_tx,
             seq,
@@ -325,6 +334,11 @@ impl WindowState {
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
         self.deliver(id, RequestAction::Decide(decision))
+    }
+
+    /// Drops the card and fails its held request without recording a decision. See [`RequestAction::Dismiss`].
+    pub fn dismiss(&self, id: &str) -> bool {
+        self.deliver(id, RequestAction::Dismiss)
     }
 
     /// Accepts the connector offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
@@ -642,6 +656,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 
@@ -748,6 +763,25 @@ mod tests {
                 id: "r1".into(),
                 action: RequestAction::Decide(Decision::AllowOnce),
             }
+        );
+    }
+
+    #[test]
+    fn dismiss_delivers_a_verdict_free_action_and_removes_the_entry() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+
+        assert!(s.dismiss("r1"));
+
+        assert_eq!(s.pending_count(), 0);
+        assert_eq!(
+            rx.try_recv().expect("delivery"),
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Dismiss,
+            },
+            "a closed card carries no decision to the session"
         );
     }
 
@@ -1333,6 +1367,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             bound_value_available: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 

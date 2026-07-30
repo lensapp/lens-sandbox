@@ -445,6 +445,7 @@ async fn orchestrate(
         tty: args.tty,
         stdin: args.stdin,
         initial_winsize,
+        confine: session.is_none(),
     };
 
     let frame_tx_for_session = frame_tx.clone();

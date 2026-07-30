@@ -70,6 +70,7 @@ pub struct ApprovalRig {
     pub frames: mpsc::UnboundedReceiver<HostFrame>,
     pub policy_path: PathBuf,
     pub timeout: Duration,
+    pub ledger: Arc<crate::credential_rig::RigRecorder>,
     _tempdir: TempDir,
 }
 
@@ -88,6 +89,8 @@ impl ApprovalRig {
             tx,
             timeout,
         ));
+        let ledger = Arc::new(crate::credential_rig::RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             notifier,
@@ -95,6 +98,7 @@ impl ApprovalRig {
             frames: rx,
             policy_path,
             timeout,
+            ledger,
             _tempdir: dir,
         }
     }

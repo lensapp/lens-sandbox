@@ -257,6 +257,16 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
+    /// Fails a held request because its card was closed: no rule, no audit line, and `Timeout` on the wire because a dismissal is the absence of a decision rather than a deny the developer picked.
+    pub fn dismiss_request(&self, id: &str) -> DecisionOutcome {
+        if self.remove_pending(id).is_none() {
+            return DecisionOutcome::UnknownId;
+        }
+        self.notifier.dismiss(id);
+        self.send_decision_frame(id, Decision::Timeout);
+        DecisionOutcome::Resolved
+    }
+
     fn record_approval(&self, entry: &PendingEntry, decision: Decision) {
         let Some(recorder) = self.ledger.get() else {
             return;
@@ -449,7 +459,8 @@ impl ApprovalSession {
         if let Some(derive) = self.connector_routes.get() {
             new_policy
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .extend(derive(&new_policy.connectors));
         }
         if let Some(reconcile) = self.armed_reconciler.get() {
@@ -506,7 +517,7 @@ impl ApprovalSession {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             policy.connect(id);
             let to_persist = policy.clone();
-            policy.network.allowed_routes.extend(routes);
+            policy.network.egress.http.extend(routes);
             (to_persist, policy.network.clone())
         };
         let credentials = self.current_credentials();
@@ -837,13 +848,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_dismissed_card_fails_the_request_closed_and_records_no_approval() {
+        let (s, n, store, mut rx) = fixture();
+        let recorder = Arc::new(CapturingRecorder::default());
+        s.set_ledger_recorder(recorder.clone());
+        s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+
+        let before = s.current_policy();
+        assert_eq!(s.dismiss_request("r1"), DecisionOutcome::Resolved);
+
+        assert_eq!(before, s.current_policy());
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            Decision::Timeout,
+            "a closed card reads on the wire as no decision, so it cannot arrive as a deny-once the developer picked"
+        );
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
+        assert!(store.saves.lock().unwrap().is_empty());
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "a swatted card must not read as a deny-once the developer picked"
+        );
+    }
+
+    #[test]
+    fn dismissing_an_unknown_request_is_unknownid() {
+        let (s, _n, _store, mut rx) = fixture();
+        assert_eq!(s.dismiss_request("never-held"), DecisionOutcome::UnknownId);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn allow_always_adds_allow_rule_persists_and_emits_policy_frame() {
         let (s, _n, store, mut rx) = fixture();
         s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
 
         s.record_decision("r1", Decision::AllowAlways);
 
-        let routes = s.current_policy().network.allowed_routes;
+        let routes = s.current_policy().network.egress.http;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].match_pattern, "api.linear.app");
         assert_eq!(routes[0].verdict, Verdict::Allow);
@@ -851,14 +893,14 @@ pub(crate) mod tests {
         assert_eq!(decision_frame(&mut rx).decision, Decision::AllowAlways);
         let pushed = policy_frame(&mut rx);
         assert_eq!(
-            pushed.network.unwrap().allowed_routes[0].match_pattern,
+            pushed.network.unwrap().egress.http[0].match_pattern,
             "api.linear.app"
         );
 
         let saves = store.saves.lock().unwrap();
         assert_eq!(saves.len(), 1);
         assert_eq!(
-            saves[0].network.allowed_routes[0].match_pattern,
+            saves[0].network.egress.http[0].match_pattern,
             "api.linear.app"
         );
     }
@@ -870,14 +912,14 @@ pub(crate) mod tests {
 
         s.record_decision("r1", Decision::DenyAlways);
 
-        let routes = s.current_policy().network.allowed_routes;
+        let routes = s.current_policy().network.egress.http;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].verdict, Verdict::Deny);
 
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyAlways);
         let pushed = policy_frame(&mut rx);
         assert_eq!(
-            pushed.network.unwrap().allowed_routes[0].verdict,
+            pushed.network.unwrap().egress.http[0].verdict,
             Verdict::Deny
         );
 
@@ -892,7 +934,7 @@ pub(crate) mod tests {
 
         s.record_decision("r1", Decision::AllowAlways);
 
-        let routes = s.current_policy().network.allowed_routes;
+        let routes = s.current_policy().network.egress.http;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].verdict, Verdict::Allow);
 
@@ -1126,7 +1168,7 @@ pub(crate) mod tests {
         assert_eq!(s.current_policy(), updated);
         let pushed = policy_frame(&mut rx);
         assert_eq!(
-            pushed.network.unwrap().allowed_routes[0].match_pattern,
+            pushed.network.unwrap().egress.http[0].match_pattern,
             "api.linear.app"
         );
     }
@@ -1143,7 +1185,7 @@ pub(crate) mod tests {
         reloaded.add_rule(RouteRule::allow_host("api.example.test"));
         s.apply_external_policy(reloaded);
 
-        let routes = s.current_policy().network.allowed_routes;
+        let routes = s.current_policy().network.egress.http;
         let deny_idx = routes
             .iter()
             .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Deny);
@@ -1202,7 +1244,7 @@ pub(crate) mod tests {
 
         s.apply_external_policy(reloaded);
 
-        let routes = s.current_policy().network.allowed_routes;
+        let routes = s.current_policy().network.egress.http;
         assert_eq!(
             routes.len(),
             1,
@@ -1210,7 +1252,7 @@ pub(crate) mod tests {
         );
         assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
         assert_eq!(
-            policy_frame(&mut rx).network.unwrap().allowed_routes[0].match_pattern,
+            policy_frame(&mut rx).network.unwrap().egress.http[0].match_pattern,
             "api.some-oauth.example",
             "the hot-swap frame carries the re-derived route so the guest sees it"
         );
@@ -1322,7 +1364,8 @@ pub(crate) mod tests {
         assert!(
             !saves[0]
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "gitlab.com"),
             "the route must not be baked into the file — boot re-derives it from the catalog, so persisting it would survive `disconnect`"
@@ -1331,7 +1374,7 @@ pub(crate) mod tests {
         let v = serde_json::to_value(rx.try_recv().expect("policy frame")).unwrap();
         assert_eq!(v["type"], "policy");
         assert_eq!(
-            v["network"]["allowedRoutes"][0]["match"], "gitlab.com",
+            v["network"]["egress"]["http"][0]["match"], "gitlab.com",
             "the live frame still carries the route so a held request can proceed"
         );
     }

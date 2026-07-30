@@ -14,7 +14,7 @@ use crate::approval_flow::session::PendingPrompt;
 use crate::approval_flow::window::{
     self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
 };
-use crate::credential_flow::session::CredentialDecisionRequest;
+use crate::credential_flow::session::{CredentialDecisionRequest, DenyScope};
 use crate::credential_flow::store::CredentialEntry;
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
@@ -462,7 +462,7 @@ impl eframe::App for TrayApp {
                 ui.ctx().request_repaint();
             }
             Some(CardAction::DismissInform { index }) => {
-                self.window_state.dismiss_inform(index);
+                apply_dismissal(&self.window_state, &Dismissal::Inform { index });
                 ui.ctx().request_repaint();
             }
             Some(CardAction::OpenBrowser { url }) => {
@@ -470,7 +470,16 @@ impl eframe::App for TrayApp {
                 ui.ctx().request_repaint();
             }
             Some(CardAction::CancelSignIn { credential_id }) => {
-                self.window_state.cancel_sign_in(&credential_id);
+                apply_dismissal(&self.window_state, &Dismissal::SignIn { credential_id });
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::DismissNetwork { id }) => {
+                apply_dismissal(&self.window_state, &Dismissal::Network { id });
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::DismissCredential { id }) => {
+                self.credential_inputs.remove(&id);
+                apply_dismissal(&self.window_state, &Dismissal::Credential { id });
                 ui.ctx().request_repaint();
             }
             Some(CardAction::ConnectOffer { id }) => {
@@ -513,6 +522,13 @@ pub enum CardAction {
         id: String,
         request: CredentialDecisionRequest,
     },
+    /// Closing a card carries no verdict, so a dismissal names only the card — there is nowhere to put a decision the developer did not make.
+    DismissNetwork {
+        id: String,
+    },
+    DismissCredential {
+        id: String,
+    },
     DismissInform {
         index: usize,
     },
@@ -536,6 +552,34 @@ pub enum CardAction {
         credential_id: String,
         value: String,
     },
+}
+
+/// The refusal a card's "Deny" is entitled to ask for, so durability follows the card that asked rather than the flow that happens to answer.
+fn deny_request(scope: DenyScope) -> CredentialDecisionRequest {
+    match scope {
+        DenyScope::Workload => CredentialDecisionRequest::Deny,
+        DenyScope::Machine => CredentialDecisionRequest::DenyAlways,
+    }
+}
+
+/// Every way a card can leave the stack without a verdict; closed as a type so adding a card kind fails to compile in [`apply_dismissal`] rather than silently hanging its held request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Dismissal {
+    Network { id: String },
+    Credential { id: String },
+    SignIn { credential_id: String },
+    Inform { index: usize },
+}
+
+impl From<Dismissal> for CardAction {
+    fn from(dismissal: Dismissal) -> Self {
+        match dismissal {
+            Dismissal::Network { id } => Self::DismissNetwork { id },
+            Dismissal::Credential { id } => Self::DismissCredential { id },
+            Dismissal::SignIn { credential_id } => Self::CancelSignIn { credential_id },
+            Dismissal::Inform { index } => Self::DismissInform { index },
+        }
+    }
 }
 
 /// What the user did in the token-fallback affordance shared by every connect card.
@@ -651,7 +695,7 @@ fn render_single(
                             && close_button(ui, egui::Id::new(("card-close", idx)), close_rect)
                                 .clicked()
                         {
-                            fired = Some(close);
+                            fired = Some(close.into());
                         }
                         action = action.or(fired);
                     }
@@ -801,28 +845,37 @@ fn pile_scroll_offset(
     scroll
 }
 
-fn close_all(state: &WindowState, snapshot: &Snapshot) {
+/// Dismisses every card the pile is showing; `pub` so a behavioural test drives the same fan-out the header ✕ does rather than deciding each card itself.
+pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
-        match *item {
-            StackItem::Network(i) => {
-                state.decide(&snapshot.pending[i].id, Decision::DenyOnce);
-            }
-            StackItem::Credential(i) => {
-                state.decide_credential(
-                    &snapshot.pending_credentials[i].id,
-                    CredentialDecisionRequest::Deny,
-                );
-            }
-            StackItem::SignIn(i) => {
-                state.cancel_sign_in(&snapshot.sign_ins[i].credential_id);
-            }
-            StackItem::Inform(_) => had_inform = true,
-            StackItem::Connecting(_) => {}
+        match close_action(item, snapshot) {
+            // Informs are cleared in one shot below, since dismissing them by index in a loop shifts the indices still to come.
+            Some(Dismissal::Inform { .. }) => had_inform = true,
+            Some(dismissal) => apply_dismissal(state, &dismissal),
+            None => {}
         }
     }
     if had_inform {
         state.clear_informs();
+    }
+}
+
+/// The single place a closed card becomes a non-decision, shared by the per-card ✕ and the pile's close-all.
+fn apply_dismissal(state: &WindowState, dismissal: &Dismissal) {
+    match dismissal {
+        Dismissal::Network { id } => {
+            state.dismiss(id);
+        }
+        Dismissal::Credential { id } => {
+            state.decide_credential(id, CredentialDecisionRequest::Dismiss);
+        }
+        Dismissal::SignIn { credential_id } => {
+            state.cancel_sign_in(credential_id);
+        }
+        Dismissal::Inform { index } => {
+            state.dismiss_inform(*index);
+        }
     }
 }
 
@@ -949,7 +1002,7 @@ fn pile_close(
         && let Some(close) = close_action(item, snapshot)
         && close_button(ui, key.with("close"), close_rect).clicked()
     {
-        return Some(close);
+        return Some(close.into());
     }
     None
 }
@@ -966,10 +1019,12 @@ fn pile_pill(
     rect: egui::Rect,
     id: egui::Id,
     alpha: f32,
+    label: &str,
 ) -> (egui::Response, egui::Rect) {
     use egui::{Color32, CornerRadius, Sense, Stroke, StrokeKind};
 
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let hover = ctx.animate_bool_with_time(id.with("hover"), resp.hovered(), 0.10);
     let press =
         ctx.animate_bool_with_time(id.with("press"), resp.is_pointer_button_down_on(), 0.06);
@@ -1020,7 +1075,14 @@ fn pile_header(
     let fg = Color32::from_rgba_unmultiplied(236, 237, 242, (255.0 * t) as u8);
     let mut event = None;
 
-    let (show_less, content) = pile_pill(ui, ctx, pill_rect, Id::new("approval-pile-showless"), t);
+    let (show_less, content) = pile_pill(
+        ui,
+        ctx,
+        pill_rect,
+        Id::new("approval-pile-showless"),
+        t,
+        label,
+    );
     ui.painter().text(
         content.center(),
         Align2::CENTER_CENTER,
@@ -1032,7 +1094,14 @@ fn pile_header(
         event = Some(PileHeaderEvent::ShowLess);
     }
 
-    let (close_all, content) = pile_pill(ui, ctx, close_rect, Id::new("approval-pile-closeall"), t);
+    let (close_all, content) = pile_pill(
+        ui,
+        ctx,
+        close_rect,
+        Id::new("approval-pile-closeall"),
+        t,
+        CLOSE_ALL_LABEL,
+    );
     let arm = content.width() * 0.18;
     let c = content.center();
     let x = Stroke::new(1.6, fg);
@@ -1234,28 +1303,30 @@ fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
     });
 }
 
-fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<CardAction> {
+fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<Dismissal> {
     match *item {
-        StackItem::Inform(i) => Some(CardAction::DismissInform { index: i }),
-        StackItem::Network(i) => Some(CardAction::Decide {
+        StackItem::Inform(i) => Some(Dismissal::Inform { index: i }),
+        StackItem::Network(i) => Some(Dismissal::Network {
             id: snapshot.pending[i].id.clone(),
-            decision: Decision::DenyOnce,
         }),
-        StackItem::SignIn(i) => Some(CardAction::CancelSignIn {
+        StackItem::SignIn(i) => Some(Dismissal::SignIn {
             credential_id: snapshot.sign_ins[i].credential_id.clone(),
         }),
-        StackItem::Credential(i) => Some(CardAction::DecideCredential {
+        StackItem::Credential(i) => Some(Dismissal::Credential {
             id: snapshot.pending_credentials[i].id.clone(),
-            request: CredentialDecisionRequest::Deny,
         }),
         StackItem::Connecting(_) => None,
     }
 }
 
+const CLOSE_LABEL: &str = "Dismiss";
+const CLOSE_ALL_LABEL: &str = "Dismiss all";
+
 fn close_button(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect) -> egui::Response {
     use egui::{Color32, Sense, Stroke, vec2};
 
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, CLOSE_LABEL));
     let center = rect.center();
     let radius = rect.width() * 0.5;
     let painter = ui.painter();
@@ -1574,7 +1645,7 @@ fn render_credential_card(
                     }));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Deny);
+                    chosen = Some(deny_request(prompt.deny_scope));
                 }
             });
             chosen.map(|request| CardAction::DecideCredential {
@@ -1646,7 +1717,7 @@ fn render_oauth_consent_card(
                     ));
                 }
                 if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Deny);
+                    chosen = Some(deny_request(prompt.deny_scope));
                 }
             });
             if chosen.is_none()
@@ -2075,6 +2146,243 @@ mod tests {
         assert_eq!(deny_decision(true), Decision::DenyAlways);
     }
 
+    /// Clicks the control labelled `label` in a headless `render_stack` and returns what it fired, hovering first so hover-only affordances exist and fanning the pile out when `expanded`.
+    fn click_labelled_control(
+        snapshot: Snapshot,
+        label: &str,
+        expanded: bool,
+    ) -> Option<CardAction> {
+        use egui_kittest::kittest::Queryable;
+
+        let fired: Arc<Mutex<Option<CardAction>>> = Arc::new(Mutex::new(None));
+        let sink = fired.clone();
+        let mut credential_inputs = HashMap::new();
+        let mut token_drafts = HashMap::new();
+        let mut remember = HashMap::new();
+
+        // egui applies added fonts at the next pass, so the icon font goes in on a pass that draws nothing — otherwise a card's eyebrow icon panics on an unbound family.
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new("approval-pile-expanded"), expanded);
+                    });
+                    prepared = true;
+                    return;
+                }
+                let (action, _) = render_stack(
+                    ui,
+                    &snapshot,
+                    &mut credential_inputs,
+                    &mut token_drafts,
+                    &mut remember,
+                    1000.0,
+                );
+                if let Some(action) = action {
+                    *sink.lock().expect("action sink poisoned") = Some(action);
+                }
+            });
+
+        harness.run();
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(120.0, 60.0)));
+        harness.run();
+        harness.get_by_label(label).click();
+        harness.run();
+
+        fired.lock().expect("action sink poisoned").take()
+    }
+
+    /// A pile with no connecting placeholder, whose spinner would repaint forever and stall the harness.
+    fn two_credential_cards() -> Snapshot {
+        Snapshot {
+            pending: Vec::new(),
+            pending_credentials: vec![credential_prompt("c0"), credential_prompt("c1")],
+            sign_ins: Vec::new(),
+            informs: Vec::new(),
+            connecting: Vec::new(),
+            order: vec![StackItem::Credential(0), StackItem::Credential(1)],
+        }
+    }
+
+    #[test]
+    fn the_close_all_pill_fires_a_close_all_rather_than_a_per_card_decision() {
+        assert_eq!(
+            click_labelled_control(two_credential_cards(), CLOSE_ALL_LABEL, true),
+            Some(CardAction::CloseAll),
+            "the pile header's ✕ must route through close_all, not decide each card where no test can see it"
+        );
+    }
+
+    #[test]
+    fn the_hover_close_button_dismisses_a_credential_card_without_deciding() {
+        assert_eq!(
+            click_labelled_control(one_credential_card(), CLOSE_LABEL, false),
+            Some(CardAction::DismissCredential { id: "c1".into() }),
+            "the ✕ the developer actually clicks carries no verdict, so it cannot persist a rule"
+        );
+    }
+
+    #[test]
+    fn closing_a_network_card_decides_nothing() {
+        let snapshot = Snapshot {
+            pending: vec![PendingPrompt {
+                id: "r1".into(),
+                host: "api.example.test".into(),
+                action: "CONNECT api.example.test:443".into(),
+                offer: None,
+                token_fallback: None,
+            }],
+            pending_credentials: Vec::new(),
+            sign_ins: Vec::new(),
+            informs: Vec::new(),
+            connecting: Vec::new(),
+            order: vec![StackItem::Network(0)],
+        };
+
+        assert_eq!(
+            close_action(&StackItem::Network(0), &snapshot),
+            Some(Dismissal::Network { id: "r1".into() }),
+            "a dismissed card must not be recorded in the audit chain as a deny-once the developer picked"
+        );
+    }
+
+    fn credential_pending_prompt(
+        id: &str,
+    ) -> crate::credential_flow::session::CredentialPendingPrompt {
+        crate::credential_flow::session::CredentialPendingPrompt {
+            id: id.to_string(),
+            credential_id: "some-provider".to_string(),
+            action: "read".to_string(),
+            oauth_display_name: None,
+            token_fallback: None,
+            env_var: None,
+            injection_domains: vec![],
+            is_project_defined: false,
+            bound_value_available: false,
+            deny_scope: crate::credential_flow::session::DenyScope::Workload,
+        }
+    }
+
+    fn one_credential_card() -> Snapshot {
+        Snapshot {
+            pending: Vec::new(),
+            pending_credentials: vec![credential_prompt("c1")],
+            sign_ins: Vec::new(),
+            informs: Vec::new(),
+            connecting: Vec::new(),
+            order: vec![StackItem::Credential(0)],
+        }
+    }
+
+    fn card_with_deny_scope(scope: DenyScope) -> Snapshot {
+        Snapshot {
+            pending_credentials: vec![CredentialCardPrompt {
+                deny_scope: scope,
+                ..credential_prompt("c1")
+            }],
+            ..one_credential_card()
+        }
+    }
+
+    #[test]
+    fn a_run_card_denies_only_for_this_workload() {
+        assert_eq!(
+            click_labelled_control(card_with_deny_scope(DenyScope::Workload), "Deny", false),
+            Some(CardAction::DecideCredential {
+                id: "c1".into(),
+                request: CredentialDecisionRequest::Deny
+            }),
+            "a card raised by a run speaks for that workload, so its Deny must not reach the machine-wide store"
+        );
+    }
+
+    #[test]
+    fn the_bind_card_denies_for_the_whole_machine() {
+        assert_eq!(
+            click_labelled_control(card_with_deny_scope(DenyScope::Machine), "Deny", false),
+            Some(CardAction::DecideCredential {
+                id: "c1".into(),
+                request: CredentialDecisionRequest::DenyAlways
+            }),
+            "the bind card is the only one entitled to a standing refusal, and swapping this mapping would make `lns connector connect` + Deny record nothing"
+        );
+    }
+
+    #[test]
+    fn closing_a_credential_card_decides_nothing() {
+        assert_eq!(
+            close_action(&StackItem::Credential(0), &one_credential_card()),
+            Some(Dismissal::Credential { id: "c1".into() }),
+            "a dismissed card is not a decision, so its action has nowhere to carry one"
+        );
+    }
+
+    #[test]
+    fn closing_every_card_at_once_decides_nothing() {
+        let state = WindowState::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(state.try_insert_credential_pending(credential_pending_prompt("c1"), false, tx));
+
+        close_all(&state, &state.snapshot());
+
+        let delivery = rx
+            .try_recv()
+            .expect("close-all must resolve every held request");
+        assert_eq!(
+            delivery.request,
+            CredentialDecisionRequest::Dismiss,
+            "one click on close-all must not permanently deny every credential in the stack"
+        );
+    }
+
+    #[test]
+    fn close_all_takes_down_every_kind_of_card_in_the_stack() {
+        let state = WindowState::new();
+        let (net_tx, _net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cred_tx, _cred_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        state.insert_pending(
+            crate::approval_flow::session::PendingPrompt {
+                id: "r1".into(),
+                host: "api.example.test".into(),
+                action: "CONNECT api.example.test:443".into(),
+                offer: None,
+                token_fallback: None,
+            },
+            net_tx,
+        );
+        state.insert_credential_pending(credential_pending_prompt("c1"), false, cred_tx);
+        state.insert_sign_in(
+            crate::approval_flow::window::SignInCard {
+                credential_id: "some-oauth".into(),
+                display_name: "Some OAuth".into(),
+                user_code: None,
+                verification_uri: "https://api.some-oauth.example/device".into(),
+                token_fallback: None,
+                env_var: None,
+                injection_domains: vec![],
+                is_project_defined: false,
+            },
+            cancel_tx,
+        );
+        state.push_inform("something went wrong".into());
+
+        close_all(&state, &state.snapshot());
+
+        let left = state.snapshot();
+        assert!(
+            left.order.is_empty(),
+            "every card kind the stack can hold must come down on close-all, or its held request hangs to the approval timeout: {:?}",
+            left.order
+        );
+    }
+
     fn credential_prompt(id: &str) -> CredentialCardPrompt {
         CredentialCardPrompt {
             id: id.to_string(),
@@ -2087,6 +2395,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            deny_scope: DenyScope::Workload,
         }
     }
 

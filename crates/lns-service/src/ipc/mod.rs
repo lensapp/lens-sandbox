@@ -490,6 +490,7 @@ pub(super) fn build_session_params(
         initial_winsize: args
             .initial_winsize
             .map(|(rows, cols)| lns_session::Winsize { rows, cols }),
+        confine: true,
     }
 }
 
@@ -1897,6 +1898,15 @@ mod tests {
         );
         let ws = params.initial_winsize.expect("winsize should be mapped");
         assert_eq!((ws.rows, ws.cols), (24, 80));
+    }
+
+    #[test]
+    fn build_session_params_asks_the_broker_to_confine_the_exec() {
+        let params = build_session_params(exec_args(vec!["nft".into()], false, false));
+        assert!(
+            params.confine,
+            "an exec reaches the broker, not the supervisor, so the broker is the only place its identity and capabilities can be capped"
+        );
     }
 
     #[test]

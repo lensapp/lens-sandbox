@@ -8,6 +8,7 @@ use lns_service::approval_flow::window::{
     CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,
     lds_visuals, quiet_debug_overlays,
 };
+use lns_service::credential_flow::session::DenyScope;
 use lns_service::tray::{
     CardAction, MIN_WINDOW_HEIGHT, TokenDraft, ViewportPlacement, WINDOW_WIDTH, content_cap,
     install_activation_policy, refresh_window_shadows, render_stack,
@@ -115,6 +116,16 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
             .position(|c| c.credential_id == *credential_id)
             .map(StackItem::SignIn),
         CardAction::DismissInform { index } => Some(StackItem::Inform(*index)),
+        CardAction::DismissNetwork { id } => snapshot
+            .pending
+            .iter()
+            .position(|p| p.id == *id)
+            .map(StackItem::Network),
+        CardAction::DismissCredential { id } => snapshot
+            .pending_credentials
+            .iter()
+            .position(|p| p.id == *id)
+            .map(StackItem::Credential),
         CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
     };
     if let Some(item) = item {
@@ -177,6 +188,7 @@ fn seed_all() -> Snapshot {
                 env_var: Some("OPENAI_API_KEY".into()),
                 injection_domains: vec!["api.openai.com".into()],
                 is_project_defined: false,
+                deny_scope: DenyScope::Workload,
             },
             CredentialCardPrompt {
                 id: "cred-novalue".into(),
@@ -192,6 +204,7 @@ fn seed_all() -> Snapshot {
                 env_var: Some("SOME_TOKEN".into()),
                 injection_domains: vec!["api.some-provider.example".into()],
                 is_project_defined: false,
+                deny_scope: DenyScope::Workload,
             },
             CredentialCardPrompt {
                 id: "cred-oauth".into(),
@@ -207,6 +220,7 @@ fn seed_all() -> Snapshot {
                 env_var: None,
                 injection_domains: vec!["api.github.com".into(), "github.com".into()],
                 is_project_defined: false,
+                deny_scope: DenyScope::Workload,
             },
         ],
         sign_ins: vec![SignInCard {

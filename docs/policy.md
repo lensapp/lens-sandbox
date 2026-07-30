@@ -13,7 +13,8 @@ it:
 
 ```yaml
 network:
-  allowedRoutes: []
+  egress:
+    http: []
   defaultVerdict: ask
 ```
 
@@ -29,7 +30,7 @@ lns run --policy ~/team/shared-policy.yaml ghcr.io/acme/agent
 
 ### Default verdict
 
-`defaultVerdict` decides what happens to a request that no rule in `allowedRoutes`
+`defaultVerdict` decides what happens to a request that no rule in `egress.http`
 matches:
 
 - `ask` (the default) — pause and prompt you.
@@ -41,19 +42,20 @@ does real work, and your decisions accumulate into a least-privilege rule set.
 
 ### Rules
 
-Each entry in `allowedRoutes` is a rule:
+Each entry in `egress.http` is a rule:
 
 ```yaml
 network:
   defaultVerdict: ask
-  allowedRoutes:
-    - match: api.github.com
-      verdict: allow
-      description: GitHub REST API
-    - match: "*.telemetry.example"
-      verdict: deny
-    - match: 10.0.0.0/8
-      verdict: allow
+  egress:
+    http:
+      - match: api.github.com
+        verdict: allow
+        description: GitHub REST API
+      - match: "*.telemetry.example"
+        verdict: deny
+      - match: 10.0.0.0/8
+        verdict: allow
 ```
 
 | Field         | Meaning                                                                 |
@@ -68,6 +70,10 @@ A `match` pattern can be:
 - a wildcard — `*.github.com`
 - a CIDR block — `10.0.0.0/8`
 - a host with a port — `registry.internal:5000`
+
+`egress.http` used to be a top-level `allowedRoutes:` list. That key is gone: a
+policy file still naming it is refused with an error rather than loaded as a
+policy with no rules. Move the list under `egress: http:`.
 
 ## Editing rules from the CLI
 

@@ -28,12 +28,20 @@ pub struct Policy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkPolicy {
     #[serde(default)]
-    pub allowed_routes: Vec<RouteRule>,
+    pub egress: Egress,
     #[serde(default = "default_ask")]
     pub default_verdict: Verdict,
     // Always serialized: sandbox-core's schema requires transport, and a missing one fail-closes a non-deny verdict to deny in the guest.
     #[serde(default)]
     pub default_transport: Transport,
+}
+
+/// The per-protocol egress tables lens-sandbox-core routes on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Egress {
+    #[serde(default)]
+    pub http: Vec<RouteRule>,
 }
 
 fn default_ask() -> Verdict {
@@ -43,7 +51,7 @@ fn default_ask() -> Verdict {
 impl Default for NetworkPolicy {
     fn default() -> Self {
         Self {
-            allowed_routes: Vec::new(),
+            egress: Egress::default(),
             default_verdict: Verdict::Ask,
             default_transport: Transport::Direct,
         }
@@ -54,7 +62,8 @@ impl NetworkPolicy {
     pub fn validate_local_transport(&self) -> io::Result<()> {
         let uses_upstream = self.default_transport == Transport::Upstream
             || self
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|route| route.transport == Transport::Upstream);
         if uses_upstream {
@@ -152,8 +161,8 @@ impl Policy {
     }
 
     pub fn add_rule(&mut self, rule: RouteRule) {
-        if !self.network.allowed_routes.contains(&rule) {
-            self.network.allowed_routes.push(rule);
+        if !self.network.egress.http.contains(&rule) {
+            self.network.egress.http.push(rule);
         }
     }
 
@@ -227,12 +236,12 @@ mod tests {
         let p = Policy::default();
         assert_eq!(p.network.default_verdict, Verdict::Ask);
         assert_eq!(p.network.default_transport, Transport::Direct);
-        assert!(p.network.allowed_routes.is_empty());
+        assert!(p.network.egress.http.is_empty());
     }
 
     #[test]
     fn a_network_section_omitting_the_defaults_parses_to_ask_and_direct() {
-        let net: NetworkPolicy = serde_yaml::from_str("allowedRoutes: []\n").unwrap();
+        let net: NetworkPolicy = serde_yaml::from_str("egress:\n  http: []\n").unwrap();
         assert_eq!(net.default_verdict, Verdict::Ask);
         assert_eq!(net.default_transport, Transport::Direct);
     }
@@ -375,16 +384,67 @@ mod tests {
         let path = dir.path().join("lns-policy.yaml");
         let yaml = "\
 network:
+  egress:
+    http:
+      - match: api.linear.app
+        verdict: allow
+  defaultVerdict: ask
+";
+        fs::write(&path, yaml).unwrap();
+        let p = Policy::load_or_default(&path).unwrap();
+        assert_eq!(p.network.egress.http.len(), 1);
+        assert_eq!(p.network.egress.http[0].match_pattern, "api.linear.app");
+        assert_eq!(p.network.egress.http[0].verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn load_or_default_rejects_a_file_still_naming_the_removed_allowed_routes_key() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
   allowedRoutes:
     - match: api.linear.app
       verdict: allow
   defaultVerdict: ask
 ";
         fs::write(&path, yaml).unwrap();
-        let p = Policy::load_or_default(&path).unwrap();
-        assert_eq!(p.network.allowed_routes.len(), 1);
-        assert_eq!(p.network.allowed_routes[0].match_pattern, "api.linear.app");
-        assert_eq!(p.network.allowed_routes[0].verdict, Verdict::Allow);
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("allowedRoutes"),
+            "a stale key must name itself in the error, not load as a policy with zero rules: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_egress_table_is_a_parse_error_rather_than_an_empty_one() {
+        let err = serde_yaml::from_str::<NetworkPolicy>(
+            "egress:\n  tcp:\n    - match: db.example:5432\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("tcp"),
+            "an egress table this lns can't enforce must fail the load, not publish zero rules: {err}"
+        );
+    }
+
+    #[test]
+    fn saving_emits_the_egress_table_the_guest_routes_on() {
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("api.linear.app"));
+        let yaml = serde_yaml::to_string(&p).unwrap();
+        assert!(yaml.contains("egress:"), "got:\n{yaml}");
+        assert!(yaml.contains("http:"), "got:\n{yaml}");
+    }
+
+    #[test]
+    fn an_empty_policy_still_writes_the_http_table_the_guest_reads() {
+        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
+        assert!(
+            yaml.contains("http: []"),
+            "the guest reads egress.http; omitting it hands every destination to defaultVerdict:\n{yaml}"
+        );
     }
 
     #[test]
@@ -412,10 +472,11 @@ network:
         let path = dir.path().join("lns-policy.yaml");
         let yaml = "\
 network:
-  allowedRoutes:
-    - match: api.example.test
-      verdict: allow
-      transport: upstream
+  egress:
+    http:
+      - match: api.example.test
+        verdict: allow
+        transport: upstream
   defaultVerdict: ask
 ";
         fs::write(&path, yaml).unwrap();
@@ -502,15 +563,15 @@ network:
     }
 
     #[test]
-    fn add_rule_appends_to_allowed_routes_in_order() {
+    fn add_rule_appends_to_the_http_egress_table_in_order() {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("a"));
         p.add_rule(RouteRule::deny_host("b"));
-        assert_eq!(p.network.allowed_routes.len(), 2);
-        assert_eq!(p.network.allowed_routes[0].match_pattern, "a");
-        assert_eq!(p.network.allowed_routes[0].verdict, Verdict::Allow);
-        assert_eq!(p.network.allowed_routes[1].match_pattern, "b");
-        assert_eq!(p.network.allowed_routes[1].verdict, Verdict::Deny);
+        assert_eq!(p.network.egress.http.len(), 2);
+        assert_eq!(p.network.egress.http[0].match_pattern, "a");
+        assert_eq!(p.network.egress.http[0].verdict, Verdict::Allow);
+        assert_eq!(p.network.egress.http[1].match_pattern, "b");
+        assert_eq!(p.network.egress.http[1].verdict, Verdict::Deny);
     }
 
     #[test]
@@ -518,7 +579,7 @@ network:
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("huggingface.co"));
         p.add_rule(RouteRule::allow_host("huggingface.co"));
-        assert_eq!(p.network.allowed_routes.len(), 1);
+        assert_eq!(p.network.egress.http.len(), 1);
     }
 
     #[test]
@@ -526,14 +587,15 @@ network:
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("example.com"));
         p.add_rule(RouteRule::deny_host("example.com"));
-        assert_eq!(p.network.allowed_routes.len(), 2);
+        assert_eq!(p.network.egress.http.len(), 2);
     }
 
     #[test]
     fn legacy_network_only_yaml_parses_with_empty_connectors() {
         let yaml = "\
 network:
-  allowedRoutes: []
+  egress:
+    http: []
   defaultVerdict: ask
   defaultTransport: direct
 ";
@@ -565,7 +627,8 @@ network:
     fn a_legacy_policy_carrying_the_removed_credentials_section_still_loads() {
         let yaml = "\
 network:
-  allowedRoutes: []
+  egress:
+    http: []
   defaultVerdict: ask
   defaultTransport: direct
 credentials:

@@ -596,7 +596,7 @@ mod tests {
         let json = serde_json::to_value(&frame).expect("serialise");
         assert_eq!(json["type"], "policy");
         assert_eq!(
-            json["network"]["allowedRoutes"][0]["match"],
+            json["network"]["egress"]["http"][0]["match"],
             "api.linear.app"
         );
     }

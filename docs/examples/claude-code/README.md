@@ -31,7 +31,7 @@ node comes from `spec.tools`: the service provisions `node@22` once per machine
 before the microVM boots — no base-image coupling, no per-run download, no
 policy route. The first boot still runs `npm install -g
 @anthropic-ai/claude-code` for the agent itself; the microVM is ephemeral, so
-each cold start reinstalls that package (the `allowedRoutes` keep
+each cold start reinstalls that package (the `egress.http` rules keep
 `registry.npmjs.org` open for exactly that install).
 
 On first run, an approval card asks for your Claude subscription token and shows

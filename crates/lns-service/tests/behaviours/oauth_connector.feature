@@ -9,7 +9,9 @@ Feature: lns-service oauth connector sign-in
   and the approval surface offers to connect, and accepting runs the device
   sign-in instead of asking for a value. On success the connector is
   connected live and the token set is armed; denial or expiry fails the
-  held request without persisting. (The run-start refresh of an expired
+  held request without persisting. Only a denial in the browser is the
+  developer's decision — an expiry or a transport error is a failure,
+  and the audit chain must not record it as a refusal. (The run-start refresh of an expired
   grant, and dropping a grant that can no longer be refreshed, are pinned
   at the unit layer in `oauth/mod.rs`.)
 
@@ -29,6 +31,7 @@ Feature: lns-service oauth connector sign-in
     Then the held request is failed at the boundary
     And no token set is stored for "some-oauth"
     And the "some-oauth" connector is not connected
+    And the audit chain records no approval for "some-oauth"
 
   Scenario: A device sign-in denied in the browser stores nothing
     Given an unconnected "some-oauth" oauth connector whose sign-in will be denied
@@ -36,6 +39,7 @@ Feature: lns-service oauth connector sign-in
     And the developer accepts the prompt
     Then the held request is failed at the boundary
     And no token set is stored for "some-oauth"
+    And the audit chain records the "some-oauth" credential approval as denied once
 
   Scenario: A user-catalog oauth connector signs in through the same flow
     Given an unconnected "acme" oauth connector whose sign-in will complete

@@ -183,7 +183,7 @@ mod tests {
         let handler = event_handler(path.clone(), session.clone());
         handler(Ok(evt(EventKind::Modify(ModifyKind::Any), &path)));
 
-        assert_eq!(session.current_policy().network.allowed_routes.len(), 1);
+        assert_eq!(session.current_policy().network.egress.http.len(), 1);
         assert!(rx.try_recv().is_ok(), "expected a Policy hot-swap frame");
     }
 
@@ -204,7 +204,7 @@ mod tests {
         );
 
         let cur = session.current_policy();
-        assert_eq!(cur.network.allowed_routes.len(), 1);
+        assert_eq!(cur.network.egress.http.len(), 1);
         assert!(rx.try_recv().is_ok(), "expected a Policy hot-swap frame");
     }
 

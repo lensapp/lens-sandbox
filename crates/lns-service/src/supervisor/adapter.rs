@@ -135,6 +135,9 @@ async fn decision_delivery_loop(
             RequestAction::Decide(decision) => {
                 session.record_decision(&delivery.id, decision);
             }
+            RequestAction::Dismiss => {
+                session.dismiss_request(&delivery.id);
+            }
             // Accepting a connector offer drives a connect (async) rather than a per-request verdict.
             RequestAction::ConnectConnector => {
                 session.connect_offer(&delivery.id).await;
@@ -643,7 +646,7 @@ pub(super) async fn start(
         &declared_connectors,
         &catalog,
     );
-    policy.network.allowed_routes.extend(applied.routes);
+    policy.network.egress.http.extend(applied.routes);
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let run =
@@ -873,6 +876,43 @@ mod tests {
             }
             other => panic!("expected RequestDecision, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn decision_delivery_loop_dismisses_a_closed_card_without_recording_a_decision() {
+        use crate::approval_flow::protocol::{Decision, HostFrame, RequestPending};
+        let (session, mut frame_rx) = fixture_session();
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.linear.app".into(),
+                action: "CONNECT api.linear.app:443".into(),
+                reason: "policy-ambiguous".into(),
+            },
+            std::time::Instant::now(),
+        );
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::Dismiss,
+        })
+        .unwrap();
+        drop(tx);
+
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        match frame_rx.try_recv().expect("decision frame") {
+            HostFrame::RequestDecision(d) => {
+                assert_eq!(d.id, "r1");
+                assert_eq!(
+                    d.decision,
+                    Decision::Timeout,
+                    "the held request still fails closed, as an undecided card rather than a deny"
+                );
+            }
+            other => panic!("expected RequestDecision, got {other:?}"),
+        }
+        assert_eq!(session.current_policy(), Policy::default());
     }
 
     #[tokio::test]
@@ -1517,7 +1557,7 @@ mod tests {
         let json = serde_json::to_value(&frame).expect("serialise");
         assert_eq!(json["type"], "policy");
         assert_eq!(
-            json["network"]["allowedRoutes"][0]["match"],
+            json["network"]["egress"]["http"][0]["match"],
             "api.linear.app"
         );
         let ids: Vec<&str> = json["credentials"]
@@ -1792,7 +1832,8 @@ mod tests {
             session
                 .current_policy()
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "gitlab.com"),
             "the connector's route is allowed live"
@@ -2460,6 +2501,10 @@ mod tests {
         .unwrap();
         drop(tx);
         credential_delivery_loop(Arc::downgrade(&session), rx).await;
+        assert!(
+            session.current_state().is_empty(),
+            "denying an oauth prompt fails it closed rather than driving a device sign-in, and leaves no rule"
+        );
         let mut denied = false;
         while let Ok(frame) = frame_rx.try_recv() {
             if let HostFrame::CredentialDecision(d) = frame {

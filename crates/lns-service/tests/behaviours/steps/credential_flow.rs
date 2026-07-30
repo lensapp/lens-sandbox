@@ -530,6 +530,22 @@ fn given_disconnected_while_card_open(world: &mut BehaviourWorld, credential_id:
     world.credential().forget_project_grants(&credential_id);
 }
 
+#[then(regex = r#"^a run in another project is still asked for "([^"]+)"$"#)]
+fn then_another_project_still_asked(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    if !world
+        .credential()
+        .another_project_is_still_asked(&credential_id)
+    {
+        return Err(format!(
+            "a run in another project got no card for {credential_id}, so closing a card here silenced it machine-wide — the blast radius the dismissal must not have"
+        ));
+    }
+    Ok(())
+}
+
 #[then(regex = r#"^the workload grant sidecar records no grant for "([^"]+)"$"#)]
 fn then_grant_sidecar_records_nothing(
     world: &mut BehaviourWorld,
@@ -907,6 +923,154 @@ fn decision_allow_assert(frames: &[HostFrame]) -> Result<(), String> {
     let d = last_credential_decision(frames).ok_or("no credential decision emitted")?;
     if !matches!(d.decision, CredentialDecisionKind::Allow) {
         return Err(format!("expected Allow, got {:?}", d.decision));
+    }
+    Ok(())
+}
+
+#[when("the developer closes the card without choosing")]
+fn when_developer_closes_the_card(world: &mut BehaviourWorld) {
+    if let Some(rig) = world.approval.as_mut() {
+        let id = rig
+            .notifier
+            .presented
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a card must be visible before it can be closed")
+            .id
+            .clone();
+        rig.session.dismiss_request(&id);
+    }
+    if let Some(rig) = world.credential.as_mut() {
+        let id = window_credential_id(rig);
+        rig.session
+            .record_decision(&id, CredentialDecisionRequest::Dismiss);
+    }
+}
+
+#[when("the developer closes every card at once")]
+fn when_developer_closes_every_card(world: &mut BehaviourWorld) {
+    let rig = world.credential();
+    // Drive the pile's own fan-out rather than deciding each card here, or the scenario would pin the loop the test wrote instead of the one the ✕ runs.
+    let snapshot = rig.window_state.snapshot();
+    lns_service::tray::close_all(&rig.window_state, &snapshot);
+    rig.apply_queued_card_decisions();
+}
+
+#[given(regex = r#"^credential cards for "([^"]+)" and "([^"]+)" are visible$"#)]
+fn given_two_credential_cards(world: &mut BehaviourWorld, first: String, second: String) {
+    let rig = world.credential();
+    submit_credential_with_id(rig, "cred-first", &first);
+    submit_credential_with_id(rig, "cred-second", &second);
+}
+
+#[then("both held requests are failed at the boundary")]
+fn then_both_held_requests_failed(world: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = world.credential();
+    let frames = drain_frames(rig);
+    let failed = frames
+        .iter()
+        .filter_map(|f| match f {
+            HostFrame::CredentialDecision(d) => Some(d),
+            _ => None,
+        })
+        .filter(|d| {
+            matches!(
+                d.decision,
+                CredentialDecisionKind::Deny | CredentialDecisionKind::Timeout
+            )
+        })
+        .count();
+    if failed < 2 {
+        return Err(format!("expected two failed requests, got {failed}"));
+    }
+    Ok(())
+}
+
+#[then(
+    regex = r#"^a future request carrying either the "([^"]+)" or "([^"]+)" placeholder fires a fresh credential card$"#
+)]
+fn then_both_placeholders_fire_fresh_cards(
+    world: &mut BehaviourWorld,
+    first: String,
+    second: String,
+) -> Result<(), String> {
+    // Both, not either: the bug was one click deciding for every card in the stack, so checking one of the two cannot tell "nothing was decided for any" from "nothing was decided for the first".
+    for credential_id in [&first, &second] {
+        let rig = world.credential();
+        submit_credential_with_id(
+            rig,
+            &format!("fresh-after-close-{credential_id}"),
+            credential_id,
+        );
+        let snap = rig.window_state.snapshot();
+        if snap
+            .pending_credentials
+            .iter()
+            .all(|c| &c.credential_id != credential_id)
+        {
+            return Err(format!(
+                "no fresh credential card for {credential_id} after a close-all"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the audit chain records the "([^"]+)" credential approval as denied once$"#)]
+fn then_audit_records_denied_once(
+    world: &mut BehaviourWorld,
+    credential_id: String,
+) -> Result<(), String> {
+    let rig = world.credential();
+    let events = rig.ledger.events.lock().unwrap();
+    let matched = events.iter().any(|e| {
+        matches!(
+            e,
+            lns_ipc::LedgerEvent::Approval {
+                kind: lns_ipc::ApprovalKind::Credential,
+                target,
+                decision: lns_ipc::Decision::DenyOnce,
+                ..
+            } if target == &credential_id
+        )
+    });
+    if !matched {
+        return Err(format!(
+            "no deny-once approval for {credential_id}; got {events:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r#"^the audit chain records no approval for "([^"]+)"$"#)]
+fn then_audit_records_no_approval(
+    world: &mut BehaviourWorld,
+    target_id: String,
+) -> Result<(), String> {
+    let recorded: Vec<lns_ipc::LedgerEvent> = world
+        .approval
+        .as_ref()
+        .map(|r| r.ledger.events.lock().unwrap().clone())
+        .into_iter()
+        .chain(
+            world
+                .credential
+                .as_ref()
+                .map(|r| r.ledger.events.lock().unwrap().clone()),
+        )
+        .flatten()
+        .filter(|e| {
+            matches!(
+                e,
+                lns_ipc::LedgerEvent::Approval { target, .. } if target == &target_id
+            )
+        })
+        .collect();
+    if !recorded.is_empty() {
+        return Err(format!(
+            "a non-decision must earn no audit line, got {recorded:?}"
+        ));
     }
     Ok(())
 }

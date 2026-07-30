@@ -178,7 +178,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
         root.join("lns-policy.yaml"),
-        "network:\n  allowedRoutes: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+        "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
     )
     .expect("write the project policy");
     root
@@ -1140,6 +1140,14 @@ fn start_detached(world: &mut E2eWorld, cmd_line: String) {
     }
 }
 
+#[when(regex = r#"^the user starts a detached microVM command "([^"]*)" as user "([^"]+)"$"#)]
+fn start_detached_as_user(world: &mut E2eWorld, cmd_line: String, user: String) {
+    run_microvm(world, vec!["-d".into(), "-u".into(), user], &cmd_line);
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
+}
+
 #[when(regex = r#"^the user starts a detached microVM command "([^"]*)" with auto-remove$"#)]
 fn start_detached_auto_remove(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec!["-d".into(), "--rm".into()], &cmd_line);
@@ -1401,7 +1409,7 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  allowedRoutes:\n    - match: api.example.test\n      verdict: allow\n      transport: direct\n",
+        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 

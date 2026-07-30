@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use lns_policy::grants::{GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity};
-use lns_service::approval_flow::protocol::{HostFrame, PolicyMessage};
-use lns_service::approval_flow::window::WindowState;
+use lns_service::approval_flow::protocol::{CredentialPending, HostFrame, PolicyMessage};
+use lns_service::approval_flow::window::{CredentialDecisionDelivery, WindowState};
 use lns_service::credential_flow::notification::WindowCredentialNotifier;
 use lns_service::credential_flow::providers::DefProvider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
@@ -14,6 +14,7 @@ use lns_service::credential_flow::session::CredentialSession;
 use lns_service::credential_flow::store::{
     CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
+use lns_service::ledger::LedgerRecorder;
 use lns_service::oauth::{
     AuthCodeFlow, CallbackHandle, CallbackListener, CallbackParams, Clock, DeviceCode, DeviceFlow,
     OauthConfig, PkceChallenge, PkceConfig, PollOutcome, TokenSet,
@@ -41,6 +42,18 @@ fn fixture_providers() -> Vec<DefProvider> {
             header: None,
         }],
     })]
+}
+
+/// Captures the audit lines a scenario earns, so a scenario can assert the chain stayed silent for a non-decision.
+#[derive(Default)]
+pub struct RigRecorder {
+    pub events: Mutex<Vec<lns_ipc::LedgerEvent>>,
+}
+
+impl LedgerRecorder for RigRecorder {
+    fn record(&self, event: lns_ipc::LedgerEvent) {
+        self.events.lock().unwrap().push(event);
+    }
 }
 
 pub struct FlakyCredentialStore {
@@ -90,6 +103,8 @@ pub struct CredentialRig {
     grant_store: Arc<dyn GrantStore>,
     grant_project: String,
     grant_workload: WorkloadIdentity,
+    pub ledger: Arc<RigRecorder>,
+    card_decisions: Mutex<mpsc::UnboundedReceiver<CredentialDecisionDelivery>>,
     _tempdir: TempDir,
 }
 
@@ -123,7 +138,7 @@ impl CredentialRig {
         let window_state = WindowState::new();
         let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let detector_values = host_values.clone();
-        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let (decision_tx, decision_rx) = mpsc::unbounded_channel();
         let notifier = Arc::new(WindowCredentialNotifier::new(
             window_state.clone(),
             decision_tx,
@@ -166,6 +181,8 @@ impl CredentialRig {
                 grant_store.clone(),
             ),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state,
@@ -179,6 +196,8 @@ impl CredentialRig {
             grant_store,
             grant_project,
             grant_workload,
+            ledger,
+            card_decisions: Mutex::new(decision_rx),
             _tempdir: dir,
         }
     }
@@ -192,6 +211,55 @@ impl CredentialRig {
                     .is_some_and(|g| g.verdict == GrantVerdict::Deny)
             })
             .unwrap_or(false)
+    }
+
+    /// Applies whatever decisions the approval window queued on its delivery channel, the way the service's credential delivery loop does, so a scenario can drive a real card gesture end to end instead of calling `record_decision` itself. Models the non-sign-in path only, which is every static value decision.
+    pub fn apply_queued_card_decisions(&self) {
+        let mut rx = self
+            .card_decisions
+            .lock()
+            .expect("card decisions mutex poisoned");
+        while let Ok(delivery) = rx.try_recv() {
+            self.session.record_decision(&delivery.id, delivery.request);
+        }
+    }
+
+    /// Whether a fresh run in a different project is still asked for `credential_id`, reading the machine-wide store exactly as a later run would. The blast radius of a decision only shows from outside the run that made it, so this builds a second session over the same store rather than re-asking inside this one.
+    pub fn another_project_is_still_asked(&self, credential_id: &str) -> bool {
+        let state = self.store.load().expect("read the machine-wide store");
+        let window_state = WindowState::new();
+        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let notifier = Arc::new(WindowCredentialNotifier::new(
+            window_state.clone(),
+            decision_tx,
+            None,
+            Arc::new(|_: &str| false),
+        ));
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
+        let session =
+            CredentialSession::new(state, notifier, self.store.clone(), frame_tx, self.timeout)
+                .with_custom_providers(Arc::new(fixture_providers()))
+                .with_grants(
+                    "rig-other-project".to_string(),
+                    WorkloadIdentity::Definition {
+                        dir: "/rig-other".to_string(),
+                    },
+                    self.grant_store.clone(),
+                );
+        session.submit_pending(
+            CredentialPending {
+                id: "other-project-request".to_string(),
+                credential_id: credential_id.to_string(),
+                action: format!("use of {credential_id} placeholder"),
+                reason: "placeholder-unauthorized".to_string(),
+            },
+            std::time::Instant::now(),
+        );
+        window_state
+            .snapshot()
+            .pending_credentials
+            .iter()
+            .any(|c| c.credential_id == credential_id)
     }
 
     /// What `lns connector disconnect` does to the sidecar from its own process while this run is still deciding.
@@ -303,7 +371,7 @@ impl CredentialRig {
         let window_state = WindowState::new();
         let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let detector_values = host_values.clone();
-        let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+        let (decision_tx, decision_rx) = mpsc::unbounded_channel();
         let notifier = Arc::new(WindowCredentialNotifier::new(
             window_state.clone(),
             decision_tx,
@@ -378,6 +446,8 @@ impl CredentialRig {
                 grant_store.clone(),
             ),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state,
@@ -391,6 +461,8 @@ impl CredentialRig {
             grant_store,
             grant_project,
             grant_workload,
+            ledger,
+            card_decisions: Mutex::new(decision_rx),
             _tempdir: dir,
         }
     }
@@ -461,6 +533,7 @@ impl CallbackHandle for RigCallbackHandle {
 
 struct RigShared {
     window_state: Arc<WindowState>,
+    decision_rx: mpsc::UnboundedReceiver<CredentialDecisionDelivery>,
     host_values: Arc<Mutex<HashMap<String, String>>>,
     store: Arc<FlakyCredentialStore>,
     frames: mpsc::UnboundedReceiver<HostFrame>,
@@ -491,7 +564,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
     let window_state = WindowState::new();
     let host_values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
     let detector_values = host_values.clone();
-    let (decision_tx, _decision_rx) = mpsc::unbounded_channel();
+    let (decision_tx, decision_rx) = mpsc::unbounded_channel();
     let notifier = Arc::new(WindowCredentialNotifier::new(
         window_state.clone(),
         decision_tx,
@@ -528,6 +601,7 @@ fn scaffold(state: CredentialStateFile, timeout: Duration) -> (CredentialSession
         session,
         RigShared {
             window_state,
+            decision_rx,
             host_values,
             store,
             frames: frame_rx,
@@ -606,6 +680,8 @@ impl CredentialRig {
                     "OpenRouter".to_string(),
                 )])),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state: shared.window_state,
@@ -619,6 +695,8 @@ impl CredentialRig {
             grant_store: shared.grant_store,
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
+            ledger,
+            card_decisions: Mutex::new(shared.decision_rx),
             _tempdir: shared.dir,
         }
     }
@@ -649,6 +727,8 @@ impl CredentialRig {
                 .with_custom_providers(Arc::new(vec![provider]))
                 .with_armed_ids(HashSet::from([id.to_string()])),
         );
+        let ledger = Arc::new(RigRecorder::default());
+        session.set_ledger_recorder(ledger.clone());
         Self {
             session,
             window_state: shared.window_state,
@@ -662,6 +742,8 @@ impl CredentialRig {
             grant_store: shared.grant_store,
             grant_project: shared.grant_project,
             grant_workload: shared.grant_workload,
+            ledger,
+            card_decisions: Mutex::new(shared.decision_rx),
             _tempdir: shared.dir,
         }
     }

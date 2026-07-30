@@ -49,7 +49,7 @@ pub fn guardrail_flags(policy: &Policy) -> Vec<GuardrailFlag> {
     if policy.network.default_verdict == Verdict::Allow {
         flags.push(GuardrailFlag::PermissiveDefaultVerdict);
     }
-    for rule in &policy.network.allowed_routes {
+    for rule in &policy.network.egress.http {
         if rule.verdict != Verdict::Allow {
             continue;
         }
@@ -74,15 +74,48 @@ pub fn run_summary(flags: &[GuardrailFlag]) -> String {
     summary
 }
 
-/// A deny-by-default layer permits only the routes it names, so an allow survives the merge only if every such ceiling layer carries it.
-fn allowed_by_every_ceiling(rule: &RouteRule, ceilings: &[&Policy]) -> bool {
-    ceilings
-        .iter()
-        .all(|ceiling| ceiling.network.allowed_routes.contains(rule))
+type TableOf<R> = fn(&Policy) -> &Vec<R>;
+
+fn push_unique<R: Clone + PartialEq>(merged: &mut Vec<R>, rule: &R) {
+    if !merged.contains(rule) {
+        merged.push(rule.clone());
+    }
+}
+
+/// A deny-by-default layer permits only the destinations it names, so an allow survives the merge only if every such ceiling layer carries it.
+fn allowed_by_every_ceiling<R: PartialEq>(
+    rule: &R,
+    ceilings: &[&Policy],
+    table: TableOf<R>,
+) -> bool {
+    ceilings.iter().all(|ceiling| table(ceiling).contains(rule))
+}
+
+/// Fold one egress table across `layers` into the merged table the guest gate installs, deny-first and clamped by the deny-by-default `ceilings`.
+// Deny-first ordering is load-bearing: lens-sandbox-core's rule lookup is first-match-wins, so a destination denied by any layer must have its deny rule appear before any allow.
+fn merge_rule_table<R: Clone + PartialEq>(
+    layers: &[&Policy],
+    ceilings: &[&Policy],
+    table: TableOf<R>,
+    is_deny: fn(&R) -> bool,
+) -> Vec<R> {
+    let mut merged: Vec<R> = Vec::new();
+    for layer in layers {
+        for rule in table(layer).iter().filter(|rule| is_deny(rule)) {
+            push_unique(&mut merged, rule);
+        }
+    }
+    for layer in layers {
+        for rule in table(layer).iter().filter(|rule| !is_deny(rule)) {
+            if allowed_by_every_ceiling(rule, ceilings, table) {
+                push_unique(&mut merged, rule);
+            }
+        }
+    }
+    merged
 }
 
 /// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a `deny`-by-default layer is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), `defaultVerdict` is backstopped to `ask` unless a layer denies, and only the user's overlay connectors are applied — an artifact-declared connector the user hasn't connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
-// Deny-first ordering is load-bearing: lens-sandbox-core's `find_matching_route` is first-match-wins, so a host denied by any layer must have its deny rule appear before any allow.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
     let ceilings: Vec<&Policy> = layers
@@ -90,26 +123,12 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
         .copied()
         .filter(|policy| policy.network.default_verdict == Verdict::Deny)
         .collect();
-    let mut routes: Vec<RouteRule> = Vec::new();
-    let mut push_unique = |rule: &RouteRule| {
-        if !routes.contains(rule) {
-            routes.push(rule.clone());
-        }
-    };
-    for layer in &layers {
-        for rule in &layer.network.allowed_routes {
-            if rule.verdict == Verdict::Deny {
-                push_unique(rule);
-            }
-        }
-    }
-    for layer in &layers {
-        for rule in &layer.network.allowed_routes {
-            if rule.verdict != Verdict::Deny && allowed_by_every_ceiling(rule, &ceilings) {
-                push_unique(rule);
-            }
-        }
-    }
+    let http = merge_rule_table(
+        &layers,
+        &ceilings,
+        |policy| &policy.network.egress.http,
+        |rule: &RouteRule| rule.verdict == Verdict::Deny,
+    );
     let default_verdict = if layers
         .iter()
         .any(|l| l.network.default_verdict == Verdict::Deny)
@@ -120,7 +139,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     };
     Policy {
         network: NetworkPolicy {
-            allowed_routes: routes,
+            egress: lns_policy::Egress { http },
             default_verdict,
             default_transport: overlay.network.default_transport,
         },
@@ -189,7 +208,7 @@ mod tests {
         let baseline = allow("api.example.test");
         let overlay = deny("api.example.test");
         let merged = merge_effective(Some(&baseline), &overlay);
-        let routes = &merged.network.allowed_routes;
+        let routes = &merged.network.egress.http;
         let deny_idx = routes.iter().position(|r| r.verdict == Verdict::Deny);
         let allow_idx = routes.iter().position(|r| r.verdict == Verdict::Allow);
         assert!(
@@ -243,12 +262,12 @@ mod tests {
         let merged = merge_effective(Some(&baseline), &overlay);
 
         assert!(
-            !merged.network.allowed_routes.iter().any(|rule| {
+            !merged.network.egress.http.iter().any(|rule| {
                 rule.match_pattern == "api.overlay-only.example" && rule.verdict == Verdict::Allow
             }),
             "a local overlay must not widen a sandbox's deny-by-default baseline: {merged:?}"
         );
-        assert!(merged.network.allowed_routes.iter().any(|rule| {
+        assert!(merged.network.egress.http.iter().any(|rule| {
             rule.match_pattern == "api.allowed.example" && rule.verdict == Verdict::Allow
         }));
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
@@ -268,12 +287,12 @@ mod tests {
         let merged = merge_effective(Some(&baseline), &overlay);
 
         assert!(
-            !merged.network.allowed_routes.iter().any(|rule| {
+            !merged.network.egress.http.iter().any(|rule| {
                 rule.match_pattern == "attacker.example" && rule.verdict == Verdict::Allow
             }),
             "a pulled artifact's allow must not punch through the user's deny-by-default lockdown: {merged:?}"
         );
-        assert!(merged.network.allowed_routes.iter().any(|rule| {
+        assert!(merged.network.egress.http.iter().any(|rule| {
             rule.match_pattern == "api.trusted.example" && rule.verdict == Verdict::Allow
         }));
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
@@ -287,7 +306,7 @@ mod tests {
         let merged = merge_effective(Some(&baseline), &overlay);
 
         assert!(
-            merged.network.allowed_routes.iter().any(|rule| {
+            merged.network.egress.http.iter().any(|rule| {
                 rule.match_pattern == "api.shared.example" && rule.verdict == Verdict::Allow
             }),
             "a host both the user and the artifact allow under deny-by-default is in the intersection and must survive: {merged:?}"
@@ -305,7 +324,8 @@ mod tests {
         assert!(
             !merged
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|rule| rule.verdict == Verdict::Allow),
             "two deny-by-default layers with disjoint allowlists intersect to nothing: {merged:?}"
@@ -320,7 +340,8 @@ mod tests {
         assert!(
             merged
                 .network
-                .allowed_routes
+                .egress
+                .http
                 .iter()
                 .any(|r| r.match_pattern == "api.example.test")
         );

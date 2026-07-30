@@ -61,7 +61,11 @@ impl AgentDispatcher {
         reaper: Arc<OrphanReaper>,
         runner: Arc<dyn AgentRunner>,
     ) -> Self {
-        let exec_manager = ExecManager::new(sandbox_creds.clone(), config.core.is_root);
+        let exec_manager = ExecManager::new(
+            crate::run_as::setuid_creds(sandbox_creds.as_ref()),
+            config.core.is_root,
+            reaper.guard(),
+        );
         let activity = ActivityStream::new();
         spawn_activity_to_stdout(&activity);
         Self {
@@ -236,7 +240,7 @@ pub(crate) fn agent_child_spec(
             creds.map(|c| c.home()),
         )),
         env: build_agent_env(config, creds, env),
-        creds: creds.cloned(),
+        creds: crate::run_as::setuid_creds(creds),
         is_root: config.core.is_root,
     }
 }
@@ -385,6 +389,42 @@ mod tests {
         let env = build_agent_env(&config, Some(&creds), &HashMap::new());
         assert_eq!(env.get("HOME").map(String::as_str), Some(creds.home()));
         assert_eq!(env.get("USER").map(String::as_str), Some(creds.user()));
+    }
+
+    #[test]
+    fn a_root_run_as_keeps_its_identity_but_not_its_setuid() {
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let mut config = make_agent_config();
+        config.workspace_path = None;
+
+        let spec = agent_child_spec(&config, Some(&creds), &HashMap::new());
+
+        assert!(
+            spec.creds.is_none(),
+            "a root run-as must reach child_spawner's cap-drop branch, which only runs when creds is None"
+        );
+        assert_eq!(
+            spec.env.get("HOME").map(String::as_str),
+            Some(creds.home()),
+            "dropping the setuid must not cost the workload its HOME — the flag exists so root-owned tooling works"
+        );
+        assert_eq!(spec.env.get("USER").map(String::as_str), Some(creds.user()));
+        assert_eq!(
+            spec.cwd.as_deref(),
+            Some(creds.home()),
+            "with no explicit workspace the agent still starts in the run-as user's home"
+        );
+    }
+
+    #[test]
+    fn a_non_root_run_as_still_setuids() {
+        let creds = SandboxCredentials::resolve_by_uid(65534, 65534).expect("uid resolves on host");
+        let config = make_agent_config();
+
+        let spec = agent_child_spec(&config, Some(&creds), &HashMap::new());
+
+        let (uid, gid) = spec.creds.expect("a non-root run-as setuids").uid_gid();
+        assert_eq!((uid.as_raw(), gid.as_raw()), (65534, 65534));
     }
 
     #[tokio::test]

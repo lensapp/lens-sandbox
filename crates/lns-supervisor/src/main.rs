@@ -1,5 +1,6 @@
 mod config;
 mod dispatcher;
+mod run_as;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use lens_sandbox_core::network;
 use lens_sandbox_core::privilege;
 use lens_sandbox_core::proxy;
 
-/// Drop to the uid/gid lns-init resolved in the guest, or `None` to run the agent as root with capabilities dropped.
+/// The run-as identity lns-init resolved in the guest; whether it is also a setuid target is decided at spawn time by `run_as::setuid_creds`.
 fn resolve_agent_creds() -> Option<privilege::SandboxCredentials> {
     let uid = env_u32("LENS_RUN_UID");
     let gid = env_u32("LENS_RUN_GID");
