@@ -198,7 +198,7 @@ fn remove_saved_credential(state: &mut CredentialStateFile, connector_id: &str) 
 mod tests {
     use super::*;
     use crate::approval_flow::window::{CredentialDecisionDelivery, SignInCard};
-    use crate::credential_flow::session::CredentialPendingPrompt;
+    use crate::credential_flow::session::{CredentialPendingPrompt, DenyScope};
     use lns_policy::grants::{GrantRecord, WorkloadGrantFile, WorkloadIdentity};
     use std::collections::HashMap;
     use tokio::sync::mpsc;
@@ -252,6 +252,7 @@ mod tests {
                     injection_domains: vec!["api.some-provider.example".into()],
                     is_project_defined: false,
                     bound_value_available: true,
+                    deny_scope: DenyScope::Workload,
                 },
                 true,
                 tx,

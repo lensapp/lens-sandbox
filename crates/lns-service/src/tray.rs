@@ -2389,6 +2389,7 @@ mod tests {
                 env_var: None,
                 injection_domains: vec![],
                 is_project_defined: false,
+                origin: None,
             },
             cancel_tx,
         );
