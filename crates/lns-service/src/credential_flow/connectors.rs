@@ -246,8 +246,8 @@ pub fn boot_sign_in_grants(
 
 /// Two route patterns collide if either matches the other as a host under the gate's own wildcard- and case-insensitive rule, so an applied domain suppresses a connectable that shares it even when the patterns aren't byte-identical.
 fn domains_overlap(a: &str, b: &str) -> bool {
-    use crate::approval_flow::session::host_matches_pattern;
-    host_matches_pattern(a, b) || host_matches_pattern(b, a)
+    use lns_policy::matching::domain_matches;
+    domain_matches(a, b) || domain_matches(b, a)
 }
 
 /// Every domain a connector claims: its route patterns plus the domains its credential/oauth injections actually write a token onto (a custom catalog may inject on a domain it doesn't route).

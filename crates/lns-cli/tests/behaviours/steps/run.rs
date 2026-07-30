@@ -10,7 +10,7 @@ use lns_cli::service::{
 use lns_ipc::{
     LogLevel, Response, WireFrame, encode_frame, encode_wire_frame, read_frame_bytes_async,
 };
-use lns_policy::{Policy, RouteRule, Transport, Verdict};
+use lns_policy::{Policy, RouteRule, Verdict};
 use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
 
@@ -173,26 +173,10 @@ fn that_policy_has(world: &mut BehaviourWorld, verdict: String, allows: usize, d
         other => panic!("unknown verdict {other:?}"),
     };
     for i in 0..allows {
-        policy.add_rule(RouteRule {
-            match_pattern: format!("allow-{i}.example"),
-            verdict: Verdict::Allow,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-        });
+        policy.add_rule(RouteRule::allow_host(format!("allow-{i}.example")));
     }
     for i in 0..denies {
-        policy.add_rule(RouteRule {
-            match_pattern: format!("deny-{i}.example"),
-            verdict: Verdict::Deny,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-        });
+        policy.add_rule(RouteRule::deny_host(format!("deny-{i}.example")));
     }
     policy
         .save_atomic(&cwd.join("lns-policy.yaml"))

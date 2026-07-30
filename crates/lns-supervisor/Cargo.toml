@@ -21,3 +21,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 serial_test = "3"
+lns-policy = { path = "../lns-policy" }

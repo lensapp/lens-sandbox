@@ -11,6 +11,7 @@ use crate::approval_flow::protocol::{
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
 use lns_policy::connectors::TokenFallback;
+use lns_policy::matching::domain_matches;
 use lns_policy::{Policy, PolicyStore, RouteRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
@@ -167,7 +168,7 @@ impl ApprovalSession {
     fn offer_for_host(&self, host: &str) -> Option<&OfferableConnector> {
         self.offerable
             .iter()
-            .find(|i| i.patterns.iter().any(|p| host_matches_pattern(p, host)))
+            .find(|i| i.patterns.iter().any(|p| domain_matches(p, host)))
     }
 
     /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected this run.
@@ -535,22 +536,6 @@ impl ApprovalSession {
             self.notifier.dismiss(&request_id);
             self.send_decision_frame(&request_id, Decision::AllowOnce);
         }
-    }
-}
-
-/// Matches a request host against a connector route pattern, case-insensitively as DNS names are: exact, a leading `*.suffix` wildcard covering the apex and any subdomain, or a mid-segment `prefix.*.suffix` wildcard covering one variable label.
-pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
-    let (pattern, host) = (pattern.as_str(), host.as_str());
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        host == suffix || host.ends_with(&format!(".{suffix}"))
-    } else if let Some((prefix, suffix)) = pattern.split_once('*') {
-        host.starts_with(prefix)
-            && host[prefix.len()..].ends_with(suffix)
-            && host.len() > prefix.len() + suffix.len()
-    } else {
-        pattern == host
     }
 }
 
@@ -1926,61 +1911,5 @@ pub(crate) mod tests {
             "once the connect ends the request can time out"
         );
         assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
-    }
-
-    #[test]
-    fn host_matches_pattern_exact_matches_only_the_same_host() {
-        assert!(host_matches_pattern(
-            "api.some-oauth.example",
-            "api.some-oauth.example"
-        ));
-        assert!(!host_matches_pattern(
-            "api.some-oauth.example",
-            "some-oauth.example"
-        ));
-        assert!(!host_matches_pattern(
-            "api.some-oauth.example",
-            "evil-api.some-oauth.example"
-        ));
-    }
-
-    #[test]
-    fn host_matches_pattern_wildcard_covers_apex_and_subdomains_only() {
-        assert!(host_matches_pattern("*.huggingface.co", "huggingface.co"));
-        assert!(host_matches_pattern(
-            "*.huggingface.co",
-            "cdn.huggingface.co"
-        ));
-        assert!(!host_matches_pattern(
-            "*.huggingface.co",
-            "evilhuggingface.co"
-        ));
-        assert!(!host_matches_pattern(
-            "*.huggingface.co",
-            "huggingface.co.evil.com"
-        ));
-    }
-
-    #[test]
-    fn host_matches_pattern_is_case_insensitive_like_dns() {
-        assert!(host_matches_pattern("api.example.test", "API.Example.Test"));
-        assert!(host_matches_pattern("*.example.test", "CDN.Example.Test"));
-        assert!(host_matches_pattern("API.EXAMPLE.TEST", "api.example.test"));
-    }
-
-    #[test]
-    fn host_matches_pattern_mid_segment_wildcard_covers_a_variable_label() {
-        assert!(host_matches_pattern(
-            "bedrock-runtime.*.amazonaws.com",
-            "bedrock-runtime.us-east-1.amazonaws.com"
-        ));
-        assert!(!host_matches_pattern(
-            "bedrock-runtime.*.amazonaws.com",
-            "bedrock-runtime.us-east-1amazonaws.com"
-        ));
-        assert!(!host_matches_pattern(
-            "bedrock-runtime.*.amazonaws.com",
-            "bedrock.us-east-1.amazonaws.com"
-        ));
     }
 }

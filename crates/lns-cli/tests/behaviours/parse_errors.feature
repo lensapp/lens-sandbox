@@ -46,3 +46,8 @@ Feature: clap rejects bad input with exit code 2
     Then the exit code is 2
     And the output contains "invalid value"
     And the output contains "--format"
+
+  Scenario: lns policy deny does not take --binary, which only narrows an allow
+    When I run "lns policy deny evil.example.test --binary /usr/bin/git"
+    Then the exit code is 2
+    And the output contains "unexpected argument"
