@@ -43,6 +43,7 @@ impl ConnectorRoute {
             description: None,
             tls_terminate: self.tls_terminate || !self.rules.is_empty(),
             rules: self.rules.clone(),
+            binaries: None,
         }
     }
 }

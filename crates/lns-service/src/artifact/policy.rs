@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use lns_policy::{NetworkPolicy, Policy, RouteRule, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,13 +84,41 @@ fn push_unique<R: Clone + PartialEq>(merged: &mut Vec<R>, rule: &R) {
     }
 }
 
-/// A deny-by-default layer permits only the destinations it names, so an allow survives the merge only if every such ceiling layer carries it.
-fn allowed_by_every_ceiling<R: PartialEq>(
+/// A deny-by-default layer permits only the destinations it names, so an allow survives the merge only if every such ceiling layer carries a rule permitting it.
+fn allowed_by_every_ceiling<R>(
     rule: &R,
     ceilings: &[&Policy],
     table: TableOf<R>,
+    permits: fn(&R, &R) -> bool,
 ) -> bool {
-    ceilings.iter().all(|ceiling| table(ceiling).contains(rule))
+    ceilings.iter().all(|ceiling| {
+        table(ceiling)
+            .iter()
+            .any(|permitted| permits(permitted, rule))
+    })
+}
+
+/// Whether `permitted` covers `rule`: identical apart from binary scoping and the human-readable note neither layer grants anything by, and scoped no tighter than `rule` — a rule that only narrows a ceiling's grant to fewer callers grants nothing the ceiling didn't.
+fn permits(permitted: &RouteRule, rule: &RouteRule) -> bool {
+    let widened = RouteRule {
+        binaries: permitted.binaries.clone(),
+        description: permitted.description.clone(),
+        ..rule.clone()
+    };
+    widened == *permitted && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
+}
+
+fn scope_within(rule: Option<&[String]>, permitted: Option<&[String]>) -> bool {
+    match (rule, permitted) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        // Compared as paths, the way the guest compares them against /proc/<pid>/exe, so a redundant separator doesn't read as a different binary.
+        (Some(rule), Some(permitted)) => rule.iter().all(|binary| {
+            permitted
+                .iter()
+                .any(|listed| Path::new(listed) == Path::new(binary))
+        }),
+    }
 }
 
 /// Fold one egress table across `layers` into the merged table the guest gate installs, deny-first and clamped by the deny-by-default `ceilings`.
@@ -98,6 +128,7 @@ fn merge_rule_table<R: Clone + PartialEq>(
     ceilings: &[&Policy],
     table: TableOf<R>,
     is_deny: fn(&R) -> bool,
+    permits: fn(&R, &R) -> bool,
 ) -> Vec<R> {
     let mut merged: Vec<R> = Vec::new();
     for layer in layers {
@@ -107,7 +138,7 @@ fn merge_rule_table<R: Clone + PartialEq>(
     }
     for layer in layers {
         for rule in table(layer).iter().filter(|rule| !is_deny(rule)) {
-            if allowed_by_every_ceiling(rule, ceilings, table) {
+            if allowed_by_every_ceiling(rule, ceilings, table, permits) {
                 push_unique(&mut merged, rule);
             }
         }
@@ -128,6 +159,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
         &ceilings,
         |policy| &policy.network.egress.http,
         |rule: &RouteRule| rule.verdict == Verdict::Deny,
+        permits,
     );
     let default_verdict = if layers
         .iter()
@@ -296,6 +328,148 @@ mod tests {
             rule.match_pattern == "api.trusted.example" && rule.verdict == Verdict::Allow
         }));
         assert_eq!(merged.network.default_verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn merge_does_not_let_an_unscoped_allow_clear_a_binary_scoped_ceiling() {
+        let overlay = allow("git.example.test");
+        let mut baseline = deny_default_allowing("git.example.test");
+        baseline.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged.network.egress.http.iter().any(|rule| {
+                rule.match_pattern == "git.example.test" && rule.binaries.is_none()
+            }),
+            "an artifact that only allows a host for one binary must not be widened to every caller by an unscoped overlay allow: {merged:?}"
+        );
+        assert!(
+            merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| { rule.binaries.as_deref() == Some(&["/usr/bin/git".to_string()]) }),
+            "the scoped allow itself clears every ceiling and must survive, or the assertion above passes vacuously: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_scoped_allow_that_only_narrows_what_a_ceiling_already_permits() {
+        let mut overlay = allow("git.example.test");
+        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+        let baseline = deny_default_allowing("git.example.test");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        let scoped = merged
+            .network
+            .egress
+            .http
+            .iter()
+            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git".to_string()]));
+        let open =
+            merged.network.egress.http.iter().position(|rule| {
+                rule.match_pattern == "git.example.test" && rule.binaries.is_none()
+            });
+        assert!(
+            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
+            "narrowing a host the ceiling already allows to every caller must survive the merge, and a first-match gate must see the narrower rule before the ceiling's open allow or the narrowing is void: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_scoped_allow_whose_ceiling_rule_differs_only_in_its_description() {
+        let mut overlay = allow("git.example.test");
+        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+        let mut baseline = deny_default_allowing("git.example.test");
+        baseline.network.egress.http[0].description = Some("git over https".into());
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        let scoped = merged
+            .network
+            .egress
+            .http
+            .iter()
+            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git".to_string()]));
+        let open =
+            merged.network.egress.http.iter().position(|rule| {
+                rule.match_pattern == "git.example.test" && rule.binaries.is_none()
+            });
+        assert!(
+            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
+            "a note on the ceiling's rule is not part of its grant, so it must not decide whether the user's narrowing survives — dropping it leaves the ceiling's own open allow in force: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_reads_a_redundant_separator_as_the_same_binary_the_ceiling_named() {
+        let mut overlay = allow("git.example.test");
+        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git/".into()]);
+        let mut baseline = deny_default_allowing("git.example.test");
+        baseline.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git/".to_string()])),
+            "the guest compares these as paths and admits the same caller, so the merge must not read them as different binaries and drop the overlay: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_drops_a_scoped_allow_for_a_binary_the_ceilings_own_scope_excludes() {
+        let mut overlay = allow("git.example.test");
+        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/curl".into()]);
+        let mut baseline = deny_default_allowing("git.example.test");
+        baseline.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/curl".to_string()])),
+            "a ceiling that names one binary must not be widened to another by an overlay scoped to it: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_does_not_let_a_scoped_overlay_allow_punch_through_a_ceiling() {
+        let mut overlay = allow("git.example.test");
+        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
+        let baseline = deny_default_allowing("other.example.test");
+
+        let merged = merge_effective(Some(&baseline), &overlay);
+
+        assert!(
+            !merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "git.example.test"),
+            "scoping an allow to one binary must not exempt it from an artifact's deny-by-default ceiling: {merged:?}"
+        );
+        assert!(
+            merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "other.example.test"),
+            "the ceiling's own allow must survive, or the assertion above passes on an empty merge: {merged:?}"
+        );
     }
 
     #[test]

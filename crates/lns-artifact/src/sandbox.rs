@@ -192,6 +192,10 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
         .policy
         .validate_local_transport()
         .context("sandbox policy")?;
+    doc.spec
+        .policy
+        .validate_binary_scopes()
+        .context("sandbox policy")?;
     if let Some(workdir) = &doc.spec.workdir {
         spec::validate_mount_path(workdir).context("workdir")?;
     }
@@ -586,6 +590,42 @@ mod tests {
         assert!(
             format!("{err:#}").contains("upstream transport isn't supported in the local sandbox"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_binary_scope() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["git"]}]}}}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not an absolute path"),
+            "a scope core would reject must fail here, not inside the guest: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_empty_binary_scope() {
+        let err = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":[]}]}}}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("matches no caller"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_an_absolute_binary_scope() {
+        let def = parse(&def_json(
+            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["/usr/bin/git"]}]}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.policy.egress.http[0].binaries,
+            Some(vec!["/usr/bin/git".to_string()])
         );
     }
 

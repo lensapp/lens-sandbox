@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,7 @@ pub mod credentials;
 mod env_subst;
 pub mod grants;
 pub mod host_bind_decisions;
+pub mod matching;
 pub mod providers;
 pub mod registry_auth;
 mod secure_file;
@@ -74,6 +75,13 @@ impl NetworkPolicy {
         }
         Ok(())
     }
+
+    pub fn validate_binary_scopes(&self) -> io::Result<()> {
+        self.egress
+            .http
+            .iter()
+            .try_for_each(RouteRule::validate_binaries)
+    }
 }
 
 pub(crate) fn is_false(b: &bool) -> bool {
@@ -97,6 +105,9 @@ pub struct RouteRule {
     pub tls_terminate: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<HttpRule>,
+    /// Absolute guest binary paths this rule is scoped to; absent means any caller, and a listed rule denies every other caller rather than falling through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binaries: Option<Vec<String>>,
 }
 
 /// HTTP method/path restriction within a route rule; wire-compatible with lens-sandbox-core's `HttpRule`.
@@ -139,6 +150,7 @@ impl Policy {
                 let policy: Self = serde_yaml::from_str(&text)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 policy.network.validate_local_transport()?;
+                policy.network.validate_binary_scopes()?;
                 Ok(policy)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -210,6 +222,7 @@ impl RouteRule {
             description: None,
             tls_terminate: false,
             rules: Vec::new(),
+            binaries: None,
         }
     }
 
@@ -222,8 +235,48 @@ impl RouteRule {
             description: None,
             tls_terminate: false,
             rules: Vec::new(),
+            binaries: None,
         }
     }
+
+    pub fn validate_binaries(&self) -> io::Result<()> {
+        let Some(binaries) = self.binaries.as_deref() else {
+            return Ok(());
+        };
+        if binaries.is_empty() {
+            return Err(invalid_data(format!(
+                "the rule for {:?} has an empty binaries filter: it matches no caller, so it denies the host for everyone — omit binaries to let any caller through",
+                self.match_pattern
+            )));
+        }
+        binaries
+            .iter()
+            .try_for_each(|path| self.validate_binary(path))
+    }
+
+    fn validate_binary(&self, binary: &str) -> io::Result<()> {
+        let unmatchable = |why: &str| {
+            Err(invalid_data(format!(
+                "the rule for {:?} lists the binary {binary:?}, which {why}: binaries are matched against the kernel-resolved /proc/<pid>/exe, so it can never match",
+                self.match_pattern
+            )))
+        };
+        let path = Path::new(binary);
+        if !path.is_absolute() {
+            return unmatchable("is not an absolute path");
+        }
+        if path.components().any(|c| c == Component::ParentDir) {
+            return unmatchable("climbs through a \"..\" segment");
+        }
+        if path.file_name().is_none() {
+            return unmatchable("names no binary");
+        }
+        Ok(())
+    }
+}
+
+fn invalid_data(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 #[cfg(test)]
@@ -323,6 +376,7 @@ mod tests {
                 method: Some("GET".into()),
                 path: Some("/api/v4/**".into()),
             }],
+            binaries: None,
         };
         let yaml = serde_yaml::to_string(&rule).unwrap();
         assert!(yaml.contains("scheme: https"), "got:\n{yaml}");
@@ -330,6 +384,146 @@ mod tests {
         assert!(yaml.contains("path: /api/v4/**"), "got:\n{yaml}");
         let parsed: RouteRule = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, rule);
+    }
+
+    #[test]
+    fn a_binary_scoped_route_rule_round_trips_with_the_core_wire_name() {
+        let rule = RouteRule {
+            match_pattern: "git.example.test".into(),
+            verdict: Verdict::Allow,
+            transport: Transport::Direct,
+            scheme: None,
+            description: None,
+            tls_terminate: false,
+            rules: Vec::new(),
+            binaries: Some(vec!["/usr/bin/git".into()]),
+        };
+        let yaml = serde_yaml::to_string(&rule).unwrap();
+        assert!(yaml.contains("binaries:"), "got:\n{yaml}");
+        assert!(yaml.contains("- /usr/bin/git"), "got:\n{yaml}");
+        let parsed: RouteRule = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, rule);
+    }
+
+    #[test]
+    fn an_unscoped_route_rule_omits_the_binaries_key() {
+        let yaml = serde_yaml::to_string(&RouteRule::allow_host("api.example.test")).unwrap();
+        assert!(
+            !yaml.contains("binaries"),
+            "sandbox-core reads an empty binaries list as `matches no caller`, so a rule open to every caller must omit the key:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_accepts_a_rule_scoped_to_an_absolute_binary() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
+  egress:
+    http:
+      - match: git.example.test
+        verdict: allow
+        binaries:
+          - /usr/bin/git
+  defaultVerdict: ask
+";
+        fs::write(&path, yaml).unwrap();
+        let p = Policy::load_or_default(&path).unwrap();
+        assert_eq!(
+            p.network.egress.http[0].binaries,
+            Some(vec!["/usr/bin/git".to_string()])
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_an_empty_binaries_filter() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
+  egress:
+    http:
+      - match: git.example.test
+        verdict: allow
+        binaries: []
+  defaultVerdict: ask
+";
+        fs::write(&path, yaml).unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("git.example.test")
+                && err.to_string().contains("matches no caller"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_a_relative_binary_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        let yaml = "\
+network:
+  egress:
+    http:
+      - match: git.example.test
+        verdict: allow
+        binaries:
+          - /usr/bin/git
+          - git
+  defaultVerdict: ask
+";
+        fs::write(&path, yaml).unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("\"git\"")
+                && err.to_string().contains("is not an absolute path")
+                && err.to_string().contains("/proc/<pid>/exe"),
+            "got: {err}"
+        );
+    }
+
+    fn scoped_to(binary: &str) -> RouteRule {
+        RouteRule {
+            binaries: Some(vec![binary.to_string()]),
+            ..RouteRule::allow_host("git.example.test")
+        }
+    }
+
+    #[test]
+    fn validate_binaries_rejects_a_path_climbing_through_a_parent_segment() {
+        let err = scoped_to("/usr/bin/../bin/git")
+            .validate_binaries()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("\"..\" segment"),
+            "core compares path components, so `..` survives and never equals a kernel-resolved exe path: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_binaries_rejects_a_path_naming_no_binary() {
+        let err = scoped_to("/").validate_binaries().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("names no binary"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_binaries_accepts_the_separators_a_kernel_path_compares_equal_to() {
+        for equivalent in [
+            "/usr/bin/git/",
+            "//usr/bin/git",
+            "/usr//bin/git",
+            "/usr/./bin/git",
+        ] {
+            assert!(
+                scoped_to(equivalent).validate_binaries().is_ok(),
+                "{equivalent} compares equal to /usr/bin/git as a Path, so refusing it would be a false error"
+            );
+        }
     }
 
     #[test]
@@ -588,6 +782,21 @@ network:
         p.add_rule(RouteRule::allow_host("example.com"));
         p.add_rule(RouteRule::deny_host("example.com"));
         assert_eq!(p.network.egress.http.len(), 2);
+    }
+
+    #[test]
+    fn add_rule_keeps_two_rules_that_differ_only_in_their_binaries() {
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("git.example.test"));
+        p.add_rule(RouteRule {
+            binaries: Some(vec!["/usr/bin/git".into()]),
+            ..RouteRule::allow_host("git.example.test")
+        });
+        assert_eq!(
+            p.network.egress.http.len(),
+            2,
+            "a binary-scoped grant is a different grant, not a duplicate of the open one"
+        );
     }
 
     #[test]

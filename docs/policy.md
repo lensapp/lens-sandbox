@@ -63,6 +63,8 @@ network:
 | `match`       | Destination pattern (see below).                                        |
 | `verdict`     | `allow`, `deny`, or `ask`.                                              |
 | `description` | Optional human-readable note kept alongside the rule.                   |
+| `binaries`    | Optional list of guest binaries the rule is scoped to (see below).      |
+| `rules`       | Optional `method` / `path` list; with it the rule permits only the requests it names and denies the rest. |
 
 A `match` pattern can be:
 
@@ -74,6 +76,57 @@ A `match` pattern can be:
 `egress.http` used to be a top-level `allowedRoutes:` list. That key is gone: a
 policy file still naming it is refused with an error rather than loaded as a
 policy with no rules. Move the list under `egress: http:`.
+
+### Scoping a rule to specific binaries
+
+`binaries` narrows a rule to the processes allowed to use it. Here only
+`/usr/bin/git` reaches `git.example.test`; every other process in the sandbox is
+denied that host:
+
+```yaml
+network:
+  defaultVerdict: ask
+  egress:
+    http:
+      - match: git.example.test
+        verdict: allow
+        binaries:
+          - /usr/bin/git
+```
+
+This is the one policy feature that denies without asking, so read the rest of this
+section before using it.
+
+- **The filter fails closed.** A caller that is not on the list does not fall
+  through to `defaultVerdict` — it is denied, and never prompted. Adding an
+  unrestricted `allow` or `ask` for the same destination later does *not* re-open it
+  for the excluded callers: the guest skips such a rule rather than let it undo the
+  scoping. What it does not skip is another *scoped* rule, so that is how you grant a
+  second binary — list them together in one rule, or add another scoped rule.
+- **Only meaningful on `allow`.** On a `deny` rule the listed binaries are blocked by
+  verdict and every other caller fails closed, so the only thing the scoping buys is
+  that a later rule scoped to one of those others can still let it through. That is
+  too fine a distinction to be worth the confusion, so `lns policy deny` has no
+  `--binary` flag; a hand-written scoped deny is honoured, but read it as a plain
+  deny with one narrow exception rather than as a per-binary block.
+- **Absolute, canonical paths only.** The path is compared against the kernel's view
+  of the running process (`/proc/<pid>/exe`), so name the real binary, not a symlink
+  or a `PATH` shim. Paths that could never equal such a target are rejected when the
+  policy loads: a relative path, one climbing through `..`, one naming no binary, and
+  an empty `binaries: []` list — the last would match no caller and deny the
+  destination outright.
+- **Ancestors count, up to eight deep.** A caller matches if its own executable path
+  or one of its first eight parents' is on the list, so a process that shells out
+  still matches a rule naming the binary that launched it. The walk stops at the
+  guest's init, at that eighth parent, or at the first parent whose executable it
+  cannot read — a caller further down a wrapper chain than that is denied like any
+  other unlisted one, without being asked.
+- **It gates DNS too**, not only the connection itself.
+- **Order matters.** Rules are read top to bottom and the first match wins, so a
+  scoped rule placed after an unrestricted rule for the same destination never fires.
+  `lns policy allow` handles this for you — it puts a new rule ahead of any existing
+  rule that would pre-empt it and prints where it landed — but when you hand-edit the
+  file, mind the order yourself.
 
 ## Editing rules from the CLI
 
@@ -89,19 +142,102 @@ lns policy allow "*.npmjs.org"
 lns policy deny metrics.vendor.example
 ```
 
+### Scope an allow rule to a binary
+
+`--binary` takes one absolute path and repeats:
+
+```bash
+lns policy allow git.example.test --binary /usr/bin/git
+lns policy allow api.example.test --binary /usr/bin/curl --binary /usr/bin/wget
+```
+
+`lns policy deny` does not take `--binary` — see
+[Scoping a rule to specific binaries](#scoping-a-rule-to-specific-binaries) for why.
+
+Because the guest stops at the first matching rule, a narrowing rule only has an
+effect ahead of the broader rule it narrows. `lns policy allow` places it there and
+says so:
+
+```
+Added allow rule for "api.example.test" to lns-policy.yaml
+Placed it before the existing rule for "*.example.test", which covers the same
+destination and would otherwise pre-empt it. Every other caller is now denied
+"api.example.test" without being asked, and that rule no longer serves them.
+```
+
+That second sentence is the fail-closed filter arriving: the rule the scoped one now
+sits in front of is still in the file, but it no longer admits anyone for that
+destination. A scoped rule for a destination no other rule covers has nothing to sit
+in front of, so it is appended — and still reports what it now denies:
+
+```
+Added allow rule for "git.example.test" to lns-policy.yaml
+Every other caller is now denied "git.example.test" without being asked.
+```
+
+A rule placed in front of another inherits its TLS termination, and says so. Sitting
+ahead of a rule the sandbox intercepts is a narrowing of *who* may reach the
+destination, not a request to stop intercepting it.
+
+What it will not do is widen egress to get a rule to fire. Three cases are refused
+outright, with nothing written:
+
+- An `allow` for a destination an earlier `deny` already blocks. Ahead of that deny
+  it would open every destination the deny covers, so narrowing the deny or
+  reordering the file is left to you.
+- An unrestricted `allow` for a destination an earlier binary-scoped rule already
+  claimed. Ahead of that rule it would open the destination to every caller in the
+  sandbox — the opposite of what the scoped rule says — so the error names the scoped
+  rule and, if you did mean to open it up, tells you to drop that rule first:
+
+  ```
+  error: the rule for "git.example.test" is scoped to /usr/bin/git, and placing
+  this allow rule in front of it would open the destination to every caller in the
+  sandbox — drop the scoped rule with `lns policy remove git.example.test` first if
+  that is what you mean
+  ```
+
+- An `allow` for a destination an earlier rule permits only *some requests* to (a
+  rule carrying a `rules:` list). Ahead of that rule it would hand its callers every
+  method and path the restriction was written to exclude.
+
+A `deny` behind a deny is not an error: the destination is already blocked, so the
+command says so and changes nothing. Adding a rule the file already holds is the
+same — it reports and leaves the file alone. What counts as already held is the rule
+the gate would actually reach, not any copy sitting somewhere in the file: a copy
+stranded behind a rule that pre-empts it — by verdict, by binary scope, or by a
+request filter — is not in force, so the command treats it as the placement or refusal
+it is rather than reporting a grant the sandbox does not honour. Where the stranded
+copy is the one that gets moved into force, it keeps the note it was carrying. The one
+exception is `--description`: the note is not part of the grant, so passing a new one
+for a rule the file already holds edits that rule in place instead of adding a second
+copy of it.
+
+One placement the CLI cannot make for you: a rule whose destination is an address
+range or IP literal is compared numerically, but whether a *hostname* rule resolves
+into a range is DNS's answer, not the file's. A scoped rule for a host behind a
+broad CIDR allow is left where you put it, so order those by hand.
+
 ### List rules
 
 ```bash
 lns policy list
 ```
 
+The `BINARIES` column shows what each rule is scoped to, and `--format json` reports
+the same under `binaries` (`null` for a rule open to every caller).
+
 ### Remove a rule
 
-Remove the rule matching a destination pattern:
+Remove every rule matching a destination pattern:
 
 ```bash
 lns policy remove api.github.com
 ```
+
+Removal goes by pattern alone, so it deletes *every* rule for that destination —
+binary-scoped ones included. The command reports how many rules went; run
+`lns policy list` first to see which ones they will be.
 
 ## The approval flow
 

@@ -3350,6 +3350,7 @@ dependencies = [
 name = "lns-policy"
 version = "0.0.0"
 dependencies = [
+ "ipnet",
  "libc",
  "serde",
  "serde_json",
@@ -3447,6 +3448,7 @@ dependencies = [
  "async-trait",
  "lens-sandbox-core",
  "libc",
+ "lns-policy",
  "rustls",
  "serde_json",
  "serial_test",

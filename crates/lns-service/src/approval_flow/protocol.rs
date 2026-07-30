@@ -276,6 +276,7 @@ mod tests {
             description: None,
             tls_terminate: false,
             rules: Vec::new(),
+            binaries: None,
         });
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(net),
