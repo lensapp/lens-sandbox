@@ -35,8 +35,16 @@ pub struct CommandSpec {
     pub augment: fn(clap::Command) -> clap::Command,
     pub run: for<'a> fn(&'a ArgMatches, RunCtx<'a>) -> RunFuture<'a>,
     pub announces_update_check: bool,
-    /// True for commands that drive the tty over async tokio stdin/stdout, so the dispatcher must not hold the blocking std stdin/stdout locks.
-    pub owns_terminal: bool,
+    /// Answers, for one parsed invocation, whether it drives the tty over async tokio stdin/stdout — the dispatcher then must not hold the blocking std stdin/stdout locks, and the command gets no readable stdin.
+    pub owns_terminal: fn(&ArgMatches) -> bool,
+}
+
+pub fn always_owns_terminal(_: &ArgMatches) -> bool {
+    true
+}
+
+pub fn never_owns_terminal(_: &ArgMatches) -> bool {
+    false
 }
 
 /// Add a derive-`Args` subcommand named `name` to `app`.
@@ -353,22 +361,73 @@ mod tests {
         assert!(spec_for("does-not-exist").is_none());
     }
 
+    fn owns_terminal_for(argv: &[&str]) -> bool {
+        let matches = try_get_matches_from(argv).expect("argv must parse");
+        let (name, sub) = matches.subcommand().expect("a subcommand");
+        let spec = spec_for(name).expect("a registered spec");
+        (spec.owns_terminal)(sub)
+    }
+
     #[test]
-    fn every_spec_that_can_stream_over_tokio_stdio_owns_the_terminal() {
-        for spec in registry() {
-            if matches!(spec.name, "run" | "exec" | "sandbox" | "logs" | "attach") {
-                assert!(
-                    spec.owns_terminal,
-                    "{} can drive the tty over tokio stdin/stdout; the dispatcher must not hold the std locks for it",
-                    spec.name
-                );
-            } else {
-                assert!(
-                    !spec.owns_terminal,
-                    "{} runs synchronously and relies on the dispatcher holding the std stdin/stdout locks",
-                    spec.name
-                );
-            }
+    fn every_invocation_that_streams_over_tokio_stdio_owns_the_terminal() {
+        for argv in [
+            ["lns", "run", "someimage"].as_slice(),
+            &["lns", "exec", "someid", "sh"],
+            &["lns", "logs", "someid"],
+            &["lns", "attach", "someid"],
+            &["lns", "sandbox", "run", "someimage"],
+            &["lns", "sandbox", "exec", "someid", "sh"],
+            &["lns", "sandbox", "logs", "someid"],
+            &["lns", "sandbox", "attach", "someid"],
+        ] {
+            let invocation = argv.join(" ");
+            assert!(
+                owns_terminal_for(argv),
+                "`{invocation}` drives the tty over tokio stdin/stdout; the dispatcher must not hold the std locks for it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verb_that_prompts_never_owns_the_terminal_under_the_sandbox_parent() {
+        for argv in [
+            ["lns", "sandbox", "pull", "ghcr.io/team/hermes:1.4.0"].as_slice(),
+            &["lns", "sandbox", "push", "ghcr.io/team/hermes:1.4.0"],
+            &["lns", "sandbox", "prune"],
+            &["lns", "sandbox", "rm", "ghcr.io/team/hermes:1.4.0"],
+            &["lns", "sandbox", "ls"],
+        ] {
+            let invocation = argv.join(" ");
+            assert!(
+                !owns_terminal_for(argv),
+                "`{invocation}` reads its answer from the dispatcher's stdin; owning the terminal hands it io::empty() and it can never be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shortcut_and_its_sandbox_spelling_agree_on_who_owns_the_terminal() {
+        for verb in [
+            "init", "ps", "kill", "push", "pull", "tag", "stop", "rm", "inspect", "logs", "attach",
+        ] {
+            let argv: Vec<&str> = match verb {
+                "init" | "ps" => vec!["lns", verb],
+                "push" | "pull" => vec!["lns", verb, "ghcr.io/team/hermes:1.4.0"],
+                "tag" => vec![
+                    "lns",
+                    verb,
+                    "ghcr.io/team/hermes:1.4.0",
+                    "ghcr.io/team/hermes:latest",
+                ],
+                _ => vec!["lns", verb, "someid"],
+            };
+            let mut canonical = argv.clone();
+            canonical.insert(1, "sandbox");
+            assert_eq!(
+                owns_terminal_for(&argv),
+                owns_terminal_for(&canonical),
+                "`lns {verb}` is documented as an exact shortcut for `lns sandbox {verb}`, so both spellings must get the same stdin"
+            );
         }
     }
 

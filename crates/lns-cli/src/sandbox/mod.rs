@@ -248,12 +248,20 @@ pub fn augment(app: clap::Command) -> clap::Command {
     )
 }
 
+/// Only four of the parent's verbs drive the tty; the rest prompt, so they need the dispatcher's real stdin instead of the `io::empty()` a terminal owner is handed.
+fn verb_owns_terminal(sub: &clap::ArgMatches) -> bool {
+    matches!(
+        sub.subcommand_name(),
+        Some("run" | "exec" | "logs" | "attach")
+    )
+}
+
 pub const SPEC: CommandSpec = CommandSpec {
     name: "sandbox",
     augment,
     run: real::run,
     announces_update_check: true,
-    owns_terminal: true,
+    owns_terminal: verb_owns_terminal,
 };
 
 pub fn augment_init(app: clap::Command) -> clap::Command {
@@ -268,7 +276,7 @@ pub const INIT_SPEC: CommandSpec = CommandSpec {
     augment: augment_init,
     run: real::run_init,
     announces_update_check: true,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 pub fn augment_ps(app: clap::Command) -> clap::Command {
@@ -284,14 +292,22 @@ pub const PS_SPEC: CommandSpec = CommandSpec {
     augment: augment_ps,
     run: real::run_ps,
     announces_update_check: true,
-    owns_terminal: false,
+    owns_terminal: crate::command::never_owns_terminal,
 };
 
 macro_rules! shortcut_spec {
     ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal) => {
-        shortcut_spec!($augment, $const_name, $args, $name, $run, $about, false);
+        shortcut_spec!(
+            $augment,
+            $const_name,
+            $args,
+            $name,
+            $run,
+            $about,
+            crate::command::never_owns_terminal
+        );
     };
-    ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal, $owns_terminal:literal) => {
+    ($augment:ident, $const_name:ident, $args:ty, $name:literal, $run:path, $about:literal, $owns_terminal:expr) => {
         pub fn $augment(app: clap::Command) -> clap::Command {
             app.subcommand(subcommand::<$args>($name).about($about))
         }
@@ -344,7 +360,7 @@ shortcut_spec!(
     "logs",
     real::run_logs,
     "Print a running sandbox's output (shortcut for `lns sandbox logs`).",
-    true
+    crate::command::always_owns_terminal
 );
 shortcut_spec!(
     augment_attach,
@@ -353,7 +369,7 @@ shortcut_spec!(
     "attach",
     real::run_attach,
     "Re-attach to a running sandbox (shortcut for `lns sandbox attach`).",
-    true
+    crate::command::always_owns_terminal
 );
 shortcut_spec!(
     augment_push,
