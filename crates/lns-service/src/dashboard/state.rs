@@ -460,6 +460,12 @@ impl UnifiedDashboardState {
         request: &PendingCredentialRequest,
         choice: CredentialReviewChoice,
     ) {
+        let choice = match choice {
+            CredentialReviewChoice::UseValue(value) => {
+                CredentialReviewChoice::UseValue(trimmed(value))
+            }
+            other => other,
+        };
         let connector_id = self
             .credentials
             .iter()
@@ -490,7 +496,7 @@ impl UnifiedDashboardState {
     }
 
     pub(super) fn resolve_replacement(&mut self, connector_id: &str) {
-        let value = std::mem::take(&mut self.replacement_value);
+        let value = trimmed(std::mem::take(&mut self.replacement_value));
         match self.mode {
             DashboardMode::Preview => {
                 if let Some(credential) = self
@@ -664,6 +670,11 @@ impl UnifiedDashboardState {
 
 const PREVIEW_EVENT_TS: &str = "2026-07-27T12:00:00Z";
 const PREVIEW_EVENT_WHEN: &str = "2026-07-27 12:00:00";
+
+/// Every path a typed value takes into a store trims it, so a pasted trailing newline can't become part of the credential; the untrimmed original is zeroized on drop.
+fn trimmed(value: Zeroizing<String>) -> Zeroizing<String> {
+    Zeroizing::new(value.trim().to_string())
+}
 
 pub(super) struct SearchResults {
     pub(super) credentials: Vec<usize>,
@@ -1506,6 +1517,43 @@ mod tests {
             Some("some-secret"),
             "the live snapshot changes only when the service reports the write"
         );
+    }
+
+    #[test]
+    fn a_typed_value_is_trimmed_before_it_leaves_the_dashboard() {
+        let mut preview = state();
+        preview.replacement_value = Zeroizing::new(" new-secret ".into());
+        preview.resolve_replacement("beta");
+        assert_eq!(
+            preview.credentials[0].value.as_deref().map(String::as_str),
+            Some("new-secret")
+        );
+
+        let mut state = UnifiedDashboardState::live(
+            vec![sandbox("run-1")],
+            vec![credential("alpha", CredentialStatus::Pending)],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let pending = request("request-1", "run-1");
+        state.credentials[0].summary.pending = Some(pending.clone());
+        state.resolve_review(
+            &pending,
+            CredentialReviewChoice::UseValue(Zeroizing::new(" some-secret\n".into())),
+        );
+        assert!(matches!(
+            state.pending_command.take().expect("review command"),
+            DashboardCommand::ReviewCredential { choice: CredentialReviewChoice::UseValue(value), .. }
+                if value.as_str() == "some-secret"
+        ));
+
+        state.replacement_value = Zeroizing::new("\tnew-secret \n".into());
+        state.resolve_replacement("alpha");
+        assert!(matches!(
+            state.pending_command.take().expect("replace command"),
+            DashboardCommand::ReplaceCredential { value, .. } if value.as_str() == "new-secret"
+        ));
     }
 
     #[test]
