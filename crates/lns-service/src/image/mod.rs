@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use oci_client::{
     Reference,
+    client::ClientConfig,
     manifest::{self, OciDescriptor, OciImageManifest},
 };
 use sha2::{Digest, Sha256};
@@ -160,6 +161,23 @@ pub(crate) fn linux_platform_resolver(
                 })
         })
         .map(|m| m.digest.clone())
+}
+
+/// Every registry client this service builds, so no pull, push or login probe can pick its own transport.
+pub(crate) fn client_config_for(registry: &str) -> ClientConfig {
+    ClientConfig {
+        protocol: lns_artifact::client_protocol_for(registry),
+        platform_resolver: Some(Box::new(linux_platform_resolver)),
+        ..Default::default()
+    }
+}
+
+const LOGIN_PROBE_REPOSITORY: &str = "lns/login-check";
+
+pub(crate) fn login_probe_reference(registry: &str) -> Result<Reference> {
+    format!("{registry}/{LOGIN_PROBE_REPOSITORY}")
+        .parse()
+        .with_context(|| format!("invalid registry {registry:?}"))
 }
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -512,11 +530,58 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use oci_client::client::ClientProtocol;
     use oci_client::config::{ConfigFile, Rootfs};
     use oci_client::manifest::{OciDescriptor, OciImageManifest};
     use std::io::Write;
     use std::sync::Mutex;
     use tempfile::TempDir;
+
+    fn speaks_http(registry: &str) -> bool {
+        matches!(client_config_for(registry).protocol, ClientProtocol::Http)
+    }
+
+    #[test]
+    fn a_loopback_registry_client_speaks_plaintext_http() {
+        assert!(speaks_http("localhost:5000"));
+        assert!(speaks_http("127.0.0.1:5000"));
+        assert!(speaks_http("[::1]:5000"));
+    }
+
+    #[test]
+    fn a_remote_registry_client_stays_on_https() {
+        assert!(!speaks_http("ghcr.io"));
+        assert!(!speaks_http("127.0.0.1.evil.com"));
+    }
+
+    #[test]
+    fn every_registry_client_resolves_the_linux_host_arch_manifest() {
+        let loopback = client_config_for("localhost:5000");
+        assert!(loopback.platform_resolver.is_some());
+        assert!(client_config_for("ghcr.io").platform_resolver.is_some());
+    }
+
+    #[test]
+    fn the_login_probe_targets_a_throwaway_repository_on_the_named_registry() {
+        let probe = login_probe_reference("localhost:5000").unwrap();
+        assert_eq!(probe.registry(), "localhost:5000");
+        assert_eq!(probe.repository(), "lns/login-check");
+    }
+
+    #[test]
+    fn a_login_probe_reaches_a_loopback_registry_the_same_way_a_pull_does() {
+        let probe = login_probe_reference("127.0.0.1:5000").unwrap();
+        assert!(speaks_http(probe.registry()));
+    }
+
+    #[test]
+    fn an_unparseable_registry_names_itself_in_the_login_probe_error() {
+        let err = login_probe_reference("not a registry").unwrap_err();
+        assert!(
+            err.to_string().contains("not a registry"),
+            "unexpected error: {err}"
+        );
+    }
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         let mut e = GzEncoder::new(Vec::new(), Compression::default());
