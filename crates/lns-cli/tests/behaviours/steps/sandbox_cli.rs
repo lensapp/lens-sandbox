@@ -314,7 +314,8 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
 pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
-    let args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
+    let mut args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
+    lns_cli::sandbox::apply_registry_default(&mut args.command, None);
 
     if author::is_offline(&args.command) {
         run_author_verb(w, &args.command);

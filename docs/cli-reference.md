@@ -99,7 +99,7 @@ the `./lns.yaml` definition with its command overridden.
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; rounded up to a whole MiB); falls back to the `run.mem` config default. |
 | `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory roots the definition's relative binds and filesets. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
-| `--registry <HOST>`          | `docker.io`      | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default. A fully-qualified reference is used as-is. |
+| `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
@@ -164,7 +164,7 @@ interchangeable everywhere a run is addressed.
 | ---------- | -------------- | ------- |
 | `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
 | `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. `-f`/`--file` validates another definition file instead. |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at. Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing. `-f`/`--file` publishes another definition file instead. |
+| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a sandbox artifact, in one step. `<REF>` is the registry reference to publish at; a bare one (`you/agent`) resolves against the `run.registry` default, else the Lens hub (`hub.lns.run`). Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing. `-f`/`--file` publishes another definition file instead. |
 | `pull`     | `lns pull`     | Fetch a published sandbox and its base image into the local cache. |
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
@@ -218,12 +218,12 @@ lns logout <REGISTRY>
 
 | Form                                  | Meaning                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
-| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `docker.io`). Pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `-p`/`--password`. |
+| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `hub.lns.run`). Pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `-p`/`--password`. |
 | `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
 | `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
 
 The registry is matched by host: a bare published-sandbox reference uses the
-`run.registry` default (or Docker Hub), while a fully-qualified
+`run.registry` default (or the Lens hub), while a fully-qualified
 `lns run ghcr.io/org/app` always targets that registry and uses its stored login if present. Credentials live in
 a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
 `LNS_REGISTRY_AUTH_PATH`), separate from any shareable policy.
@@ -385,7 +385,7 @@ lns config list
 | ------------- | ------------- | ---------------------------------------------------------- |
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
-| `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`). |
+| `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the Lens hub, `hub.lns.run`. |
 
 The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment
 variables, volumes, and ports are properties of a sandbox, not persistent config —
