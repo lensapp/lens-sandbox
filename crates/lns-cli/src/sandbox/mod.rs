@@ -96,7 +96,7 @@ pub struct SandboxValidateArgs {
 pub struct SandboxPushArgs {
     #[arg(
         value_name = "REF",
-        help = "Registry reference to publish the sandbox at, e.g. ghcr.io/team/hermes:1.4.0."
+        help = "Registry reference to publish the sandbox at, e.g. ghcr.io/team/hermes:1.4.0; a bare reference resolves against the `run.registry` default, else hub.lns.run."
     )]
     pub reference: String,
     #[arg(
@@ -117,7 +117,7 @@ pub struct SandboxPushArgs {
 pub struct SandboxPullArgs {
     #[arg(
         value_name = "REF",
-        help = "Published sandbox reference to fetch, e.g. ghcr.io/team/hermes:1.4.0."
+        help = "Published sandbox reference to fetch, e.g. ghcr.io/team/hermes:1.4.0; a bare reference resolves against the `run.registry` default, else hub.lns.run."
     )]
     pub reference: String,
 }
@@ -221,6 +221,16 @@ pub struct SandboxPruneArgs {
         help = "Required: confirm removing every cached sandbox not held by a running one."
     )]
     pub force: bool,
+}
+
+/// Qualifies the registry coordinate a distribution verb addresses with `registry`, or the built-in default when nothing is configured; the local-cache verbs take an id-or-ref the service resolves, so they are left alone.
+pub fn apply_registry_default(command: &mut SandboxCommand, registry: Option<&str>) {
+    let reference = match command {
+        SandboxCommand::Push(args) => &mut args.reference,
+        SandboxCommand::Pull(args) => &mut args.reference,
+        _ => return,
+    };
+    *reference = crate::config::resolve_default_registry(reference, registry);
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {

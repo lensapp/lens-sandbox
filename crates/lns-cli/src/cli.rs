@@ -54,7 +54,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Registry to qualify a bare image reference (e.g. ghcr.io); falls back to the `run.registry` config default. A fully-qualified reference is used as-is."
+        help = "Registry to qualify a bare image reference (e.g. ghcr.io); falls back to the `run.registry` config default, else hub.lns.run. A fully-qualified reference is used as-is."
     )]
     pub registry: Option<String>,
 

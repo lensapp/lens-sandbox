@@ -17,7 +17,7 @@ pub use real::RealRegistryVerifier;
 #[derive(clap::Args)]
 pub struct LoginArgs {
     #[arg(
-        help = "Registry host to log in to (e.g. ghcr.io); defaults to the configured `run.registry`, else docker.io."
+        help = "Registry host to log in to (e.g. ghcr.io); defaults to the configured `run.registry`, else hub.lns.run."
     )]
     pub registry: Option<String>,
     #[arg(short = 'u', long, help = "Username for the registry.")]
@@ -45,7 +45,7 @@ pub struct LoginArgs {
 #[derive(clap::Args)]
 pub struct LogoutArgs {
     #[arg(
-        help = "Registry host to log out of; defaults to the configured `run.registry`, else docker.io."
+        help = "Registry host to log out of; defaults to the configured `run.registry`, else hub.lns.run."
     )]
     pub registry: Option<String>,
 }
