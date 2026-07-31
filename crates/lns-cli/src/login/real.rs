@@ -44,7 +44,7 @@ pub fn run_logout<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutu
 fn configured_default_registry() -> Result<String> {
     let path = crate::config::default_config_path()?;
     let defaults = crate::config::load_run_defaults(&path)?;
-    Ok(defaults.registry.unwrap_or_else(|| "docker.io".to_string()))
+    Ok(defaults.registry_or_default().to_string())
 }
 
 pub struct RealRegistryVerifier {

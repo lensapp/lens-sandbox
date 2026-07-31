@@ -353,11 +353,20 @@ fn legacy_entries(cfg: &ConfigFile) -> Vec<&'static str> {
     present
 }
 
+/// The registry a bare reference addresses when `run.registry` is unset — the Lens hub, so publishing a sandbox never silently targets Docker Hub.
+pub const DEFAULT_REGISTRY: &str = "hub.lns.run";
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RunDefaults {
     pub cpus: Option<u8>,
     pub mem: Option<usize>,
     pub registry: Option<String>,
+}
+
+impl RunDefaults {
+    pub fn registry_or_default(&self) -> &str {
+        self.registry.as_deref().unwrap_or(DEFAULT_REGISTRY)
+    }
 }
 
 pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
@@ -397,11 +406,9 @@ pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args
 }
 
-/// Qualifies a bare image reference with the configured default registry; a reference that already names a registry — or a docker.io default, which the parser already assumes — is left untouched so implicit `library/` namespacing is preserved.
+/// Qualifies a bare image reference with the configured default registry, falling back to [`DEFAULT_REGISTRY`]; a reference that already names a registry — or a docker.io default, which the parser already assumes — is left untouched so implicit `library/` namespacing is preserved.
 pub fn resolve_default_registry(image: &str, default_registry: Option<&str>) -> String {
-    let Some(registry) = default_registry else {
-        return image.to_string();
-    };
+    let registry = default_registry.unwrap_or(DEFAULT_REGISTRY);
     if lns_policy::registry_auth::canonical_registry(registry) == "docker.io"
         || image_has_registry(image)
     {
@@ -922,8 +929,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_registry_leaves_an_image_untouched_without_a_default() {
-        assert_eq!(resolve_default_registry("alpine", None), "alpine");
+    fn resolve_default_registry_falls_back_to_the_lens_hub_not_docker_hub() {
+        assert_eq!(
+            resolve_default_registry("hchen/claude-code", None),
+            "hub.lns.run/hchen/claude-code",
+            "an unconfigured bare reference must address the Lens hub; docker.io would push someone's sandbox to Docker Hub"
+        );
+    }
+
+    #[test]
+    fn run_defaults_report_the_lens_hub_when_no_registry_is_configured() {
+        assert_eq!(RunDefaults::default().registry_or_default(), "hub.lns.run");
+        assert_eq!(
+            RunDefaults {
+                registry: Some("ghcr.io".into()),
+                ..RunDefaults::default()
+            }
+            .registry_or_default(),
+            "ghcr.io"
+        );
     }
 
     #[test]
@@ -972,6 +996,12 @@ mod tests {
             },
         );
         assert_eq!(resolved.image.as_deref(), Some("ghcr.io/alpine"));
+    }
+
+    #[test]
+    fn apply_run_defaults_qualifies_a_bare_image_with_the_lens_hub_when_nothing_is_configured() {
+        let resolved = apply_run_defaults(bare_run_args(), RunDefaults::default());
+        assert_eq!(resolved.image.as_deref(), Some("hub.lns.run/alpine"));
     }
 
     #[test]

@@ -12,6 +12,26 @@ Feature: distributing a sandbox
     And the output contains "built"
     And the output contains "ghcr.io/team/hermes:1.4.0"
 
+  Scenario: a bare push reference publishes to the Lens hub
+    Given a valid lns.yaml in the current directory
+    And the registry accepts the push
+    When the user runs sandbox command "push hchen/claude-code"
+    Then the exit code is 0
+    And the output contains "hub.lns.run/hchen/claude-code"
+
+  Scenario: a bare pull reference fetches from the Lens hub
+    Given the registry serves the sandbox "hub.lns.run/hchen/claude-code"
+    When the user runs sandbox command "pull hchen/claude-code"
+    Then the exit code is 0
+    And the service received a request to pull "hub.lns.run/hchen/claude-code"
+
+  Scenario: a fully-qualified reference is published where it names
+    Given a valid lns.yaml in the current directory
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "ghcr.io/team/hermes:1.4.0"
+
   Scenario: there is no standalone build command
     When I run "lns build ."
     Then the exit code is 2

@@ -13,7 +13,8 @@ use crate::service::client::BoxFuture;
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = super::SandboxArgs::from_arg_matches(matches)?;
+        let mut args = super::SandboxArgs::from_arg_matches(matches)?;
+        qualify_references(&mut args.command)?;
         if let super::SandboxCommand::Run(run_args) = args.command {
             return crate::service::launch_run(*run_args, ctx.debug).await;
         }
@@ -28,6 +29,23 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         crate::service::require_running().await;
         dispatch(args, ctx.input).await
     })
+}
+
+fn configured_registry() -> Result<Option<String>> {
+    let path = crate::config::default_config_path()?;
+    Ok(crate::config::load_run_defaults(&path)?.registry)
+}
+
+fn qualify_references(command: &mut super::SandboxCommand) -> Result<()> {
+    super::apply_registry_default(command, configured_registry()?.as_deref());
+    Ok(())
+}
+
+fn qualified_reference(reference: &str) -> Result<String> {
+    Ok(crate::config::resolve_default_registry(
+        reference,
+        configured_registry()?.as_deref(),
+    ))
 }
 
 pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -99,7 +117,7 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
     Box::pin(async move {
         let args = super::SandboxPushArgs::from_arg_matches(matches)?;
         push_local(
-            &args.reference,
+            &qualified_reference(&args.reference)?,
             args.dry_run,
             args.file.as_deref(),
             ctx.cwd()?,
@@ -110,7 +128,8 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 
 pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = super::SandboxPullArgs::from_arg_matches(matches)?;
+        let mut args = super::SandboxPullArgs::from_arg_matches(matches)?;
+        args.reference = qualified_reference(&args.reference)?;
         dispatch_command(super::SandboxCommand::Pull(args), ctx.input).await
     })
 }
