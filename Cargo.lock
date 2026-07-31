@@ -3261,6 +3261,7 @@ dependencies = [
  "anyhow",
  "hex",
  "lns-policy",
+ "oci-client",
  "serde",
  "serde_json",
  "serde_yaml",
