@@ -4,7 +4,6 @@ use lns_policy::registry_auth::{
 };
 use oci_client::{
     Reference, RegistryOperation,
-    client::ClientConfig,
     manifest::{OciDescriptor, OciImageManifest},
     secrets::RegistryAuth,
 };
@@ -13,8 +12,9 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    CountingSink, PulledArtifact, PulledImage, Registry, enforce_manifest_doc_size,
-    linux_platform_resolver, pull_inner, pull_sandbox_with, serialized_len,
+    CountingSink, PulledArtifact, PulledImage, Registry, client_config_for,
+    enforce_manifest_doc_size, login_probe_reference, pull_inner, pull_sandbox_with,
+    serialized_len,
 };
 
 pub struct RealRegistry {
@@ -23,31 +23,15 @@ pub struct RealRegistry {
 }
 
 impl RealRegistry {
-    pub fn new() -> Self {
-        Self::with_auth(RegistryAuth::Anonymous)
+    pub fn for_registry(registry: &str, auth: RegistryAuth) -> Self {
+        Self {
+            client: oci_client::Client::new(client_config_for(registry)),
+            auth,
+        }
     }
 
-    pub fn with_auth(auth: RegistryAuth) -> Self {
-        let client = oci_client::Client::new(ClientConfig {
-            platform_resolver: Some(Box::new(linux_platform_resolver)),
-            ..Default::default()
-        });
-        Self { client, auth }
-    }
-
-    /// Like `with_auth`, but reaches a loopback registry over plaintext HTTP (as Docker treats `localhost:5000`) so a local test/dev registry works without TLS.
     pub fn for_reference(reference: &Reference, auth: RegistryAuth) -> Self {
-        let protocol = if lns_artifact::is_loopback_registry(reference.registry()) {
-            oci_client::client::ClientProtocol::Http
-        } else {
-            oci_client::client::ClientProtocol::Https
-        };
-        let client = oci_client::Client::new(ClientConfig {
-            protocol,
-            platform_resolver: Some(Box::new(linux_platform_resolver)),
-            ..Default::default()
-        });
-        Self { client, auth }
+        Self::for_registry(reference.registry(), auth)
     }
 }
 
@@ -66,29 +50,17 @@ pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
     }
 }
 
-const LOGIN_PROBE_REPOSITORY: &str = "lns/login-check";
-
 /// Verifies a registry login by running the exact pull-auth handshake a later pull would, against a throwaway repository scope: an accepted credential resolves, a rejected one errors.
 pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Result<()> {
-    let reference: Reference = format!("{registry}/{LOGIN_PROBE_REPOSITORY}")
-        .parse()
-        .with_context(|| format!("invalid registry {registry:?}"))?;
-    let client = oci_client::Client::new(ClientConfig {
-        platform_resolver: Some(Box::new(linux_platform_resolver)),
-        ..Default::default()
-    });
+    let reference = login_probe_reference(registry)?;
     let auth = RegistryAuth::Basic(username.to_string(), secret.to_string());
-    client
-        .auth(&reference, &auth, RegistryOperation::Pull)
+    let probe = RealRegistry::for_reference(&reference, auth);
+    probe
+        .client
+        .auth(&reference, &probe.auth, RegistryOperation::Pull)
         .await
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-impl Default for RealRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Registry for RealRegistry {
@@ -230,7 +202,7 @@ pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRe
     let auth = registry_auth_for(image);
     let inner = match image.parse::<Reference>() {
         Ok(parsed) => RealRegistry::for_reference(&parsed, auth),
-        Err(_) => RealRegistry::with_auth(auth),
+        Err(_) => RealRegistry::for_registry(image, auth),
     };
     Ok(CachingRegistry::new(inner, ManifestCache::new(manifests)))
 }

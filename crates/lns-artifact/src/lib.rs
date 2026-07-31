@@ -4,4 +4,4 @@ pub mod sandbox;
 pub mod spec;
 pub mod validate;
 
-pub use registry::is_loopback_registry;
+pub use registry::{client_protocol_for, is_loopback_registry};
