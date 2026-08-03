@@ -36,6 +36,7 @@ pub mod run_name;
 pub mod run_registry;
 pub mod runtime_layer;
 pub mod shutdown;
+pub mod sidecar;
 pub mod supervisor;
 mod time_fmt;
 pub mod tools;

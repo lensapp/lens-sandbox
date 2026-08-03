@@ -1,7 +1,7 @@
 mod agent;
 mod runtime;
 
-pub(crate) use agent::AgentDispatcher;
+pub(crate) use agent::{AgentDispatcher, ProxyCa};
 
 const DIM: &str = "\x1b[90m";
 const CYAN: &str = "\x1b[36m";

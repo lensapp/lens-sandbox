@@ -19,6 +19,26 @@ use super::runtime::RealAgentRunner;
 use super::{DIM, RESET};
 use crate::config::AgentConfig;
 
+/// The run's MITM CA; `None` both before the proxy generates one and for a run that has no proxy at all.
+pub(crate) trait ProxyCa: Send + Sync {
+    fn pem(&self) -> Option<String>;
+}
+
+const PROXY_CA_REQUEST: &str = "proxy_ca_request";
+
+fn is_proxy_ca_request(raw_text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some(PROXY_CA_REQUEST)
+}
+
+fn proxy_ca_reply(ca: &dyn ProxyCa) -> String {
+    serde_json::json!({ "type": "proxy_ca", "pem": ca.pem() }).to_string()
+}
+
 /// Spawns the agent workload for a started session.
 pub(crate) trait AgentRunner: Send + Sync {
     fn spawn_run(
@@ -44,6 +64,7 @@ pub(crate) struct AgentDispatcher {
     /// Shared across WS sessions so the running agent's output reaches the current session after a reconnect.
     activity: ActivityStream,
     runner: Arc<dyn AgentRunner>,
+    proxy_ca: Arc<dyn ProxyCa>,
 }
 
 impl AgentDispatcher {
@@ -51,8 +72,15 @@ impl AgentDispatcher {
         config: Arc<AgentConfig>,
         sandbox_creds: Option<SandboxCredentials>,
         reaper: Arc<OrphanReaper>,
+        proxy_ca: Arc<dyn ProxyCa>,
     ) -> Self {
-        Self::with_runner(config, sandbox_creds, reaper, Arc::new(RealAgentRunner))
+        Self::with_runner(
+            config,
+            sandbox_creds,
+            reaper,
+            Arc::new(RealAgentRunner),
+            proxy_ca,
+        )
     }
 
     pub(crate) fn with_runner(
@@ -60,6 +88,7 @@ impl AgentDispatcher {
         sandbox_creds: Option<SandboxCredentials>,
         reaper: Arc<OrphanReaper>,
         runner: Arc<dyn AgentRunner>,
+        proxy_ca: Arc<dyn ProxyCa>,
     ) -> Self {
         let exec_manager = ExecManager::new(
             crate::run_as::setuid_creds(sandbox_creds.as_ref()),
@@ -77,6 +106,7 @@ impl AgentDispatcher {
             exec_manager,
             activity,
             runner,
+            proxy_ca,
         }
     }
 
@@ -97,6 +127,7 @@ impl SandboxDispatcher for AgentDispatcher {
             activity: self.activity.clone(),
             exec_manager: self.exec_manager.clone(),
             runner: self.runner.clone(),
+            proxy_ca: self.proxy_ca.clone(),
         })
     }
 }
@@ -145,6 +176,7 @@ struct AgentSession {
     activity: ActivityStream,
     exec_manager: ExecManager,
     runner: Arc<dyn AgentRunner>,
+    proxy_ca: Arc<dyn ProxyCa>,
 }
 
 #[async_trait]
@@ -154,6 +186,10 @@ impl SessionHandler for AgentSession {
     }
 
     async fn dispatch(&self, raw_text: &str, tx: &mpsc::UnboundedSender<String>) {
+        if is_proxy_ca_request(raw_text) {
+            let _ = tx.send(proxy_ca_reply(self.proxy_ca.as_ref()));
+            return;
+        }
         match serde_json::from_str::<IncomingMessage>(raw_text) {
             Ok(mut msg) => {
                 if let IncomingMessage::ExecAttach { env, .. } = &mut msg {
@@ -350,6 +386,18 @@ mod tests {
 
     const PRINT_CA_ENV_CMD: &str = "printf '%s|%s|%s|%s|%s' \"$SSL_CERT_FILE\" \"$REQUESTS_CA_BUNDLE\" \"$NODE_EXTRA_CA_CERTS\" \"$CURL_CA_BUNDLE\" \"$GIT_SSL_CAINFO\"";
 
+    struct FakeCa(Option<String>);
+
+    impl ProxyCa for FakeCa {
+        fn pem(&self) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    fn no_ca() -> Arc<dyn ProxyCa> {
+        Arc::new(FakeCa(None))
+    }
+
     struct FakeRunner {
         calls: Arc<AtomicUsize>,
     }
@@ -537,7 +585,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_ignores_all_messages() {
         let config = Arc::new(make_agent_config());
-        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let dispatcher =
+            AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()), no_ca());
         let session = dispatcher.new_session();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -550,9 +599,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_proxy_ca_request_is_answered_with_the_pem() {
+        let dispatcher = AgentDispatcher::new(
+            Arc::new(make_agent_config()),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeCa(Some("PEM-BODY".into()))),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        dispatcher
+            .new_session()
+            .dispatch(r#"{"type":"proxy_ca_request"}"#, &tx)
+            .await;
+
+        let reply: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().expect("a reply")).expect("json");
+        assert_eq!(reply["type"], "proxy_ca");
+        assert_eq!(reply["pem"], "PEM-BODY");
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_proxy_answers_a_null_pem_rather_than_staying_silent() {
+        // Silence is indistinguishable from a hung guest.
+        let dispatcher = AgentDispatcher::new(
+            Arc::new(make_agent_config()),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            no_ca(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        dispatcher
+            .new_session()
+            .dispatch(r#"{"type":"proxy_ca_request"}"#, &tx)
+            .await;
+
+        let reply: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().expect("a reply")).expect("json");
+        assert_eq!(reply["type"], "proxy_ca");
+        assert!(reply["pem"].is_null(), "expected a null pem, got {reply}");
+    }
+
+    #[tokio::test]
+    async fn an_exec_message_is_not_mistaken_for_a_ca_request() {
+        // Both arrive on the same channel, so the discriminator has to be the type.
+        let dispatcher = AgentDispatcher::new(
+            Arc::new(make_agent_config()),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeCa(Some("PEM-BODY".into()))),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        dispatcher
+            .new_session()
+            .dispatch(r#"{"type":"exec","id":"r1","command":"ls"}"#, &tx)
+            .await;
+
+        assert!(rx.try_recv().is_err(), "a CA must not leak to an exec");
+    }
+
+    #[tokio::test]
     async fn session_activity_exposes_its_stream() {
         let config = Arc::new(make_agent_config());
-        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let dispatcher =
+            AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()), no_ca());
         let session = dispatcher.new_session();
 
         let mut rx = session.activity().subscribe();
@@ -567,7 +679,8 @@ mod tests {
     #[tokio::test]
     async fn activity_is_shared_across_reconnect_sessions() {
         let config = Arc::new(make_agent_config());
-        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let dispatcher =
+            AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()), no_ca());
         let session1 = dispatcher.new_session();
         let session2 = dispatcher.new_session();
 
@@ -584,7 +697,8 @@ mod tests {
     async fn shutdown_leaves_the_agent_running() {
         // shutdown is a no-op: the agent outlives the WS session, so it must not tear anything down.
         let config = Arc::new(make_agent_config());
-        let dispatcher = AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()));
+        let dispatcher =
+            AgentDispatcher::new(config, None, Arc::new(OrphanReaper::spawn()), no_ca());
         let session = dispatcher.new_session();
         session.shutdown().await;
     }
@@ -600,6 +714,7 @@ mod tests {
             None,
             Arc::new(OrphanReaper::spawn()),
             runner,
+            no_ca(),
         );
 
         dispatcher.new_session().on_policy(HashMap::new()).await;
@@ -621,8 +736,12 @@ mod tests {
         // The exec registry must outlive a WS session: session2 reattaching session1's id hits "already in use".
         let mut config = make_agent_config();
         config.agent_command = "true".into();
-        let dispatcher =
-            AgentDispatcher::new(Arc::new(config), None, Arc::new(OrphanReaper::spawn()));
+        let dispatcher = AgentDispatcher::new(
+            Arc::new(config),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            no_ca(),
+        );
 
         let session1 = dispatcher.new_session();
         let (tx1, mut rx1) = mpsc::unbounded_channel::<String>();

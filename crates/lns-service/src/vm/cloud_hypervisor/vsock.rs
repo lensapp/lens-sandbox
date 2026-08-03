@@ -11,8 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 use super::real::into_blocking_fd;
-use crate::vm::GuestTransport;
 use crate::vm::connect::{ConnectOnce, connect_with};
+use crate::vm::{GuestDialer, GuestTransport};
 
 const MAX_REPLY_LINE: usize = 64;
 
@@ -32,11 +32,13 @@ impl HybridVsockConnector {
     }
 }
 
-impl GuestTransport for HybridVsockConnector {
+impl GuestDialer for HybridVsockConnector {
     fn connect(&self, port: u32, timeout: Duration) -> BoxFuture<'_, Result<RawFd>> {
         Box::pin(connect_with(self, port, timeout))
     }
+}
 
+impl GuestTransport for HybridVsockConnector {
     fn request_stop(&self) {
         use std::io::Write;
         use std::os::unix::net::UnixStream as StdUnixStream;

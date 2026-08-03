@@ -744,6 +744,7 @@ pub(super) async fn start(
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
     let credential_frame_tx = frame_tx.clone();
+    let relay_frame_tx = frame_tx.clone();
     let session = Arc::new(
         ApprovalSession::new(
             policy,
@@ -840,6 +841,7 @@ pub(super) async fn start(
         &microvm_name,
         session,
         credential_session,
+        relay_frame_tx,
         frame_rx,
         user_env,
     )?;

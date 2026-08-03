@@ -810,7 +810,7 @@ mod tests {
     }
 
     struct StubTransport;
-    impl crate::vm::GuestTransport for StubTransport {
+    impl crate::vm::GuestDialer for StubTransport {
         fn connect(
             &self,
             _port: u32,
@@ -818,6 +818,9 @@ mod tests {
         ) -> futures_util::future::BoxFuture<'_, anyhow::Result<std::os::fd::RawFd>> {
             Box::pin(async { Ok(0) })
         }
+    }
+
+    impl crate::vm::GuestTransport for StubTransport {
         fn request_stop(&self) {}
     }
 

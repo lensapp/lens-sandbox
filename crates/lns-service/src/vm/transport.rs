@@ -5,9 +5,13 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 
-/// A connected guest VM, abstracted over the host VMM (Vz on macOS, Cloud Hypervisor on Linux).
-pub trait GuestTransport: Send + Sync {
+/// Dialling a port inside a guest; all a relay needs, so it never gets the power to stop the guest it dials into.
+pub trait GuestDialer: Send + Sync {
     fn connect(&self, port: u32, timeout: Duration) -> BoxFuture<'_, Result<RawFd>>;
+}
+
+/// A connected guest VM, abstracted over the host VMM (Vz on macOS, Cloud Hypervisor on Linux).
+pub trait GuestTransport: GuestDialer {
     fn request_stop(&self);
 }
 
@@ -36,10 +40,13 @@ mod tests {
         stopped: Arc<AtomicBool>,
     }
 
-    impl GuestTransport for FakeTransport {
+    impl GuestDialer for FakeTransport {
         fn connect(&self, _port: u32, _timeout: Duration) -> BoxFuture<'_, Result<RawFd>> {
             Box::pin(async { Ok(42) })
         }
+    }
+
+    impl GuestTransport for FakeTransport {
         fn request_stop(&self) {
             self.stopped.store(true, Ordering::SeqCst);
         }

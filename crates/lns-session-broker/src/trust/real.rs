@@ -1,8 +1,10 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
-use super::TrustFs;
+use super::{TrustFs, TrustStore};
 
 #[derive(Default)]
 struct RealTrustFs;
@@ -30,6 +32,20 @@ impl TrustFs for RealTrustFs {
 #[cfg(target_os = "linux")]
 pub fn seed_trust_store() -> Result<super::Seeding, String> {
     super::seed_trust_store_with(&RealTrustFs)
+}
+
+pub struct RealTrustStore;
+
+impl TrustStore for RealTrustStore {
+    fn read(&self, path: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    /// Leading newline so the CA starts its own PEM block even if the bundle did not end with one.
+    fn append(&self, path: &str, pem: &str) -> std::io::Result<()> {
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        writeln!(file, "\n{}", pem.trim())
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +115,41 @@ mod tests {
             .read("/does/not/exist/ca-certificates.crt")
             .expect_err("read should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn appending_leaves_both_the_existing_roots_and_the_ca_readable() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let bundle = dir.path().join("ca-certificates.crt");
+        std::fs::write(&bundle, "EXISTING-ROOT").expect("seed");
+        let path = bundle.to_str().expect("utf8 path");
+
+        RealTrustStore.append(path, "PEM-BODY").expect("append");
+
+        let got = RealTrustStore.read(path).expect("read");
+        assert_eq!(got, "EXISTING-ROOT\nPEM-BODY\n");
+    }
+
+    #[test]
+    fn appending_to_a_missing_bundle_is_an_error_not_a_new_file() {
+        // A trust store we created from nothing would trust the proxy and nothing
+        // else, breaking every unrelated TLS client in the guest.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let missing = dir.path().join("absent.crt");
+        let path = missing.to_str().expect("utf8 path");
+
+        assert!(RealTrustStore.append(path, "PEM-BODY").is_err());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn reading_a_missing_bundle_surfaces_the_io_error() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("absent.crt");
+        assert!(
+            RealTrustStore
+                .read(path.to_str().expect("utf8 path"))
+                .is_err()
+        );
     }
 }

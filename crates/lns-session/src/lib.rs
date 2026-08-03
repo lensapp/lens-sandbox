@@ -4,6 +4,19 @@ pub const BROKER_PORT: u32 = 1029;
 
 pub const FORWARD_PORT: u32 = 1030;
 
+/// Host-listening port a sidecar guest dials to reach the run's supervisor proxy.
+pub const SIDECAR_EGRESS_PORT: u32 = 1032;
+
+/// First host-listening port for a sidecar's exposed services; the workload dials `base + index`, one per `expose` entry.
+pub const SIDECAR_SERVICE_PORT_BASE: u32 = 1040;
+
+pub fn sidecar_service_port(index: usize) -> u32 {
+    SIDECAR_SERVICE_PORT_BASE + index as u32
+}
+
+/// Session env key carrying the run's MITM CA in PEM. The broker installs it into the guest trust store and drops it before exec, so the workload trusts the run's proxy without the image knowing anything about it.
+pub const PROXY_CA_ENV: &str = "LNS_PROXY_CA_PEM";
+
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Where the service stages the pinned public trust store and the broker reads it from; one spelling, or the guest silently keeps no store at all.

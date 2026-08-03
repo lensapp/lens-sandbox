@@ -5,7 +5,7 @@ use libc::c_int;
 
 use super::{AF_VSOCK, ReadOutcome, SockaddrVm, VsockSyscalls, read_exact_with};
 #[cfg(target_os = "linux")]
-use super::{VsockError, accept_with, listen_with, write_all_with};
+use super::{VsockError, accept_with, connect_host_with, listen_with, write_all_with};
 use crate::session::close as session_close;
 
 struct RealVsockSyscalls;
@@ -29,6 +29,22 @@ impl VsockSyscalls for RealVsockSyscalls {
         // SAFETY: addr is a fully-initialised SockaddrVm of the size we pass.
         let r = unsafe {
             libc::bind(
+                fd,
+                addr as *const SockaddrVm as *const libc::sockaddr,
+                std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()> {
+        // SAFETY: addr is a fully-initialised SockaddrVm of the size we pass.
+        let r = unsafe {
+            libc::connect(
                 fd,
                 addr as *const SockaddrVm as *const libc::sockaddr,
                 std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
@@ -100,6 +116,11 @@ impl VsockSyscalls for RealVsockSyscalls {
 #[cfg(target_os = "linux")]
 pub fn listen(port: u32) -> Result<RawFd, VsockError> {
     listen_with(&RealVsockSyscalls, port)
+}
+
+#[cfg(target_os = "linux")]
+pub fn connect_host(port: u32) -> Result<RawFd, VsockError> {
+    connect_host_with(&RealVsockSyscalls, port)
 }
 
 #[cfg(target_os = "linux")]

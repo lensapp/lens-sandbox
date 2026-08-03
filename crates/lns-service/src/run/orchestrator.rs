@@ -409,10 +409,11 @@ async fn orchestrate(
         binds: bind_attachments,
         workload_uid: run_as.uid,
         workload_gid: vm::host_known_workload_gid(&run_as),
-        vsock: Some(vm::VsockChannel {
+        vsock: vec![vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,
             fd_tx: session.relay.fd_tx.clone(),
-        }),
+        }],
+        no_nic: false,
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,

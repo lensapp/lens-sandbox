@@ -3,6 +3,7 @@ mod forker;
 mod forward;
 mod network;
 mod pty;
+mod revforward;
 mod session;
 mod trust;
 mod volumes;
@@ -61,6 +62,7 @@ fn run() -> Result<i32, String> {
     }
 
     forward::spawn_listener();
+    revforward::spawn_listeners();
 
     let listen_fd = vsock::listen(BROKER_PORT).map_err(|e| format!("listen: {e}"))?;
 
