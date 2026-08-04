@@ -113,7 +113,7 @@ pub fn format_summary(
     }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
-    writeln!(s, "    unmatched destinations: ask").unwrap();
+    writeln!(s, "    unmatched destinations: {}", unmatched_line(policy)).unwrap();
     writeln!(s, "    rules: {}", rules_line(policy)).unwrap();
     writeln!(s, "    source: {}", source_line(source)).unwrap();
     s.push('\n');
@@ -263,6 +263,14 @@ fn ports_line(args: &RunArgs) -> String {
         .join(", ")
 }
 
+fn unmatched_line(policy: &Policy) -> &'static str {
+    if policy.network.is_closed() {
+        "denied by the catch-all rule"
+    } else {
+        "ask"
+    }
+}
+
 fn rules_line(policy: &Policy) -> String {
     let routes = &policy.network.egress.http;
     if routes.is_empty() {
@@ -274,7 +282,12 @@ fn rules_line(policy: &Policy) -> String {
             Verdict::Allow => (a + 1, d),
             Verdict::Deny => (a, d + 1),
         });
-    format!("{} allow, {} deny, anything else asks", allows, denies)
+    let tail = if policy.network.is_closed() {
+        "anything else denied"
+    } else {
+        "anything else asks"
+    };
+    format!("{allows} allow, {denies} deny, {tail}")
 }
 
 fn source_line(source: &PolicySource) -> String {
@@ -767,6 +780,26 @@ mod tests {
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     (none)"), "flags line wrong: {s}");
+    }
+
+    #[test]
+    fn a_closed_policy_does_not_claim_anything_still_asks() {
+        // The catch-all answers for whatever the named rules leave, so nothing is
+        // unmatched — telling the developer it asks would be false, not vague.
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::allow_host("api.example.test"));
+        policy.add_rule(RouteRule::deny_host("*"));
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            &policy,
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("unmatched destinations: denied by the catch-all rule"),
+            "got: {s}"
+        );
+        assert!(s.contains("anything else denied"), "got: {s}");
     }
 
     #[test]

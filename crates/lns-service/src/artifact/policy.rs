@@ -220,29 +220,7 @@ pub fn splice_connector_routes(
 /// them separately would leave a locked-down layer unable to clamp raw destinations
 /// at all.
 pub fn is_closed(policy: &Policy) -> bool {
-    is_closed_network(&policy.network)
-}
-
-/// [`is_closed`] for a bare network section, which is what the wire carries.
-///
-/// Only the first catch-all counts: one behind it is a line the layer's own gate never
-/// reaches, so a file whose first catch-all allows is open however it ends.
-pub fn is_closed_network(network: &lns_policy::NetworkPolicy) -> bool {
-    network
-        .egress
-        .http
-        .iter()
-        .find(|rule| rule.is_catch_all())
-        .is_some_and(|rule| rule.verdict == Verdict::Deny)
-}
-
-/// A catch-all deny decides every destination for every caller. One narrowed by
-/// caller, request or scheme decides only what it names, so it is an ordinary rule.
-fn is_catch_all(rule: &RouteRule) -> bool {
-    rule.match_pattern == "*"
-        && rule.binaries.is_none()
-        && rule.rules.is_empty()
-        && rule.scheme.is_none()
+    policy.network.is_closed()
 }
 
 /// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: denies from every layer come first so a first-match gate stays deny-dominant, a closed layer (see [`is_closed`]) is a ceiling an allow must clear in every such layer (so neither the artifact nor the user can widen the other's lockdown), and only the user's overlay connectors are applied — an artifact-declared connector the user hasn't connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
@@ -258,7 +236,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
         &ceilings,
         |policy| &policy.network.egress.http,
         |rule: &RouteRule| rule.verdict == Verdict::Deny,
-        is_catch_all,
+        RouteRule::is_catch_all,
         permits,
     );
     // Folded independently of `http`: an inspected route in a ceiling is not consent to splice the same host raw.

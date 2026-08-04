@@ -100,7 +100,7 @@ the `./lns.yaml` definition with its command overridden.
 | `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory roots the definition's relative binds and filesets. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
-| `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with `defaultVerdict: ask` if absent.         |
+| `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with no rules if absent.                      |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
@@ -300,7 +300,6 @@ lns policy allow     <PATTERN> [--description <TEXT>] [--binary <PATH>]…
 lns policy deny      <PATTERN> [--description <TEXT>]
 lns policy allow-tcp <HOST:PORT> [--description <TEXT>] [--binary <PATH>]…
 lns policy deny-tcp  <HOST:PORT> [--description <TEXT>]
-lns policy ask-tcp   <HOST:PORT> [--description <TEXT>] [--binary <PATH>]…
 lns policy list      [--format <table|json>]
 lns policy remove    <PATTERN>
 ```
@@ -311,12 +310,17 @@ lns policy remove    <PATTERN>
 | `deny`      | Add a deny rule for a destination pattern.                         |
 | `allow-tcp` | Allow a raw TCP destination, spliced through without inspection.   |
 | `deny-tcp`  | Deny a raw TCP destination.                                        |
-| `ask-tcp`   | Prompt on first use of a raw TCP destination.                      |
 | `list`      | List the rules in the policy file, with the table each is in and what each is scoped to. |
 | `remove`    | Remove every rule for a destination pattern, from either table and binary-scoped ones included. |
 
 `PATTERN` is a host, wildcard (`*.github.com`), CIDR, or `host:port`. The
-`-tcp` verbs write to the raw table and always require a port.
+`-tcp` verbs write to the raw table and always require a port; a raw destination you
+have not decided raises an approval card on first use, so declaring one up front is
+optional.
+
+`lns policy deny '*'` closes the directory — nothing unlisted gets out and nothing
+prompts. A later `allow` goes in front of that catch-all rather than being refused;
+see [Policy and approvals](policy.md).
 
 `--binary` restricts a rule to callers running that guest binary, named by absolute
 path and repeatable. The filter fails closed — once a scoped rule claims a
