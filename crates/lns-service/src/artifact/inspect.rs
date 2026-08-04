@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"defaultVerdict":"allow"}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"egress":{"http":[{"match":"*","verdict":"allow"}]}}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
                 credentials: vec![],
                 tools: vec![],
                 policy_flags: vec![
-                    "permissive defaultVerdict: allow — the sandbox is open by default".into()
+                    "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into()
                 ],
             }))
         );

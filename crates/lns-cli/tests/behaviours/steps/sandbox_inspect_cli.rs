@@ -173,7 +173,9 @@ fn inspects_sandbox_credential_with_requirement(
     cached_artifact(world, &reference, inspection);
 }
 
-#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox whose policy defaults to allow$"#)]
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox whose policy allows every destination$"#
+)]
 fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
@@ -188,7 +190,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: vec![
-            "permissive defaultVerdict: allow — the sandbox is open by default".into(),
+            "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into(),
         ],
     }));
     cached_artifact(world, &reference, inspection);

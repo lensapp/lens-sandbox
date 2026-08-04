@@ -181,7 +181,7 @@ fn surface_service_refusal(message: &str) -> CliRun {
 fn lns_yaml_with_policy_connectors_resources(w: &mut BehaviourWorld) {
     w.author_files.insert(
         PathBuf::from("/work/lns.yaml"),
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  policy:\n    defaultVerdict: ask\n  connectors:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  policy:\n    egress:\n      http: []\n  connectors:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
             .to_string(),
     );
 }

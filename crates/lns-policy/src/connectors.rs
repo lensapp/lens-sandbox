@@ -188,7 +188,6 @@ impl Catalog {
                     .collect(),
                 ..crate::Egress::default()
             },
-            ..NetworkPolicy::default()
         }
         .validate_local_transport()
         .map_err(|error| error.to_string())?;

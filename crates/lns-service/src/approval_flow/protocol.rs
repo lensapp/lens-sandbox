@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lns_policy::NetworkPolicy;
+use lns_policy::{Egress, NetworkPolicy, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -19,12 +19,52 @@ pub enum GuestFrame {
     Other,
 }
 
+/// The `network` section as the guest gate requires it: both defaults left the policy
+/// file, and a guest reading one without `defaultVerdict` fails every destination
+/// closed, so neither is ever omitted.
+///
+/// The verdict follows the rules because a connection the guest cannot classify reads
+/// the default rather than the tables, so a closed policy must say "do not ask" there
+/// too.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireNetwork {
+    pub egress: Egress,
+    pub default_verdict: WireDefaultVerdict,
+    pub default_transport: Transport,
+}
+
+impl WireNetwork {
+    pub fn seeded(network: NetworkPolicy) -> Self {
+        let default_verdict = if crate::artifact::policy::is_closed_network(&network) {
+            WireDefaultVerdict::Deny
+        } else {
+            WireDefaultVerdict::Ask
+        };
+        Self {
+            egress: network.egress,
+            default_verdict,
+            default_transport: Transport::Direct,
+        }
+    }
+}
+
+/// No `ask` rule can be written, so the wire carries only the two a policy can
+/// arrive at: closed, or asking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WireDefaultVerdict {
+    #[default]
+    Ask,
+    Deny,
+}
+
 /// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network` and (when armed) `credentials`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network: Option<NetworkPolicy>,
+    pub network: Option<WireNetwork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<Vec<Credential>>,
 }
@@ -141,7 +181,7 @@ mod tests {
     #[test]
     fn policy_frame_serializes_with_type_discriminator() {
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(NetworkPolicy::default()),
+            network: Some(WireNetwork::seeded(NetworkPolicy::default())),
             credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
@@ -155,9 +195,27 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_policy_tells_the_guest_not_to_ask_either() {
+        // A catch-all deny decides everything the tables are consulted for, but a
+        // connection the guest cannot classify reads the default instead — so a
+        // locked-down policy has to say so there too, or it would still raise cards
+        // for the traffic it exists to refuse.
+        let mut closed = NetworkPolicy::default();
+        closed.egress.http.push(RouteRule::deny_host("*"));
+        let v = serde_json::to_value(WireNetwork::seeded(closed)).unwrap();
+        assert_eq!(v["defaultVerdict"], "deny");
+
+        let open = serde_json::to_value(WireNetwork::seeded(NetworkPolicy::default())).unwrap();
+        assert_eq!(
+            open["defaultVerdict"], "ask",
+            "a policy that decides nothing must keep asking"
+        );
+    }
+
+    #[test]
     fn the_policy_frame_publishes_one_egress_table_and_not_the_deprecated_list() {
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(NetworkPolicy::default()),
+            network: Some(WireNetwork::seeded(NetworkPolicy::default())),
             credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
@@ -185,7 +243,7 @@ mod tests {
                 "db.internal:5432",
             ));
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(net),
+            network: Some(WireNetwork::seeded(net)),
             credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
@@ -204,7 +262,7 @@ mod tests {
         let mut net = NetworkPolicy::default();
         net.egress.http.push(RouteRule::allow_host("10.0.0.0/8"));
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(net),
+            network: Some(WireNetwork::seeded(net)),
             credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
@@ -221,7 +279,7 @@ mod tests {
             .http
             .push(RouteRule::allow_host("api.linear.app"));
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(net),
+            network: Some(WireNetwork::seeded(net)),
             credentials: None,
         });
 
@@ -368,7 +426,7 @@ mod tests {
             binaries: None,
         });
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(net),
+            network: Some(WireNetwork::seeded(net)),
             credentials: None,
         });
         let s = serde_json::to_string(&frame).unwrap();
@@ -427,7 +485,7 @@ mod tests {
     #[test]
     fn policy_frame_with_credentials_round_trips() {
         let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(NetworkPolicy::default()),
+            network: Some(WireNetwork::seeded(NetworkPolicy::default())),
             credentials: Some(vec![some_credential(true)]),
         });
         let s = serde_json::to_string(&frame).unwrap();

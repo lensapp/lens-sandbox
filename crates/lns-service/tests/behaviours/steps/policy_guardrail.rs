@@ -1,14 +1,7 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
-use lns_policy::{RouteRule, TcpEgressRule, Verdict};
+use lns_policy::{RouteRule, TcpEgressRule};
 use lns_service::artifact::policy::{guardrail_flags, run_summary};
-
-#[given(r#"a sandbox whose policy has defaultVerdict "allow""#)]
-async fn default_verdict_allow(world: &mut BehaviourWorld) {
-    let rig = world.policy();
-    rig.sandbox_ships_policy = true;
-    rig.sandbox_policy.network.default_verdict = Verdict::Allow;
-}
 
 #[given(regex = r#"^a sandbox whose policy allows the CIDR "([^"]+)"$"#)]
 async fn allows_cidr(world: &mut BehaviourWorld, cidr: String) {
@@ -48,13 +41,6 @@ fn summary(world: &mut BehaviourWorld) -> String {
         .summary
         .clone()
         .expect("the first-run summary must have been produced")
-}
-
-#[then("the run summary prominently flags the permissive defaultVerdict")]
-async fn flags_default_verdict(world: &mut BehaviourWorld) {
-    let summary = summary(world);
-    assert!(summary.contains("over-broad"), "got: {summary}");
-    assert!(summary.contains("defaultVerdict"), "got: {summary}");
 }
 
 #[then("the run summary prominently flags the wildcard allow")]

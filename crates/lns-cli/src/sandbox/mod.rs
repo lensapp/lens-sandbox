@@ -2467,8 +2467,11 @@ mod tests {
     fn policy_doc_embeds_a_parsed_policy() {
         let doc = policy_doc(
             "/work/lns-policy.yaml",
-            Some(serde_json::json!({"network": {"defaultVerdict": "ask"}})),
+            Some(serde_json::json!({"network": {"egress": {"http": []}}})),
         );
-        assert_eq!(doc["policy"]["network"]["defaultVerdict"], "ask");
+        assert_eq!(
+            doc["policy"]["network"]["egress"]["http"],
+            serde_json::json!([])
+        );
     }
 }

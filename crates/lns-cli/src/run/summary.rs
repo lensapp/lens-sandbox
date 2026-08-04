@@ -20,7 +20,6 @@ network:
   egress:
     http: []
     tcp: []
-  defaultVerdict: ask
 ";
 
 pub fn policy_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
@@ -114,12 +113,7 @@ pub fn format_summary(
     }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
-    writeln!(
-        s,
-        "    default verdict: {}",
-        verdict_word(policy.network.default_verdict)
-    )
-    .unwrap();
+    writeln!(s, "    unmatched destinations: ask").unwrap();
     writeln!(s, "    rules: {}", rules_line(policy)).unwrap();
     writeln!(s, "    source: {}", source_line(source)).unwrap();
     s.push('\n');
@@ -269,14 +263,6 @@ fn ports_line(args: &RunArgs) -> String {
         .join(", ")
 }
 
-fn verdict_word(v: Verdict) -> &'static str {
-    match v {
-        Verdict::Allow => "allow",
-        Verdict::Deny => "deny",
-        Verdict::Ask => "ask",
-    }
-}
-
 fn rules_line(policy: &Policy) -> String {
     let routes = &policy.network.egress.http;
     if routes.is_empty() {
@@ -287,7 +273,6 @@ fn rules_line(policy: &Policy) -> String {
         .fold((0u32, 0u32), |(a, d), r| match r.verdict {
             Verdict::Allow => (a + 1, d),
             Verdict::Deny => (a, d + 1),
-            Verdict::Ask => (a, d),
         });
     format!("{} allow, {} deny, anything else asks", allows, denies)
 }
@@ -303,7 +288,7 @@ fn source_line(source: &PolicySource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::{RouteRule, Transport};
+    use lns_policy::RouteRule;
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
@@ -770,28 +755,6 @@ mod tests {
     }
 
     #[test]
-    fn rules_line_does_not_count_ask_verdict_rules_as_allow_or_deny() {
-        let mut policy = Policy::default();
-        policy.add_rule(RouteRule {
-            match_pattern: "ambiguous.example".to_string(),
-            verdict: Verdict::Ask,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-            binaries: None,
-        });
-        let s = format_summary(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
-        );
-        assert!(s.contains("0 allow, 0 deny, anything else asks"));
-    }
-
-    #[test]
     fn flags_line_says_none_when_no_flags_are_set() {
         let mut args = run_args(Some("ubuntu"));
         args.interactive = false;
@@ -807,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_block_shows_file_path_default_verdict_and_rule_summary() {
+    fn policy_block_shows_the_file_path_and_a_rule_summary() {
         let mut policy = Policy::default();
         policy.add_rule(RouteRule::allow_host("api.linear.app"));
         policy.add_rule(RouteRule::allow_host("api.example.com"));
@@ -820,7 +783,10 @@ mod tests {
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("file: ./lns-policy.yaml"));
-        assert!(s.contains("default verdict: ask"));
+        assert!(
+            s.contains("unmatched destinations: ask"),
+            "the default is no longer a field the file varies, so the summary states the rule: {s}"
+        );
         assert!(s.contains("3 allow, 1 deny, anything else asks"));
     }
 
@@ -850,13 +816,6 @@ mod tests {
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("1 allow, 1 deny, anything else asks"));
-    }
-
-    #[test]
-    fn default_verdict_word_covers_each_variant() {
-        assert_eq!(verdict_word(Verdict::Allow), "allow");
-        assert_eq!(verdict_word(Verdict::Deny), "deny");
-        assert_eq!(verdict_word(Verdict::Ask), "ask");
     }
 
     #[test]
@@ -923,11 +882,7 @@ mod tests {
     fn resolve_policy_finds_existing_default_file_in_cwd() {
         let dir = tempfile::TempDir::new().unwrap();
         let preexisting = dir.path().join(DEFAULT_POLICY_FILENAME);
-        std::fs::write(
-            &preexisting,
-            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
-        )
-        .unwrap();
+        std::fs::write(&preexisting, "network:\n  egress:\n    http: []\n").unwrap();
         let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
         assert_eq!(resolved, preexisting);
         assert_eq!(source, PolicySource::FoundInCwd);
@@ -940,7 +895,10 @@ mod tests {
         assert_eq!(resolved, dir.path().join(DEFAULT_POLICY_FILENAME));
         assert_eq!(source, PolicySource::AutoCreated);
         let body = std::fs::read_to_string(&resolved).unwrap();
-        assert!(body.contains("defaultVerdict: ask"));
+        assert!(
+            !body.contains("defaultVerdict"),
+            "a file born with the key would be born with the one value the loader tells you to delete: {body}"
+        );
         assert!(
             body.contains("egress:") && body.contains("http: []"),
             "the scaffold must name the table the guest reads, not the deprecated one:\n{body}"

@@ -22,16 +22,11 @@ pub enum PolicyCommand {
     Deny(PolicyRuleArgs),
     #[command(
         about = "Allow a raw TCP destination, spliced through without inspection.",
-        long_about = "Allow a raw TCP destination, spliced through without inspection.\n\nRaw destinations are matched before the HTTP rules and are passed through untouched: no TLS interception, no HTTP rules, no credential injection. A destination no raw rule names falls through to the HTTP rules as before. Every raw destination must name a port."
+        long_about = "Allow a raw TCP destination, spliced through without inspection.\n\nRaw destinations are matched before the HTTP rules and are passed through untouched: no TLS interception, no HTTP rules, no credential injection. A destination no raw rule names falls through to the HTTP rules as before. Every raw destination must name a port.\n\nA connection the sandbox cannot read raises an approval card on first use, so a raw destination does not have to be declared up front to be allowed."
     )]
     AllowTcp(PolicyScopedRuleArgs),
     #[command(about = "Deny a raw TCP destination.")]
     DenyTcp(PolicyRuleArgs),
-    #[command(
-        about = "Prompt on first use of a raw TCP destination.",
-        long_about = "Prompt on first use of a raw TCP destination.\n\nAn approval card confirms a destination the policy already names; it never discovers one. This is the only way to be asked about a raw splice instead of declaring it up front."
-    )]
-    AskTcp(PolicyScopedRuleArgs),
     #[command(about = "List the rules in the policy file.")]
     List(PolicyScopeArgs),
     #[command(about = "Remove every rule matching a destination pattern.")]
@@ -117,9 +112,6 @@ pub fn run(cmd: &PolicyCommand, cwd: &Path, writer: &mut impl Write) -> Result<i
             add_tcp_rule(&args.rule, Verdict::Allow, &args.binary, cwd, writer)
         }
         PolicyCommand::DenyTcp(args) => add_tcp_rule(args, Verdict::Deny, &[], cwd, writer),
-        PolicyCommand::AskTcp(args) => {
-            add_tcp_rule(&args.rule, Verdict::Ask, &args.binary, cwd, writer)
-        }
         PolicyCommand::List(args) => list_rules(args, cwd, writer),
         PolicyCommand::Remove(args) => remove_rule(args, cwd, writer),
     }
@@ -209,6 +201,12 @@ trait Placeable: Clone + PartialEq {
     fn table(policy: &mut Policy) -> &mut Vec<Self>;
     fn first_shadowing(policy: &Policy, rule: &Self) -> Option<(usize, Self)>;
 
+    /// Whether this rule is the file's backstop rather than a decision about any one
+    /// destination. A raw rule must name a port, so it can never be one.
+    fn is_catch_all(&self) -> bool {
+        false
+    }
+
     /// Takes on the treatment the fronted rule carries and returns the note saying so, since fronting a rule is not a request to stop applying it. A raw rule carries no treatment to take on.
     fn inherit_from(&mut self, _shadowing: &Self) -> Option<&'static str> {
         None
@@ -226,6 +224,10 @@ trait Placeable: Clone + PartialEq {
 }
 
 impl Placeable for RouteRule {
+    fn is_catch_all(&self) -> bool {
+        RouteRule::is_catch_all(self)
+    }
+
     const WORDS: Vocabulary = Vocabulary {
         announced: "",
         qualifier: "",
@@ -455,7 +457,14 @@ fn place<R: Placeable>(policy: &mut Policy, mut rule: R) -> Result<Placement> {
         let described = rule.description().map(str::to_string);
         return Ok(renote(&mut R::table(policy)[index], described));
     }
-    if shadowing.verdict() == Verdict::Deny {
+    // A catch-all deny is what closes a directory now that no default can, so an allow
+    // has to be able to go in front of it — refusing would leave a closed policy
+    // editable by hand alone, since it raises no approval cards either. A deny aimed at
+    // a destination is still a decision, and an allow behind that stays refused.
+    if shadowing.verdict() == Verdict::Deny && !shadowing.is_catch_all() {
+        return behind_a_deny(&shadowing, &rule);
+    }
+    if shadowing.verdict() == Verdict::Deny && rule.verdict() == Verdict::Deny {
         return behind_a_deny(&shadowing, &rule);
     }
     if reopens_a_scoped_rule(&shadowing, &rule) {
@@ -674,7 +683,6 @@ fn verdict_word(v: Verdict) -> &'static str {
     match v {
         Verdict::Allow => "allow",
         Verdict::Deny => "deny",
-        Verdict::Ask => "ask",
     }
 }
 
@@ -825,16 +833,16 @@ mod tests {
     }
 
     #[test]
-    fn list_reports_each_verdict_including_ask_and_descriptions() {
+    fn list_reports_each_verdict_and_its_description() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("lns-policy.yaml");
         let mut policy = Policy::default();
         policy.add_rule(RouteRule {
-            match_pattern: "ask.example".into(),
-            verdict: Verdict::Ask,
+            match_pattern: "blocked.example".into(),
+            verdict: Verdict::Deny,
             transport: Transport::Direct,
             scheme: None,
-            description: Some("undecided".into()),
+            description: Some("phishing kit".into()),
             tls_terminate: false,
             rules: Vec::new(),
             binaries: None,
@@ -845,7 +853,7 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("VERDICT  TABLE  PATTERN"), "got: {text}");
         assert!(
-            text.contains("ask      http   ask.example            undecided"),
+            text.contains("deny     http   blocked.example            phishing kit"),
             "an unscoped rule leaves the BINARIES column blank and still lines up:\n{text}"
         );
     }

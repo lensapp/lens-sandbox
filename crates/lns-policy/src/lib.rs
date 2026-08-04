@@ -27,16 +27,55 @@ pub struct Policy {
     pub connectors: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "NetworkPolicyRaw"
+)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub egress: Egress,
-    #[serde(default = "default_ask")]
-    pub default_verdict: Verdict,
-    // Always serialized: sandbox-core's schema requires transport, and a missing one fail-closes a non-deny verdict to deny in the guest.
+}
+
+/// Deserialization shim for the two fields that left the file: a value restating what
+/// the runtime now does unconditionally is dropped, and one that decided something is
+/// refused, since ignoring it would change what the file means.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkPolicyRaw {
     #[serde(default)]
-    pub default_transport: Transport,
+    egress: Egress,
+    #[serde(default)]
+    default_verdict: Option<String>,
+    #[serde(default)]
+    default_transport: Option<String>,
+}
+
+impl TryFrom<NetworkPolicyRaw> for NetworkPolicy {
+    type Error = String;
+
+    fn try_from(raw: NetworkPolicyRaw) -> Result<Self, Self::Error> {
+        match raw.default_verdict.as_deref() {
+            None | Some("ask") => {}
+            Some(verdict @ ("allow" | "deny")) => {
+                return Err(format!(
+                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: end `egress.http` with a catch-all instead — `lns policy {verdict} '*'` — then delete the line. That rule governs raw destinations too, so `egress.tcp` needs no counterpart"
+                ));
+            }
+            Some(other) => {
+                return Err(format!(
+                    "defaultVerdict is no longer part of a policy file, and `{other}` was never one of its values: delete the line"
+                ));
+            }
+        }
+        if let Some(transport) = raw.default_transport.as_deref().filter(|t| *t != "direct") {
+            return Err(format!(
+                "defaultTransport is no longer part of a policy file, and `{transport}` isn't supported in the local sandbox: delete the line"
+            ));
+        }
+        Ok(Self { egress: raw.egress })
+    }
 }
 
 /// The per-protocol egress tables lens-sandbox-core routes on.
@@ -72,28 +111,13 @@ impl TryFrom<EgressRaw> for Egress {
     }
 }
 
-fn default_ask() -> Verdict {
-    Verdict::Ask
-}
-
-impl Default for NetworkPolicy {
-    fn default() -> Self {
-        Self {
-            egress: Egress::default(),
-            default_verdict: Verdict::Ask,
-            default_transport: Transport::Direct,
-        }
-    }
-}
-
 impl NetworkPolicy {
     pub fn validate_local_transport(&self) -> io::Result<()> {
-        let uses_upstream = self.default_transport == Transport::Upstream
-            || self
-                .egress
-                .http
-                .iter()
-                .any(|route| route.transport == Transport::Upstream);
+        let uses_upstream = self
+            .egress
+            .http
+            .iter()
+            .any(|route| route.transport == Transport::Upstream);
         if uses_upstream {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -289,12 +313,28 @@ pub struct HttpRule {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What a rule decides. There is no `ask`: a destination no rule decides is
+/// asked about, so being asked is the absence of a rule rather than a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
     Allow,
     Deny,
-    Ask,
+}
+
+impl<'de> Deserialize<'de> for Verdict {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "allow" => Ok(Self::Allow),
+            "deny" => Ok(Self::Deny),
+            "ask" => Err(serde::de::Error::custom(
+                "verdict `ask` is not written in a policy file: a destination no rule decides is asked about already, so delete the rule and the approval card will appear on first use",
+            )),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown verdict {other:?}: expected `allow` or `deny`"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,39 +387,21 @@ impl Policy {
         }
     }
 
-    /// Records a decision the developer just made on a held request. See [`place_approved`] for the placement and [`answering_an_ask`] for why the rule isn't built from the host alone.
+    /// Records a decision the developer just made on a held request. See [`place_approved`] for the placement.
     pub fn add_approved_rule(&mut self, rule: RouteRule) -> Approval {
         let shadowing = self
             .network
             .first_shadowing_rule(&rule)
             .map(|(index, shadowing)| (index, shadowing.clone()));
-        let rule = match &shadowing {
-            Some((_, asked)) if answering_an_ask(asked.verdict, rule.verdict) => RouteRule {
-                match_pattern: rule.match_pattern.clone(),
-                verdict: rule.verdict,
-                description: rule.description.clone(),
-                ..asked.clone()
-            },
-            _ => rule,
-        };
         place_approved(&mut self.network.egress.http, rule, shadowing)
     }
 
-    /// Records a decision the developer just made on a held raw-TCP request. See [`place_approved`] for the placement and [`answering_an_ask`] for why the rule isn't built from the destination alone.
+    /// Records a decision the developer just made on a held raw-TCP request. See [`place_approved`] for the placement.
     pub fn add_approved_tcp_rule(&mut self, rule: TcpEgressRule) -> Approval {
         let shadowing = self
             .network
             .first_shadowing_tcp_rule(&rule)
             .map(|(index, shadowing)| (index, shadowing.clone()));
-        let rule = match &shadowing {
-            Some((_, asked)) if answering_an_ask(asked.verdict, rule.verdict) => TcpEgressRule {
-                match_pattern: rule.match_pattern.clone(),
-                verdict: rule.verdict,
-                description: rule.description.clone(),
-                ..asked.clone()
-            },
-            _ => rule,
-        };
         place_approved(&mut self.network.egress.tcp, rule, shadowing)
     }
 
@@ -408,11 +430,6 @@ pub enum Approval {
     Unreachable(String),
 }
 
-/// Whether the rule being written is the answer to a standing `ask`. An approval says "stop asking", not "treat this destination differently", so the rule it writes carries the asking rule's TLS termination, request filter and binary scope rather than silently lifting them — but never its `match`, which the card never showed and which would grant every other destination the ask covered. A deny narrows whatever the ask covered and needs nothing carried.
-fn answering_an_ask(standing: Verdict, decided: Verdict) -> bool {
-    standing == Verdict::Ask && decided != Verdict::Deny
-}
-
 /// A rule table entry the gate scans first-match-wins.
 trait Placed: PartialEq {
     fn verdict(&self) -> Verdict;
@@ -439,7 +456,7 @@ impl Placed for TcpEgressRule {
     }
 }
 
-/// Places an approval-derived rule where the guest gate will actually reach it: ahead of the `ask` rule that raised the prompt, since lens-sandbox-core stops at the first match and appending behind that rule would be dead. With nothing covering it the rule appends. A rule that already *decides* the destination is neither jumped — that would grant more than the card showed — nor written behind, which would be a rule that never fires; the decision stands for its own request and the caller is told it outlived nothing.
+/// Places an approval-derived rule where the guest gate will actually reach it: appended when nothing covers the destination, and otherwise neither jumped over the rule that already decides it — that would grant more than the card showed — nor written behind it, where it would never fire; the decision stands for its own request and the caller is told it outlived nothing.
 fn place_approved<R: Placed>(
     table: &mut Vec<R>,
     rule: R,
@@ -459,10 +476,6 @@ fn place_approved<R: Placed>(
         } else {
             Approval::Unreachable(shadowing.match_pattern().to_string())
         };
-    }
-    if shadowing.verdict() == Verdict::Ask {
-        table.insert(index, rule);
-        return Approval::Stands;
     }
     if shadowing.verdict() == rule.verdict() {
         return Approval::Stands;
@@ -491,6 +504,16 @@ impl PolicyStore for FilePolicyStore {
 }
 
 impl RouteRule {
+    /// Whether this rule decides every destination for every caller: the file's backstop
+    /// rather than a decision about anything in particular. One narrowed by caller,
+    /// request or scheme decides only what it names, so it is an ordinary rule.
+    pub fn is_catch_all(&self) -> bool {
+        self.match_pattern == "*"
+            && self.binaries.is_none()
+            && self.rules.is_empty()
+            && self.scheme.is_none()
+    }
+
     pub fn allow_host(host: impl Into<String>) -> Self {
         Self {
             match_pattern: host.into(),
@@ -553,18 +576,90 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn default_policy_uses_verdict_ask_with_direct_transport() {
+    fn a_default_policy_decides_nothing_and_so_holds_no_rules() {
+        // The file is the decisions the developer has made. A fresh one has made
+        // none, and what happens to everything else is not a field any more.
         let p = Policy::default();
-        assert_eq!(p.network.default_verdict, Verdict::Ask);
-        assert_eq!(p.network.default_transport, Transport::Direct);
         assert!(p.network.egress.http.is_empty());
+        assert!(p.network.egress.tcp.is_empty());
     }
 
     #[test]
-    fn a_network_section_omitting_the_defaults_parses_to_ask_and_direct() {
-        let net: NetworkPolicy = serde_yaml::from_str("egress:\n  http: []\n").unwrap();
-        assert_eq!(net.default_verdict, Verdict::Ask);
-        assert_eq!(net.default_transport, Transport::Direct);
+    fn the_removed_defaults_are_dropped_where_they_only_restated_the_new_behavior() {
+        // Every file created before this change carries both, and both spell what
+        // the runtime now does unconditionally — refusing them would brick every
+        // existing project to tell it nothing.
+        let net: NetworkPolicy = serde_yaml::from_str(
+            "egress:\n  http: []\ndefaultVerdict: ask\ndefaultTransport: direct\n",
+        )
+        .expect("the values that restate the new behavior must load");
+        assert!(net.egress.http.is_empty());
+        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
+        assert!(
+            !yaml.contains("defaultVerdict") && !yaml.contains("defaultTransport"),
+            "a rewritten file must not put the keys back:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn a_default_verdict_that_decided_something_is_refused_with_the_rule_to_write_instead() {
+        // These two changed a file's meaning, and no rule the loader could invent
+        // would preserve it — so it says what to write rather than guessing.
+        for (value, expected) in [("deny", "deny"), ("allow", "allow")] {
+            let err = serde_yaml::from_str::<NetworkPolicy>(&format!(
+                "egress:\n  http: []\ndefaultVerdict: {value}\n"
+            ))
+            .expect_err("a default that decided something must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("defaultVerdict") && msg.contains(expected),
+                "the error must name the key and the verdict; got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_default_verdict_that_was_never_a_value_is_refused_without_inventing_a_command() {
+        let err =
+            serde_yaml::from_str::<NetworkPolicy>("egress:\n  http: []\ndefaultVerdict: bananas\n")
+                .expect_err("an unknown value must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("never one of its values") && !msg.contains("lns policy bananas"),
+            "the fix-it must not echo a value back as a verb: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_upstream_default_transport_keeps_the_error_it_always_had() {
+        let err = serde_yaml::from_str::<NetworkPolicy>(
+            "egress:\n  http: []\ndefaultTransport: upstream\n",
+        )
+        .expect_err("upstream must stay refused");
+        assert!(err.to_string().contains("upstream"), "got {err}");
+    }
+
+    #[test]
+    fn a_rule_asking_to_be_asked_is_refused_because_that_is_now_the_absence_of_a_rule() {
+        // `ask` was how you said "prompt me about this". Nothing is decided
+        // without a rule now, so the way to be asked is to write no rule — and a
+        // file still saying it is telling the loader something it cannot honor.
+        for table in ["http", "tcp"] {
+            let pattern = if table == "tcp" {
+                "db.internal:5432"
+            } else {
+                "api.example.test"
+            };
+            let err = serde_yaml::from_str::<NetworkPolicy>(&format!(
+                "egress:\n  {table}:\n    - match: {pattern}\n      verdict: ask\n"
+            ))
+            .expect_err("an ask rule must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("ask"),
+                "the {table} error must name the verdict; got {msg}"
+            );
+        }
     }
 
     #[test]
@@ -573,15 +668,6 @@ mod tests {
         let yaml = serde_yaml::to_string(&p).unwrap();
         let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(p, parsed);
-    }
-
-    #[test]
-    fn default_policy_yaml_emits_the_transport_the_guest_gate_requires() {
-        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
-        assert!(
-            yaml.contains("defaultTransport: direct"),
-            "the sandbox-core schema requires defaultTransport; omitting it fail-closes ask to deny in the guest:\n{yaml}"
-        );
     }
 
     #[test]
@@ -817,7 +903,6 @@ network:
             serde_yaml::to_string(&Verdict::Deny).unwrap().trim(),
             "deny"
         );
-        assert_eq!(serde_yaml::to_string(&Verdict::Ask).unwrap().trim(), "ask");
     }
 
     #[test]
@@ -1099,55 +1184,6 @@ network:
         }
     }
 
-    fn ask_route(host: &str) -> RouteRule {
-        RouteRule {
-            match_pattern: host.into(),
-            verdict: Verdict::Ask,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-            binaries: None,
-        }
-    }
-
-    #[test]
-    fn an_approved_route_lands_before_the_ask_rule_that_raised_the_prompt() {
-        let mut p = Policy::default();
-        p.add_rule(ask_route("api.example.test"));
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert_eq!(
-            p.network
-                .egress
-                .http
-                .iter()
-                .map(|r| r.verdict)
-                .collect::<Vec<_>>(),
-            vec![Verdict::Allow, Verdict::Ask],
-            "the gate is first-match-wins, so an approval appended after the ask rule would never be reached"
-        );
-    }
-
-    #[test]
-    fn an_approved_route_keeps_the_rules_that_already_decide_ahead_of_it() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule::deny_host("evil.example"));
-        p.add_rule(ask_route("api.example.test"));
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert_eq!(
-            p.network
-                .egress
-                .http
-                .iter()
-                .map(|r| r.match_pattern.as_str())
-                .collect::<Vec<_>>(),
-            vec!["evil.example", "api.example.test", "api.example.test"],
-            "only the undecided tail moves; a standing deny still wins"
-        );
-        assert_eq!(p.network.egress.http[1].verdict, Verdict::Allow);
-    }
-
     #[test]
     fn an_approved_route_appends_when_no_rule_asks() {
         let mut p = Policy::default();
@@ -1165,26 +1201,6 @@ network:
         p.add_approved_rule(RouteRule::allow_host("api.example.test"));
         p.add_approved_rule(RouteRule::allow_host("api.example.test"));
         assert_eq!(p.network.egress.http.len(), 1);
-    }
-
-    #[test]
-    fn an_approved_tcp_rule_lands_before_the_ask_rule_that_raised_the_prompt() {
-        let mut p = Policy::default();
-        p.network
-            .egress
-            .tcp
-            .push(TcpEgressRule::new("db.internal:5432", Verdict::Ask));
-        p.add_approved_tcp_rule(TcpEgressRule::allow_destination("db.internal:5432"));
-        assert_eq!(
-            p.network
-                .egress
-                .tcp
-                .iter()
-                .map(|r| r.verdict)
-                .collect::<Vec<_>>(),
-            vec![Verdict::Allow, Verdict::Ask],
-            "an ask rule is the only way a raw prompt is raised, so an approval behind it is dead"
-        );
     }
 
     #[test]
@@ -1211,33 +1227,34 @@ network:
 
     // Repositioning a rule the author placed themselves is more surprising than one more card, so the dedup wins, the prompt comes back — and the developer is told, because a silent "always" reads as remembered.
     #[test]
-    fn an_approval_matching_a_rule_the_author_put_behind_the_ask_is_reported_as_unreachable() {
+    fn an_approval_matching_a_rule_stranded_behind_a_deny_is_reported_as_unreachable() {
         let mut p = Policy::default();
-        p.add_rule(ask_route("api.example.test"));
+        p.add_rule(RouteRule::deny_host("*.example.test"));
         p.add_rule(RouteRule::allow_host("api.example.test"));
         assert_eq!(
             p.add_approved_rule(RouteRule::allow_host("api.example.test")),
-            Approval::Unreachable("api.example.test".into()),
-            "the gate stops at the ask rule, so the copy behind it never fires and the card comes back on the next request"
+            Approval::Unreachable("*.example.test".into()),
+            "the gate stops at the deny, so the allow behind it never fires and the card comes back on the next request"
         );
         assert_eq!(
             p.network
                 .egress
                 .http
                 .iter()
-                .map(|r| r.verdict)
+                .map(|r| r.match_pattern.as_str())
                 .collect::<Vec<_>>(),
-            vec![Verdict::Ask, Verdict::Allow]
+            vec!["*.example.test", "api.example.test"],
+            "a rule the author placed is not moved on their behalf"
         );
     }
 
     #[test]
-    fn an_approval_matching_a_raw_rule_behind_the_raw_ask_is_reported_as_unreachable() {
+    fn an_approval_matching_a_raw_rule_stranded_behind_a_deny_is_reported_as_unreachable() {
         let mut p = Policy::default();
         p.network
             .egress
             .tcp
-            .push(TcpEgressRule::new("db.internal:5432", Verdict::Ask));
+            .push(TcpEgressRule::deny_destination("db.internal:5432"));
         p.network
             .egress
             .tcp
@@ -1247,98 +1264,6 @@ network:
             Approval::Unreachable("db.internal:5432".into())
         );
         assert_eq!(p.network.egress.tcp.len(), 2);
-    }
-
-    #[test]
-    fn an_approved_route_keeps_the_tls_termination_the_ask_rule_asked_for() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule {
-            tls_terminate: true,
-            ..ask_route("api.example.test")
-        });
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert!(
-            p.network.egress.http[0].tls_terminate,
-            "the allow now decides the destination, so dropping interception here silently stops credential injection for it: {:?}",
-            p.network.egress.http
-        );
-    }
-
-    #[test]
-    fn an_approved_route_keeps_the_request_filter_the_ask_rule_carried() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule {
-            rules: vec![HttpRule {
-                method: Some("GET".into()),
-                path: None,
-            }],
-            ..ask_route("api.example.test")
-        });
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert_eq!(
-            p.network.egress.http[0].rules,
-            vec![HttpRule {
-                method: Some("GET".into()),
-                path: None,
-            }],
-            "an unrestricted allow in front would allow every method the author restricted away"
-        );
-    }
-
-    #[test]
-    fn an_approved_route_keeps_the_binary_scope_the_ask_rule_carried() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule {
-            binaries: Some(vec!["/usr/bin/curl".into()]),
-            ..ask_route("api.example.test")
-        });
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert_eq!(
-            p.network.egress.http[0].binaries.as_deref(),
-            Some(&["/usr/bin/curl".to_string()][..]),
-            "approving the caller that asked is not consent to open the destination to every other caller"
-        );
-    }
-
-    #[test]
-    fn an_approved_route_under_a_wildcard_ask_grants_only_the_host_on_the_card() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule {
-            tls_terminate: true,
-            ..ask_route("*.example.test")
-        });
-        p.add_approved_rule(RouteRule::allow_host("api.example.test"));
-        assert_eq!(
-            p.network
-                .egress
-                .http
-                .iter()
-                .map(|r| (r.match_pattern.as_str(), r.verdict, r.tls_terminate))
-                .collect::<Vec<_>>(),
-            vec![
-                ("api.example.test", Verdict::Allow, true),
-                ("*.example.test", Verdict::Ask, true)
-            ],
-            "the card named one host; taking the wildcard's pattern too would grant every other subdomain without ever asking, and the ask rule exists to keep asking about them"
-        );
-    }
-
-    #[test]
-    fn an_approved_deny_does_not_take_on_the_ask_rules_tls_termination() {
-        let mut p = Policy::default();
-        p.add_rule(RouteRule {
-            tls_terminate: true,
-            ..ask_route("api.example.test")
-        });
-        p.add_approved_rule(RouteRule::deny_host("api.example.test"));
-        assert_eq!(
-            (
-                p.network.egress.http[0].verdict,
-                p.network.egress.http[0].tls_terminate
-            ),
-            (Verdict::Deny, false),
-            "a deny blocks the request before there is anything to intercept"
-        );
     }
 
     #[test]
@@ -1365,7 +1290,6 @@ network:
     #[test]
     fn a_second_approval_contradicting_the_rule_the_first_one_wrote_is_reported_not_written() {
         let mut p = Policy::default();
-        p.add_rule(ask_route("api.example.test"));
         assert_eq!(
             p.add_approved_rule(RouteRule::allow_host("api.example.test")),
             Approval::Stands
@@ -1373,7 +1297,7 @@ network:
         assert_eq!(
             p.add_approved_rule(RouteRule::deny_host("api.example.test")),
             Approval::Shadowed("api.example.test".into()),
-            "one ask rule raises one card per request, so the second answer arrives after the first has already written the rule that now decides"
+            "one card is raised per request, so a second answer can arrive after the first has already written the rule that now decides"
         );
         assert_eq!(
             p.network
@@ -1382,7 +1306,8 @@ network:
                 .iter()
                 .map(|r| r.verdict)
                 .collect::<Vec<_>>(),
-            vec![Verdict::Allow, Verdict::Ask]
+            vec![Verdict::Allow],
+            "the contradicting deny is reported, not written behind the allow where it would never fire"
         );
     }
 
@@ -1414,47 +1339,9 @@ network:
     }
 
     #[test]
-    fn an_approved_tcp_rule_keeps_the_binary_scope_the_raw_ask_carried() {
-        let mut p = Policy::default();
-        p.network.egress.tcp.push(TcpEgressRule {
-            binaries: Some(vec!["/usr/bin/psql".into()]),
-            ..TcpEgressRule::new("db.internal:5432", Verdict::Ask)
-        });
-        p.add_approved_tcp_rule(TcpEgressRule::allow_destination("db.internal:5432"));
-        assert_eq!(
-            p.network.egress.tcp[0].binaries.as_deref(),
-            Some(&["/usr/bin/psql".to_string()][..]),
-            "an opaque splice for one binary is not consent to splice it for every caller"
-        );
-    }
-
-    #[test]
-    fn an_approved_tcp_rule_under_a_range_ask_splices_only_the_address_on_the_card() {
-        let mut p = Policy::default();
-        p.network
-            .egress
-            .tcp
-            .push(TcpEgressRule::new("10.0.0.0/24:5432", Verdict::Ask));
-        p.add_approved_tcp_rule(TcpEgressRule::allow_destination("10.0.0.5:5432"));
-        assert_eq!(
-            p.network
-                .egress
-                .tcp
-                .iter()
-                .map(|r| (r.match_pattern.as_str(), r.verdict))
-                .collect::<Vec<_>>(),
-            vec![
-                ("10.0.0.5:5432", Verdict::Allow),
-                ("10.0.0.0/24:5432", Verdict::Ask)
-            ],
-            "taking the range's pattern would open an opaque, unaudited splice to 256 addresses off one approval for one of them"
-        );
-    }
-
-    #[test]
     fn add_rule_still_appends_so_a_hand_written_order_is_preserved() {
         let mut p = Policy::default();
-        p.add_rule(ask_route("api.example.test"));
+        p.add_rule(RouteRule::deny_host("api.example.test"));
         p.add_rule(RouteRule::allow_host("api.example.test"));
         assert_eq!(
             p.network
@@ -1463,7 +1350,7 @@ network:
                 .iter()
                 .map(|r| r.verdict)
                 .collect::<Vec<_>>(),
-            vec![Verdict::Ask, Verdict::Allow],
+            vec![Verdict::Deny, Verdict::Allow],
             "only an approval-derived rule jumps the queue; an author's order is theirs"
         );
     }
@@ -1580,7 +1467,8 @@ network:
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
             err.to_string()
-                .contains("upstream transport isn't supported in the local sandbox"),
+                .contains("defaultTransport is no longer part of a policy file")
+                && err.to_string().contains("upstream"),
             "got: {err}"
         );
     }
@@ -1596,7 +1484,6 @@ network:
       - match: api.example.test
         verdict: allow
         transport: upstream
-  defaultVerdict: ask
 ";
         fs::write(&path, yaml).unwrap();
         let err = Policy::load_or_default(&path).unwrap_err();

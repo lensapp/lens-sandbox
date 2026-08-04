@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
 use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
-use lns_policy::{Policy, RouteRule, Verdict};
+use lns_policy::{Policy, RouteRule};
 
 use crate::credential_flow::providers::{DefProvider, Provider};
 
@@ -132,7 +132,7 @@ pub fn resolve_applied_with_slots(
     let mut base = policy.clone();
     base.connectors.retain(|id| !slot_ids.contains(id.as_str()));
     let mut out = resolve_applied_connectors(&base, catalog);
-    let ceiling_denies = policy.network.default_verdict == Verdict::Deny;
+    let ceiling_denies = crate::artifact::policy::is_closed(policy);
     for slot in slots {
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
             continue;
@@ -141,7 +141,7 @@ pub fn resolve_applied_with_slots(
             def.env_var = slot.env.clone();
             out.providers.push(DefProvider::new(def));
         }
-        // A slot is artifact-declared, so its route must not widen the user's deny-by-default lockdown.
+        // A slot is artifact-declared, so its route must not widen the user's lockdown.
         if !ceiling_denies {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));

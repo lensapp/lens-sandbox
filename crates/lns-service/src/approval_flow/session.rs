@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
     Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
+    WireNetwork,
 };
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
@@ -534,11 +535,11 @@ impl ApprovalSession {
             new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
         }
         if let Some(derive) = self.connector_routes.get() {
-            new_policy
-                .network
-                .egress
-                .http
-                .extend(derive(&new_policy.connectors));
+            let routes = derive(&new_policy.connectors);
+            crate::artifact::policy::splice_connector_routes(
+                &mut new_policy.network.egress.http,
+                routes,
+            );
         }
         if let Some(reconcile) = self.armed_reconciler.get() {
             reconcile(&new_policy.connectors);
@@ -546,7 +547,7 @@ impl ApprovalSession {
         *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(new_policy.network),
+            network: Some(WireNetwork::seeded(new_policy.network)),
             credentials,
         }));
     }
@@ -634,7 +635,7 @@ impl ApprovalSession {
     fn publish_and_persist(&self, snapshot: Policy) {
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(snapshot.network.clone()),
+            network: Some(WireNetwork::seeded(snapshot.network.clone())),
             credentials,
         }));
         if let Err(e) = self.store.save(&snapshot) {
@@ -650,12 +651,15 @@ impl ApprovalSession {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             policy.connect(id);
             let to_persist = policy.clone();
-            policy.network.egress.http.extend(routes);
+            crate::artifact::policy::splice_connector_routes(
+                &mut policy.network.egress.http,
+                routes,
+            );
             (to_persist, policy.network.clone())
         };
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(live_network),
+            network: Some(WireNetwork::seeded(live_network)),
             credentials,
         }));
         if let Err(e) = self.store.save(&to_persist) {
@@ -1111,12 +1115,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_second_always_decision_the_first_ones_rule_pre_empts_writes_nothing_and_says_so() {
-        let mut asking = Policy::default();
-        asking.add_rule(RouteRule {
-            verdict: Verdict::Ask,
-            ..RouteRule::allow_host("api.example.test")
-        });
-        let (session, notifier, store, _rx) = fixture_holding(asking);
+        let (session, notifier, store, _rx) = fixture_holding(Policy::default());
         session.submit_pending(pending("r1", "api.example.test"), Instant::now());
         session.submit_pending(pending("r2", "api.example.test"), Instant::now());
         session.record_decision("r1", Decision::AllowAlways);
@@ -1132,7 +1131,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|r| r.verdict)
                 .collect::<Vec<_>>(),
-            vec![Verdict::Allow, Verdict::Ask],
+            vec![Verdict::Allow],
             "a deny written behind the allow the first card wrote never fires, so it is not written: {saved:?}"
         );
         assert_eq!(
@@ -1661,6 +1660,41 @@ pub(crate) mod tests {
         let frame = rx.try_recv().expect("expected a policy frame");
         assert!(matches!(frame, HostFrame::Policy(_)));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_reload_of_a_closed_policy_still_reaches_the_connector_route() {
+        // A closed policy is a trailing catch-all deny now, and the gate stops at the
+        // first match. Re-deriving the route but appending it behind that rule would
+        // leave the connector dead — and a closed policy raises no card, so nothing
+        // would say why.
+        let (s, _n, _store, mut rx) = fixture();
+        s.set_connector_route_deriver(Box::new(|ids| {
+            ids.iter()
+                .filter(|id| id.as_str() == "some-oauth")
+                .map(|_| RouteRule::allow_host("api.some-oauth.example"))
+                .collect()
+        }));
+        let mut closed = Policy::default();
+        closed.connect("some-oauth");
+        closed.add_rule(RouteRule::deny_host("*"));
+
+        s.apply_external_policy(closed);
+
+        let patterns: Vec<String> = s
+            .current_policy()
+            .network
+            .egress
+            .http
+            .iter()
+            .map(|r| r.match_pattern.clone())
+            .collect();
+        assert_eq!(
+            patterns,
+            vec!["api.some-oauth.example".to_string(), "*".to_string()],
+            "the connector route must sit ahead of the catch-all the gate stops at"
+        );
+        let _ = policy_frame(&mut rx);
     }
 
     #[test]

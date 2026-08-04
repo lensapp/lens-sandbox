@@ -132,35 +132,35 @@ fn policy_has_raw_rule(world: &mut BehaviourWorld, file: String, verdict: String
 }
 
 #[given(
-    regex = r#"^"([^"]+)" has a raw ask rule for "([^"]+)" ahead of a raw allow rule for "([^"]+)"$"#
+    regex = r#"^"([^"]+)" has a raw allow rule for "([^"]+)" ahead of a raw allow rule for "([^"]+)"$"#
 )]
-fn policy_has_raw_ask_ahead_of_allow(
+fn policy_has_raw_allow_ahead_of_allow(
     world: &mut BehaviourWorld,
     file: String,
-    ask: String,
-    allow: String,
+    covering: String,
+    stranded: String,
 ) {
-    seed_raw_ask_ahead_of_allow(world, &file, &ask, &allow, None);
+    seed_raw_allow_ahead_of_allow(world, &file, &covering, &stranded, None);
 }
 
 #[given(
-    regex = r#"^"([^"]+)" has a raw ask rule for "([^"]+)" ahead of a raw allow rule for "([^"]+)" described as "([^"]+)"$"#
+    regex = r#"^"([^"]+)" has a raw allow rule for "([^"]+)" ahead of a raw allow rule for "([^"]+)" described as "([^"]+)"$"#
 )]
-fn policy_has_raw_ask_ahead_of_described_allow(
+fn policy_has_raw_allow_ahead_of_described_allow(
     world: &mut BehaviourWorld,
     file: String,
-    ask: String,
-    allow: String,
+    covering: String,
+    stranded: String,
     description: String,
 ) {
-    seed_raw_ask_ahead_of_allow(world, &file, &ask, &allow, Some(description));
+    seed_raw_allow_ahead_of_allow(world, &file, &covering, &stranded, Some(description));
 }
 
-fn seed_raw_ask_ahead_of_allow(
+fn seed_raw_allow_ahead_of_allow(
     world: &mut BehaviourWorld,
     file: &str,
-    ask: &str,
-    allow: &str,
+    covering: &str,
+    stranded: &str,
     description: Option<String>,
 ) {
     let dir = cwd(world);
@@ -169,12 +169,41 @@ fn seed_raw_ask_ahead_of_allow(
         .network
         .egress
         .tcp
-        .push(TcpEgressRule::new(ask, Verdict::Ask));
+        .push(TcpEgressRule::allow_destination(covering));
     policy.network.egress.tcp.push(TcpEgressRule {
         description,
-        ..TcpEgressRule::allow_destination(allow)
+        ..TcpEgressRule::allow_destination(stranded)
     });
     policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
+#[then(regex = r#"^the raw allow rule for "([^"]+)" sits ahead of the raw rule for "([^"]+)"$"#)]
+fn raw_allow_precedes_raw_rule(
+    world: &mut BehaviourWorld,
+    first: String,
+    second: String,
+) -> Result<(), String> {
+    let policy = load(world, "lns-policy.yaml");
+    let patterns: Vec<&str> = policy
+        .network
+        .egress
+        .tcp
+        .iter()
+        .map(|r| r.match_pattern.as_str())
+        .collect();
+    let (Some(i), Some(j)) = (
+        patterns.iter().position(|p| *p == first),
+        patterns.iter().position(|p| *p == second),
+    ) else {
+        return Err(format!("expected both rules in {patterns:?}"));
+    };
+    if i < j {
+        Ok(())
+    } else {
+        Err(format!(
+            "the gate stops at the first match, so a rule behind the one covering it is dead: {patterns:?}"
+        ))
+    }
 }
 
 #[given(regex = r#"^"([^"]+)" has a raw allow rule for "([^"]+)" and a deny rule for "([^"]+)"$"#)]
@@ -215,7 +244,7 @@ fn verdict_named(verdict: &str) -> Verdict {
     match verdict {
         "allow" => Verdict::Allow,
         "deny" => Verdict::Deny,
-        _ => Verdict::Ask,
+        other => panic!("no such verdict: {other}"),
     }
 }
 
@@ -391,9 +420,7 @@ fn policy_uses_the_removed_key(world: &mut BehaviourWorld, file: String, pattern
     let dir = cwd(world);
     std::fs::write(
         dir.join(file),
-        format!(
-            "network:\n  allowedRoutes:\n    - match: {pattern}\n      verdict: allow\n  defaultVerdict: ask\n"
-        ),
+        format!("network:\n  allowedRoutes:\n    - match: {pattern}\n      verdict: allow\n"),
     )
     .expect("seed a policy file in the pre-egress shape");
 }
@@ -540,23 +567,10 @@ fn allow_scoped_raw_destination(world: &mut BehaviourWorld, pattern: String, bin
     run_policy(world, PolicyCommand::AllowTcp(args));
 }
 
-#[when(regex = r#"^the developer asks about the raw destination "([^"]+)" scoped to "([^"]+)"$"#)]
-fn ask_scoped_raw_destination(world: &mut BehaviourWorld, pattern: String, binary: String) {
-    let mut args = allow_args(world, &pattern, None);
-    args.binary = vec![binary];
-    run_policy(world, PolicyCommand::AskTcp(args));
-}
-
 #[when(regex = r#"^the developer denies the raw destination "([^"]+)"$"#)]
 fn deny_raw_destination(world: &mut BehaviourWorld, pattern: String) {
     let args = rule_args(world, &pattern, None);
     run_policy(world, PolicyCommand::DenyTcp(args));
-}
-
-#[when(regex = r#"^the developer asks about the raw destination "([^"]+)"$"#)]
-fn ask_raw_destination(world: &mut BehaviourWorld, pattern: String) {
-    let args = allow_args(world, &pattern, None);
-    run_policy(world, PolicyCommand::AskTcp(args));
 }
 
 #[when(regex = r"^the developer lists rules$")]
@@ -647,21 +661,6 @@ fn file_is_created(world: &mut BehaviourWorld, file: String) -> Result<(), Strin
 #[then(regex = r#"^it contains an allow rule for "([^"]+)"$"#)]
 fn it_contains_allow(world: &mut BehaviourWorld, pattern: String) -> Result<(), String> {
     file_contains_allow(world, "lns-policy.yaml".to_string(), pattern)
-}
-
-#[then(regex = r#"^its defaultVerdict is "([^"]+)"$"#)]
-fn its_default_verdict_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    let policy = load(world, "lns-policy.yaml");
-    let actual = match policy.network.default_verdict {
-        Verdict::Allow => "allow",
-        Verdict::Deny => "deny",
-        Verdict::Ask => "ask",
-    };
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!("defaultVerdict is {actual}, expected {expected}"))
-    }
 }
 
 #[then(regex = r#"^"([^"]+)" contains the allow rule$"#)]
@@ -787,11 +786,7 @@ fn file_contains_raw_rule(
     verdict: String,
     pattern: String,
 ) -> Result<(), String> {
-    let expected = match verdict.as_str() {
-        "allow" => Verdict::Allow,
-        "deny" => Verdict::Deny,
-        _ => Verdict::Ask,
-    };
+    let expected = verdict_named(&verdict);
     let policy = load(world, &file);
     if policy
         .network
@@ -951,26 +946,7 @@ fn output_says_raw_already_present(world: &mut BehaviourWorld) -> Result<(), Str
     output_mentions(world, "is already in")
 }
 
-#[then(regex = r#"^the raw allow rule for "([^"]+)" sits ahead of the raw ask rule$"#)]
-fn raw_allow_precedes_ask(world: &mut BehaviourWorld, pattern: String) -> Result<(), String> {
-    let policy = load(world, "lns-policy.yaml");
-    let verdicts: Vec<Verdict> = policy
-        .network
-        .egress
-        .tcp
-        .iter()
-        .filter(|r| r.match_pattern == pattern)
-        .map(|r| r.verdict)
-        .collect();
-    if verdicts != vec![Verdict::Allow, Verdict::Ask] {
-        return Err(format!(
-            "the gate stops at the first match, so an allow behind the ask rule is dead: {verdicts:?}"
-        ));
-    }
-    Ok(())
-}
-
-#[then(regex = r#"^"([^"]+)" has exactly one raw (allow|deny|ask) rule for "([^"]+)"$"#)]
+#[then(regex = r#"^"([^"]+)" has exactly one raw (allow|deny) rule for "([^"]+)"$"#)]
 fn file_has_one_raw_rule_of_verdict(
     world: &mut BehaviourWorld,
     file: String,
@@ -1311,6 +1287,39 @@ fn file_still_holds(
             "expected {expected} rules in {file}, found {found}"
         ))
     }
+}
+
+#[then(regex = r#"^"([^"]+)" lists the allow rule for "([^"]+)" before the rule for "([^"]+)"$"#)]
+fn allow_comes_before_rule(
+    world: &mut BehaviourWorld,
+    file: String,
+    allowed: String,
+    pattern: String,
+) -> Result<(), String> {
+    let allow_at = position_of(
+        world,
+        &file,
+        |rule: &RouteRule| rule.match_pattern == allowed && rule.verdict == Verdict::Allow,
+        &format!("allow rule for {allowed}"),
+    )?;
+    let other_at = position_of(
+        world,
+        &file,
+        |rule: &RouteRule| rule.match_pattern == pattern,
+        &format!("rule for {pattern}"),
+    )?;
+    if allow_at < other_at {
+        Ok(())
+    } else {
+        Err(format!(
+            "the gate stops at the first match, so the allow must come first; got {allow_at} then {other_at}"
+        ))
+    }
+}
+
+#[then("the failure says the deny already blocks it")]
+fn failure_says_deny_blocks(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "already blocks every request")
 }
 
 #[then(regex = r#"^the output says it was placed before the rule for "([^"]+)"$"#)]

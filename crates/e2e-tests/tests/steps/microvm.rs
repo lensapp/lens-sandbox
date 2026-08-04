@@ -178,7 +178,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
         root.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
+        "network:\n  egress:\n    http: []\n",
     )
     .expect("write the project policy");
     root
@@ -745,7 +745,7 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
         .expect("write consumer marker");
     std::fs::write(
         consumer.join("lns-policy.yaml"),
-        "network:\n  defaultVerdict: deny\n",
+        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     track_volume(world, &volume);
@@ -1005,7 +1005,7 @@ fn run_pulled_sandbox_offline(world: &mut E2eWorld, cmd_line: &str) {
         .to_path_buf();
     std::fs::write(
         consumer.join("lns-policy.yaml"),
-        "network:\n  defaultVerdict: deny\n",
+        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     let mut args = vec![
@@ -1409,13 +1409,16 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  defaultVerdict: ask\n  defaultTransport: direct\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
+        "network:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 
 #[given("a network policy that denies all egress")]
 fn policy_deny_all(world: &mut E2eWorld) {
-    write_policy(world, "network:\n  defaultVerdict: deny\n");
+    write_policy(
+        world,
+        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+    );
 }
 
 #[then(regex = r#"^volume "([^"]+)" is released$"#)]

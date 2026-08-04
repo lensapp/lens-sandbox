@@ -474,7 +474,6 @@ pub fn validate(config_json: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::{Transport, Verdict};
 
     fn def_json(spec: &str) -> Vec<u8> {
         format!(
@@ -539,7 +538,7 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"defaultVerdict":"deny","egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}},"connectors":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"],"credentials":[{"name":"some-provider","env":"SOME_TOKEN"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
         assert_eq!(def.metadata.name, "hermes");
@@ -550,8 +549,12 @@ mod tests {
             def.spec.env.get("MODE").map(String::as_str),
             Some("research")
         );
-        assert_eq!(def.spec.policy.default_verdict, Verdict::Deny);
-        assert_eq!(def.spec.policy.egress.http.len(), 1);
+        assert_eq!(
+            def.spec.policy.egress.http.last().unwrap().match_pattern,
+            "*",
+            "a closed baseline carries its lockdown as a catch-all deny"
+        );
+        assert_eq!(def.spec.policy.egress.http.len(), 2);
         assert_eq!(def.spec.connectors, vec!["some-provider".to_string()]);
         assert_eq!(def.spec.credentials[0].env, "SOME_TOKEN");
         assert_eq!(def.spec.volumes[0].source(), ".");
@@ -562,21 +565,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_defaults_the_policy_to_ask_and_direct_when_omitted() {
+    fn parse_reads_an_omitted_policy_as_deciding_nothing() {
         let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
-        assert_eq!(def.spec.policy.default_verdict, Verdict::Ask);
-        assert_eq!(def.spec.policy.default_transport, Transport::Direct);
+        assert!(def.spec.policy.egress.http.is_empty());
+        assert!(def.spec.policy.egress.tcp.is_empty());
         assert!(def.spec.connectors.is_empty());
     }
 
     #[test]
-    fn parse_rejects_an_upstream_default_transport() {
+    fn parse_rejects_a_default_transport_the_file_no_longer_carries() {
         let err = parse(&def_json(
             r#"{"image":"ghcr.io/team/base:1","policy":{"defaultTransport":"upstream"}}"#,
         ))
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("upstream transport isn't supported in the local sandbox"),
+            format!("{err:#}").contains("defaultTransport is no longer part of a policy file"),
             "got: {err:#}"
         );
     }
