@@ -70,7 +70,7 @@ async fn orchestrate(
     let layer_cache = oci_layer_cache::LayerCache::new(cache_dir.join("layers"));
     let content_store = content_store::ContentStore::new(cache_dir.join("content"));
     let run_scratch_dir = cache_dir.join("runs").join(&run_id);
-    let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir);
+    let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
     let mut run_scratch =
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
@@ -283,6 +283,10 @@ async fn orchestrate(
     if let Some(ensured) = &ensured_tools {
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
+    fileset_specs.extend(
+        crate::tools::provisioner::real::workload_ca_spec(&cache_dir, crate::tools::host_arch())
+            .await,
+    );
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
