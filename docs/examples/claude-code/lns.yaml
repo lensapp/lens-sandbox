@@ -22,7 +22,6 @@ spec:
     cpu: 4
     memory: 6Gi
   policy:
-    defaultVerdict: ask
     egress:
       http:
         - match: registry.npmjs.org

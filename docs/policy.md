@@ -16,7 +16,6 @@ network:
   egress:
     http: []
     tcp: []
-  defaultVerdict: ask
 ```
 
 `lns run` writes this starter file for you, so you only deal with it by hand if you
@@ -29,17 +28,23 @@ run at a different file with `--policy <path>`:
 lns run --policy ~/team/shared-policy.yaml ghcr.io/acme/agent
 ```
 
-### Default verdict
+### What the file decides, and what it doesn't
 
-`defaultVerdict` decides what happens to a request that no rule in `egress.http`
-matches:
+The file holds the decisions you have made. A destination no rule decides is one
+you are asked about — that is not a setting, it is what happens when nothing
+answers. So a fresh file decides nothing and asks about everything, and your
+decisions accumulate into a least-privilege rule set as the workload does real
+work.
 
-- `ask` (the default) — pause and prompt you.
-- `allow` — let unmatched requests through.
-- `deny` — block unmatched requests.
+To close a directory instead — block what you have not listed, without being
+prompted — end `egress.http` with a catch-all deny:
 
-`ask` is the recommended starting point: you run into the policy as the workload
-does real work, and your decisions accumulate into a least-privilege rule set.
+```bash
+lns policy deny '*'
+```
+
+That rule governs raw destinations too, so `egress.tcp` needs no counterpart. See
+[Closing a directory](#closing-a-directory).
 
 ### Rules
 
@@ -47,7 +52,6 @@ Each entry in `egress.http` is a rule:
 
 ```yaml
 network:
-  defaultVerdict: ask
   egress:
     http:
       - match: api.github.com
@@ -62,7 +66,7 @@ network:
 | Field         | Meaning                                                                 |
 | ------------- | ----------------------------------------------------------------------- |
 | `match`       | Destination pattern (see below).                                        |
-| `verdict`     | `allow`, `deny`, or `ask`.                                              |
+| `verdict`     | `allow` or `deny`. There is no `ask`: a destination no rule decides is asked about already. |
 | `description` | Optional human-readable note kept alongside the rule.                   |
 | `binaries`    | Optional list of guest binaries the rule is scoped to (see below).      |
 | `rules`       | Optional `method` / `path` list; with it the rule permits only the requests it names and denies the rest. |
@@ -87,7 +91,6 @@ allow anyway:
 
 ```yaml
 network:
-  defaultVerdict: ask
   egress:
     http:
       - match: api.github.com
@@ -113,13 +116,12 @@ Three things are worth knowing:
   `db.internal:5432` is a rule. Because the traffic is passed through unread,
   "any port on this host" is not a grant Lens Sandbox will write. IPv6 uses
   bracket notation: `[2001:db8::1]:5432`, `[2001:db8::/32]:5432`.
-- **`defaultVerdict` never sends anything here.** An unmatched destination falls
-  through to the HTTP side; it is never spliced raw by default. Which means an
-  approval card for a raw splice only appears where you asked for one:
-
-```bash
-lns policy ask-tcp db.internal:5432
-```
+- **You do not have to declare one to be asked.** A connection Lens Sandbox cannot
+  read — Postgres, Redis, SSH — cannot be matched against `egress.http` rules at
+  all, so rather than dropping it silently, it raises an approval card naming the
+  address and port. Answering "always allow" writes the `egress.tcp` rule for you.
+  A closed directory (a catch-all deny, see [Closing a directory](#closing-a-directory))
+  refuses those connections instead of asking.
 
 An optional `binaries:` list scopes a rule to specific callers, matched against
 the guest's `/proc/<pid>/exe`, so the paths must be absolute:
@@ -143,7 +145,6 @@ denied that host:
 
 ```yaml
 network:
-  defaultVerdict: ask
   egress:
     http:
       - match: git.example.test
@@ -155,9 +156,9 @@ network:
 This is the one policy feature that denies without asking, so read the rest of this
 section before using it.
 
-- **The filter fails closed.** A caller that is not on the list does not fall
-  through to `defaultVerdict` — it is denied, and never prompted. Adding an
-  unrestricted `allow` or `ask` for the same destination later does *not* re-open it
+- **The filter fails closed.** A caller that is not on the list is not asked about
+  — it is denied outright. Adding an unrestricted `allow` for the same destination
+  later does *not* re-open it
   for the excluded callers: the guest skips such a rule rather than let it undo the
   scoping. What it does not skip is another *scoped* rule, so that is how you grant a
   second binary — list them together in one rule, or add another scoped rule.
@@ -283,10 +284,10 @@ The `-tcp` verbs write to `egress.tcp` instead, and require a port:
 ```bash
 lns policy allow-tcp db.internal:5432 --description "project database"
 lns policy deny-tcp  10.0.0.0/8:5432
-lns policy ask-tcp   cache.internal:6379
 ```
 
-`allow-tcp` and `ask-tcp` take `--binary` the way `allow` does, which on a raw
+You only need these to decide a raw destination up front; one you have not decided
+raises a card on first use. `allow-tcp` takes `--binary` the way `allow` does, which on a raw
 destination is the narrowest the grant gets — nothing between the workload and it can
 read the traffic, so the one caller allowed to open it is the whole of the control:
 
@@ -328,11 +329,38 @@ Removal goes by pattern alone, so it deletes *every* rule for that destination �
 binary-scoped ones included. The command reports how many rules went; run
 `lns policy list` first to see which ones they will be.
 
+### Closing a directory
+
+To block everything you have not listed, and stop being asked, end `egress.http`
+with a catch-all deny:
+
+```bash
+lns policy deny '*'
+```
+
+The gate stops at the first matching rule, so the rules above it still decide the
+destinations they name — the catch-all only answers for whatever is left. That is
+why `lns policy allow <host>` still works afterwards: the allow goes in front of
+the catch-all, and the command says so. A deny you aimed at a destination is
+different, and an allow behind *that* is refused rather than reordered.
+
+Closing `egress.http` closes raw traffic too, so `egress.tcp` needs no
+counterpart: a raw destination no `tcp` rule names falls through to the catch-all,
+and a connection Lens Sandbox cannot read is refused rather than raising a card.
+
+Two things worth knowing:
+
+- **A near-catch-all is not a catch-all.** `deny 0.0.0.0/0` or `deny '*.com'` are
+  ordinary rules covering a lot; only an unscoped `match: "*"` closes a directory.
+  A `"*"` deny narrowed by `binaries` or a request filter decides only what it
+  names, so it does not close anything either.
+- **A closed directory raises no approval cards**, so the CLI is how you widen it.
+  That is deliberate: a card you never see cannot be a decision.
+
 ## The approval flow
 
-When the workload makes a request that hits a `defaultVerdict: ask` (or a rule
-whose verdict is `ask`), the request pauses and the background service shows an
-approval window with the host and the action — for example
+When the workload reaches a destination no rule decides, the request pauses and the
+background service shows an approval window with the host and the action — for example
 `CONNECT api.linear.app:443`. Your options:
 
 - **Allow once** / **Deny once** — apply to this request only; nothing is written
@@ -344,11 +372,11 @@ approval window with the host and the action — for example
 decides that destination — an earlier answer, or a rule you wrote — the gate stops
 there, so a second one behind it would never fire. Nothing is written and the
 approval window says the decision applied to that request alone. Same if the file
-already holds the very rule the answer would write, but behind the `ask` rule that
-raised the card: rather than reorder a file you wrote, the window tells you where the
-rule is so you can move it ahead yourself.
+already holds the very rule the answer would write, stranded behind another rule the
+gate reaches first: rather than reorder a file you wrote, the window tells you where
+the rule is so you can move it ahead yourself.
 
-A card raised by a `verdict: ask` rule in `egress.tcp` is marked **RAW** and says
+A card for a connection Lens Sandbox cannot read is marked **RAW** and says
 so in as many words: Lens Sandbox cannot inspect that traffic or inject
 credentials into it. Allowing it always writes a port-scoped rule —
 `db.internal:5432`, never `db.internal` — and names any `egress.http` rule that

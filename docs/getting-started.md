@@ -97,13 +97,13 @@ lns run
   Ports:     (none)
   Policy:
     file: /Users/you/dev/my-app/lns-policy.yaml
-    default verdict: ask
+    unmatched destinations: ask
     rules: none defined; anything else asks
     source: auto-created (no policy in this directory)
 ```
 
 You run Lens Sandbox from a project directory — that's where it looks for
-`lns-policy.yaml`, creating one with a default verdict of `ask` the first time. To
+`lns-policy.yaml`, creating an empty one the first time. To
 give the workload your actual project files, bind-mount the directory with
 `-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
 portable definition use a declarative bind with `source: .`; for scratch
@@ -136,7 +136,6 @@ spec:
     cpu: 1
     memory: 512Mi
   policy:
-    defaultVerdict: ask
     egress:
       http: []
   connectors: []
@@ -179,8 +178,8 @@ lns push ghcr.io/acme/reviewer:1.0.0
 
 ## What happens on an unknown request
 
-With the default `ask` verdict, the workload runs normally until it tries to reach
-the network. When it opens a connection that no rule covers, the request pauses and
+The workload runs normally until it tries to reach the network. When it opens a
+connection no rule decides, the request pauses and
 an approval window appears from the background service showing the host and the
 action (for example `CONNECT api.github.com:443`). You choose:
 

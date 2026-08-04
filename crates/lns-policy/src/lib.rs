@@ -60,7 +60,13 @@ impl TryFrom<NetworkPolicyRaw> for NetworkPolicy {
             None | Some("ask") => {}
             Some(verdict @ ("allow" | "deny")) => {
                 return Err(format!(
-                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: end `egress.http` with a catch-all instead — `lns policy {verdict} '*'` — then delete the line. That rule governs raw destinations too, so `egress.tcp` needs no counterpart"
+                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: end `egress.http` with a catch-all instead — `lns policy {verdict} '*'` — then delete the line. {raw}",
+                    raw = match verdict {
+                        "deny" =>
+                            "That rule governs raw destinations too, so `egress.tcp` needs no counterpart",
+                        // A catch-all allow leaves a connection nothing can read still asking, since a default was never consent to splice one.
+                        _ => "A raw destination nothing can inspect will still ask on first use",
+                    }
                 ));
             }
             Some(other) => {
@@ -112,6 +118,19 @@ impl TryFrom<EgressRaw> for Egress {
 }
 
 impl NetworkPolicy {
+    /// Whether this policy closes the directory: it ends `egress.http` with a catch-all
+    /// deny, so it decides everything the named rules leave rather than asking.
+    ///
+    /// Only the first catch-all counts — one behind it is a line the gate never reaches,
+    /// so a file whose first catch-all allows is open however it ends.
+    pub fn is_closed(&self) -> bool {
+        self.egress
+            .http
+            .iter()
+            .find(|rule| rule.is_catch_all())
+            .is_some_and(|rule| rule.verdict == Verdict::Deny)
+    }
+
     pub fn validate_local_transport(&self) -> io::Result<()> {
         let uses_upstream = self
             .egress
@@ -605,16 +624,27 @@ mod tests {
     fn a_default_verdict_that_decided_something_is_refused_with_the_rule_to_write_instead() {
         // These two changed a file's meaning, and no rule the loader could invent
         // would preserve it — so it says what to write rather than guessing.
-        for (value, expected) in [("deny", "deny"), ("allow", "allow")] {
+        for (value, tail, absent) in [
+            (
+                "deny",
+                "`egress.tcp` needs no counterpart",
+                "still ask on first use",
+            ),
+            ("allow", "still ask on first use", "needs no counterpart"),
+        ] {
             let err = serde_yaml::from_str::<NetworkPolicy>(&format!(
                 "egress:\n  http: []\ndefaultVerdict: {value}\n"
             ))
             .expect_err("a default that decided something must be refused");
             let msg = err.to_string();
             assert!(
-                msg.contains("defaultVerdict") && msg.contains(expected),
+                msg.contains("defaultVerdict") && msg.contains(value),
                 "the error must name the key and the verdict; got {msg}"
             );
+            // Only a catch-all deny reaches raw destinations, so only that branch may
+            // promise it; an allow leaves an unreadable connection still asking.
+            assert!(msg.contains(tail), "expected {tail:?} in {msg}");
+            assert!(!msg.contains(absent), "unexpected {absent:?} in {msg}");
         }
     }
 

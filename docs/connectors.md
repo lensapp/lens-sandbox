@@ -96,7 +96,6 @@ resolves from the catalog at run time and the shareable policy stays small:
 network:
   egress:
     http: []
-  defaultVerdict: ask
 connectors:
   - gitlab
 ```

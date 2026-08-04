@@ -36,7 +36,7 @@ pub struct WireNetwork {
 
 impl WireNetwork {
     pub fn seeded(network: NetworkPolicy) -> Self {
-        let default_verdict = if crate::artifact::policy::is_closed_network(&network) {
+        let default_verdict = if network.is_closed() {
             WireDefaultVerdict::Deny
         } else {
             WireDefaultVerdict::Ask
