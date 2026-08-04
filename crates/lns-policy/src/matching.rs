@@ -44,7 +44,7 @@ impl NetworkPolicy {
             .find(|(_, existing)| tcp_shadows(existing, new))
     }
 
-    /// The `egress.http` rules a raw rule pre-empts on its port. The raw table is the pre-filter, so those rules are simply not applied there and the traffic is spliced unread — lens-sandbox-core computes the same pairs and leaves reporting them to its callers, silence being the failure mode.
+    /// The `egress.http` rules a raw rule pre-empts on its port: the raw table is the pre-filter, so those rules stop applying and the traffic is spliced unread.
     pub fn http_rules_pre_empted_by(&self, raw: &TcpEgressRule) -> Vec<&RouteRule> {
         if raw.verdict == Verdict::Deny {
             return Vec::new();
@@ -66,7 +66,7 @@ impl NetworkPolicy {
     }
 }
 
-/// Whether two host patterns can name the same host, either one possibly a wildcard. Two mid-segment wildcards that nonetheless share hosts are not detected: this backs a warning, so a miss costs a line of output, not enforcement.
+/// Whether two host patterns can name the same host; two mid-segment wildcards that share hosts are not detected, which costs a line of output rather than enforcement.
 fn patterns_overlap(one: &str, other: &str) -> bool {
     domain_matches(one, other) || domain_matches(other, one)
 }
@@ -134,7 +134,7 @@ fn split_port(pattern: &str) -> Option<(&str, u16)> {
     Some((host, port?.parse().ok()?))
 }
 
-/// A destination's address — brackets stripped, see [`unbracketed`] — and whatever sits in its port position, split the way lens-sandbox-core's `parse_matcher` splits one.
+/// A destination's address — brackets stripped — and whatever sits in its port position, split the way lens-sandbox-core's `parse_matcher` splits one.
 pub fn split_destination(destination: &str) -> (&str, Option<&str>) {
     if let Some((bracketed, port)) = destination.rsplit_once("]:") {
         return (bracketed.trim_start_matches('['), Some(port));
@@ -144,7 +144,7 @@ pub fn split_destination(destination: &str) -> (&str, Option<&str>) {
         return (unbracketed(destination), None);
     }
     match destination.rsplit_once(':') {
-        // A tail that is no kind of number may be a hostname the author never meant to port-scope, so it is no port at all rather than a broken one.
+        // A tail that is no kind of number may be a hostname the author never meant to port-scope.
         Some((address, port)) if port_shaped(port) => (address, Some(port)),
         _ => (destination, None),
     }

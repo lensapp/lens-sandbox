@@ -19,13 +19,7 @@ pub enum GuestFrame {
     Other,
 }
 
-/// The `network` section as the guest gate requires it: both defaults left the policy
-/// file, and a guest reading one without `defaultVerdict` fails every destination
-/// closed, so neither is ever omitted.
-///
-/// The verdict follows the rules because a connection the guest cannot classify reads
-/// the default rather than the tables, so a closed policy must say "do not ask" there
-/// too.
+/// The `network` section as the guest gate requires it: both defaults left the policy file, but a guest missing `defaultVerdict` fails every destination closed, so it is derived from the rules here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireNetwork {
@@ -49,8 +43,7 @@ impl WireNetwork {
     }
 }
 
-/// No `ask` rule can be written, so the wire carries only the two a policy can
-/// arrive at: closed, or asking.
+/// No `ask` rule can be written, so the wire carries only the two a policy can arrive at.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WireDefaultVerdict {
@@ -85,7 +78,7 @@ pub struct RequestPending {
 #[serde(rename_all = "snake_case")]
 pub enum Treatment {
     Raw,
-    /// Also the reading of a treatment a later guest names and this lns doesn't know: failing the frame would drop the card and hang the workload until the approval times out, and of the two this is the one that grants less.
+    /// Also how a treatment this lns doesn't know reads, since failing the frame would drop the card and hang the workload.
     #[default]
     #[serde(other)]
     Inspected,

@@ -45,7 +45,7 @@ fn is_broad_wildcard(pattern: &str) -> bool {
 
 pub fn guardrail_flags(policy: &Policy) -> Vec<GuardrailFlag> {
     let mut flags = Vec::new();
-    // A raw splice is granted with no inspection at all, so a broad `egress.tcp` allow is the widest grant a policy can express and is held to the same checks.
+    // A broad `egress.tcp` allow is the widest grant a policy can express, so it is held to the same checks.
     let http = policy
         .network
         .egress
@@ -98,8 +98,7 @@ fn allowed_by_every_ceiling<R>(
     closes: fn(&R) -> bool,
     permits: fn(&R, &R) -> bool,
 ) -> bool {
-    // A ceiling grants only what its own gate reaches: a line stranded behind its
-    // catch-all authorizes nothing, here least of all another layer's copy of it.
+    // A ceiling grants only what its own gate reaches, so a line stranded behind its catch-all authorizes nothing.
     ceilings
         .iter()
         .all(|ceiling| live_rules(table(ceiling), closes).any(|permitted| permits(permitted, rule)))
@@ -138,10 +137,7 @@ fn scope_within(rule: Option<&[String]>, permitted: Option<&[String]>) -> bool {
     }
 }
 
-/// A layer's rules up to its catch-all deny — the ones its own first-match gate can
-/// still reach. Read position-blind, a rule the author wrote *behind* their catch-all
-/// would be hoisted out from under it, so the merged policy would grant what the same
-/// file grants nothing of when it runs alone.
+/// A layer's rules up to its catch-all — the ones its own first-match gate still reaches, so one written behind it is not hoisted out from under it.
 fn live_rules<R>(table: &[R], closes: fn(&R) -> bool) -> impl Iterator<Item = &R> + Clone {
     table.iter().take_while(move |rule| !closes(rule))
 }
@@ -169,10 +165,7 @@ fn merge_rule_table<R: Clone + PartialEq>(
             }
         }
     }
-    // The catch-all goes last, not first: it decides every destination, so ahead of
-    // the allows it would answer for the ones its own layer permits. Only the closer
-    // each layer actually reaches counts, and a deny wins over an allow so neither
-    // layer's lockdown can be opened by the other's backstop.
+    // The catch-all goes last: ahead of the allows it would answer for the ones its own layer permits, and a deny wins so neither layer's lockdown is opened by the other's backstop.
     let reached: Vec<&R> = layers
         .iter()
         .filter_map(|layer| table(layer).iter().find(|rule| closes(rule)))
@@ -180,8 +173,7 @@ fn merge_rule_table<R: Clone + PartialEq>(
     let closer = reached
         .iter()
         .find(|rule| is_deny(rule))
-        // Vacuous while http is the only table with a catch-all: a ceiling's own first
-        // catch-all is a deny, so the deny branch above already won.
+        // Vacuous while http is the only table with a catch-all, since a ceiling's own first catch-all is a deny.
         .or_else(|| {
             reached
                 .iter()
@@ -194,13 +186,7 @@ fn merge_rule_table<R: Clone + PartialEq>(
     merged
 }
 
-/// Add rules a connector derived to the table the guest will gate on, ahead of any
-/// catch-all so they are still reached.
-///
-/// A closed policy used to say so with `defaultVerdict`, which the gate consulted only
-/// where no rule matched, so appending was enough. Saying it with a rule instead makes
-/// appending a way to write lines that never fire — and a closed policy raises no card,
-/// so the connector would fail with nothing said.
+/// Adds a connector's derived rules ahead of any catch-all, since appended behind one they would never fire and a closed policy raises no card to say why.
 pub fn splice_connector_routes(
     table: &mut Vec<RouteRule>,
     routes: impl IntoIterator<Item = RouteRule>,
@@ -212,13 +198,7 @@ pub fn splice_connector_routes(
     table.splice(at..at, routes);
 }
 
-/// Whether a layer is closed: it holds a catch-all deny, so it permits only what it names.
-///
-/// This is what `defaultVerdict: deny` used to say before the key left the file. It
-/// is read from the `http` table alone and clamps both tables, because a raw rule
-/// must name a port — a catch-all is not expressible in `egress.tcp`, so reading
-/// them separately would leave a locked-down layer unable to clamp raw destinations
-/// at all.
+/// Whether a layer permits only what it names. Read from the `http` table alone and clamping both, because a raw rule must name a port and so can never be a catch-all.
 pub fn is_closed(policy: &Policy) -> bool {
     policy.network.is_closed()
 }
