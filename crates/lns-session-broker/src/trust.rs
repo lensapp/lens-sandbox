@@ -4,10 +4,9 @@ mod real;
 #[cfg(target_os = "linux")]
 pub use real::seed_trust_store;
 
-use lns_session::STAGED_CA_BUNDLE_PATH as STAGED_PEM;
+use lns_session::{STAGED_CA_BUNDLE_PATH as STAGED_PEM, SYSTEM_CA_BUNDLE_PATH as SYSTEM_BUNDLE};
 
 pub const CERTS_DIR: &str = "/etc/ssl/certs";
-pub const SYSTEM_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 pub trait TrustFs {
     fn exists(&self, path: &str) -> bool;

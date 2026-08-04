@@ -13,7 +13,7 @@ use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub const ENGINE_BIN: &str = "/.lens/tools-engine/bin/mise";
 pub const CURL_BIN: &str = "/.lens/tools-engine/bin/curl";
-pub const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+pub use lns_session::SYSTEM_CA_BUNDLE_PATH as CA_BUNDLE;
 pub const DRIVER: &str = "/.lens/tools-engine/provision.sh";
 pub const STAGING: &str = "/staging";
 pub const ENGINE_STATE: &str = "/tmp/mise/tools";

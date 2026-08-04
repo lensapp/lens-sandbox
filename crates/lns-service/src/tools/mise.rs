@@ -151,7 +151,7 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("HOME", "/tmp/mise/home"),
         ("MISE_STATE_DIR", "/tmp/mise/state"),
         ("MISE_CONFIG_DIR", "/tmp/mise/config"),
-        ("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"),
+        ("SSL_CERT_FILE", lns_session::SYSTEM_CA_BUNDLE_PATH),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))
