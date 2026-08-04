@@ -44,6 +44,24 @@ pub enum EntryKind {
     Symlink { target: String },
 }
 
+const NPM_LAUNCHER: &str = "bin/npm";
+const NPM_CLI: &str = "lib/node_modules/npm/bin/npm-cli.js";
+const STOCK_NPM_TARGET: &str = "../lib/node_modules/npm/bin/npm-cli.js";
+
+/// The engine replaces node's `bin/npm` symlink with a shim that reshims through `mise` under bash — neither of which a workload guest has — so the tree goes back to the launcher the upstream tarball ships.
+fn restore_stock_npm(entries: &mut [ManifestEntry]) {
+    if !entries.iter().any(|entry| entry.path == NPM_CLI) {
+        return;
+    }
+    for entry in entries {
+        if entry.path == NPM_LAUNCHER && matches!(entry.kind, EntryKind::Regular { .. }) {
+            entry.kind = EntryKind::Symlink {
+                target: STOCK_NPM_TARGET.to_string(),
+            };
+        }
+    }
+}
+
 pub fn guest_root(tool: &str, resolved: &lns_artifact::tools::SafeVersion) -> String {
     format!("/.lens/tools/{tool}/{resolved}")
 }
@@ -144,7 +162,7 @@ impl ToolCache for RealToolCache {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
-        let manifest: ToolManifest = match serde_json::from_slice(&bytes) {
+        let mut manifest: ToolManifest = match serde_json::from_slice(&bytes) {
             Ok(manifest) => manifest,
             Err(_) => return Ok(None),
         };
@@ -167,6 +185,7 @@ impl ToolCache for RealToolCache {
         {
             return Ok(None);
         }
+        restore_stock_npm(&mut manifest.entries);
         if let Err(e) = validate_tree(&manifest.entries, &manifest.bin_paths) {
             crate::log::warn!("ignoring the cached tool tree at {}: {e:#}", dir.display());
             return Ok(None);
@@ -182,13 +201,14 @@ impl ToolCache for RealToolCache {
     }
 
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest> {
-        let entries = match &staged.tar {
+        let mut entries = match &staged.tar {
             StagedTar::File(path) => {
                 let file = open_staged_tar(path)?;
                 ingest_tar_entries(file, &self.store)?
             }
             StagedTar::Bytes(bytes) => ingest_tar_entries(&bytes[..], &self.store)?,
         };
+        restore_stock_npm(&mut entries);
         validate_tree(&entries, &staged.bin_paths)?;
         let manifest = ToolManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
@@ -499,6 +519,64 @@ mod tests {
         dir.set_cksum();
         builder.append(&dir, std::io::empty()).unwrap();
         builder.into_inner().unwrap()
+    }
+
+    fn file_header(path: &str, mode: u32, size: u64) -> tar::Header {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_size(size);
+        header.set_mode(mode);
+        header.set_cksum();
+        header
+    }
+
+    fn npm_tar(npm: EntryKind) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let launcher = b"#!/usr/bin/env node\n";
+        builder
+            .append(
+                &file_header(
+                    "lib/node_modules/npm/bin/npm-cli.js",
+                    0o755,
+                    launcher.len() as u64,
+                ),
+                &launcher[..],
+            )
+            .unwrap();
+        match npm {
+            EntryKind::Regular { .. } => {
+                let shim = b"#!/usr/bin/env bash\nmise reshim\n";
+                builder
+                    .append(&file_header("bin/npm", 0o755, shim.len() as u64), &shim[..])
+                    .unwrap();
+            }
+            EntryKind::Symlink { target } => {
+                let mut link = tar::Header::new_gnu();
+                link.set_entry_type(tar::EntryType::Symlink);
+                link.set_path("bin/npm").unwrap();
+                link.set_link_name(&target).unwrap();
+                link.set_size(0);
+                link.set_mode(0o777);
+                link.set_cksum();
+                builder.append(&link, std::io::empty()).unwrap();
+            }
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn shimmed_npm() -> EntryKind {
+        EntryKind::Regular {
+            digest: String::new(),
+            size: 0,
+        }
+    }
+
+    fn npm_entry(manifest: &ToolManifest) -> &ManifestEntry {
+        manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "bin/npm")
+            .expect("the tree carries bin/npm")
     }
 
     fn tree_dir(root: &Path) -> PathBuf {
@@ -1153,6 +1231,83 @@ mod tests {
             manifest.guest_bin_paths(),
             vec!["/.lens/tools/some-tool/1.2.3".to_string()]
         );
+    }
+
+    #[test]
+    fn a_shimmed_npm_launcher_is_restored_to_the_stock_symlink_at_ingest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let manifest = cache
+            .ingest(&key(), &staged(npm_tar(shimmed_npm())))
+            .unwrap();
+        assert_eq!(
+            npm_entry(&manifest).kind,
+            EntryKind::Symlink {
+                target: STOCK_NPM_TARGET.into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_tree_cached_with_the_shim_is_restored_on_lookup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut manifest = cache
+            .ingest(&key(), &staged(npm_tar(shimmed_npm())))
+            .unwrap();
+        let shim = EntryKind::Regular {
+            digest: format!("sha256:{}", "1".repeat(64)),
+            size: 31,
+        };
+        for entry in &mut manifest.entries {
+            if entry.path == "bin/npm" {
+                entry.kind = shim.clone();
+            }
+        }
+        std::fs::write(
+            tree_dir(dir.path()).join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let read_back = cache.lookup(&key(), &[]).unwrap().expect("a cache hit");
+        assert_eq!(
+            npm_entry(&read_back).kind,
+            EntryKind::Symlink {
+                target: STOCK_NPM_TARGET.into()
+            },
+            "a tree ingested before the shim was known must not keep launching it"
+        );
+    }
+
+    #[test]
+    fn an_npm_launcher_without_the_stock_tree_beside_it_is_left_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut builder = tar::Builder::new(Vec::new());
+        let body = b"#!/usr/bin/env bash\n";
+        builder
+            .append(&file_header("bin/npm", 0o755, body.len() as u64), &body[..])
+            .unwrap();
+        let manifest = cache
+            .ingest(&key(), &staged(builder.into_inner().unwrap()))
+            .unwrap();
+        assert!(
+            matches!(npm_entry(&manifest).kind, EntryKind::Regular { .. }),
+            "a symlink to a launcher the tree does not carry would break npm outright"
+        );
+    }
+
+    #[test]
+    fn a_stock_npm_symlink_survives_ingest_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let stock = EntryKind::Symlink {
+            target: STOCK_NPM_TARGET.into(),
+        };
+        let manifest = cache
+            .ingest(&key(), &staged(npm_tar(stock.clone())))
+            .unwrap();
+        assert_eq!(npm_entry(&manifest).kind, stock);
     }
 
     #[test]
