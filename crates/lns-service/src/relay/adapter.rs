@@ -34,7 +34,7 @@ pub(super) async fn accept_loop(
     audit: PathBuf,
     user_env: Vec<String>,
     identity: super::RunIdentity,
-    proxy_ca: watch::Sender<super::ProxyCaState>,
+    proxy_ca: std::sync::Arc<watch::Sender<super::ProxyCaState>>,
 ) {
     let mut conn_tx: Option<mpsc::UnboundedSender<HostFrame>> = None;
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -125,7 +125,7 @@ async fn handle_connection(
     identity: super::RunIdentity,
     shutdown: oneshot::Receiver<()>,
     budget: AuditBudget,
-    proxy_ca: watch::Sender<super::ProxyCaState>,
+    proxy_ca: std::sync::Arc<watch::Sender<super::ProxyCaState>>,
 ) -> Result<()> {
     // SAFETY: `VZVirtioSocketConnection.fileDescriptor` hands us a kernel fd that supports stream read/write.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };

@@ -45,7 +45,7 @@ pub(super) struct PackageSpec {
     pub(super) sha256: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GuestTools {
     pub root: PathBuf,
 }

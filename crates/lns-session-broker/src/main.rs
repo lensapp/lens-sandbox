@@ -51,7 +51,7 @@ fn run() -> Result<i32, String> {
         eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
     }
 
-    // Must run before any session forks: the workload inherits env naming the canonical bundle, and the supervisor appends the proxy CA to it.
+    // Must run before any session forks: the workload inherits env naming the canonical bundle, and a proxy CA is appended to that same file.
     match trust::seed_trust_store() {
         Ok(seeding) => {
             if let Some(report) = seeding.report() {

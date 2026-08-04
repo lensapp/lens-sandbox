@@ -70,8 +70,7 @@ pub struct Relay {
     pub audit_path: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fd_tx: mpsc::UnboundedSender<RawFd>,
-    pub(crate) frame_tx: mpsc::UnboundedSender<HostFrame>,
-    pub(crate) proxy_ca: watch::Receiver<ProxyCaState>,
+    pub(crate) proxy_ca: ProxyCaAsk,
 }
 
 /// The MITM CA as the host knows it; `Pending` until the supervisor answers, so a caller can tell "not yet" from "there is none".
@@ -89,9 +88,22 @@ enum NoProxyCa {
 }
 
 impl Relay {
-    /// Ask the supervisor for the run's MITM CA and wait for the answer, which a sidecar must trust before its first request or its egress can only be tunnelled, never inspected.
-    pub async fn proxy_ca(&self, timeout: Duration) -> Result<String> {
-        let mut rx = self.proxy_ca.clone();
+    /// A handle for asking the supervisor for the run's MITM CA, which a sidecar must trust before its first request or its egress can only be tunnelled, never inspected. Detached from the relay, so a bring-up that outlives this borrow can still ask.
+    pub fn proxy_ca_ask(&self) -> ProxyCaAsk {
+        self.proxy_ca.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct ProxyCaAsk {
+    frame_tx: mpsc::UnboundedSender<HostFrame>,
+    state: watch::Receiver<ProxyCaState>,
+}
+
+impl ProxyCaAsk {
+    /// Ask, then wait for the answer or the timeout. An answer that already landed is returned as-is, so a second ask can read the first one's answer; a run asks once.
+    pub async fn get(&self, timeout: Duration) -> Result<String> {
+        let mut rx = self.state.clone();
         self.frame_tx
             .send(HostFrame::ProxyCaRequest)
             .context("relay is gone, cannot ask for the proxy CA")?;
@@ -120,6 +132,19 @@ impl Relay {
     }
 }
 
+/// A handle answering as the supervisor already has, for tests that need a `ProxyCaAsk` without a relay behind it.
+#[cfg(test)]
+pub(crate) fn test_proxy_ca_ask(
+    frame_tx: mpsc::UnboundedSender<HostFrame>,
+    answered: ProxyCaState,
+) -> ProxyCaAsk {
+    let (_ca_tx, ca_rx) = watch::channel(answered);
+    ProxyCaAsk {
+        frame_tx,
+        state: ca_rx,
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RunIdentity {
     pub(super) run: String,
@@ -140,6 +165,11 @@ pub fn spawn(
     let audit = audit_path(run_id).context("resolving audit log path")?;
     let (fd_tx, fd_rx) = mpsc::unbounded_channel::<RawFd>();
     let (proxy_ca_tx, proxy_ca_rx) = watch::channel(ProxyCaState::Pending);
+    let proxy_ca_tx = Arc::new(proxy_ca_tx);
+    let proxy_ca = ProxyCaAsk {
+        frame_tx: frame_tx.clone(),
+        state: proxy_ca_rx,
+    };
 
     let token_clone = token.clone();
     let audit_clone = audit.clone();
@@ -172,8 +202,7 @@ pub fn spawn(
         token,
         audit_path: audit,
         fd_tx,
-        frame_tx,
-        proxy_ca: proxy_ca_rx,
+        proxy_ca,
     })
 }
 
@@ -1198,8 +1227,10 @@ mod tests {
             token: "t".to_string(),
             audit_path: PathBuf::from("/tmp/unused.jsonl"),
             fd_tx,
-            frame_tx,
-            proxy_ca: ca_rx,
+            proxy_ca: ProxyCaAsk {
+                frame_tx,
+                state: ca_rx,
+            },
         };
         (relay, frame_rx, ca_tx)
     }
@@ -1207,7 +1238,8 @@ mod tests {
     #[tokio::test]
     async fn asking_for_the_proxy_ca_sends_a_request_and_returns_the_answer() {
         let (relay, mut frame_rx, ca_tx) = relay_awaiting_ca();
-        let asked = tokio::spawn(async move { relay.proxy_ca(Duration::from_secs(5)).await });
+        let asked =
+            tokio::spawn(async move { relay.proxy_ca_ask().get(Duration::from_secs(5)).await });
 
         assert_eq!(
             frame_rx.recv().await.expect("a request frame"),
@@ -1227,7 +1259,11 @@ mod tests {
         ca_tx.send_replace(ProxyCaState::Available("PEM-BODY".to_string()));
 
         assert_eq!(
-            relay.proxy_ca(Duration::from_secs(5)).await.expect("a pem"),
+            relay
+                .proxy_ca_ask()
+                .get(Duration::from_secs(5))
+                .await
+                .expect("a pem"),
             "PEM-BODY"
         );
     }
@@ -1238,7 +1274,8 @@ mod tests {
         ca_tx.send_replace(ProxyCaState::Unavailable);
 
         let err = relay
-            .proxy_ca(Duration::from_secs(5))
+            .proxy_ca_ask()
+            .get(Duration::from_secs(5))
             .await
             .expect_err("no CA to hand out");
         assert!(
@@ -1252,7 +1289,8 @@ mod tests {
         let (relay, _frame_rx, _ca_tx) = relay_awaiting_ca();
 
         let err = relay
-            .proxy_ca(Duration::from_millis(20))
+            .proxy_ca_ask()
+            .get(Duration::from_millis(20))
             .await
             .expect_err("no answer");
         assert!(
@@ -1268,7 +1306,8 @@ mod tests {
         drop(ca_tx);
 
         let err = relay
-            .proxy_ca(Duration::from_secs(30))
+            .proxy_ca_ask()
+            .get(Duration::from_secs(30))
             .await
             .expect_err("nothing to ask");
         assert!(
@@ -1284,7 +1323,8 @@ mod tests {
         drop(ca_tx);
 
         let err = relay
-            .proxy_ca(Duration::from_secs(30))
+            .proxy_ca_ask()
+            .get(Duration::from_secs(30))
             .await
             .expect_err("no answer is coming");
         assert!(

@@ -759,7 +759,6 @@ mod tests {
 
     fn fake_session(url: &str, token: &str) -> crate::supervisor::SupervisorSession {
         let (fd_tx, _fd_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (frame_tx, _frame_rx) = tokio::sync::mpsc::unbounded_channel();
         crate::supervisor::SupervisorSession {
             assets: crate::supervisor::SupervisorAssets {
                 supervisor_bin: std::path::PathBuf::from("/tmp/fake-supervisor"),
@@ -770,8 +769,10 @@ mod tests {
                 token: token.to_string(),
                 audit_path: std::path::PathBuf::from("/tmp/fake-audit.jsonl"),
                 fd_tx,
-                frame_tx,
-                proxy_ca: tokio::sync::watch::channel(crate::relay::ProxyCaState::Pending).1,
+                proxy_ca: crate::relay::test_proxy_ca_ask(
+                    tokio::sync::mpsc::unbounded_channel().0,
+                    crate::relay::ProxyCaState::Pending,
+                ),
             },
             watcher: None,
             credential_watcher: None,

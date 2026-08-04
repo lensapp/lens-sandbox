@@ -69,6 +69,7 @@ The `spec` fields:
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
+| `sidecars`     | Auxiliary guests attached to the run — a docker daemon, say — each in its own microVM with no network device, publishing what it serves into the workload as a unix socket; see [Sidecars](#sidecars--an-auxiliary-guest-beside-the-workload). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
 
 Check the definition offline — no network, no service — with `validate` and a
@@ -704,6 +705,78 @@ the OS userland; matching builds are selected for its libc flavor (musl or
 glibc). A tool with no build for the image's flavor refuses the launch with
 both remedies: switch to a glibc base image, or bring the runtime via
 `spec.image` as before.
+
+### Sidecars — an auxiliary guest beside the workload
+
+Some workloads need a service, not a library: an agent that builds container
+images needs a docker daemon. A **sidecar** is that service, running in its own
+microVM beside the workload's:
+
+```yaml
+spec:
+  image: docker.io/library/alpine:3.20
+  egress:
+    http:
+      - match: registry-1.docker.io
+        verdict: allow
+      - match: auth.docker.io
+        verdict: allow
+  sidecars:
+    - name: docker
+      image: docker.io/library/docker:27-dind
+      command: dockerd -H tcp://127.0.0.1:2375 --iptables=false --bridge=none
+      egress: proxy
+      resources:
+        cpu: 2
+        memory: 2Gi
+      volumes:
+        - name: docker-layers
+          target: /var/lib/docker
+      expose:
+        - guestPort: 2375
+          socket: /var/run/docker.sock
+          mode: "0666"
+```
+
+The workload then uses `docker` as it always would — the socket is there.
+
+| Field       | Meaning                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `name`      | Names the sidecar in logs and in `lns inspect` (**required**, unique per definition). |
+| `image`     | The OCI image the sidecar runs (**required**).                              |
+| `command`   | Command to run, replacing the image's default.                              |
+| `env`       | Non-secret environment variables for the sidecar's own processes.           |
+| `egress`    | `none` (the default) or `proxy` — see below.                                |
+| `resources` | vCPUs and memory the sidecar boots with, in the same shapes the workload's `resources` takes (`cpu`, `memory` with a unit suffix, or `N%` of the host); defaults to 2 vCPUs and 1 GiB. |
+| `volumes`   | Named volumes for the sidecar's own state. Host binds are refused: the sidecar runs as root. |
+| `expose`    | Services to surface in the workload: `guestPort` inside the sidecar, `socket` as the unix socket path in the workload, and an octal `mode` string (default `"0666"`). |
+
+Three things are true of every sidecar, and they are what make it safe to give
+one root:
+
+- **One policy governs the whole run.** A sidecar with `egress: proxy` reaches
+  the network only through the same supervisor proxy the workload uses, so its
+  requests hit the same decisions file, the same approval cards, and the same
+  [audit chain](audit.md). The example above allows Docker Hub's pull path; a
+  `docker pull` from a registry no entry decides is asked about like any other
+  request.
+- **Without that route there is no route.** A sidecar guest has no network
+  device at all. `egress: none` is therefore not a promise to behave — it is the
+  absence of any wire. Nothing needs to hold.
+- **It is disclosed before it runs.** `lns inspect` names each sidecar, its
+  image, the egress it asked for, and the sockets it publishes, so a sandbox you
+  pulled cannot bring one along quietly.
+
+Two limits worth knowing:
+
+- The sidecar starts alongside the workload, not before it, because the
+  certificate its egress must trust does not exist until the run's proxy does.
+  A workload that uses its socket in the first seconds may find it not yet
+  answering; the run log says when each sidecar is up.
+- An exposed service counts as up when it answers an HTTP-shaped nudge on its
+  `guestPort`. That fits an HTTP API like docker's; a service that speaks a
+  binary protocol and stays silent until spoken to properly is not recognised
+  yet, so today's sidecars are HTTP-serving ones.
 
 ### Host bind mounts
 

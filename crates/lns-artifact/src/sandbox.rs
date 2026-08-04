@@ -100,6 +100,9 @@ pub enum SidecarEgress {
     Proxy,
 }
 
+/// What an exposed socket is created with when the declaration does not say: a run's guest holds one workload, so letting it reach the socket is the useful default.
+pub const DEFAULT_SOCKET_MODE: u32 = 0o666;
+
 /// One service a sidecar publishes, surfaced in the workload as a unix socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -109,6 +112,21 @@ pub struct SidecarExpose {
     /// Octal, as a string: YAML would read a bare `0666` as decimal on the 1.2 core schema and silently widen the mode.
     #[serde(default)]
     pub mode: Option<String>,
+}
+
+impl SidecarExpose {
+    pub fn mode_bits(&self) -> Result<u32> {
+        let Some(mode) = &self.mode else {
+            return Ok(DEFAULT_SOCKET_MODE);
+        };
+        let bits = u32::from_str_radix(mode, 8)
+            .with_context(|| format!("socket mode {mode:?} must be octal, like \"0660\""))?;
+        // setuid/setgid/sticky mean nothing on a socket, so a mode that sets them is a mistake worth naming rather than a grant to pass through.
+        if bits > 0o777 {
+            bail!("socket mode {mode:?} must not set bits above 0777");
+        }
+        Ok(bits)
+    }
 }
 
 /// An auxiliary guest attached to the run: rootful and unsupervised, with no network device, so egress it does not route to the run's proxy reaches nothing.
@@ -477,21 +495,7 @@ fn validate_sidecar_expose<'a>(
                 service.socket
             );
         }
-        validate_socket_mode(service)?;
-    }
-    Ok(())
-}
-
-fn validate_socket_mode(service: &SidecarExpose) -> Result<()> {
-    let Some(mode) = &service.mode else {
-        return Ok(());
-    };
-    let Ok(bits) = u32::from_str_radix(mode, 8) else {
-        bail!("socket mode {mode:?} must be octal, like \"0660\"");
-    };
-    // setuid/setgid/sticky mean nothing on a socket, so a mode that sets them is a mistake worth naming rather than a grant to pass through.
-    if bits > 0o777 {
-        bail!("socket mode {mode:?} must not set bits above 0777");
+        service.mode_bits()?;
     }
     Ok(())
 }
@@ -2416,11 +2420,24 @@ mod tests {
     }
 
     #[test]
+    fn an_undeclared_socket_mode_still_lets_the_workload_reach_the_socket() {
+        // The broker creates the socket as root; a default the workload cannot open would make expose useless.
+        let def = parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]}]"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.sidecars[0].expose[0].mode_bits().unwrap(),
+            DEFAULT_SOCKET_MODE
+        );
+    }
+
+    #[test]
     fn a_socket_mode_is_read_as_octal_not_decimal() {
         let def = parse(&sidecar_json(
             r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock","mode":"0600"}]}]"#,
         ))
         .unwrap();
-        assert_eq!(def.spec.sidecars[0].expose[0].mode.as_deref(), Some("0600"));
+        assert_eq!(def.spec.sidecars[0].expose[0].mode_bits().unwrap(), 0o600);
     }
 }
