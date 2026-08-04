@@ -103,7 +103,7 @@ const RAW_SPLICE_CAPTION: &str = "lns cannot inspect this traffic or inject cred
 #[derive(Debug)]
 struct PendingEntry {
     host: String,
-    /// The gate's own name for the destination (`CONNECT db.internal:5432`) — the only place the port survives, since `host` reaches us already stripped of it.
+    /// The gate's own name for the destination (`CONNECT db.internal:5432`), the only place the port survives.
     action: String,
     treatment: Treatment,
     deadline: Instant,
@@ -579,7 +579,7 @@ impl ApprovalSession {
         self.publish_if_it_stands(approval, snapshot);
     }
 
-    /// Says the decision stands for this request but outlived nothing, because a rule the guest cannot parse force-denies the whole policy and so is never written at all.
+    /// Says the decision stands for this request but outlived nothing.
     fn report_no_rule_written(&self, why: &str) {
         self.notifier.inform(&format!(
             "decision applied to this request only; no policy rule could be written: {why}"
@@ -604,7 +604,7 @@ impl ApprovalSession {
         if !self.publish_if_it_stands(approval, snapshot) {
             return;
         }
-        // The raw table is consulted first, so this rule is what decides that port now; the http rules it displaces would otherwise go quiet without a word.
+        // The http rules this raw rule displaces would otherwise go quiet without a word.
         if !pre_empted.is_empty() {
             self.notifier.inform(&format!(
                 "that traffic is now spliced raw, so these HTTP rules no longer apply to it: {}",
@@ -613,7 +613,7 @@ impl ApprovalSession {
         }
     }
 
-    /// A rule the gate would never reach is not written, so the developer hears that the answer they gave applied to that one request — silence would read as "remembered". Answers whether the decision stands.
+    /// Answers whether the decision stands, telling the developer when it applied to one request only — silence there would read as "remembered".
     fn publish_if_it_stands(&self, approval: Approval, snapshot: Policy) -> bool {
         let why = match approval {
             Approval::Stands => {
@@ -712,12 +712,11 @@ fn earns_a_rule(decision: Decision) -> bool {
     matches!(decision, Decision::AllowAlways | Decision::DenyAlways)
 }
 
-/// The gate's `CONNECT <destination>` taken verbatim, and `None` unless it names the frame's own host — a rule built from a misread action force-denies the whole policy in the guest.
+/// The gate's `CONNECT <destination>` taken verbatim, and `None` unless it names the frame's own host.
 fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
     let destination = action.strip_prefix("CONNECT ")?;
-    // Whether a port is present is validation's complaint to make, and a more specific one.
     let (named, _) = split_destination(destination);
-    // The gate strips the port from `host` before sending it, so only its brackets come off here.
+    // The gate strips the port from `host` before sending it, so only brackets come off here.
     (named == unbracketed(host)).then_some(destination)
 }
 

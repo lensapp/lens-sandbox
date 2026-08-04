@@ -38,9 +38,7 @@ pub struct NetworkPolicy {
     pub egress: Egress,
 }
 
-/// Deserialization shim for the two fields that left the file: a value restating what
-/// the runtime now does unconditionally is dropped, and one that decided something is
-/// refused, since ignoring it would change what the file means.
+/// Deserialization shim for the two fields that left the file: one restating the new behavior is dropped, one that decided something is refused.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NetworkPolicyRaw {
@@ -118,11 +116,7 @@ impl TryFrom<EgressRaw> for Egress {
 }
 
 impl NetworkPolicy {
-    /// Whether this policy closes the directory: it ends `egress.http` with a catch-all
-    /// deny, so it decides everything the named rules leave rather than asking.
-    ///
-    /// Only the first catch-all counts — one behind it is a line the gate never reaches,
-    /// so a file whose first catch-all allows is open however it ends.
+    /// Whether the first catch-all `egress.http` rule the gate reaches is a deny, which decides everything the named rules leave rather than asking.
     pub fn is_closed(&self) -> bool {
         self.egress
             .http
@@ -237,7 +231,7 @@ impl TcpEgressRule {
     }
 }
 
-/// Why a binaries entry can never name a caller, or `None` when it can. Absoluteness is judged the way the guest kernel will judge it, not the way this host would.
+/// Why a binaries entry can never name a caller, or `None` when it can, judged the way the guest kernel will judge it.
 fn unmatchable_binary(binary: &str) -> Option<&'static str> {
     let path = Path::new(binary);
     if !binary.starts_with('/') {
@@ -252,7 +246,7 @@ fn unmatchable_binary(binary: &str) -> Option<&'static str> {
     None
 }
 
-/// The destination port an `egress.tcp` `match` names, mirroring lens-sandbox-core's `parse_matcher`; a pattern that resolves to a portless matcher is an error because a raw splice is granted with no inspection at all.
+/// The destination port an `egress.tcp` `match` names, mirroring lens-sandbox-core's `parse_matcher`; a portless matcher is an error because a raw splice is granted with no inspection at all.
 fn destination_port(pattern: &str) -> Result<u16, String> {
     if parses_as_cidr(pattern) {
         return Err(needs_a_port(pattern));
@@ -265,7 +259,6 @@ fn destination_port(pattern: &str) -> Result<u16, String> {
             "ambiguous IPv6 address without brackets: {pattern}; use [addr]:port notation"
         ));
     }
-    // An unbracketed tail that is no kind of number may be a hostname the author never meant to port-scope, so it reads as the port they left off.
     let (host, Some(port)) = split_destination(pattern) else {
         return Err(needs_a_port(pattern));
     };
@@ -281,14 +274,14 @@ fn bracketed_port(pattern: &str) -> Result<u16, String> {
     };
     prefixed_host_is_a_range(pattern, host)?;
     named_host(pattern, host)?;
-    // A `]:` puts the tail in a position only a port can occupy, so a tail that isn't one is a broken port rather than a missing one.
+    // A `]:` puts the tail where only a port belongs, so one that isn't a port is broken rather than missing.
     if !port_shaped(port) {
         return Err(format!("invalid port in {pattern}"));
     }
     parse_port(pattern, port)
 }
 
-/// A prefix core's CIDR parser rejects leaves the host reading as a hostname there — one that resolves to nothing and matches no connection — so a `/` that is not a range is refused rather than written as a rule that silently never fires.
+/// A prefix core's CIDR parser rejects reads as a hostname there, which resolves to nothing, so a `/` that is not a range is refused rather than written as a rule that never fires.
 fn prefixed_host_is_a_range(pattern: &str, host: &str) -> Result<(), String> {
     if host.contains('/') && !parses_as_cidr(host) {
         return Err(format!("invalid CIDR in {pattern}"));
@@ -305,7 +298,7 @@ fn named_host(pattern: &str, host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The port a pattern's numeric tail names; one too large to be a port is its own error, because the author did name one and should not be sent looking for a missing colon.
+/// The port a pattern's numeric tail names; one too large gets its own error rather than being sent looking for a missing colon.
 fn parse_port(pattern: &str, port: &str) -> Result<u16, String> {
     port.parse::<u16>().map_err(|_| {
         format!("egress.tcp rule {pattern:?}: {port} is not a valid port number (1-65535)")
@@ -332,8 +325,7 @@ pub struct HttpRule {
     pub path: Option<String>,
 }
 
-/// What a rule decides. There is no `ask`: a destination no rule decides is
-/// asked about, so being asked is the absence of a rule rather than a verdict.
+/// What a rule decides; there is no `ask`, because being asked is the absence of a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
@@ -406,7 +398,7 @@ impl Policy {
         }
     }
 
-    /// Records a decision the developer just made on a held request. See [`place_approved`] for the placement.
+    /// Records a decision the developer just made on a held request; see [`place_approved`].
     pub fn add_approved_rule(&mut self, rule: RouteRule) -> Approval {
         let shadowing = self
             .network
@@ -415,7 +407,7 @@ impl Policy {
         place_approved(&mut self.network.egress.http, rule, shadowing)
     }
 
-    /// Records a decision the developer just made on a held raw-TCP request. See [`place_approved`] for the placement.
+    /// Records a decision the developer just made on a held raw-TCP request; see [`place_approved`].
     pub fn add_approved_tcp_rule(&mut self, rule: TcpEgressRule) -> Approval {
         let shadowing = self
             .network
@@ -443,9 +435,9 @@ impl Policy {
 pub enum Approval {
     /// The decision is in force from here on, either as a rule just written or as one the file already held.
     Stands,
-    /// Nothing was written: the named rule already decides every request this one could match, and the gate stops at the first match — so the decision applied to its own request and no further.
+    /// Nothing was written: the named rule already decides every request this one could match, and the gate stops at the first match.
     Shadowed(String),
-    /// Nothing was written: the table already holds this exact rule, but behind the named rule the gate reaches first, so the copy never fires. Repositioning a rule the author placed themselves is a bigger surprise than the prompt coming back, so the reordering is theirs to make.
+    /// Nothing was written: the table already holds this exact rule, but behind the named rule the gate reaches first, so reordering it is the author's to make.
     Unreachable(String),
 }
 
@@ -475,7 +467,7 @@ impl Placed for TcpEgressRule {
     }
 }
 
-/// Places an approval-derived rule where the guest gate will actually reach it: appended when nothing covers the destination, and otherwise neither jumped over the rule that already decides it — that would grant more than the card showed — nor written behind it, where it would never fire; the decision stands for its own request and the caller is told it outlived nothing.
+/// Places an approval-derived rule where the gate reaches it: appended when nothing covers the destination, and otherwise written neither ahead of the rule that already decides it — that would grant more than the card showed — nor behind it, where it would never fire.
 fn place_approved<R: Placed>(
     table: &mut Vec<R>,
     rule: R,
@@ -523,9 +515,7 @@ impl PolicyStore for FilePolicyStore {
 }
 
 impl RouteRule {
-    /// Whether this rule decides every destination for every caller: the file's backstop
-    /// rather than a decision about anything in particular. One narrowed by caller,
-    /// request or scheme decides only what it names, so it is an ordinary rule.
+    /// Whether this rule decides every destination for every caller, which makes it the file's backstop rather than a decision about anything in particular.
     pub fn is_catch_all(&self) -> bool {
         self.match_pattern == "*"
             && self.binaries.is_none()
