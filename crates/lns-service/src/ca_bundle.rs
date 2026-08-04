@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -29,6 +30,9 @@ pub(crate) async fn ensure_pem<F: Fetcher, S: Fs>(
     .await
 }
 
+/// Generous for a ~230KB PEM, and the bound belongs here rather than on the shared fetcher, which also carries the kernel and VMM transfers.
+const FETCH_BUDGET: Duration = Duration::from_secs(10);
+
 /// Every workload process inherits `SSL_CERT_FILE` and friends naming the canonical bundle path, and the proxy CA is appended to that same file — so a run gets the pinned store staged even when nothing else needs it, and a run that cannot have it keeps booting on whatever the image ships.
 pub(crate) async fn workload_spec<F: Fetcher, S: Fs>(
     fetcher: &F,
@@ -37,7 +41,25 @@ pub(crate) async fn workload_spec<F: Fetcher, S: Fs>(
     cache_dir: &Path,
     arch: Arch,
 ) -> Option<RuntimeFileSpec> {
-    match ensure_pem(fetcher, fs, manifest, cache_dir, arch).await {
+    workload_spec_within(fetcher, fs, manifest, cache_dir, arch, FETCH_BUDGET).await
+}
+
+async fn workload_spec_within<F: Fetcher, S: Fs>(
+    fetcher: &F,
+    fs: &S,
+    manifest: &mise::Manifest,
+    cache_dir: &Path,
+    arch: Arch,
+    budget: Duration,
+) -> Option<RuntimeFileSpec> {
+    let ensured = tokio::time::timeout(budget, ensure_pem(fetcher, fs, manifest, cache_dir, arch))
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "the pinned store did not arrive within {budget:?}"
+            ))
+        });
+    match ensured {
         Ok(path) => Some(RuntimeFileSpec {
             guest_path: lns_session::STAGED_CA_BUNDLE_PATH.to_string(),
             mode: 0o644,
@@ -98,11 +120,15 @@ mod tests {
     struct FakeFetcher {
         calls: Arc<Mutex<Vec<String>>>,
         reachable: bool,
+        stalls: bool,
     }
 
     impl Fetcher for FakeFetcher {
         async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
             self.calls.lock().expect("calls mutex").push(url.into());
+            if self.stalls {
+                std::future::pending::<()>().await;
+            }
             if self.reachable {
                 Ok(PEM.to_vec())
             } else {
@@ -260,6 +286,52 @@ mod tests {
         )
         .await;
         assert!(spec.is_none(), "a run must not fail over the CA store");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_that_never_answers_stops_holding_the_boot_and_stages_nothing() {
+        let fetcher = FakeFetcher {
+            reachable: true,
+            stalls: true,
+            ..Default::default()
+        };
+        let spec = workload_spec_within(
+            &fetcher,
+            &FakeFs::default(),
+            &manifest(&pem_sha256()),
+            Path::new("/cache"),
+            Arch::Aarch64,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(
+            spec.is_none(),
+            "a blackholed route must not hold the guest before it boots"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_warm_cache_never_waits_on_the_budget() {
+        let fs = FakeFs::default();
+        fs.files.lock().expect("files mutex").insert(
+            provisioner::ca_cache_dir(Path::new("/cache"), Arch::Aarch64)
+                .join("cacert-2026-07-16.pem"),
+            PEM.to_vec(),
+        );
+        let started = tokio::time::Instant::now();
+        assert!(
+            workload_spec_within(
+                &FakeFetcher::default(),
+                &fs,
+                &manifest(&pem_sha256()),
+                Path::new("/cache"),
+                Arch::Aarch64,
+                Duration::from_secs(10),
+            )
+            .await
+            .is_some()
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test]

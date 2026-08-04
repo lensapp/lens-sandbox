@@ -11,9 +11,23 @@ pub(crate) struct RealFetcher {
     pub max_bytes: u64,
 }
 
+/// A connect bound, not a total one: the same client carries the kernel and VMM transfers, where a slow-but-progressing body must not be cut off.
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            // Same failure reqwest::get panics on: the process has no usable TLS backend, so there is nothing to fall back to.
+            .expect("a TLS-backed HTTP client")
+    })
+}
+
 impl Fetcher for RealFetcher {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = reqwest::get(url)
+        let resp = shared_client()
+            .get(url)
+            .send()
             .await
             .with_context(|| format!("downloading {url}"))?
             .error_for_status()
