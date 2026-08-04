@@ -144,6 +144,14 @@ Feature: shaping network rules from the CLI
     Then "lns-policy.yaml" lists the allow rule for "api.example.test" before the rule for "*"
     And the output says it was placed before the rule for "*"
 
+  # The catch-all already blocks it, so a second deny naming one destination adds
+  # nothing — the same answer the file gives for any deny behind a covering deny.
+  Scenario: Denying a destination in a closed policy reports the catch-all already blocks it
+    Given "lns-policy.yaml" has a deny rule for "*"
+    When the developer denies "evil.example"
+    Then the output says the broader deny already blocks it
+    And "lns-policy.yaml" still holds 1 rule
+
   # A deny the author aimed at a destination is a decision, so an allow behind it is
   # still refused rather than quietly reordered.
   Scenario: Allowing a destination a narrower deny names is still refused

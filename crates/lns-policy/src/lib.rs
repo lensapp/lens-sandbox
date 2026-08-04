@@ -670,6 +670,21 @@ mod tests {
     }
 
     #[test]
+    fn a_verdict_that_is_neither_allow_nor_deny_is_refused_naming_both() {
+        // A typo must not read as one of the two, and the message has to say what the
+        // author can write instead — there are only two answers now.
+        let err = serde_yaml::from_str::<NetworkPolicy>(
+            "egress:\n  http:\n    - match: api.example.test\n      verdict: bananas\n",
+        )
+        .expect_err("an unknown verdict must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bananas") && msg.contains("`allow`") && msg.contains("`deny`"),
+            "got {msg}"
+        );
+    }
+
+    #[test]
     fn a_rule_asking_to_be_asked_is_refused_because_that_is_now_the_absence_of_a_rule() {
         // `ask` was how you said "prompt me about this". Nothing is decided
         // without a rule now, so the way to be asked is to write no rule — and a

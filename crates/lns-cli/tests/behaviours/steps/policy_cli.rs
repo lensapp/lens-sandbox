@@ -920,6 +920,11 @@ fn output_says_http_rule_pre_empted(
     )
 }
 
+#[then(regex = r"^the output says the broader deny already blocks it$")]
+fn output_says_broader_deny_covers(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "so this deny adds nothing")
+}
+
 #[then(regex = r"^the output says the broader raw deny already blocks it$")]
 fn output_says_broader_raw_deny_covers(world: &mut BehaviourWorld) -> Result<(), String> {
     output_mentions(world, "so this deny adds nothing")
