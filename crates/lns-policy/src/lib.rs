@@ -58,7 +58,7 @@ impl TryFrom<NetworkPolicyRaw> for NetworkPolicy {
             None | Some("ask") => {}
             Some(verdict @ ("allow" | "deny")) => {
                 return Err(format!(
-                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: end `egress.http` with a catch-all instead — `lns policy {verdict} '*'` — then delete the line. {raw}",
+                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: delete the line, then end `egress.http` with a catch-all instead — `lns policy {verdict} '*'`. {raw}",
                     raw = match verdict {
                         "deny" =>
                             "That rule governs raw destinations too, so `egress.tcp` needs no counterpart",
@@ -636,6 +636,26 @@ mod tests {
             assert!(msg.contains(tail), "expected {tail:?} in {msg}");
             assert!(!msg.contains(absent), "unexpected {absent:?} in {msg}");
         }
+    }
+
+    #[test]
+    fn the_refusal_says_delete_the_line_before_the_command_that_needs_it_gone() {
+        // `lns policy deny '*'` loads the file first, so it stops on this same error.
+        // Prescribed in the other order the fix is a loop the reader cannot leave.
+        let err =
+            serde_yaml::from_str::<NetworkPolicy>("egress:\n  http: []\ndefaultVerdict: deny\n")
+                .expect_err("a default that decided something must be refused");
+        let msg = err.to_string();
+        let (delete, command) = (
+            msg.find("delete the line")
+                .expect("the message must say to delete it"),
+            msg.find("lns policy deny")
+                .expect("the message must name the command"),
+        );
+        assert!(
+            delete < command,
+            "the command cannot run until the line is gone: {msg}"
+        );
     }
 
     #[test]

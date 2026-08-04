@@ -272,22 +272,34 @@ fn unmatched_line(policy: &Policy) -> &'static str {
 }
 
 fn rules_line(policy: &Policy) -> String {
-    let routes = &policy.network.egress.http;
-    if routes.is_empty() {
+    let egress = &policy.network.egress;
+    if egress.http.is_empty() && egress.tcp.is_empty() {
         return "none defined; anything else asks".to_string();
     }
-    let (allows, denies) = routes
-        .iter()
-        .fold((0u32, 0u32), |(a, d), r| match r.verdict {
-            Verdict::Allow => (a + 1, d),
-            Verdict::Deny => (a, d + 1),
-        });
+    let (allows, denies) = tally(egress.http.iter().map(|r| r.verdict));
+    let raw = raw_counts(&egress.tcp);
     let tail = if policy.network.is_closed() {
         "anything else denied"
     } else {
         "anything else asks"
     };
-    format!("{allows} allow, {denies} deny, {tail}")
+    format!("{allows} allow, {denies} deny{raw}, {tail}")
+}
+
+/// Raw splices counted apart from the routes, since nothing inspects one and folded into the route count a splice would read as one more gated host. Empty when the table is, so a policy with no raw rules carries no zeros.
+fn raw_counts(tcp: &[lns_policy::TcpEgressRule]) -> String {
+    if tcp.is_empty() {
+        return String::new();
+    }
+    let (allows, denies) = tally(tcp.iter().map(|r| r.verdict));
+    format!(", {allows} raw allow, {denies} raw deny")
+}
+
+fn tally(verdicts: impl Iterator<Item = Verdict>) -> (u32, u32) {
+    verdicts.fold((0u32, 0u32), |(a, d), verdict| match verdict {
+        Verdict::Allow => (a + 1, d),
+        Verdict::Deny => (a, d + 1),
+    })
 }
 
 fn source_line(source: &PolicySource) -> String {
@@ -301,7 +313,7 @@ fn source_line(source: &PolicySource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::RouteRule;
+    use lns_policy::{RouteRule, TcpEgressRule};
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
@@ -821,6 +833,50 @@ mod tests {
             "the default is no longer a field the file varies, so the summary states the rule: {s}"
         );
         assert!(s.contains("3 allow, 1 deny, anything else asks"));
+    }
+
+    #[test]
+    fn the_rules_line_counts_the_raw_splices_apart_from_the_inspected_routes() {
+        // The launch summary is the only surface that discloses this directory's own
+        // policy, and a raw splice is the widest grant it can express — folded into
+        // the route count it would read as one more inspected host.
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::allow_host("api.example.test"));
+        policy
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("0.0.0.0/0:5432"));
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            &policy,
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("1 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
+            "got: {s}"
+        );
+    }
+
+    #[test]
+    fn the_rules_line_reports_a_raw_only_policy_rather_than_none_defined() {
+        let mut policy = Policy::default();
+        policy
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.internal:5432"));
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            &policy,
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("0 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
+            "a file holding only raw rules is not a file holding none: {s}"
+        );
     }
 
     #[test]
