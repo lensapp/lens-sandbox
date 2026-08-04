@@ -48,8 +48,13 @@ fn run() -> Result<i32, String> {
     }
 
     // Must run before any session forks: the workload inherits env naming the canonical bundle, and the supervisor appends the proxy CA to it.
-    if let Err(e) = trust::seed_trust_store() {
-        eprintln!("lns-session-broker: best-effort trust store setup failed: {e}");
+    match trust::seed_trust_store() {
+        Ok(seeding) => {
+            if let Some(report) = seeding.report() {
+                eprintln!("lns-session-broker: {report}");
+            }
+        }
+        Err(e) => eprintln!("lns-session-broker: best-effort trust store setup failed: {e}"),
     }
 
     forward::spawn_listener();
