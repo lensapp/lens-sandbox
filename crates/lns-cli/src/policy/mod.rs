@@ -461,10 +461,9 @@ fn place<R: Placeable>(policy: &mut Policy, mut rule: R) -> Result<Placement> {
     // has to be able to go in front of it — refusing would leave a closed policy
     // editable by hand alone, since it raises no approval cards either. A deny aimed at
     // a destination is still a decision, and an allow behind that stays refused.
-    if shadowing.verdict() == Verdict::Deny && !shadowing.is_catch_all() {
-        return behind_a_deny(&shadowing, &rule);
-    }
-    if shadowing.verdict() == Verdict::Deny && rule.verdict() == Verdict::Deny {
+    if shadowing.verdict() == Verdict::Deny
+        && (!shadowing.is_catch_all() || rule.verdict() == Verdict::Deny)
+    {
         return behind_a_deny(&shadowing, &rule);
     }
     if reopens_a_scoped_rule(&shadowing, &rule) {
