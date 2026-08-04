@@ -4,6 +4,7 @@ mod forward;
 mod network;
 mod pty;
 mod session;
+mod trust;
 mod vsock;
 
 use std::process::ExitCode;
@@ -44,6 +45,11 @@ fn run() -> Result<i32, String> {
     // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
     if let Err(e) = network::configure_dns() {
         eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
+    }
+
+    // Must run before any session forks: the workload inherits env naming the canonical bundle, and the supervisor appends the proxy CA to it.
+    if let Err(e) = trust::seed_trust_store() {
+        eprintln!("lns-session-broker: best-effort trust store setup failed: {e}");
     }
 
     forward::spawn_listener();

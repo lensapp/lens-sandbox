@@ -275,6 +275,23 @@ pub(crate) async fn ensure_engine_artifacts(
     .await
 }
 
+/// The pinned public trust store every workload guest is staged with, whether or not it declares tools.
+pub(crate) async fn workload_ca_spec(
+    cache_dir: &Path,
+    arch: crate::tools::Arch,
+) -> Option<crate::runtime_layer::RuntimeFileSpec> {
+    crate::ca_bundle::workload_spec(
+        &RealFetcher {
+            max_bytes: MAX_ARTIFACT_BYTES,
+        },
+        &RealFs,
+        mise::manifest(),
+        cache_dir,
+        arch,
+    )
+    .await
+}
+
 /// The musl companion trees a workload guest needs beside node/bun tool trees, injected at their canonical library paths.
 pub(crate) async fn workload_companion_specs(
     cache_dir: &Path,

@@ -5,6 +5,7 @@ pub mod audit;
 mod base64;
 pub mod browser;
 pub mod build_cache;
+pub mod ca_bundle;
 pub mod cache;
 pub mod composefs;
 pub mod content_store;

@@ -263,6 +263,11 @@ fn companions_root(cache_dir: &Path, arch: super::Arch) -> PathBuf {
         .join(arch.to_string())
 }
 
+/// One cache slot for the pinned store, so a workload run and a provision share the bytes either one downloaded.
+pub(crate) fn ca_cache_dir(cache_dir: &Path, arch: super::Arch) -> PathBuf {
+    companions_root(cache_dir, arch).join("ca")
+}
+
 /// Ensure the pinned engine, static curl, CA bundle, and (musl) companion apks are cached and expanded — every byte sha-verified against the injected manifest before it can reach a guest.
 pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
     fetcher: &F,
@@ -300,19 +305,7 @@ pub(crate) async fn ensure_engine_artifacts_with<F: Fetcher, S: Fs>(
     )
     .await?;
 
-    let ca_path = ensure_pinned(
-        fetcher,
-        fs,
-        &root.join("ca"),
-        &PinnedArtifact {
-            filename: &format!("cacert-{}.pem", manifest.ca_bundle.date),
-            url: &manifest.ca_bundle.url(),
-            sha256: &manifest.ca_bundle.sha256,
-            mode: None,
-            label: "CA bundle",
-        },
-    )
-    .await?;
+    let ca_path = crate::ca_bundle::ensure_pem(fetcher, fs, manifest, cache_dir, arch).await?;
     let ca_pem = fs
         .read(&ca_path)
         .await

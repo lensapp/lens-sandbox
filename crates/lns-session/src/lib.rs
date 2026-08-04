@@ -6,6 +6,9 @@ pub const FORWARD_PORT: u32 = 1030;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
+/// Where the service stages the pinned public trust store and the broker reads it from; one spelling, or the guest silently keeps no store at all.
+pub const STAGED_CA_BUNDLE_PATH: &str = "/.lens/ca-certificates.crt";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwardHeader {
     pub container_port: u16,
