@@ -13,6 +13,12 @@ Feature: declared developer tools reach a real guest
     When the sandbox runs "node --version"
     Then it prints a node 22 version
 
+  Scenario: A launcher the provisioning engine rewrote still runs in the guest
+    Given the Lens Sandbox service is running
+    And a lns.yaml declaring tools ["node@22"] over the pinned base image
+    When the sandbox runs "npm --version"
+    Then it prints an npm version
+
   Scenario: Provisioning is disclosed, audited, and reused on the next run
     Given a clean lns cache home
     And the Lens Sandbox service is running in that home

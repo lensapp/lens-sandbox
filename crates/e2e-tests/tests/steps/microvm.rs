@@ -12,6 +12,9 @@ const LOG_REPLAY_DEADLINE: Duration = Duration::from_secs(90);
 // The ECR mirror of Docker Hub: anonymous pulls there hit hard rate limits when the suite boots ~45 guests.
 const MICROVM_IMAGE: &str = "public.ecr.aws/docker/library/alpine:3.20";
 
+// Alpine ships ca-certificates-bundle, so the trust-store scenarios need a rootfs that carries no store at all.
+const NO_TRUST_STORE_IMAGE: &str = "public.ecr.aws/docker/library/busybox:1.36";
+
 static PINNED_MICROVM_IMAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn linux_host_arch_resolver(entries: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
@@ -328,6 +331,11 @@ fn run_definition_only(world: &mut E2eWorld) {
 #[when(regex = r#"^the user runs a microVM command "([^"]*)"$"#)]
 fn run_command(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
+}
+
+#[given("a base image that ships no trust store")]
+fn base_image_without_a_trust_store(world: &mut E2eWorld) {
+    world.project_image = Some(NO_TRUST_STORE_IMAGE.to_string());
 }
 
 fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
@@ -881,6 +889,26 @@ fn prints_a_node_22_version(world: &mut E2eWorld) {
     assert!(
         result.stdout.contains("v22."),
         "expected a node 22 version, got:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
+}
+
+#[then("it prints an npm version")]
+fn prints_an_npm_version(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "run failed:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    let parts: Vec<&str> = result.stdout.trim().split('.').collect();
+    assert!(
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+        "expected npm to print its version, got:\n{}\n{}",
         result.stdout,
         result.stderr
     );
