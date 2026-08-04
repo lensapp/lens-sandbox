@@ -189,14 +189,27 @@ async fn orchestrate(
         log::debug!("volumes ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(resolved)
     };
+    let workload_ca_fut = async {
+        let spec = crate::tools::provisioner::real::workload_ca_spec(
+            &cache_dir,
+            crate::tools::host_arch(),
+        )
+        .await;
+        log::debug!(
+            "workload CA store ready at +{:.2?}",
+            prepare_started.elapsed()
+        );
+        spec
+    };
 
     // join! rather than try_join! so the detached spawn_blocking inside upperfs::provision always settles before the scratch guard can fire — a cancelled provision would keep writing and re-orphan the run dir we just cleaned.
-    let (tools_res, image_res, kernel_res, upper_res, volumes_res) = tokio::join!(
+    let (tools_res, image_res, kernel_res, upper_res, volumes_res, workload_ca_spec) = tokio::join!(
         tools_then_session,
         image_fut,
         kernel_fut,
         upper_fut,
-        volumes_fut
+        volumes_fut,
+        workload_ca_fut
     );
     let (guest_tools, session, initrd) = tools_res?;
     let mut image = image_res?;
@@ -283,10 +296,7 @@ async fn orchestrate(
     if let Some(ensured) = &ensured_tools {
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
-    fileset_specs.extend(
-        crate::tools::provisioner::real::workload_ca_spec(&cache_dir, crate::tools::host_arch())
-            .await,
-    );
+    fileset_specs.extend(workload_ca_spec);
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
