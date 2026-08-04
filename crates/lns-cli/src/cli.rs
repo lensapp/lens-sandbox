@@ -77,7 +77,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory, auto-created with `defaultVerdict: ask` if absent."
+        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory, auto-created with no rules if absent."
     )]
     pub policy: Option<PathBuf>,
 

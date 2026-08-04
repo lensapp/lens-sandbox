@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use crate::approval_flow::notification::WindowNotifier;
 use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::protocol::PolicyMessage;
+use crate::approval_flow::protocol::WireNetwork;
 use crate::approval_flow::session::{ApprovalSession, Notifier};
 use crate::approval_flow::watcher::PolicyWatcher;
 use crate::approval_flow::window::{
@@ -396,7 +397,7 @@ fn make_policy_emitter(
         let network = session.current_policy().network;
         let credentials = expand_credentials_for_wire_with_custom(state, &custom_providers, armed);
         let _ = sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(network),
+            network: Some(WireNetwork::seeded(network)),
             credentials: Some(credentials),
         }));
     })
@@ -646,7 +647,10 @@ pub(super) async fn start(
         &declared_connectors,
         &catalog,
     );
-    policy.network.egress.http.extend(applied.routes);
+    crate::artifact::policy::splice_connector_routes(
+        &mut policy.network.egress.http,
+        applied.routes,
+    );
     let offerable = build_offerable(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let run =

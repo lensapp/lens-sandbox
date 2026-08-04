@@ -28,7 +28,6 @@ Feature: shaping network rules from the CLI
     When the developer adds an allow rule for "api.linear.app" without passing --policy
     Then "lns-policy.yaml" is created in the current directory
     And it contains an allow rule for "api.linear.app"
-    And its defaultVerdict is "ask"
 
   Scenario: --policy can point at any path
     When the developer adds an allow rule for "api.linear.app" with --policy "/tmp/team-policy.yaml"
@@ -135,6 +134,23 @@ Feature: shaping network rules from the CLI
     When the developer adds an allow rule for "git.example.test" scoped to "/usr/bin/git"
     Then "lns-policy.yaml" lists the rule scoped to "/usr/bin/git" before the rule scoped to "/usr/bin/git,/usr/bin/curl"
     And the output does not claim any scoping is spent
+
+  # A catch-all deny is the file's backstop, not a decision about any one destination
+  # — and it is what closes a directory now that no default can. Refusing to widen it
+  # would leave a closed policy editable only by hand, since it raises no cards either.
+  Scenario: Allowing a destination in a closed policy puts the allow ahead of the catch-all
+    Given "lns-policy.yaml" has a deny rule for "*"
+    When the developer adds an allow rule for "api.example.test" without passing --policy
+    Then "lns-policy.yaml" lists the allow rule for "api.example.test" before the rule for "*"
+    And the output says it was placed before the rule for "*"
+
+  # A deny the author aimed at a destination is a decision, so an allow behind it is
+  # still refused rather than quietly reordered.
+  Scenario: Allowing a destination a narrower deny names is still refused
+    Given "lns-policy.yaml" has a deny rule for "*.example.test"
+    When the developer adds an allow rule for "api.example.test" without passing --policy
+    Then the command fails with an exit code other than 0
+    And the failure says the deny already blocks it
 
   Scenario: Denying a destination a scoped allow claimed puts the deny in front of it
     Given "lns-policy.yaml" has an allow rule for "git.example.test" scoped to "/usr/bin/git"
@@ -290,12 +306,6 @@ Feature: shaping network rules from the CLI
     When the developer denies the raw destination "db.internal:5432"
     Then "lns-policy.yaml" contains a raw deny rule for "db.internal:5432"
 
-  # An approval card can only ever confirm a destination the policy already asks about,
-  # so this verb is the one way to put a raw splice in front of the developer at all.
-  Scenario: Asking about a raw TCP destination is what makes an approval card possible
-    When the developer asks about the raw destination "db.internal:5432"
-    Then "lns-policy.yaml" contains a raw ask rule for "db.internal:5432"
-
   # A portless raw rule fails the whole policy closed inside the guest, so it is
   # refused here rather than at the next run.
   Scenario: A raw destination with no port is refused before anything is written
@@ -313,12 +323,6 @@ Feature: shaping network rules from the CLI
     Then the command fails with an exit code other than 0
     And the error explains the raw rule would never fire
     And the policy file is unchanged
-
-  Scenario: A raw allow is placed ahead of the raw ask rule it answers
-    Given "lns-policy.yaml" has a raw ask rule for "db.internal:5432"
-    When the developer allows the raw destination "db.internal:5432"
-    Then the raw allow rule for "db.internal:5432" sits ahead of the raw ask rule
-    And the output says it was placed before the existing raw rule
 
   # A scoped raw rule claims the destination and fails closed for every caller off
   # its list, so placing an unscoped rule in front widens the file's own grant —
@@ -360,17 +364,17 @@ Feature: shaping network rules from the CLI
   # A copy of the grant stranded behind the rule that pre-empts it is the same rule,
   # not a second one to keep: moving it into force is the whole of what was asked for,
   # and leaving the old line behind grows the file with rules the gate never reaches.
-  Scenario: A raw allow the file holds but a raw ask pre-empts is moved in front of that ask
-    Given "lns-policy.yaml" has a raw ask rule for "db.internal:5432" ahead of a raw allow rule for "db.internal:5432"
-    When the developer allows the raw destination "db.internal:5432"
-    Then the raw allow rule for "db.internal:5432" sits ahead of the raw ask rule
-    And "lns-policy.yaml" has exactly one raw allow rule for "db.internal:5432"
+  Scenario: A raw allow the file holds but a broader rule pre-empts is moved in front of it
+    Given "lns-policy.yaml" has a raw allow rule for "10.0.0.0/24:5432" ahead of a raw allow rule for "10.0.0.5:5432"
+    When the developer allows the raw destination "10.0.0.5:5432"
+    Then the raw allow rule for "10.0.0.5:5432" sits ahead of the raw rule for "10.0.0.0/24:5432"
+    And "lns-policy.yaml" has exactly one raw allow rule for "10.0.0.5:5432"
 
   Scenario: Moving a stranded raw rule into force keeps the note it was carrying
-    Given "lns-policy.yaml" has a raw ask rule for "db.internal:5432" ahead of a raw allow rule for "db.internal:5432" described as "project database"
-    When the developer allows the raw destination "db.internal:5432"
-    Then "lns-policy.yaml" describes the raw allow rule for "db.internal:5432" as "project database"
-    And "lns-policy.yaml" has exactly one raw allow rule for "db.internal:5432"
+    Given "lns-policy.yaml" has a raw allow rule for "10.0.0.0/24:5432" ahead of a raw allow rule for "10.0.0.5:5432" described as "project database"
+    When the developer allows the raw destination "10.0.0.5:5432"
+    Then "lns-policy.yaml" describes the raw allow rule for "10.0.0.5:5432" as "project database"
+    And "lns-policy.yaml" has exactly one raw allow rule for "10.0.0.5:5432"
 
   Scenario: Adding the same raw rule twice reports it rather than duplicating it
     Given "lns-policy.yaml" has a raw allow rule for "db.internal:5432"
@@ -385,10 +389,6 @@ Feature: shaping network rules from the CLI
     When the developer allows the raw destination "db.internal:5432" scoped to "/usr/bin/psql"
     Then "lns-policy.yaml" contains a raw allow rule for "db.internal:5432" scoped to "/usr/bin/psql"
     And the output says every other caller is now denied "db.internal:5432"
-
-  Scenario: Scoping a raw ask to one binary records it in the policy file
-    When the developer asks about the raw destination "db.internal:5432" scoped to "/usr/bin/psql"
-    Then "lns-policy.yaml" contains a raw ask rule for "db.internal:5432" scoped to "/usr/bin/psql"
 
   Scenario: A relative binary path is refused before any raw rule is written
     Given the developer is in a directory with no "lns-policy.yaml"

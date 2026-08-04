@@ -77,18 +77,15 @@ fn lns_yaml_declaring_tools(w: &mut BehaviourWorld, entries: String) {
     rig.definition = Some(definition_with_tools(&entries));
 }
 
-#[given(
-    regex = r#"^a lns\.yaml declaring tools \[(.*)\] with defaultVerdict (\w+) and no egress rules$"#
-)]
-fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String, verdict: String) {
+#[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] that denies every destination$"#)]
+fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String) {
     let tools: Vec<String> = entries
         .split(',')
         .map(|entry| format!("{:?}", entry.trim().trim_matches('"')))
         .collect();
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"defaultVerdict":"{}","egress":{{"http":[]}}}},"tools":[{}]}}}}"#,
-        verdict,
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","policy":{{"egress":{{"http":[{{"match":"*","verdict":"deny"}}]}}}},"tools":[{}]}}}}"#,
         tools.join(",")
     ));
 }

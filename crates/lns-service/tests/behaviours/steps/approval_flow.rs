@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::approval_rig::ApprovalRig;
 use crate::world::BehaviourWorld;
-use lns_policy::{Policy, RouteRule, TcpEgressRule, Verdict};
+use lns_policy::{Policy, RouteRule, Verdict};
 use lns_service::approval_flow::protocol::{Decision, HostFrame, RequestPending, Treatment};
 
 fn make_raw_pending(destination: &str) -> RequestPending {
@@ -110,34 +110,16 @@ fn given_notification_visible_for(world: &mut BehaviourWorld, host: String) {
     let _ = drain_frames(rig);
 }
 
-#[given(regex = r#"^the policy asks about "([^"]+)"$"#)]
-fn given_policy_asks_about(world: &mut BehaviourWorld, host: String) {
+#[given(
+    regex = r#"^the policy denies "([^"]+)" and holds an allow rule for "([^"]+)" behind that$"#
+)]
+fn given_policy_denies_then_allows(world: &mut BehaviourWorld, covering: String, host: String) {
     seed_policy(world, |policy| {
-        policy.network.egress.http.push(RouteRule {
-            verdict: Verdict::Ask,
-            ..RouteRule::allow_host(host)
-        })
-    });
-}
-
-#[given(regex = r#"^the policy asks about "([^"]+)" with TLS interception$"#)]
-fn given_policy_asks_about_with_tls(world: &mut BehaviourWorld, host: String) {
-    seed_policy(world, |policy| {
-        policy.network.egress.http.push(RouteRule {
-            verdict: Verdict::Ask,
-            tls_terminate: true,
-            ..RouteRule::allow_host(host)
-        })
-    });
-}
-
-#[given(regex = r#"^the policy asks about "([^"]+)" and holds an allow rule for it behind that$"#)]
-fn given_policy_asks_then_allows(world: &mut BehaviourWorld, host: String) {
-    seed_policy(world, |policy| {
-        policy.network.egress.http.push(RouteRule {
-            verdict: Verdict::Ask,
-            ..RouteRule::allow_host(host.clone())
-        });
+        policy
+            .network
+            .egress
+            .http
+            .push(RouteRule::deny_host(covering));
         policy.network.egress.http.push(RouteRule::allow_host(host));
     });
 }
@@ -146,17 +128,6 @@ fn given_policy_asks_then_allows(world: &mut BehaviourWorld, host: String) {
 fn given_policy_allows(world: &mut BehaviourWorld, host: String) {
     seed_policy(world, |policy| {
         policy.network.egress.http.push(RouteRule::allow_host(host))
-    });
-}
-
-#[given(regex = r#"^the policy asks about the raw destination "([^"]+)"$"#)]
-fn given_policy_asks_about_raw(world: &mut BehaviourWorld, destination: String) {
-    seed_policy(world, |policy| {
-        policy
-            .network
-            .egress
-            .tcp
-            .push(TcpEgressRule::new(destination.clone(), Verdict::Ask))
     });
 }
 
@@ -570,64 +541,6 @@ fn assert_file_rule(
         return Err(format!(
             "expected verdict {expected:?} for {host} in file, got {:?}",
             matched.verdict
-        ));
-    }
-    Ok(())
-}
-
-#[then(regex = r#"^the allow rule sits ahead of the ask rule for "([^"]+)"$"#)]
-fn then_allow_precedes_ask(world: &mut BehaviourWorld, host: String) -> Result<(), String> {
-    let on_disk = on_disk_policy(world)?;
-    let verdicts: Vec<Verdict> = on_disk
-        .network
-        .egress
-        .http
-        .iter()
-        .filter(|r| r.match_pattern == host)
-        .map(|r| r.verdict)
-        .collect();
-    if verdicts != vec![Verdict::Allow, Verdict::Ask] {
-        return Err(format!(
-            "the gate stops at the first match, so an approval behind the ask rule is dead: {verdicts:?}"
-        ));
-    }
-    Ok(())
-}
-
-#[then(regex = r"^the new allow rule still terminates TLS$")]
-fn then_allow_still_terminates_tls(world: &mut BehaviourWorld) -> Result<(), String> {
-    let on_disk = on_disk_policy(world)?;
-    let first = on_disk
-        .network
-        .egress
-        .http
-        .first()
-        .ok_or("the policy file holds no rules")?;
-    if first.verdict != Verdict::Allow || !first.tls_terminate {
-        return Err(format!(
-            "the allow decides the destination now, so dropping interception here silently stops credential injection for it: {first:?}"
-        ));
-    }
-    Ok(())
-}
-
-#[then(regex = r#"^the raw allow rule sits ahead of the raw ask rule for "([^"]+)"$"#)]
-fn then_raw_allow_precedes_ask(
-    world: &mut BehaviourWorld,
-    destination: String,
-) -> Result<(), String> {
-    let on_disk = on_disk_policy(world)?;
-    let verdicts: Vec<Verdict> = on_disk
-        .network
-        .egress
-        .tcp
-        .iter()
-        .filter(|r| r.match_pattern == destination)
-        .map(|r| r.verdict)
-        .collect();
-    if verdicts != vec![Verdict::Allow, Verdict::Ask] {
-        return Err(format!(
-            "an ask rule is the only way a raw card is ever raised, so an approval behind it is dead: {verdicts:?}"
         ));
     }
     Ok(())

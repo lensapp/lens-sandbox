@@ -10,7 +10,7 @@ use lns_cli::service::{
 use lns_ipc::{
     LogLevel, Response, WireFrame, encode_frame, encode_wire_frame, read_frame_bytes_async,
 };
-use lns_policy::{Policy, RouteRule, Verdict};
+use lns_policy::{Policy, RouteRule};
 use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
 
@@ -160,18 +160,10 @@ fn cwd_contains_policy_file(world: &mut BehaviourWorld) {
     let _ = require_cwd(world);
 }
 
-#[given(
-    regex = r#"^that policy has default verdict "([^"]+)", (\d+) allow rules?, and (\d+) deny rules?$"#
-)]
-fn that_policy_has(world: &mut BehaviourWorld, verdict: String, allows: usize, denies: usize) {
+#[given(regex = r#"^that policy has (\d+) allow rules?, and (\d+) deny rules?$"#)]
+fn that_policy_has(world: &mut BehaviourWorld, allows: usize, denies: usize) {
     let cwd = require_cwd(world).to_path_buf();
     let mut policy = Policy::default();
-    policy.network.default_verdict = match verdict.as_str() {
-        "allow" => Verdict::Allow,
-        "deny" => Verdict::Deny,
-        "ask" => Verdict::Ask,
-        other => panic!("unknown verdict {other:?}"),
-    };
     for i in 0..allows {
         policy.add_rule(RouteRule::allow_host(format!("allow-{i}.example")));
     }
@@ -295,13 +287,13 @@ fn policy_block_shows_file_path(world: &mut BehaviourWorld) -> Result<(), String
     }
 }
 
-#[then(regex = r"^the default verdict$")]
-fn default_verdict_line_present(world: &mut BehaviourWorld) -> Result<(), String> {
-    if world.summary_output.contains("default verdict:") {
+#[then(regex = r"^what happens to a destination no rule names$")]
+fn unmatched_line_present(world: &mut BehaviourWorld) -> Result<(), String> {
+    if world.summary_output.contains("unmatched destinations: ask") {
         Ok(())
     } else {
         Err(format!(
-            "missing `default verdict:` line in:\n{}",
+            "missing `unmatched destinations:` line in:\n{}",
             world.summary_output
         ))
     }
@@ -343,9 +335,9 @@ fn source_line_reads(world: &mut BehaviourWorld, expected: String) -> Result<(),
     }
 }
 
-#[then(regex = r#"^the default verdict is "([^"]+)"$"#)]
-fn default_verdict_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    let needle = format!("default verdict: {expected}");
+#[then(regex = r#"^a destination no rule names is "([^"]+)"ed$"#)]
+fn unmatched_destination_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let needle = format!("unmatched destinations: {expected}");
     if world.summary_output.contains(&needle) {
         Ok(())
     } else {

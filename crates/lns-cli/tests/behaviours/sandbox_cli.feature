@@ -79,10 +79,10 @@ Feature: managing running sandboxes from the CLI
 
   Scenario: inspect embeds the policy file when it is readable
     Given the service reports run 3 with policy path "/work/lns-policy.yaml"
-    And the policy file parses with default verdict "ask"
+    And the policy file parses with one allow rule
     When the user runs sandbox command "inspect 3"
     Then the exit code is 0
-    And the output contains "defaultVerdict"
+    And the output contains "egress"
     And the output contains "/work/lns-policy.yaml"
 
   Scenario: inspect marks an unreadable policy file instead of failing

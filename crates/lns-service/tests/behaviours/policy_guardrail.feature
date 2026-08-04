@@ -1,15 +1,10 @@
 Feature: an over-broad shipped policy is surfaced, never hidden
-  A sandbox could ship a policy that quietly opens it — a
-  defaultVerdict of "allow", or a broad "*" / CIDR allow. Such a baseline
+  A sandbox could ship a policy that quietly opens it — a broad "*" or CIDR
+  allow, in either egress table. Such a baseline
   is never applied silently: the first-run summary surfaces it prominently
   so a consumer sees the exposure before trusting the sandbox. (The producer
   side only warns on these shapes at build — it does not reject them, so the
   consumer-side surfacing is what keeps an over-broad baseline from hiding.)
-
-  Scenario: A sandbox whose policy defaults to allow is flagged on first run
-    Given a sandbox whose policy has defaultVerdict "allow"
-    When the first-run summary is produced
-    Then the run summary prominently flags the permissive defaultVerdict
 
   Scenario: A sandbox policy with a wildcard allow is flagged on first run
     Given a sandbox whose policy allows "*"

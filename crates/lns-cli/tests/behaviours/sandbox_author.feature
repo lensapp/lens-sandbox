@@ -14,7 +14,6 @@ Feature: authoring a sandbox
     And the file "lns.yaml" contains "volumes:"
     And the file "lns.yaml" contains "env:"
     And the file "lns.yaml" contains "resources:"
-    And the file "lns.yaml" contains "defaultVerdict: ask"
     And the file "lns.yaml" contains "egress:"
     And the file "lns.yaml" contains "connectors:"
     And the file "lns.yaml" contains "credentials:"

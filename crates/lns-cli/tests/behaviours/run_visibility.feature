@@ -19,10 +19,10 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
 
   Scenario: Policy block answers what and why
     Given the working directory contains `./lns-policy.yaml`
-    And that policy has default verdict "ask", 3 allow rules, and 1 deny rule
+    And that policy has 3 allow rules, and 1 deny rule
     When the summary is printed
     Then the Policy block shows the file path
-    And the default verdict
+    And what happens to a destination no rule names
     And a one-line rule summary: "3 allow, 1 deny, anything else asks"
     And the provenance line: "source: found in this directory"
 
@@ -30,7 +30,7 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Given no `lns-policy.yaml` exists in the working directory
     When the run starts
     Then the Policy block source line reads "auto-created (no policy in this directory)"
-    And the default verdict is "ask"
+    And a destination no rule names is "ask"ed
 
   Scenario: Explicit --policy is called out in the source line
     Given the command is `lns run --policy ~/team/strict.yaml ubuntu`

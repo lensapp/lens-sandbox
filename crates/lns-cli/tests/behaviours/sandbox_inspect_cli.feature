@@ -56,10 +56,10 @@ Feature: inspecting a typed artifact before running it
     And the output contains "credential: some-provider -> SOME_TOKEN (required)"
 
   Scenario: inspecting a sandbox flags a permissive shipped policy
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy defaults to allow
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy allows every destination
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
     Then the exit code is 0
-    And the output contains "defaultVerdict: allow"
+    And the output contains "wildcard allow"
 
   Scenario: A pulled sandbox's tools are disclosed before anything runs
     Given a published sandbox declaring tools

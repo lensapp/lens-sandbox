@@ -61,7 +61,7 @@ pub fn dispatch_run(
     Ok(path)
 }
 
-/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim — including its `defaultVerdict`.
+/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
     let ships_policy =
         def.spec.policy != lns_policy::NetworkPolicy::default() || !def.spec.connectors.is_empty();
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"defaultVerdict":"deny"},"connectors":["some-provider"]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"egress":{"http":[{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"]}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
@@ -240,7 +240,10 @@ mod tests {
         let policy = resolved
             .policy
             .expect("a flat sandbox carries its inline policy");
-        assert_eq!(policy.network.default_verdict, lns_policy::Verdict::Deny);
+        assert_eq!(
+            policy.network.egress.http[0].match_pattern, "*",
+            "the baseline's lockdown is a catch-all deny it carries in the table"
+        );
         assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
     }
 
@@ -253,7 +256,7 @@ mod tests {
         assert_eq!(
             resolved_from_sandbox(&def).policy,
             None,
-            "a plain definition must leave the directory overlay governing verbatim, defaultVerdict included"
+            "a plain definition must leave the directory overlay governing verbatim"
         );
     }
 

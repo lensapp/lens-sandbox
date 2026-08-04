@@ -595,11 +595,7 @@ mod tests {
             EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
         ];
         let policy_path = dir.path().join("lns-policy.yaml");
-        std::fs::write(
-            &policy_path,
-            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
-        )
-        .expect("policy");
+        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
         lns_policy::connectors::Catalog {
             connectors: vec![lns_policy::connectors::Connector {
                 id: "some-oauth".into(),
@@ -732,11 +728,7 @@ mod tests {
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
         let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(
-            &policy_path,
-            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n",
-        )
-        .expect("policy");
+        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
 
         let result = SupervisorSession::start_if_policy(
             "deadbeef00000000000000000000aa99".to_string(),
@@ -767,11 +759,7 @@ mod tests {
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
         let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(
-            &policy_path,
-            "network:\n  egress:\n    http: []\n  defaultVerdict: ask\n  defaultTransport: direct\n",
-        )
-        .expect("policy");
+        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
         let mut sandbox_policy = lns_policy::Policy::default();
         sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 

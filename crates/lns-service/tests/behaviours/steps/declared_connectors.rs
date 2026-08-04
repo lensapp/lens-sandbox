@@ -198,7 +198,7 @@ fn published_declares_one(w: &mut BehaviourWorld, id: String) {
 fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, host: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"defaultVerdict":"ask","egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}}}"#
     ));
 }
 
@@ -453,7 +453,7 @@ fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
 #[given("the directory's lns-policy.yaml denies all by default")]
 fn overlay_denies_by_default(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.overlay.network.default_verdict = Verdict::Deny;
+    rig.overlay.add_rule(lns_policy::RouteRule::deny_host("*"));
 }
 
 #[when(regex = r#"^the developer approves a new destination "([^"]+)" with "always allow"$"#)]
@@ -497,7 +497,8 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
         .iter()
         .find(|r| r.match_pattern == host)
         .map(|r| r.verdict)
-        .unwrap_or(policy.network.default_verdict);
+        // Nothing names the host: the catch-all the closed overlay carries is what decides it.
+        .unwrap_or(Verdict::Deny);
     if verdict == Verdict::Deny {
         Ok(())
     } else {

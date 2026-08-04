@@ -179,10 +179,10 @@ fn canned_inspect_with_policy(w: &mut BehaviourWorld, _run_id: u32, policy_path:
     ));
 }
 
-#[given(regex = r#"^the policy file parses with default verdict "([^"]+)"$"#)]
-fn canned_policy_doc(w: &mut BehaviourWorld, verdict: String) {
+#[given("the policy file parses with one allow rule")]
+fn canned_policy_doc(w: &mut BehaviourWorld) {
     w.sandbox.policy = Some(serde_json::json!({
-        "network": { "defaultVerdict": verdict }
+        "network": { "egress": { "http": [{ "match": "api.example.test", "verdict": "allow" }] } }
     }));
 }
 

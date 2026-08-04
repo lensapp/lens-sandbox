@@ -9,7 +9,9 @@ use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::Instrument;
 
-use crate::approval_flow::protocol::{Credential, GuestFrame, HostFrame, PolicyMessage};
+use crate::approval_flow::protocol::{
+    Credential, GuestFrame, HostFrame, PolicyMessage, WireNetwork,
+};
 use crate::approval_flow::session::ApprovalSession;
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
 use crate::credential_flow::session::CredentialSession;
@@ -125,7 +127,7 @@ pub fn spawn(
 /// `credentials` must be the registry-expanded set, or the supervisor's `on_policy` never seeds the workload env and the credential flow is silently dead.
 pub(super) fn initial_policy_frame(policy: &Policy, credentials: Vec<Credential>) -> HostFrame {
     HostFrame::Policy(PolicyMessage {
-        network: Some(policy.network.clone()),
+        network: Some(WireNetwork::seeded(policy.network.clone())),
         credentials: Some(credentials),
     })
 }

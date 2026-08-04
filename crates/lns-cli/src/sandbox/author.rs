@@ -20,7 +20,6 @@ spec:
     cpu: 1
     memory: 512Mi
   policy:
-    defaultVerdict: ask
     egress:
       http: []
       tcp: []
@@ -194,7 +193,6 @@ pub fn inspect_local<F: Fs, W: Write>(
 }
 
 fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut W) -> Result<()> {
-    let verdict = serde_json::to_string(&def.spec.policy.default_verdict).unwrap_or_default();
     writeln!(out, "Sandbox: {}", def.metadata.name)?;
     writeln!(out, "  image:        {}", def.spec.image)?;
     if let Some(command) = &def.spec.command {
@@ -231,8 +229,7 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     }
     writeln!(
         out,
-        "  policy:       defaultVerdict={} ({} route(s){})",
-        verdict.trim_matches('"'),
+        "  policy:       {} route(s){}",
         def.spec.policy.egress.http.len(),
         raw_rule_note(def.spec.policy.egress.tcp.len())
     )?;
@@ -433,7 +430,7 @@ mod tests {
             "got: {text}"
         );
         assert!(
-            text.contains("policy:") && text.contains("defaultVerdict=ask"),
+            text.contains("policy:") && text.contains("route(s)"),
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
@@ -441,13 +438,13 @@ mod tests {
 
     #[test]
     fn inspect_local_counts_raw_rules_apart_from_routes() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  policy:\n    defaultVerdict: ask\n    egress:\n      http:\n        - match: api.example.test\n          verdict: allow\n      tcp:\n        - match: db.internal:5432\n          verdict: allow\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  policy:\n    egress:\n      http:\n        - match: api.example.test\n          verdict: allow\n      tcp:\n        - match: db.internal:5432\n          verdict: allow\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains("(1 route(s), 1 raw TCP rule(s))"),
+            text.contains("1 route(s), 1 raw TCP rule(s)"),
             "a raw splice is not one more inspected route; folding the counts would hide it: {text}"
         );
     }
