@@ -39,6 +39,27 @@ fn declared_view_mounts(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<Sandbo
         .collect()
 }
 
+fn declared_view_sidecars(
+    sidecars: &[lns_artifact::sandbox::Sidecar],
+) -> Vec<lns_ipc::SandboxSidecar> {
+    sidecars
+        .iter()
+        .map(|sidecar| lns_ipc::SandboxSidecar {
+            name: sidecar.name.clone(),
+            image: sidecar.image.clone(),
+            egress: match sidecar.egress {
+                lns_artifact::sandbox::SidecarEgress::None => lns_ipc::SandboxSidecarEgress::None,
+                lns_artifact::sandbox::SidecarEgress::Proxy => lns_ipc::SandboxSidecarEgress::Proxy,
+            },
+            sockets: sidecar
+                .expose
+                .iter()
+                .map(|service| service.socket.clone())
+                .collect(),
+        })
+        .collect()
+}
+
 fn declared_view_filesets(
     spec: &lns_artifact::sandbox::SandboxSpec,
 ) -> Vec<lns_ipc::SandboxFileset> {
@@ -140,6 +161,7 @@ pub(crate) fn project_inspection(
                     connectors: def.spec.connectors.clone(),
                     credentials: def.spec.credentials.clone(),
                     tools: def.spec.tools.clone(),
+                    sidecars: declared_view_sidecars(&resolved.sidecars),
                     policy_flags: resolved
                         .policy
                         .as_ref()
@@ -285,6 +307,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus,
             mem_mib,
+            sidecars: Vec::new(),
         }))
     }
 
@@ -308,6 +331,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            sidecars: Vec::new(),
         }))
     }
 
@@ -331,6 +355,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            sidecars: Vec::new(),
         }))
     }
 
@@ -645,6 +670,7 @@ mod tests {
                 env: vec![],
                 credentials: vec![],
                 tools: vec![],
+                sidecars: Vec::new(),
                 policy_flags: vec![
                     "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into()
                 ],
@@ -689,6 +715,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                sidecars: Vec::new(),
             }))
         );
     }
@@ -720,6 +747,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                sidecars: Vec::new(),
             }))
         );
     }
@@ -751,6 +779,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                sidecars: Vec::new(),
             }))
         );
     }
@@ -778,6 +807,51 @@ mod tests {
         assert!(
             format!("{err:#}").contains("declared host port"),
             "got: {err:#}"
+        );
+    }
+    #[test]
+    fn a_sandbox_shipping_sidecars_discloses_each_one_and_the_egress_it_asked_for() {
+        // A sidecar runs as root in its own guest, so the consumer must see it before the run, not after.
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","sidecars":[{"name":"some-sidecar","image":"registry.example.test/aux:1","egress":"proxy","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]},{"name":"other-sidecar","image":"registry.example.test/other:1"}]}}"#;
+
+        let inspection = project_sandbox(config).unwrap();
+
+        assert_eq!(
+            inspection,
+            ArtifactInspection::Sandbox(Box::new(SandboxView {
+                reference: "registry.example.test/team/sandbox:latest".into(),
+                digest: digest(),
+                image: "registry.example.test/runtime:1".into(),
+                workdir: None,
+                user: None,
+                mounts: Vec::new(),
+                ports: Vec::new(),
+                filesets: Vec::new(),
+                connectors: Vec::new(),
+                env: Vec::new(),
+                credentials: Vec::new(),
+                tools: Vec::new(),
+                sidecars: vec![
+                    lns_ipc::SandboxSidecar {
+                        name: "some-sidecar".into(),
+                        image: "registry.example.test/aux:1".into(),
+                        egress: lns_ipc::SandboxSidecarEgress::Proxy,
+                        sockets: vec!["/run/aux.sock".into()],
+                    },
+                    lns_ipc::SandboxSidecar {
+                        name: "other-sidecar".into(),
+                        image: "registry.example.test/other:1".into(),
+                        egress: lns_ipc::SandboxSidecarEgress::None,
+                        sockets: Vec::new(),
+                    },
+                ],
+                policy_flags: Vec::new(),
+                cpus: None,
+                mem_mib: None,
+                mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
+            }))
         );
     }
 }

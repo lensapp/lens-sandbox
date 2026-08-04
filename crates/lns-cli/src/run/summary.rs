@@ -682,6 +682,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            sidecars: Vec::new(),
         };
 
         assert_eq!(

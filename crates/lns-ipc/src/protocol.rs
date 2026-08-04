@@ -392,6 +392,27 @@ pub struct SandboxView {
     pub cpus: Option<u8>,
     #[serde(default)]
     pub mem_mib: Option<usize>,
+    #[serde(default)]
+    pub sidecars: Vec<SandboxSidecar>,
+}
+
+/// A sidecar the artifact ships, disclosed before the run because it is a second guest running as root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxSidecar {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub egress: SandboxSidecarEgress,
+    #[serde(default)]
+    pub sockets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxSidecarEgress {
+    #[default]
+    None,
+    Proxy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1552,6 +1573,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: Some(3),
             mem_mib: Some(6144),
+            sidecars: Vec::new(),
         };
         let response = Response::ImageInspected {
             inspection: ArtifactInspection::Sandbox(Box::new(view)),

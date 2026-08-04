@@ -2,7 +2,7 @@ use crate::world::BehaviourWorld;
 use cucumber::given;
 use lns_ipc::{
     ArtifactInspection, ImageView, Response, SandboxMount, SandboxMountKind, SandboxPort,
-    SandboxView,
+    SandboxSidecar, SandboxSidecarEgress, SandboxView,
 };
 
 fn full_digest() -> String {
@@ -67,6 +67,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -103,6 +104,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -163,6 +165,7 @@ fn inspects_sandbox_with_a_pinned_flag_mixin(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -194,6 +197,7 @@ fn inspects_sandbox_resolved_from_a_mixin(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -232,6 +236,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -257,6 +262,7 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -297,6 +303,7 @@ fn inspects_sandbox_credential(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -321,6 +328,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         env: Vec::new(),
         credentials: Vec::new(),
         tools: Vec::new(),
+        sidecars: Vec::new(),
         policy_flags: vec![
             "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into(),
         ],
@@ -351,6 +359,7 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -361,4 +370,43 @@ fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
     world.sandbox.inspect_image_response = Some(Response::Error {
         message: format!("inspecting the sandbox needs a login for {host}: run `lns login {host}`"),
     });
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox shipping sidecars$"#)]
+fn inspects_sandbox_sidecars(world: &mut BehaviourWorld, reference: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        user: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        connectors: Vec::new(),
+        env: Vec::new(),
+        credentials: Vec::new(),
+        tools: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+        sidecars: vec![
+            SandboxSidecar {
+                name: "some-sidecar".into(),
+                image: "registry.example.test/aux:1".into(),
+                egress: SandboxSidecarEgress::Proxy,
+                sockets: vec!["/run/aux.sock".into()],
+            },
+            SandboxSidecar {
+                name: "other-sidecar".into(),
+                image: "registry.example.test/other:1".into(),
+                egress: SandboxSidecarEgress::None,
+                sockets: Vec::new(),
+            },
+        ],
+        mixins: Vec::new(),
+        pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
+    }));
+    cached_artifact(world, &reference, inspection);
 }

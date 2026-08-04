@@ -31,6 +31,7 @@ pub struct ResolvedSandbox {
     pub host_filesets: Vec<HostFileset>,
     pub inline_filesets: Vec<InlineFileset>,
     pub filesets: Vec<ResolvedFileset>,
+    pub sidecars: Vec<lns_artifact::sandbox::Sidecar>,
     pub command: Option<String>,
     pub user: Option<String>,
     pub env: BTreeMap<String, String>,

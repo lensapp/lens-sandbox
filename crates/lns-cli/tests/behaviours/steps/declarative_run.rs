@@ -212,6 +212,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         policy_flags: Vec::new(),
         cpus: declared.cpus,
         mem_mib: declared.mem_mib,
+        sidecars: Vec::new(),
     }
 }
 

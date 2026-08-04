@@ -982,6 +982,7 @@ fn render_cached_inspect<W: std::io::Write>(
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
+            render_sidecars(out, &view.sidecars)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
@@ -1078,6 +1079,28 @@ pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String
 fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
     for id in connectors {
         writeln!(out, "connector: {id}")?;
+    }
+    Ok(())
+}
+
+fn render_sidecars<W: std::io::Write>(
+    out: &mut W,
+    sidecars: &[lns_ipc::SandboxSidecar],
+) -> Result<()> {
+    for sidecar in sidecars {
+        let egress = match sidecar.egress {
+            lns_ipc::SandboxSidecarEgress::None => "none",
+            lns_ipc::SandboxSidecarEgress::Proxy => "proxy",
+        };
+        let sockets = match sidecar.sockets.is_empty() {
+            true => String::new(),
+            false => format!(", sockets: {}", sidecar.sockets.join(" ")),
+        };
+        writeln!(
+            out,
+            "sidecar: {} {} (egress: {egress}{sockets})",
+            sidecar.name, sidecar.image
+        )?;
     }
     Ok(())
 }
@@ -1350,6 +1373,7 @@ mod tests {
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
+                sidecars: Vec::new(),
             })),
         }
     }
@@ -2136,6 +2160,7 @@ mod tests {
                     policy_flags: Vec::new(),
                     cpus: None,
                     mem_mib: None,
+                    sidecars: Vec::new(),
                 })),
             },
         );

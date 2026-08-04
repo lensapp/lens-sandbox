@@ -95,3 +95,10 @@ Feature: inspecting a typed artifact before running it
     When the user runs "lns inspect some-registry.example/some-sandbox:research"
     Then the exit code is 1
     And the output contains "other-registry.example.test"
+
+  Scenario: inspecting a sandbox discloses each sidecar, its egress, and the socket it publishes
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox shipping sidecars
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "sidecar: some-sidecar registry.example.test/aux:1 (egress: proxy, sockets: /run/aux.sock)"
+    And the output contains "sidecar: other-sidecar registry.example.test/other:1 (egress: none)"

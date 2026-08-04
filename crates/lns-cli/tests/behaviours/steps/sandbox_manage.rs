@@ -52,6 +52,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            sidecars: Vec::new(),
         })),
     });
 }
