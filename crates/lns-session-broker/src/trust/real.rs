@@ -28,7 +28,7 @@ impl TrustFs for RealTrustFs {
 }
 
 #[cfg(target_os = "linux")]
-pub fn seed_trust_store() -> Result<(), String> {
+pub fn seed_trust_store() -> Result<super::Seeding, String> {
     super::seed_trust_store_with(&RealTrustFs)
 }
 
