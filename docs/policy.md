@@ -348,8 +348,12 @@ Closing `egress.http` closes raw traffic too, so `egress.tcp` needs no
 counterpart: a raw destination no `tcp` rule names falls through to the catch-all,
 and a connection Lens Sandbox cannot read is refused rather than raising a card.
 
-Two things worth knowing:
+Three things worth knowing:
 
+- **A second catch-all replaces the first.** `lns policy allow '*'` reopens a closed
+  directory by replacing the catch-all deny, and `lns policy deny '*'` closes an open
+  one the same way. Two catch-alls cannot both be in force, so the file is never left
+  carrying one the gate never reaches.
 - **A near-catch-all is not a catch-all.** `deny 0.0.0.0/0` or `deny '*.com'` are
   ordinary rules covering a lot; only an unscoped `match: "*"` closes a directory.
   A `"*"` deny narrowed by `binaries` or a request filter decides only what it
