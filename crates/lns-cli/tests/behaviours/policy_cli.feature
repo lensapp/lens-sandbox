@@ -152,6 +152,35 @@ Feature: shaping network rules from the CLI
     Then the output says the broader deny already blocks it
     And "lns-policy.yaml" still holds 1 rule
 
+  # Two catch-alls cannot both be in force: the second decides everything the first
+  # would have, so the file would carry a line the gate never reaches.
+  Scenario: Opening a closed policy replaces its catch-all rather than stranding it
+    Given "lns-policy.yaml" has a deny rule for "*"
+    When the developer adds an allow rule for "*" without passing --policy
+    Then "lns-policy.yaml" holds only the allow rule for "*"
+    And the output says the catch-all it replaced
+
+  Scenario: Closing an open policy replaces its catch-all rather than stranding it
+    Given "lns-policy.yaml" has an allow rule for "*"
+    When the developer denies "*"
+    Then "lns-policy.yaml" holds only the deny rule for "*"
+    And the output says the catch-all it replaced
+
+  # A deny blocks the request before there is anything to intercept, so terminating
+  # TLS on one is a dead flag — not a treatment the rule replacing or fronting it
+  # takes on.
+  Scenario: Opening a closed policy does not take up the catch-all deny's TLS termination
+    Given "lns-policy.yaml" has a TLS-terminating deny rule for "*"
+    When the developer adds an allow rule for "*" without passing --policy
+    Then "lns-policy.yaml" does not terminate TLS on the allow rule for "*"
+    And the output does not claim the rule terminates TLS
+
+  Scenario: An allow placed in front of a catch-all deny does not take up its TLS termination
+    Given "lns-policy.yaml" has a TLS-terminating deny rule for "*"
+    When the developer adds an allow rule for "api.example.test" without passing --policy
+    Then "lns-policy.yaml" does not terminate TLS on the allow rule for "api.example.test"
+    And the output does not claim the rule terminates TLS
+
   # A deny the author aimed at a destination is a decision, so an allow behind it is
   # still refused rather than quietly reordered.
   Scenario: Allowing a destination a narrower deny names is still refused

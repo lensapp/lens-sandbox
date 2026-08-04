@@ -189,7 +189,7 @@ struct Vocabulary {
     matched: &'static str,
 }
 
-/// A rule table the guest gate scans first-match-wins, and the vocabulary the CLI describes it in. Placement is identical across the tables, so it is written once here and the differences are these methods.
+/// A rule table the guest gate scans first-match-wins, and the vocabulary the CLI describes it in.
 trait Placeable: Clone + PartialEq {
     const WORDS: Vocabulary;
 
@@ -201,23 +201,22 @@ trait Placeable: Clone + PartialEq {
     fn table(policy: &mut Policy) -> &mut Vec<Self>;
     fn first_shadowing(policy: &Policy, rule: &Self) -> Option<(usize, Self)>;
 
-    /// Whether this rule is the file's backstop rather than a decision about any one
-    /// destination. A raw rule must name a port, so it can never be one.
+    /// Whether this rule is the file's backstop; a raw rule must name a port, so it can never be one.
     fn is_catch_all(&self) -> bool {
         false
     }
 
-    /// Takes on the treatment the fronted rule carries and returns the note saying so, since fronting a rule is not a request to stop applying it. A raw rule carries no treatment to take on.
+    /// Takes on the treatment the fronted rule carries and returns the note saying so, since fronting a rule is not a request to stop applying it.
     fn inherit_from(&mut self, _shadowing: &Self) -> Option<&'static str> {
         None
     }
 
-    /// Refuses a fronting the fronted rule's own shape makes a widening. Binary scope is checked for every table by [`reopens_a_scoped_rule`]; only an `egress.http` rule can additionally restrict which requests it permits.
+    /// Refuses a fronting the fronted rule's own shape makes a widening; binary scope is checked for every table by [`reopens_a_scoped_rule`].
     fn refuse_fronting(&self, _shadowing: &Self) -> Result<()> {
         Ok(())
     }
 
-    /// What writing this rule takes over from the other table. Read before placement, so the rules it names are the ones the file held.
+    /// What writing this rule takes over from the other table, read before placement.
     fn displaced(_policy: &Policy, _rule: &Self) -> Displaced {
         Displaced::none()
     }
@@ -265,9 +264,10 @@ impl Placeable for RouteRule {
             .map(|(index, shadowing)| (index, shadowing.clone()))
     }
 
-    /// The rule going in front inherits the fronted rule's TLS termination: narrowing who may reach a destination is not a request to stop intercepting it, and a deny blocks the request before there is anything to intercept.
+    /// The rule going in front inherits TLS termination the fronted rule was actually performing, since narrowing who may reach a destination is not a request to stop intercepting it; a deny blocks the request before there is anything to intercept, on either side.
     fn inherit_from(&mut self, shadowing: &Self) -> Option<&'static str> {
-        if !shadowing.tls_terminate || self.tls_terminate || self.verdict == Verdict::Deny {
+        let intercepts = shadowing.tls_terminate && shadowing.verdict != Verdict::Deny;
+        if !intercepts || self.tls_terminate || self.verdict == Verdict::Deny {
             return None;
         }
         self.tls_terminate = true;
@@ -340,7 +340,7 @@ impl Placeable for TcpEgressRule {
     }
 }
 
-/// The `egress.http` rules a rule takes its destination over from: the raw table is the pre-filter, so on that port those rules stop applying and the traffic is spliced unread. Empty for an `egress.http` rule, which pre-empts nothing in the raw table.
+/// The `egress.http` rules a raw rule takes its destination over from, empty for an `egress.http` rule.
 struct Displaced {
     lifted_deny: Option<String>,
     patterns: Vec<String>,
@@ -457,10 +457,18 @@ fn place<R: Placeable>(policy: &mut Policy, mut rule: R) -> Result<Placement> {
         let described = rule.description().map(str::to_string);
         return Ok(renote(&mut R::table(policy)[index], described));
     }
-    // A catch-all deny is what closes a directory now that no default can, so an allow
-    // has to be able to go in front of it — refusing would leave a closed policy
-    // editable by hand alone, since it raises no approval cards either. A deny aimed at
-    // a destination is still a decision, and an allow behind that stays refused.
+    // A second catch-all decides everything the first one would, so the file keeps only one — including any the fronted rule was itself in front of.
+    if rule.is_catch_all() && shadowing.is_catch_all() && rule.verdict() != shadowing.verdict() {
+        let note = format!(
+            "Replaced the catch-all {} rule, which decided the same destinations.",
+            verdict_word(shadowing.verdict())
+        );
+        let rules = R::table(policy);
+        rules.retain(|held| !held.is_catch_all());
+        rules.insert(index, rule);
+        return Ok(Placement::Inserted(note));
+    }
+    // An allow must be able to front the catch-all deny that closes a directory, or a closed policy is editable by hand alone; a deny aimed at a destination is still a decision, so an allow behind that stays refused.
     if shadowing.verdict() == Verdict::Deny
         && (!shadowing.is_catch_all() || rule.verdict() == Verdict::Deny)
     {
@@ -710,6 +718,119 @@ mod tests {
                 "The HTTP rules for \"db.internal\", \"*.internal\" no longer apply to \"db.internal:5432\", which is now spliced raw."
             ),
             "a raw rule can displace several http rules at once, and the line has to read as one sentence either way"
+        );
+    }
+
+    fn seeded(dir: &Path, rules: Vec<RouteRule>) -> PathBuf {
+        let path = dir.join("lns-policy.yaml");
+        let mut policy = Policy::default();
+        policy.network.egress.http = rules;
+        policy.save_atomic(&path).unwrap();
+        path
+    }
+
+    fn tls_deny(pattern: &str) -> RouteRule {
+        RouteRule {
+            tls_terminate: true,
+            ..RouteRule::deny_host(pattern)
+        }
+    }
+
+    fn held(path: &Path) -> Vec<RouteRule> {
+        Policy::load_or_default(path).unwrap().network.egress.http
+    }
+
+    #[test]
+    fn a_catch_all_deny_the_file_already_carries_keeps_its_note() {
+        // A `tlsTerminate` a deny never acted on must not read as a different rule:
+        // re-running the deny would rewrite it and forget the note it carries.
+        let dir = TempDir::new().unwrap();
+        let path = seeded(
+            dir.path(),
+            vec![RouteRule {
+                description: Some("closed for audit".into()),
+                ..tls_deny("*")
+            }],
+        );
+
+        let mut out = Vec::new();
+        add_rule(
+            &rule_args("*", None),
+            Verdict::Deny,
+            &[],
+            dir.path(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(
+            held(&path)[0].description.as_deref(),
+            Some("closed for audit")
+        );
+        assert!(
+            String::from_utf8(out).unwrap().contains("already blocks"),
+            "the file already decides this, so nothing is rewritten"
+        );
+    }
+
+    #[test]
+    fn replacing_a_catch_all_leaves_no_other_catch_all_behind() {
+        // The one it replaced is not the only one it has to take with it — a
+        // hand-edited file can hold a second the gate never reaches either.
+        let dir = TempDir::new().unwrap();
+        let path = seeded(dir.path(), vec![RouteRule::allow_host("*"), tls_deny("*")]);
+
+        let mut out = Vec::new();
+        add_rule(
+            &rule_args("*", None),
+            Verdict::Deny,
+            &[],
+            dir.path(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(
+            held(&path)
+                .iter()
+                .map(|r| (r.match_pattern.clone(), r.verdict))
+                .collect::<Vec<_>>(),
+            vec![("*".to_string(), Verdict::Deny)]
+        );
+    }
+
+    #[test]
+    fn replacing_a_catch_all_takes_the_copy_stranded_behind_it_along() {
+        // A hand-edited file can hold the catch-all the gate never reaches. Replacing
+        // the one in front of it must not leave the file with two.
+        let dir = TempDir::new().unwrap();
+        let mut seeded = Policy::default();
+        seeded.add_rule(RouteRule::deny_host("*"));
+        seeded.add_rule(RouteRule::allow_host("*"));
+        seeded
+            .save_atomic(&dir.path().join("lns-policy.yaml"))
+            .unwrap();
+
+        let mut out = Vec::new();
+        add_rule(
+            &rule_args("*", None),
+            Verdict::Allow,
+            &[],
+            dir.path(),
+            &mut out,
+        )
+        .unwrap();
+
+        let held = Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
+            .unwrap()
+            .network
+            .egress
+            .http;
+        assert_eq!(
+            held.iter()
+                .map(|r| (r.match_pattern.as_str(), r.verdict))
+                .collect::<Vec<_>>(),
+            vec![("*", Verdict::Allow)]
         );
     }
 

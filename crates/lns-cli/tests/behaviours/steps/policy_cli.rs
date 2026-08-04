@@ -323,6 +323,17 @@ fn policy_has_tls_terminating_allow(world: &mut BehaviourWorld, file: String, pa
     policy.save_atomic(&dir.join(file)).expect("seed policy");
 }
 
+#[given(regex = r#"^"([^"]+)" has a TLS-terminating deny rule for "([^"]+)"$"#)]
+fn policy_has_tls_terminating_deny(world: &mut BehaviourWorld, file: String, pattern: String) {
+    let dir = cwd(world);
+    let mut policy = Policy::default();
+    policy.add_rule(RouteRule {
+        tls_terminate: true,
+        ..RouteRule::deny_host(pattern)
+    });
+    policy.save_atomic(&dir.join(file)).expect("seed policy");
+}
+
 #[given(
     regex = r#"^"([^"]+)" has a TLS-terminating allow rule for "([^"]+)" described as "([^"]+)"$"#
 )]
@@ -975,6 +986,32 @@ fn file_has_one_raw_rule_of_verdict(
     ))
 }
 
+#[then(regex = r#"^"([^"]+)" holds only the (allow|deny) rule for "([^"]+)"$"#)]
+fn file_holds_only(
+    world: &mut BehaviourWorld,
+    file: String,
+    verdict: String,
+    pattern: String,
+) -> Result<(), String> {
+    let expected = verdict_named(&verdict);
+    let http = load(world, &file).network.egress.http;
+    let held: Vec<(&str, Verdict)> = http
+        .iter()
+        .map(|r| (r.match_pattern.as_str(), r.verdict))
+        .collect();
+    if held == [(pattern.as_str(), expected)] {
+        return Ok(());
+    }
+    Err(format!(
+        "expected only a {verdict} rule for {pattern} in {file}, found {held:?}"
+    ))
+}
+
+#[then("the output says the catch-all it replaced")]
+fn output_reports_the_replaced_catch_all(world: &mut BehaviourWorld) -> Result<(), String> {
+    output_mentions(world, "Replaced the catch-all")
+}
+
 #[then(regex = r#"^"([^"]+)" describes the raw allow rule for "([^"]+)" as "([^"]+)"$"#)]
 fn file_describes_raw_allow(
     world: &mut BehaviourWorld,
@@ -1243,6 +1280,37 @@ fn file_describes_rule(
             found.description
         ))
     }
+}
+
+#[then(regex = r#"^"([^"]+)" does not terminate TLS on the allow rule for "([^"]+)"$"#)]
+fn file_does_not_terminate_tls_on_the_allow(
+    world: &mut BehaviourWorld,
+    file: String,
+    pattern: String,
+) -> Result<(), String> {
+    let found = load(world, &file)
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|rule| rule.match_pattern == pattern && rule.verdict == Verdict::Allow)
+        .cloned()
+        .ok_or_else(|| format!("{file} has no allow rule for {pattern}"))?;
+    if found.tls_terminate {
+        return Err(format!(
+            "a deny never intercepted anything, so its termination is not a treatment to take on: {found:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[then(regex = r"^the output does not claim the rule terminates TLS$")]
+fn output_claims_no_inherited_tls(world: &mut BehaviourWorld) -> Result<(), String> {
+    let output = &world.result.as_ref().expect("a run").output;
+    if output.contains("terminates TLS") {
+        return Err(format!("the fronted rule terminated nothing: {output}"));
+    }
+    Ok(())
 }
 
 #[then(regex = r"^the output says the placed rule terminates TLS too$")]
