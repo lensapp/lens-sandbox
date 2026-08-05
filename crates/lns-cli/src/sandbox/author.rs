@@ -257,6 +257,22 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     for tool in &def.spec.tools {
         writeln!(out, "  tool: {tool}")?;
     }
+    for sidecar in &def.spec.sidecars {
+        let egress = match sidecar.egress {
+            lns_artifact::sandbox::SidecarEgress::None => "none",
+            lns_artifact::sandbox::SidecarEgress::Proxy => "proxy",
+        };
+        let sockets: Vec<String> = sidecar
+            .expose
+            .iter()
+            .map(|expose| expose.socket.clone())
+            .collect();
+        writeln!(
+            out,
+            "  {}",
+            super::sidecar_line(&sidecar.name, &sidecar.image, egress, &sockets)
+        )?;
+    }
     Ok(())
 }
 

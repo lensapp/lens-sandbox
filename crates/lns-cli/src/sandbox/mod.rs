@@ -1083,6 +1083,15 @@ fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> R
     Ok(())
 }
 
+/// One wording for both inspect paths, so a sandbox on disk and the same sandbox pushed disclose their sidecars identically.
+pub(crate) fn sidecar_line(name: &str, image: &str, egress: &str, sockets: &[String]) -> String {
+    let sockets = match sockets.is_empty() {
+        true => String::new(),
+        false => format!(", sockets: {}", sockets.join(" ")),
+    };
+    format!("sidecar: {name} {image} (egress: {egress}{sockets})")
+}
+
 fn render_sidecars<W: std::io::Write>(
     out: &mut W,
     sidecars: &[lns_ipc::SandboxSidecar],
@@ -1092,14 +1101,10 @@ fn render_sidecars<W: std::io::Write>(
             lns_ipc::SandboxSidecarEgress::None => "none",
             lns_ipc::SandboxSidecarEgress::Proxy => "proxy",
         };
-        let sockets = match sidecar.sockets.is_empty() {
-            true => String::new(),
-            false => format!(", sockets: {}", sidecar.sockets.join(" ")),
-        };
         writeln!(
             out,
-            "sidecar: {} {} (egress: {egress}{sockets})",
-            sidecar.name, sidecar.image
+            "{}",
+            sidecar_line(&sidecar.name, &sidecar.image, egress, &sidecar.sockets)
         )?;
     }
     Ok(())
