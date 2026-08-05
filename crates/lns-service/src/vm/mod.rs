@@ -11,7 +11,7 @@ mod transport;
 #[cfg(target_os = "macos")]
 mod vz;
 
-pub use transport::{GuestDialer, GuestTransport, VmStopGuard};
+pub use transport::{GuestDialer, GuestTransport, VmStopGuard, stop_when_reachable};
 #[cfg(target_os = "macos")]
 pub use vz::VsockConnector;
 

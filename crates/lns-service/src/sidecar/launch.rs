@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::supervise::Guest as _;
 use super::{SIDECAR_PROXY_PORT, Sidecar, bridge, ready};
 use crate::{
     composefs, content_store, guest_tools, image, ingest, log, oci_layer_cache, runtime_layer,
@@ -56,12 +57,10 @@ impl super::supervise::Guest for Running {
     }
 }
 
+/// The last-resort net for a `Running` that never reached `stop`: ask for the power-off, do not wait.
 impl Drop for Running {
     fn drop(&mut self) {
         self.connector.request_stop();
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -160,12 +159,35 @@ async fn launch(
     }
 
     let mut running = boot(spec, connector_rx, sidecar, leases).await?;
+    if let Err(e) = bring_up(
+        &mut running,
+        sidecar,
+        rootfs.config.as_ref(),
+        service_rx,
+        proxy_ca,
+    )
+    .await
+    {
+        running.stop().await;
+        return Err(e);
+    }
+    log::info!("Started", "sidecar {}", sidecar.id);
+    Ok(running)
+}
+
+/// Start the sidecar's own service and bridge each exposed port; a guest is already running, so every failure here is the caller's to power off.
+async fn bring_up(
+    running: &mut Running,
+    sidecar: &Sidecar,
+    config: Option<&oci_client::config::ConfigFile>,
+    service_rx: Vec<UnboundedReceiver<RawFd>>,
+    proxy_ca: Option<&str>,
+) -> Result<()> {
     running.session_input = Some(
-        open_primary_session(&running, sidecar, rootfs.config.as_ref(), proxy_ca)
+        open_primary_session(running, sidecar, config, proxy_ca)
             .await
             .with_context(|| format!("starting sidecar {}", sidecar.id))?,
     );
-
     for (expose, source_rx) in sidecar.expose.iter().zip(service_rx) {
         bridge::spawn(
             format!("{}/{}", sidecar.id, expose.guest_port),
@@ -177,8 +199,7 @@ async fn launch(
             .await
             .with_context(|| format!("sidecar {} service {}", sidecar.id, expose.guest_port))?;
     }
-    log::info!("Started", "sidecar {}", sidecar.id);
-    Ok(running)
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -221,19 +242,27 @@ async fn descriptor(
 
 async fn boot(
     spec: vm::VmSpec,
-    connector_rx: tokio::sync::oneshot::Receiver<Arc<dyn vm::GuestTransport>>,
+    mut connector_rx: tokio::sync::oneshot::Receiver<Arc<dyn vm::GuestTransport>>,
     sidecar: &Sidecar,
     leases: Vec<volume_store::VolumeLease>,
 ) -> Result<Running> {
     let mut task = tokio::spawn(vm::boot(spec, None));
-    let mut connector_rx = connector_rx;
-    let connector = tokio::select! {
-        biased;
-        r = &mut task => anyhow::bail!("sidecar {} ended before it was reachable: {r:?}", sidecar.id),
-        c = &mut connector_rx => c.with_context(|| format!("sidecar {} never became reachable", sidecar.id))?,
-        _ = tokio::time::sleep(BOOT_BUDGET) => {
-            task.abort();
-            anyhow::bail!("sidecar {} was not reachable within {BOOT_BUDGET:?}", sidecar.id);
+    let reachable = tokio::time::timeout(BOOT_BUDGET, async {
+        tokio::select! {
+            biased;
+            r = &mut task => Err(anyhow::anyhow!("sidecar {} ended before it was reachable: {r:?}", sidecar.id)),
+            c = &mut connector_rx => c.with_context(|| format!("sidecar {} never became reachable", sidecar.id)),
+        }
+    })
+    .await;
+    let connector = match reachable {
+        Ok(c) => c?,
+        Err(_) => {
+            vm::stop_when_reachable(connector_rx);
+            anyhow::bail!(
+                "sidecar {} was not reachable within {BOOT_BUDGET:?}",
+                sidecar.id
+            );
         }
     };
     Ok(Running {
