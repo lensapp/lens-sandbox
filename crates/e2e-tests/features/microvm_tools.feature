@@ -31,6 +31,12 @@ Feature: declared developer tools reach a real guest
     Then it prints a node 22 version
     And nothing is provisioned again
 
+  Scenario: A tool whose upstream archive nests its bin dir is still on the PATH
+    Given the Lens Sandbox service is running
+    And a lns.yaml declaring tools ["gh@2"] over the pinned base image
+    When the sandbox runs "gh --version"
+    Then it prints a gh version
+
   Scenario: A declared tool wins over the base image's copy
     Given the Lens Sandbox service is running
     And a base image that ships node 20 and a lns.yaml declaring tools ["node@22"]

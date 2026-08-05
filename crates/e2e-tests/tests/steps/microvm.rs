@@ -894,6 +894,22 @@ fn prints_a_node_22_version(world: &mut E2eWorld) {
     );
 }
 
+#[then("it prints a gh version")]
+fn prints_a_gh_version(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "run failed:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    assert!(
+        result.stdout.contains("gh version 2."),
+        "expected a gh 2 version, got:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
+}
+
 #[then("it prints an npm version")]
 fn prints_an_npm_version(world: &mut E2eWorld) {
     let result = world.result.as_ref().expect("a run result");
