@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 
-use lns_service::tools::cache::{MANIFEST_SCHEMA_VERSION, ToolCache, ToolManifest};
+use lns_service::tools::cache::{MANIFEST_SCHEMA_VERSION, ToolCache, ToolEnvVar, ToolManifest};
 use lns_service::tools::record::{ResolvedRecord, ToolRecordStore};
 use lns_service::tools::{
     EnsuredTools, ProvisionError, ProvisionTarget, StagedTar, StagedTool, ToolProvisioner, ToolRef,
@@ -20,6 +20,8 @@ pub struct ToolsRig {
     pub cache: MemToolCache,
     pub provisioner: ScriptedProvisioner,
     pub audit: Option<(tempfile::TempDir, std::path::PathBuf)>,
+    /// What the definition sets itself, so a scenario can pin whose value wins for a var a tool also reports.
+    pub sandbox_env: Vec<String>,
 }
 
 impl ToolsRig {
@@ -83,6 +85,7 @@ impl ToolCache for MemToolCache {
         staged: &StagedTool,
     ) -> anyhow::Result<ToolManifest> {
         let manifest = ToolManifest {
+            env: staged.env.clone(),
             schema_version: MANIFEST_SCHEMA_VERSION,
             co_installed: staged.co_installed.clone(),
             tool: staged.name.clone(),
@@ -107,6 +110,8 @@ pub struct ScriptedProvisioner {
     pub upstream_patch: Mutex<String>,
     pub fail_next: Mutex<Option<String>>,
     pub calls: Mutex<Vec<Vec<ToolRef>>>,
+    /// What the engine reports every staged tool needs in the workload's env.
+    pub tool_env: Mutex<Vec<ToolEnvVar>>,
 }
 
 impl Default for ScriptedProvisioner {
@@ -115,6 +120,7 @@ impl Default for ScriptedProvisioner {
             upstream_patch: Mutex::new("11.0".into()),
             fail_next: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
+            tool_env: Mutex::new(Vec::new()),
         }
     }
 }
@@ -133,6 +139,7 @@ impl ToolProvisioner for ScriptedProvisioner {
         self.calls.lock().unwrap().push(requests.to_vec());
         let fail = self.fail_next.lock().unwrap().take();
         let patch = self.upstream_patch.lock().unwrap().clone();
+        let tool_env = self.tool_env.lock().unwrap().clone();
         let staged: Vec<StagedTool> = requests
             .iter()
             .map(|request| {
@@ -142,6 +149,7 @@ impl ToolProvisioner for ScriptedProvisioner {
                     format!("{}.{patch}", request.version)
                 };
                 StagedTool {
+                    env: tool_env.clone(),
                     name: request.name.clone(),
                     co_installed: Vec::new(),
                     resolved: resolved.parse().expect("a usable version"),

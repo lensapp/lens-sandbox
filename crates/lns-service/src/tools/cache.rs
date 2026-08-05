@@ -9,7 +9,7 @@ use crate::archive_limits::{ArchiveLimits, LimitedReader};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
-pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 4;
 
 /// A provisioned tool tree, ingested into the content store and described entry-by-entry so injection composes specs without re-reading any file body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub struct ToolManifest {
     pub co_installed: Vec<String>,
     pub entries: Vec<ManifestEntry>,
     pub bin_paths: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<ToolEnvVar>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,13 +50,19 @@ const NPM_LAUNCHER: &str = "bin/npm";
 const NPM_CLI: &str = "lib/node_modules/npm/bin/npm-cli.js";
 const STOCK_NPM_TARGET: &str = "../lib/node_modules/npm/bin/npm-cli.js";
 
-/// The engine replaces node's `bin/npm` symlink with a shim that reshims through `mise` under bash — neither of which a workload guest has — so the tree goes back to the launcher the upstream tarball ships.
+/// The engine replaces node's `bin/npm` symlink with a shim that reshims through `mise` under bash — neither of which a workload guest has — so the tree goes back to the launcher the upstream tarball ships. The tree root is the install prefix, so node's own layout sits at some depth below it and only the tail of the path is fixed.
 fn restore_stock_npm(entries: &mut [ManifestEntry]) {
-    if !entries.iter().any(|entry| entry.path == NPM_CLI) {
-        return;
-    }
+    let prefixes: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .path
+                .strip_suffix(NPM_CLI)
+                .map(|prefix| format!("{prefix}{NPM_LAUNCHER}"))
+        })
+        .collect();
     for entry in entries {
-        if entry.path == NPM_LAUNCHER && matches!(entry.kind, EntryKind::Regular { .. }) {
+        if prefixes.contains(&entry.path) && matches!(entry.kind, EntryKind::Regular { .. }) {
             entry.kind = EntryKind::Symlink {
                 target: STOCK_NPM_TARGET.to_string(),
             };
@@ -62,8 +70,26 @@ fn restore_stock_npm(entries: &mut [ManifestEntry]) {
     }
 }
 
+/// The one place a tool tree ever lives: the provisioner installs it here and the workload reads it here, so an install that bakes its own absolute paths stays valid across the two guests.
+pub const TOOLS_ROOT: &str = "/.lens/tools";
+
 pub fn guest_root(tool: &str, resolved: &lns_artifact::tools::SafeVersion) -> String {
-    format!("/.lens/tools/{tool}/{resolved}")
+    format!("{TOOLS_ROOT}/{tool}/{resolved}")
+}
+
+/// One env var a tool needs to find its own payload, as the engine reported it: a value inside the tree travels as a tree-relative path, anything else as itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolEnvVar {
+    pub name: String,
+    #[serde(flatten)]
+    pub value: ToolEnvValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ToolEnvValue {
+    Tree { path: String },
+    Literal { value: String },
 }
 
 impl ToolManifest {
@@ -85,6 +111,22 @@ impl ToolManifest {
                     mode: entry.mode,
                     source,
                 })
+            })
+            .collect()
+    }
+
+    /// The env the workload needs for this tool, with every tree-relative value resolved against the root the tree is injected at.
+    pub fn guest_env(&self) -> Vec<(String, String)> {
+        let root = guest_root(&self.tool, &self.resolved);
+        self.env
+            .iter()
+            .map(|var| {
+                let value = match &var.value {
+                    ToolEnvValue::Literal { value } => value.clone(),
+                    ToolEnvValue::Tree { path } if path == "." => root.clone(),
+                    ToolEnvValue::Tree { path } => format!("{root}/{path}"),
+                };
+                (var.name.clone(), value)
             })
             .collect()
     }
@@ -186,7 +228,7 @@ impl ToolCache for RealToolCache {
             return Ok(None);
         }
         restore_stock_npm(&mut manifest.entries);
-        if let Err(e) = validate_tree(&manifest.entries, &manifest.bin_paths) {
+        if let Err(e) = validate_tree(&manifest.entries, &manifest.bin_paths, &manifest.env) {
             crate::log::warn!("ignoring the cached tool tree at {}: {e:#}", dir.display());
             return Ok(None);
         }
@@ -201,15 +243,16 @@ impl ToolCache for RealToolCache {
     }
 
     fn ingest(&self, key: &ToolCacheKey, staged: &StagedTool) -> Result<ToolManifest> {
+        let root = guest_root(&key.name, &key.resolved);
         let mut entries = match &staged.tar {
             StagedTar::File(path) => {
                 let file = open_staged_tar(path)?;
-                ingest_tar_entries(file, &self.store)?
+                ingest_tar_entries(file, &self.store, &root)?
             }
-            StagedTar::Bytes(bytes) => ingest_tar_entries(&bytes[..], &self.store)?,
+            StagedTar::Bytes(bytes) => ingest_tar_entries(&bytes[..], &self.store, &root)?,
         };
         restore_stock_npm(&mut entries);
-        validate_tree(&entries, &staged.bin_paths)?;
+        validate_tree(&entries, &staged.bin_paths, &staged.env)?;
         let manifest = ToolManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             tool: key.name.clone(),
@@ -220,6 +263,7 @@ impl ToolCache for RealToolCache {
             co_installed: staged.co_installed.clone(),
             entries,
             bin_paths: staged.bin_paths.clone(),
+            env: staged.env.clone(),
         };
         let dir = self.key_dir(key);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -255,13 +299,36 @@ fn open_staged_tar(path: &Path) -> Result<std::fs::File> {
 }
 
 /// Expand a staged tool tar into content-store entries. Fail-closed like fileset ingestion — escaping paths and exotic entry types are refused — but tool trees legitimately carry symlinks (`bin/node -> ../lib/...`) and hardlinks (JDK layouts), so those are preserved as manifest entries.
-fn ingest_tar_entries<R: Read>(tar: R, store: &ContentStore) -> Result<Vec<ManifestEntry>> {
-    ingest_tar_entries_with_limits(tar, store, ArchiveLimits::PRODUCTION)
+fn ingest_tar_entries<R: Read>(
+    tar: R,
+    store: &ContentStore,
+    install_root: &str,
+) -> Result<Vec<ManifestEntry>> {
+    ingest_tar_entries_with_limits(tar, store, install_root, ArchiveLimits::PRODUCTION)
+}
+
+/// The provisioner installs a tree at the path the workload reads it from, so an install may link inside itself by absolute path (rustup does). Spell it relative instead: injection only ever creates in-tree links, and that is what keeps the escape guards sound.
+fn relative_in_tree_link(link_rel: &str, target: &Path, install_root: &str) -> Option<String> {
+    let below = target
+        .to_str()?
+        .strip_prefix(install_root)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))?
+        .trim_start_matches('/');
+    let climb = link_rel.split('/').count() - 1;
+    let mut spelled = "../".repeat(climb);
+    spelled.push_str(below);
+    let spelled = spelled.trim_end_matches('/');
+    Some(if spelled.is_empty() {
+        ".".to_string()
+    } else {
+        spelled.to_string()
+    })
 }
 
 fn ingest_tar_entries_with_limits<R: Read>(
     tar: R,
     store: &ContentStore,
+    install_root: &str,
     limits: ArchiveLimits,
 ) -> Result<Vec<ManifestEntry>> {
     let mut entries = Vec::new();
@@ -301,7 +368,11 @@ fn ingest_tar_entries_with_limits<R: Read>(
                 .link_name()
                 .context("reading symlink target")?
                 .with_context(|| format!("tool symlink {} has no target", path.display()))?;
-            if !target_stays_in_tree(&rel, &target) {
+            let spelled = match relative_in_tree_link(&rel, &target, install_root) {
+                Some(relative) => relative,
+                None => target.to_string_lossy().into_owned(),
+            };
+            if !target_stays_in_tree(&rel, Path::new(&spelled)) {
                 bail!(
                     "tool symlink {} -> {} escapes the tool tree",
                     path.display(),
@@ -311,9 +382,7 @@ fn ingest_tar_entries_with_limits<R: Read>(
             entries.push(ManifestEntry {
                 path: rel,
                 mode,
-                kind: EntryKind::Symlink {
-                    target: target.to_string_lossy().into_owned(),
-                },
+                kind: EntryKind::Symlink { target: spelled },
             });
             continue;
         }
@@ -363,10 +432,25 @@ fn ingest_tar_entries_with_limits<R: Read>(
 }
 
 /// Every guard the tar walk applies, restated over the finished tree so a manifest read back off disk gets them too — the provision path is not the only way these entries reach a guest, and the file on disk is exactly the kind of input the version and schema checks already refuse to trust.
-fn validate_tree(entries: &[ManifestEntry], bin_paths: &[String]) -> Result<()> {
+fn validate_tree(
+    entries: &[ManifestEntry],
+    bin_paths: &[String],
+    env: &[ToolEnvVar],
+) -> Result<()> {
     for bin_path in bin_paths {
         if !lns_artifact::tools::is_safe_bin_path(bin_path) {
             bail!("tool bin path {bin_path:?} escapes the tool tree");
+        }
+    }
+    // Every var here is put in the workload's environment and in every later `lns exec`, so a hand-edited manifest gets the same guards the driver's output got.
+    for var in env {
+        if !lns_artifact::tools::is_safe_env_name(&var.name) {
+            bail!("tool env var {:?} is not one a tool may set", var.name);
+        }
+        if let ToolEnvValue::Tree { path } = &var.value
+            && !lns_artifact::tools::is_safe_bin_path(path)
+        {
+            bail!("tool env var {} points outside the tool tree", var.name);
         }
     }
     for entry in entries {
@@ -491,6 +575,7 @@ mod tests {
             source_host: Some("upstream.example.test".into()),
             tar: StagedTar::Bytes(tar),
             bin_paths: vec!["bin".into()],
+            env: Vec::new(),
         }
     }
 
@@ -606,6 +691,7 @@ mod tests {
         let err = ingest_tar_entries_with_limits(
             &tool_tar()[..],
             &ContentStore::new(dir.path().join("content")),
+            "/.lens/tools/some-tool/1.2.3",
             ArchiveLimits {
                 bytes: u64::MAX,
                 entries: 2,
@@ -621,6 +707,7 @@ mod tests {
         let err = ingest_tar_entries_with_limits(
             &tool_tar()[..],
             &ContentStore::new(dir.path().join("content")),
+            "/.lens/tools/some-tool/1.2.3",
             ArchiveLimits {
                 bytes: 512,
                 entries: usize::MAX,
@@ -900,6 +987,7 @@ mod tests {
                     source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
                     bin_paths: vec!["bin".into()],
+                    env: Vec::new(),
                 },
             )
             .unwrap_err();
@@ -929,6 +1017,7 @@ mod tests {
                     source_host: Some("upstream.example.test".into()),
                     tar: StagedTar::File(staged_path),
                     bin_paths: vec!["bin".into()],
+                    env: Vec::new(),
                 },
             )
             .unwrap_err();
@@ -1230,6 +1319,174 @@ mod tests {
         assert_eq!(
             manifest.guest_bin_paths(),
             vec!["/.lens/tools/some-tool/1.2.3".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_tools_env_reaches_the_guest_resolved_against_the_root_the_tree_lands_at() {
+        // rustup's proxies are the tool's only binaries and they read RUSTUP_HOME; without it the workload has a rustc that cannot find a toolchain.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let mut with_env = staged(tool_tar());
+        with_env.env = vec![
+            ToolEnvVar {
+                name: "SOME_TOOL_HOME".into(),
+                value: ToolEnvValue::Tree {
+                    path: "home/.some-tool".into(),
+                },
+            },
+            ToolEnvVar {
+                name: "SOME_TOOL_ROOT".into(),
+                value: ToolEnvValue::Tree { path: ".".into() },
+            },
+            ToolEnvVar {
+                name: "SOME_TOOL_PIN".into(),
+                value: ToolEnvValue::Literal {
+                    value: "1.2.3".into(),
+                },
+            },
+        ];
+        let manifest = cache.ingest(&key(), &with_env).unwrap();
+        assert_eq!(
+            manifest.guest_env(),
+            vec![
+                (
+                    "SOME_TOOL_HOME".to_string(),
+                    "/.lens/tools/some-tool/1.2.3/home/.some-tool".to_string()
+                ),
+                (
+                    "SOME_TOOL_ROOT".to_string(),
+                    "/.lens/tools/some-tool/1.2.3".to_string()
+                ),
+                ("SOME_TOOL_PIN".to_string(), "1.2.3".to_string()),
+            ]
+        );
+        assert_eq!(cache.lookup(&key(), &[]).unwrap(), Some(manifest));
+    }
+
+    #[test]
+    fn a_cached_manifest_whose_env_escapes_the_tree_or_owns_the_workloads_vars_is_a_miss() {
+        // Every var here is put in the workload's environment and in every later `lns exec`, so a tampered file must not be readable.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        for env in [
+            serde_json::json!([{"name": "SOME_TOOL_HOME", "kind": "tree", "path": "../../../../etc"}]),
+            serde_json::json!([{"name": "PATH", "kind": "literal", "value": "/pwn"}]),
+            serde_json::json!([{"name": "HOME", "kind": "literal", "value": "/pwn"}]),
+            serde_json::json!([{"name": "LD_PRELOAD=x", "kind": "literal", "value": "/pwn"}]),
+        ] {
+            cache.ingest(&key(), &staged(tool_tar())).unwrap();
+            tamper_manifest(dir.path(), |raw| raw["env"] = env.clone());
+            assert_eq!(cache.lookup(&key(), &[]).unwrap(), None, "env {env}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_link_inside_the_installed_tree_is_kept_as_a_tree_relative_one() {
+        // The provisioner installs at the path the workload reads, so an install may link inside itself absolutely (rustup's install dir is one); injection only ever creates in-tree links.
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_path("data/installs/some-tool/1.2.3").unwrap();
+        link.set_link_name("/.lens/tools/some-tool/1.2.3/home/.cargo/bin")
+            .unwrap();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_cksum();
+        builder.append(&link, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap();
+        assert_eq!(
+            manifest.entries[0].kind,
+            EntryKind::Symlink {
+                target: "../../../home/.cargo/bin".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_absolute_link_to_the_tree_root_itself_becomes_the_current_dir() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_path("self").unwrap();
+        link.set_link_name("/.lens/tools/some-tool/1.2.3").unwrap();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_cksum();
+        builder.append(&link, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap();
+        assert_eq!(
+            manifest.entries[0].kind,
+            EntryKind::Symlink { target: ".".into() }
+        );
+    }
+
+    #[test]
+    fn an_absolute_link_to_another_tools_tree_is_still_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_path("bin/esc").unwrap();
+        link.set_link_name("/.lens/tools/some-tool/1.2.3-evil/bin")
+            .unwrap();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_cksum();
+        builder.append(&link, std::io::empty()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = cache(dir.path()).ingest(&key(), &staged(tar)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("escapes the tool tree"),
+            "a sibling prefix shares the root's spelling without being inside it: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_shimmed_npm_launcher_nested_under_the_prefix_is_restored_too() {
+        // The tree root is the install prefix, so node's own files sit under the engine's data dir rather than at the root; matching only the root spelling silently left the engine's mise-and-bash shim in place.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = cache(dir.path());
+        let nested = "data/installs/node/22.23.2/";
+        let mut builder = tar::Builder::new(Vec::new());
+        let launcher = b"#!/usr/bin/env node\n";
+        builder
+            .append(
+                &file_header(
+                    &format!("{nested}lib/node_modules/npm/bin/npm-cli.js"),
+                    0o755,
+                    launcher.len() as u64,
+                ),
+                &launcher[..],
+            )
+            .unwrap();
+        let shim = b"#!/usr/bin/env bash\nmise reshim\n";
+        builder
+            .append(
+                &file_header(&format!("{nested}bin/npm"), 0o755, shim.len() as u64),
+                &shim[..],
+            )
+            .unwrap();
+        let manifest = cache
+            .ingest(&key(), &staged(builder.into_inner().unwrap()))
+            .unwrap();
+        let npm = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == format!("{nested}bin/npm"))
+            .expect("the tree carries the launcher");
+        assert_eq!(
+            npm.kind,
+            EntryKind::Symlink {
+                target: STOCK_NPM_TARGET.into()
+            }
         );
     }
 

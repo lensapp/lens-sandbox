@@ -38,6 +38,8 @@ pub struct E2eWorld {
     pub project_inline_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_tools: Vec<String>,
     pub project_image: Option<String>,
+    /// Raises the per-run budget for a tool whose upstream payload is far larger than the usual one.
+    pub run_budget: Option<std::time::Duration>,
 }
 
 impl E2eWorld {

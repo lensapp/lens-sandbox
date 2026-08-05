@@ -65,6 +65,28 @@ pub fn compose_workload_env(
 pub const GUEST_DEFAULT_PATH: &str =
     "/.lens/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// What a run's declared tools contribute to a workload's environment: the dirs that go on `PATH`, and the vars a tool needs to find its own payload (rustup's proxies read `RUSTUP_HOME`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolRuntime {
+    pub bin_paths: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// Everything the declared tools add to a guest's environment. `lns exec` into the same guest applies this same function, so what an exec session resolves matches the workload's.
+pub fn compose_guest_tool_env(env: &mut Vec<String>, tools: &ToolRuntime) {
+    compose_guest_path(env, &tools.bin_paths);
+    for (name, value) in &tools.env {
+        // A tool's own env only fills what nothing else set: a workload that declares its own CARGO_HOME means it.
+        let already_set = env
+            .iter()
+            .any(|kv| kv.split_once('=').is_some_and(|(key, _)| key == name));
+        if already_set {
+            continue;
+        }
+        env.push(format!("{name}={value}"));
+    }
+}
+
 /// The one PATH rule for a guest: declared tool dirs win over whatever the image (or `-e`) composed, and no blank segment survives either way. `lns exec` into the same guest applies this same rule, so the tool dirs it resolves match the workload's — two copies of this drift into exactly the "run finds node, exec does not" bug.
 pub fn compose_guest_path(env: &mut Vec<String>, tool_bin_paths: &[String]) {
     let declared = env.iter().find_map(|kv| kv.strip_prefix("PATH="));
@@ -102,12 +124,12 @@ pub fn run_workload_env(
     agent_command: Option<&str>,
     workdir: Option<&str>,
     extra_managed: &[String],
-    tool_bin_paths: &[String],
+    tools: &ToolRuntime,
 ) -> WorkloadEnv {
     const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
-    compose_guest_path(&mut composed.env, tool_bin_paths);
+    compose_guest_tool_env(&mut composed.env, tools);
     if let Some(agent_command) = agent_command {
         // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
@@ -139,6 +161,13 @@ mod tests {
 
     fn env(c: &WorkloadEnv) -> &[String] {
         &c.env
+    }
+
+    fn tools(bin_paths: &[&str]) -> ToolRuntime {
+        ToolRuntime {
+            bin_paths: bin_paths.iter().map(|p| p.to_string()).collect(),
+            env: Vec::new(),
+        }
     }
 
     #[test]
@@ -221,13 +250,27 @@ mod tests {
 
     #[test]
     fn run_workload_env_carries_user_env_for_an_unsupervised_run() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[], &[]);
+        let c = run_workload_env(
+            None,
+            &["FOO=bar".into()],
+            None,
+            None,
+            &[],
+            &Default::default(),
+        );
         assert_eq!(c.env, ["FOO=bar"], "user -e must reach a policy-less run");
     }
 
     #[test]
     fn run_workload_env_adds_no_supervisor_vars_when_unsupervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &[], &[]);
+        let c = run_workload_env(
+            None,
+            &["FOO=bar".into()],
+            None,
+            None,
+            &[],
+            &Default::default(),
+        );
         assert!(
             !c.env
                 .iter()
@@ -239,7 +282,14 @@ mod tests {
 
     #[test]
     fn run_workload_env_appends_agent_command_and_term_when_supervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], Some("echo hi"), None, &[], &[]);
+        let c = run_workload_env(
+            None,
+            &["FOO=bar".into()],
+            Some("echo hi"),
+            None,
+            &[],
+            &Default::default(),
+        );
         assert!(c.env.contains(&"FOO=bar".to_string()), "got: {:?}", c.env);
         assert!(c.env.contains(&"AGENT_COMMAND=echo hi".to_string()));
         assert!(c.env.contains(&"TERM=xterm-256color".to_string()));
@@ -247,7 +297,14 @@ mod tests {
 
     #[test]
     fn run_workload_env_keeps_supervisor_term_after_a_user_term_so_it_cannot_be_clobbered() {
-        let c = run_workload_env(None, &["TERM=dumb".into()], Some("sh"), None, &[], &[]);
+        let c = run_workload_env(
+            None,
+            &["TERM=dumb".into()],
+            Some("sh"),
+            None,
+            &[],
+            &Default::default(),
+        );
         let last_term = c.env.iter().rposition(|e| e.starts_with("TERM=")).unwrap();
         assert_eq!(c.env[last_term], "TERM=xterm-256color");
     }
@@ -260,7 +317,7 @@ mod tests {
             None,
             None,
             &["SOME_TOKEN".to_string()],
-            &[],
+            &Default::default(),
         );
         assert_eq!(c.refused, ["SOME_TOKEN"]);
         assert!(c.env.is_empty());
@@ -274,7 +331,7 @@ mod tests {
             None,
             None,
             &["GITLAB_TOKEN".to_string()],
-            &[],
+            &Default::default(),
         );
         assert_eq!(c.refused, ["GITLAB_TOKEN"]);
         assert!(c.env.is_empty());
@@ -282,7 +339,14 @@ mod tests {
 
     #[test]
     fn run_workload_env_pins_workspace_path_for_a_supervised_run() {
-        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &[], &[]);
+        let c = run_workload_env(
+            None,
+            &[],
+            Some("sh"),
+            Some("/app"),
+            &[],
+            &Default::default(),
+        );
         assert!(
             c.env.contains(&"WORKSPACE_PATH=/app".to_string()),
             "got: {:?}",
@@ -292,7 +356,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_omits_workspace_path_without_a_workdir() {
-        let c = run_workload_env(None, &[], Some("sh"), None, &[], &[]);
+        let c = run_workload_env(None, &[], Some("sh"), None, &[], &Default::default());
         assert!(
             !c.env.iter().any(|e| e.starts_with("WORKSPACE_PATH=")),
             "got: {:?}",
@@ -308,7 +372,7 @@ mod tests {
             Some("sh"),
             Some("/app"),
             &[],
-            &[],
+            &Default::default(),
         );
         let last = c
             .env
@@ -324,7 +388,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_adds_no_workspace_path_when_unsupervised() {
-        let c = run_workload_env(None, &[], None, Some("/app"), &[], &[]);
+        let c = run_workload_env(None, &[], None, Some("/app"), &[], &Default::default());
         assert!(
             c.env.is_empty(),
             "an unsupervised run's cwd travels via the session, not env: {:?}",
@@ -340,14 +404,27 @@ mod tests {
             None,
             None,
             &[],
-            &["/.lens/tools/some-tool/1.2.3/bin".into()],
+            &ToolRuntime {
+                bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
+                env: Vec::new(),
+            },
         );
         assert_eq!(c.env, ["PATH=/.lens/tools/some-tool/1.2.3/bin:/usr/bin"]);
     }
 
     #[test]
     fn tool_bin_paths_extend_the_guest_default_when_the_image_sets_no_path() {
-        let c = run_workload_env(None, &[], None, None, &[], &["/t/bin".into()]);
+        let c = run_workload_env(
+            None,
+            &[],
+            None,
+            None,
+            &[],
+            &ToolRuntime {
+                bin_paths: vec!["/t/bin".into()],
+                env: Vec::new(),
+            },
+        );
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
     }
 
@@ -360,7 +437,7 @@ mod tests {
             None,
             None,
             &[],
-            &["/t/bin".into()],
+            &tools(&["/t/bin"]),
         );
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
     }
@@ -373,7 +450,7 @@ mod tests {
             None,
             None,
             &[],
-            &["/t/bin".into()],
+            &tools(&["/t/bin"]),
         );
         assert_eq!(c.env, ["PATH=/t/bin:/usr/bin"]);
     }
@@ -387,7 +464,7 @@ mod tests {
             None,
             None,
             &[],
-            &[],
+            &Default::default(),
         );
         assert_eq!(c.env, ["PATH=/usr/bin"]);
     }
@@ -395,7 +472,7 @@ mod tests {
     #[test]
     fn a_run_with_no_tools_and_no_image_path_is_left_to_the_kernel_default() {
         // Composing one here would put a second copy of the same value in the env for no reason; lns-init already exports it.
-        let c = run_workload_env(None, &[], None, None, &[], &[]);
+        let c = run_workload_env(None, &[], None, None, &[], &Default::default());
         assert!(
             !c.env.iter().any(|kv| kv.starts_with("PATH=")),
             "got: {:?}",
@@ -407,7 +484,17 @@ mod tests {
     fn the_guest_default_path_carries_the_guest_tools_dir() {
         // The workload inherits the kernel PATH, so declaring a tool must not drop /.lens/bin as a side effect.
         assert!(GUEST_DEFAULT_PATH.starts_with("/.lens/bin:"));
-        let c = run_workload_env(None, &[], None, None, &[], &["/t/bin".into()]);
+        let c = run_workload_env(
+            None,
+            &[],
+            None,
+            None,
+            &[],
+            &ToolRuntime {
+                bin_paths: vec!["/t/bin".into()],
+                env: Vec::new(),
+            },
+        );
         assert!(c.env[0].contains("/.lens/bin"), "got: {:?}", c.env[0]);
     }
 
@@ -419,7 +506,7 @@ mod tests {
             Some("sh"),
             None,
             &[],
-            &["/t/a/bin".into(), "/t/b".into()],
+            &tools(&["/t/a/bin", "/t/b"]),
         );
         let path = c.env.iter().position(|e| e.starts_with("PATH=")).unwrap();
         assert!(

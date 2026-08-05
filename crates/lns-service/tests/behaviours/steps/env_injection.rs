@@ -45,7 +45,7 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
         None,
         None,
         &managed,
-        &[],
+        &Default::default(),
     ));
     world.user_env = user_env;
 }
