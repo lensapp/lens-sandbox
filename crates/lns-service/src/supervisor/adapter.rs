@@ -403,6 +403,23 @@ fn make_policy_emitter(
     })
 }
 
+/// A watcher reload re-reads the user's own allows from disk, so the launch's withholding is re-applied here too — otherwise a reload mid-run hands back the allow that would swallow an undecided connector's first-use offer. Each call re-reads the sidecar, so a decline landed earlier in this run stops withholding immediately instead of waiting for a relaunch.
+fn make_policy_withholder(
+    catalog: Vec<lns_policy::connectors::Connector>,
+    offerable: HashSet<String>,
+    project: String,
+    workload: WorkloadIdentity,
+    grant_store: Arc<dyn GrantStore>,
+) -> crate::approval_flow::session::PolicyWithholder {
+    Box::new(move |policy| {
+        // An unreadable sidecar withholds as if nothing were decided, so a lost read can never leak a domain past its offer.
+        let grants = grant_store.load().unwrap_or_default();
+        crate::credential_flow::connectors::withhold_undecided_connector_allows(
+            policy, &catalog, &offerable, &project, &workload, &grants,
+        )
+    })
+}
+
 /// A watcher reload replaces the live policy from disk, where connected connectors are recorded id-only; this deriver re-applies their catalog routes so the reload doesn't drop them.
 fn make_connector_route_deriver(
     catalog: Vec<lns_policy::connectors::Connector>,
@@ -419,34 +436,6 @@ fn make_connect_emitter(
         let rules = routes.get(id).cloned().unwrap_or_default();
         session.connect_connector(id, rules);
     })
-}
-
-/// Pairs each connectable connector's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
-fn build_offerable(
-    connectable: &crate::credential_flow::connectors::ConnectableConnectors,
-    catalog: &[lns_policy::connectors::Connector],
-) -> Vec<crate::approval_flow::session::OfferableConnector> {
-    connectable
-        .routes
-        .iter()
-        .map(|(id, routes)| {
-            let display_name = catalog
-                .iter()
-                .find(|i| &i.id == id)
-                .map(|i| i.display_name().to_string())
-                .unwrap_or_else(|| id.clone());
-            let token_fallback = catalog
-                .iter()
-                .find(|i| &i.id == id)
-                .and_then(|i| i.token_fallback.clone());
-            crate::approval_flow::session::OfferableConnector {
-                id: id.clone(),
-                display_name,
-                patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
-                token_fallback,
-            }
-        })
-        .collect()
 }
 
 /// Bridges an accepted network offer to the credential subsystem's connect; `Weak` so it never keeps the credential session alive past the run.
@@ -474,6 +463,11 @@ impl crate::approval_flow::session::ConnectPort for CredentialConnector {
                 None => false,
             }
         })
+    }
+    fn decline(&self, id: &str) {
+        if let Some(cs) = self.credential_session.upgrade() {
+            cs.decline_connector(id);
+        }
     }
 }
 
@@ -651,7 +645,8 @@ pub(super) async fn start(
         &mut policy.network.egress.http,
         applied.routes,
     );
-    let offerable = build_offerable(&connectable, &catalog);
+    let offerable =
+        crate::credential_flow::connectors::offerable_connectors(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
     let run =
         crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
@@ -693,6 +688,17 @@ pub(super) async fn start(
     let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
+    // An allow the user wrote for a connector's domain would let the first request past before the connector was ever offered, so it waits until this workload connects or declines.
+    let offerable_ids: HashSet<String> = offerable.iter().map(|o| o.id.clone()).collect();
+    let policy = crate::credential_flow::connectors::withhold_undecided_connector_allows(
+        &policy,
+        &catalog,
+        &offerable_ids,
+        &project,
+        &workload,
+        &grants,
+    );
+
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
     let credential_frame_tx = frame_tx.clone();
@@ -701,6 +707,13 @@ pub(super) async fn start(
             .with_offers(offerable),
     );
 
+    session.set_policy_withholder(make_policy_withholder(
+        catalog.clone(),
+        offerable_ids,
+        project.clone(),
+        workload.clone(),
+        grant_store.clone(),
+    ));
     session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
     if let Some(baseline) = sandbox_policy {
         session.set_policy_floor(baseline.clone());
@@ -827,6 +840,7 @@ mod tests {
     struct RecordingConnector {
         connects: std::sync::Mutex<Vec<String>>,
         token_connects: std::sync::Mutex<Vec<(String, String)>>,
+        declines: std::sync::Mutex<Vec<String>>,
     }
 
     impl crate::approval_flow::session::ConnectPort for RecordingConnector {
@@ -848,6 +862,9 @@ mod tests {
                     .push((id.to_string(), value));
                 true
             })
+        }
+        fn decline(&self, id: &str) {
+            self.declines.lock().unwrap().push(id.to_string());
         }
     }
 
@@ -1049,6 +1066,62 @@ mod tests {
             }
             other => panic!("expected RequestDecision, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_plain_allow_on_an_offer_card_declines_the_connector_through_the_bridge() {
+        use crate::approval_flow::protocol::{Decision, RequestPending, Treatment};
+        use crate::approval_flow::session::OfferableConnector;
+        use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let session = Arc::new(
+            ApprovalSession::new(
+                Policy::default(),
+                notifier,
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_offers(vec![OfferableConnector {
+                id: "some-oauth".into(),
+                display_name: "GitHub".into(),
+                patterns: vec!["api.some-oauth.example".into()],
+                token_fallback: None,
+            }]),
+        );
+        let connector = Arc::new(RecordingConnector::default());
+        session.set_connector(connector.clone());
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.some-oauth.example".into(),
+                action: "CONNECT api.some-oauth.example:443".into(),
+                reason: "policy-ambiguous".into(),
+                treatment: Treatment::Inspected,
+            },
+            std::time::Instant::now(),
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::Decide(Decision::AllowAlways),
+        })
+        .unwrap();
+        drop(tx);
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert_eq!(
+            connector.declines.lock().unwrap().as_slice(),
+            ["some-oauth"],
+            "allowing the destination instead of taking the offer must reach the sidecar as a standing no"
+        );
+        assert!(
+            connector.connects.lock().unwrap().is_empty(),
+            "declining must not also run the interactive connect"
+        );
     }
 
     #[tokio::test]
@@ -1928,7 +2001,8 @@ mod tests {
             &Policy::default(),
             &catalog,
         );
-        let offerable = build_offerable(&connectable, &catalog);
+        let offerable =
+            crate::credential_flow::connectors::offerable_connectors(&connectable, &catalog);
         assert_eq!(offerable.len(), 1);
         assert_eq!(offerable[0].id, "some-oauth");
         assert_eq!(offerable[0].display_name, "GitHub", "uses the catalog name");
@@ -1956,7 +2030,7 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let offerable = build_offerable(&connectable, &[]);
+        let offerable = crate::credential_flow::connectors::offerable_connectors(&connectable, &[]);
         assert_eq!(offerable.len(), 1);
         assert_eq!(offerable[0].id, "stray");
         assert_eq!(
@@ -2039,6 +2113,120 @@ mod tests {
             }),
             "the token is armed in the session's state"
         );
+    }
+
+    #[test]
+    fn the_policy_withholder_re_reads_the_sidecar_so_an_in_run_decline_frees_the_rule() {
+        use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute, CredentialAuth};
+        use lns_policy::providers::{InjectionDef, InjectionKind};
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        let store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(path));
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let connector = Connector {
+            id: "acme".into(),
+            name: None,
+            auth_kind: AuthKind::Credential,
+            routes: vec![ConnectorRoute {
+                match_pattern: "api.acme.corp".into(),
+                transport: None,
+                scheme: None,
+                tls_terminate: false,
+                rules: Vec::new(),
+            }],
+            credential: Some(CredentialAuth {
+                env_var: "ACME_API_KEY".into(),
+                placeholder: "acme_LNSPLACEHOLDER".into(),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: "api.acme.corp".into(),
+                    header: None,
+                }],
+            }),
+            oauth: None,
+            token_fallback: None,
+        };
+        let withhold = make_policy_withholder(
+            vec![connector.clone()],
+            HashSet::from(["acme".to_string()]),
+            "proj".into(),
+            workload.clone(),
+            store.clone(),
+        );
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::allow_host("api.acme.corp"));
+
+        assert!(
+            withhold(&policy).network.egress.http.is_empty(),
+            "an undecided connector's domain is withheld so its offer can fire"
+        );
+
+        let (env_var, domains) =
+            crate::credential_flow::connectors::disclosure_of(&connector).expect("a disclosure");
+        let mut file = store.load().unwrap_or_default();
+        file.upsert(GrantRecord::deny(
+            "proj", &workload, "acme", env_var, domains,
+        ));
+        store.save(&file).expect("persist the decline");
+
+        assert_eq!(
+            withhold(&policy).network.egress.http.len(),
+            1,
+            "a decline landed mid-run must free the user's own rule at the next reload, not wait for a relaunch"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_connector_decline_persists_the_standing_no_through_the_session() {
+        use crate::approval_flow::session::ConnectPort;
+        use crate::credential_flow::notification::NoopCredentialNotifier;
+        use lns_policy::grants::{GrantVerdict, WorkloadIdentity};
+        let (store, _dir) = tempfile_credential_store();
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let grants_dir = tempfile::TempDir::new().expect("tempdir");
+        let grants_path = grants_dir.path().join("grants.json");
+        let grants = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let session = Arc::new(
+            CredentialSession::new(
+                CredentialStateFile::new(),
+                Arc::new(NoopCredentialNotifier),
+                store,
+                frame_tx,
+                std::time::Duration::from_secs(30),
+            )
+            .with_custom_providers(acme_custom())
+            .with_grants("proj".into(), workload.clone(), grants.clone()),
+        );
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+
+        connector.decline("acme");
+
+        let persisted = grants.load().unwrap();
+        assert_eq!(
+            persisted
+                .lookup("proj", &workload, "acme")
+                .expect("the bridge must carry the decline to the sidecar")
+                .verdict,
+            GrantVerdict::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_connector_decline_is_a_no_op_when_the_session_is_dropped() {
+        use crate::approval_flow::session::ConnectPort;
+        let (session, _frame_rx) = fixture_credential_session();
+        let connector = CredentialConnector {
+            credential_session: Arc::downgrade(&session),
+        };
+        drop(session);
+        connector.decline("gitlab");
     }
 
     #[tokio::test]

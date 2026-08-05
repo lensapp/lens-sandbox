@@ -64,6 +64,74 @@ fn signin_pkce(integ: &Connector) -> Option<&OauthAuth> {
         .filter(|o| o.flow == OauthFlow::Pkce && o.authorization_endpoint.is_some())
 }
 
+/// The env var and injection domains a connector discloses on its consent card, or `None` when its authKind carries no usable block.
+pub fn disclosure_of(integ: &Connector) -> Option<(String, Vec<String>)> {
+    wire_provider(integ).map(|p| p.disclosure_snapshot())
+}
+
+/// A connector this workload has already answered for, either way: a grant recorded against the same disclosure the card showed. A redefined connector is a different question, so neither a yes nor a no carries over to a new shape.
+fn is_decided(
+    integ: &Connector,
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> bool {
+    let Some(grant) = grants.lookup(project, workload, &integ.id) else {
+        return false;
+    };
+    disclosure_of(integ)
+        .is_some_and(|(env_var, domains)| grant.matches_disclosure(&env_var, &domains))
+}
+
+/// The policy a launch actually runs: the user's own rules minus the allows that would let a request past a connector nobody has decided yet, so the first request to a claimed domain is held and the connect offer gets its chance. Once the connector is connected or decided either way, the withheld rule applies as written. Only an `offerable` connector can withhold anything — a connector with no path to a card could never release the rule again.
+pub fn withhold_undecided_connector_allows(
+    policy: &Policy,
+    catalog: &[Connector],
+    offerable: &HashSet<String>,
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+) -> Policy {
+    let undecided: Vec<&str> = catalog
+        .iter()
+        .filter(|integ| offerable.contains(&integ.id))
+        // `offerable` is a launch-time snapshot, so a connector connected since — by a policy edit, which writes no grant — is still in it.
+        .filter(|integ| !policy.connectors.iter().any(|id| id == &integ.id))
+        .filter(|integ| !is_decided(integ, project, workload, grants))
+        .flat_map(claimed_domains)
+        .collect();
+    let mut out = policy.clone();
+    out.network.egress.http.retain(|rule| {
+        rule.verdict != lns_policy::Verdict::Allow
+            || !undecided
+                .iter()
+                .any(|claimed| domains_overlap(claimed, &rule.match_pattern))
+    });
+    out
+}
+
+/// Pairs each connectable connector's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
+pub fn offerable_connectors(
+    connectable: &ConnectableConnectors,
+    catalog: &[Connector],
+) -> Vec<crate::approval_flow::session::OfferableConnector> {
+    connectable
+        .routes
+        .iter()
+        .map(|(id, routes)| {
+            let entry = catalog.iter().find(|i| &i.id == id);
+            crate::approval_flow::session::OfferableConnector {
+                id: id.clone(),
+                display_name: entry
+                    .map(|i| i.display_name().to_string())
+                    .unwrap_or_else(|| id.clone()),
+                patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
+                token_fallback: entry.and_then(|i| i.token_fallback.clone()),
+            }
+        })
+        .collect()
+}
+
 /// The allow-routes a set of connected connector ids contributes, re-derived from the catalog so boot and a watcher reload reconstruct the same live routes from an id-only policy.
 pub fn applied_connector_routes(ids: &[String], catalog: &[Connector]) -> Vec<RouteRule> {
     let applied: HashSet<&str> = ids.iter().map(String::as_str).collect();
@@ -367,6 +435,33 @@ mod tests {
             connectors: ids.iter().map(|s| s.to_string()).collect(),
             ..Policy::default()
         }
+    }
+
+    #[test]
+    fn a_connector_the_policy_itself_connects_keeps_its_routes_unwithheld() {
+        let catalog = vec![cred_connector("acme", "ACME_API_KEY", "api.acme.corp")];
+        // A `lns-policy.yaml` edit connects a connector without writing any grant, and the offerable set is a launch-time snapshot that still names it.
+        let mut policy = policy_applying(&["acme"]);
+        policy.add_rule(RouteRule::allow_host("api.acme.corp"));
+        let offerable = HashSet::from(["acme".to_string()]);
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+
+        let out = withhold_undecided_connector_allows(
+            &policy,
+            &catalog,
+            &offerable,
+            "proj",
+            &workload,
+            &WorkloadGrantFile::default(),
+        );
+
+        assert_eq!(
+            out.network.egress.http.len(),
+            1,
+            "a connected connector's own routes must survive withholding, or connecting by hand leaves them dead until a relaunch"
+        );
     }
 
     #[test]

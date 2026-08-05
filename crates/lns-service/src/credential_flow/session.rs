@@ -494,6 +494,11 @@ impl CredentialSession {
         }
     }
 
+    /// This workload's standing no for a connector whose offer was answered without taking it, so a later run stops raising the card.
+    pub fn decline_connector(&self, credential_id: &str) {
+        self.remember_grant(credential_id, GrantVerdict::Deny);
+    }
+
     /// Remembers a decision that writes no value of its own — a decline, or a grant of what is already bound on this machine — so nothing gates its durability.
     fn remember_grant(&self, credential_id: &str, verdict: GrantVerdict) {
         let record = self.remember_grant_for_the_run(credential_id, verdict);
@@ -2133,6 +2138,36 @@ mod tests {
         assert_eq!(
             decision_frame(&mut rx).decision,
             CredentialDecisionKind::Allow
+        );
+    }
+
+    #[test]
+    fn declining_a_connector_offer_persists_this_workloads_standing_no() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CredentialSession::new(
+            CredentialStateFile::new(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(CapturingStore::default()),
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_custom_providers(Arc::new(vec![some_provider()]))
+        .with_grants("proj".into(), workload.clone(), store.clone());
+
+        session.decline_connector("some-provider");
+
+        let persisted = store.load().unwrap();
+        let grant = persisted
+            .lookup("proj", &workload, "some-provider")
+            .expect("a declined offer leaves a standing no in the sidecar");
+        assert_eq!(
+            grant.verdict,
+            GrantVerdict::Deny,
+            "the network card's decline must reach the same sidecar the credential card writes, or the next run re-asks"
         );
     }
 

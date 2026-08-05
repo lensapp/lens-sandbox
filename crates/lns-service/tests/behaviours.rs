@@ -8,6 +8,8 @@ mod bind_rig;
 mod credential_rig;
 #[path = "behaviours/declared_rig.rs"]
 mod declared_rig;
+#[path = "behaviours/first_use_rig.rs"]
+mod first_use_rig;
 #[path = "behaviours/forward_rig.rs"]
 mod forward_rig;
 #[path = "behaviours/image_rig.rs"]

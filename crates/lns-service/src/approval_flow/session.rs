@@ -26,6 +26,9 @@ pub type ConnectorRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send 
 /// Invoked on a policy reload with the reloaded connected-connector ids so the credential subsystem can revoke a disconnected connector's arming.
 pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
 
+/// Strips the allows that belong to a connector this workload has not decided yet, so a reload can't hand back what the launch withheld.
+pub type PolicyWithholder = Box<dyn Fn(&Policy) -> Policy + Send + Sync>;
+
 /// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
 pub struct OfferableConnector {
     pub id: String,
@@ -42,6 +45,8 @@ pub trait ConnectPort: Send + Sync {
         id: &'a str,
         value: String,
     ) -> futures_util::future::BoxFuture<'a, bool>;
+    /// Remembers that this workload answered the connector's offer without taking it, so the next run stops asking.
+    fn decline(&self, id: &str);
 }
 
 pub trait Notifier: Send + Sync {
@@ -140,6 +145,9 @@ pub struct ApprovalSession {
     timeout: Duration,
     credentials_provider: OnceLock<CredentialsProvider>,
     connector_routes: OnceLock<ConnectorRouteDeriver>,
+    /// Connectors this run has a standing no for, so a second request to the same domain is not offered again.
+    declined: Mutex<HashSet<String>>,
+    policy_withholder: OnceLock<PolicyWithholder>,
     armed_reconciler: OnceLock<ArmedReconciler>,
     offerable: Vec<OfferableConnector>,
     connector: OnceLock<Arc<dyn ConnectPort>>,
@@ -171,6 +179,8 @@ impl ApprovalSession {
             timeout,
             credentials_provider: OnceLock::new(),
             connector_routes: OnceLock::new(),
+            declined: Mutex::new(HashSet::new()),
+            policy_withholder: OnceLock::new(),
             armed_reconciler: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
@@ -194,6 +204,11 @@ impl ApprovalSession {
     /// Installs the armed-reconciler once at boot so a watcher reload revokes a disconnected connector's arming; idempotent, the first wins.
     pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
         let _ = self.armed_reconciler.set(reconciler);
+    }
+
+    /// Installs the launch's withholder once at boot so every later reload re-applies it; idempotent, the first wins.
+    pub fn set_policy_withholder(&self, withholder: PolicyWithholder) {
+        let _ = self.policy_withholder.set(withholder);
     }
 
     /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
@@ -221,7 +236,7 @@ impl ApprovalSession {
             .find(|i| i.patterns.iter().any(|p| domain_matches(p, host)))
     }
 
-    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected this run.
+    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected — or declined — this run.
     fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String, Option<TokenFallback>)> {
         let integ = self.offer_for_host(host)?;
         let already_connected = self
@@ -231,7 +246,12 @@ impl ApprovalSession {
             .connectors
             .iter()
             .any(|i| i == &integ.id);
-        (!already_connected).then(|| {
+        let already_declined = self
+            .declined
+            .lock()
+            .expect("declined mutex poisoned")
+            .contains(&integ.id);
+        (!already_connected && !already_declined).then(|| {
             (
                 integ.id.clone(),
                 integ.display_name.clone(),
@@ -309,7 +329,23 @@ impl ApprovalSession {
         self.send_decision_frame(id, decision);
         self.persist_always_decision(&entry, decision);
         self.record_approval(&entry, decision);
+        self.decline_unanswered_offer(&entry, decision);
         DecisionOutcome::Resolved
+    }
+
+    /// An offer answered as a plain network decision is a no to the connector, so it becomes this workload's standing no rather than a question every run re-asks.
+    fn decline_unanswered_offer(&self, entry: &PendingEntry, decision: Decision) {
+        if decision == Decision::Timeout {
+            return;
+        }
+        let (Some(offer), Some(connector)) = (entry.offer.as_ref(), self.connector.get()) else {
+            return;
+        };
+        self.declined
+            .lock()
+            .expect("declined mutex poisoned")
+            .insert(offer.connector_id.clone());
+        connector.decline(&offer.connector_id);
     }
 
     /// Fails a held request because its card was closed: no rule, no audit line, and `Timeout` on the wire because a dismissal is the absence of a decision rather than a deny the developer picked.
@@ -540,6 +576,9 @@ impl ApprovalSession {
                 &mut new_policy.network.egress.http,
                 routes,
             );
+        }
+        if let Some(withhold) = self.policy_withholder.get() {
+            new_policy = withhold(&new_policy);
         }
         if let Some(reconcile) = self.armed_reconciler.get() {
             reconcile(&new_policy.connectors);
@@ -1697,6 +1736,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn apply_external_policy_still_withholds_an_undecided_connectors_allow() {
+        let (s, _n, _store, mut rx) = fixture();
+        s.set_policy_withholder(Box::new(|policy| {
+            let mut out = policy.clone();
+            out.network
+                .egress
+                .http
+                .retain(|r| r.match_pattern != "api.some-provider.example");
+            out
+        }));
+        let mut reloaded = Policy::default();
+        reloaded.add_rule(RouteRule::allow_host("api.some-provider.example"));
+
+        s.apply_external_policy(reloaded);
+
+        assert!(
+            s.current_policy().network.egress.http.is_empty(),
+            "a reload must not hand back the allow the launch withheld, or the offer is lost mid-run"
+        );
+        assert!(
+            policy_frame(&mut rx)
+                .network
+                .unwrap()
+                .egress
+                .http
+                .is_empty(),
+            "the guest must see the withheld policy too, not just the host copy"
+        );
+    }
+
+    #[test]
     fn apply_external_policy_re_derives_a_connected_connectors_routes() {
         let (s, _n, _store, mut rx) = fixture();
         s.set_connector_route_deriver(Box::new(|ids| {
@@ -1859,6 +1929,7 @@ pub(crate) mod tests {
         result: bool,
         connected: StdMutex<Vec<String>>,
         connected_with_token: StdMutex<Vec<(String, String)>>,
+        declined: StdMutex<Vec<String>>,
     }
 
     impl FakeConnector {
@@ -1867,6 +1938,7 @@ pub(crate) mod tests {
                 result,
                 connected: StdMutex::new(Vec::new()),
                 connected_with_token: StdMutex::new(Vec::new()),
+                declined: StdMutex::new(Vec::new()),
             }
         }
     }
@@ -1890,6 +1962,9 @@ pub(crate) mod tests {
                     .push((id.to_string(), value));
                 self.result
             })
+        }
+        fn decline(&self, id: &str) {
+            self.declined.lock().unwrap().push(id.to_string());
         }
     }
 
@@ -1943,6 +2018,81 @@ pub(crate) mod tests {
             n.presented.lock().unwrap()[0].offer.as_deref(),
             Some("GitHub"),
             "a held request to a connector domain offers to connect it"
+        );
+    }
+
+    #[test]
+    fn answering_an_offer_card_as_a_plain_network_decision_declines_the_connector() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+        let id = n.presented.lock().unwrap()[0].id.clone();
+
+        s.record_decision(&id, Decision::AllowOnce);
+
+        assert_eq!(
+            connector.declined.lock().unwrap().as_slice(),
+            ["some-oauth"],
+            "letting the request through without taking the offer is a no to the connector, so the next run must not re-ask"
+        );
+    }
+
+    #[test]
+    fn a_declined_connector_is_not_offered_again_in_the_same_run() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+        let first = n.presented.lock().unwrap()[0].id.clone();
+        s.record_decision(&first, Decision::AllowOnce);
+
+        s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
+
+        assert_eq!(
+            n.presented.lock().unwrap()[1].offer,
+            None,
+            "a standing no must silence the offer for the rest of the run, not re-ask on every request"
+        );
+    }
+
+    #[test]
+    fn closing_an_offer_card_declines_nothing() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
+        let id = n.presented.lock().unwrap()[0].id.clone();
+
+        s.dismiss_request(&id);
+
+        assert!(
+            connector.declined.lock().unwrap().is_empty(),
+            "closing a card decides nothing, so it must not leave a standing no the developer never gave"
+        );
+    }
+
+    #[test]
+    fn a_decision_on_a_card_carrying_no_offer_declines_nothing() {
+        let connector = Arc::new(FakeConnector::new(false));
+        let (s, n, _rx) = offer_session(
+            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.elsewhere.example"), Instant::now());
+        let id = n.presented.lock().unwrap()[0].id.clone();
+
+        s.record_decision(&id, Decision::AllowAlways);
+
+        assert!(
+            connector.declined.lock().unwrap().is_empty(),
+            "a plain destination card names no connector, so answering it must not decline one"
         );
     }
 

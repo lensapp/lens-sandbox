@@ -116,6 +116,30 @@ the launch when unbound (or blocks on the sign-in for an `oauth` slot), so the
 workload never starts half-provisioned. A new connector reaches a workload
 only at launch, so relaunch a running sandbox to pick it up.
 
+### First use always offers
+
+Nothing has to name a connector for it to be offered. The catalog claims the
+domain, so the first request a workload makes there raises the connect offer —
+whether or not `./lns.yaml` or `lns-policy.yaml` ever mentioned the connector.
+
+An allow rule you already wrote for that domain does not swallow the offer. The
+launch withholds that one rule until you decide the connector, so the request is
+held and the card appears. Your rule then applies exactly as written:
+
+- **Connect** — the connector's routes open and its value arms, and the held
+  request goes on.
+- **Answer the card as a plain destination** — that is a no to the connector. It
+  becomes a standing no for this workload, recorded in
+  [`~/.lns-workload-grants.json`](credentials.md#workload-grants); the rest of
+  the run stops offering it, and from the next launch your own rule decides
+  every request unoffered. Your other projects, and other workloads in this
+  one, are still offered the connector.
+- **Close the card** — nothing is decided and nothing is recorded, so the next
+  run asks again.
+
+A connector you have already connected is never re-offered, and an allow rule
+for a domain no connector claims is never withheld.
+
 ## The catalog file
 
 The bundled and user catalogs share one schema, so an entry is portable between them:

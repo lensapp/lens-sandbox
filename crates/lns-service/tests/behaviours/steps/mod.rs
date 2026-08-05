@@ -1,5 +1,6 @@
 pub mod approval_flow;
 pub mod artifact_dispatch;
+pub mod connector_first_use;
 pub mod credential_at_boot;
 pub mod credential_flow;
 pub mod declared_connectors;

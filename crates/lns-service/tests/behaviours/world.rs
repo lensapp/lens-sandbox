@@ -57,6 +57,7 @@ pub struct BehaviourWorld {
     pub policy: Option<PolicyRig>,
 
     pub declared: Option<DeclaredRig>,
+    pub first_use: Option<crate::first_use_rig::FirstUseRig>,
     pub tools: Option<crate::tools_rig::ToolsRig>,
 
     /// The sandbox definition JSON a fileset-planning scenario stages.
