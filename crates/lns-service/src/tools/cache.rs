@@ -9,7 +9,7 @@ use crate::archive_limits::{ArchiveLimits, LimitedReader};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// A provisioned tool tree, ingested into the content store and described entry-by-entry so injection composes specs without re-reading any file body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

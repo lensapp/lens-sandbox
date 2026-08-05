@@ -59,7 +59,7 @@ pub(crate) fn provisioner_runtime_specs(
     specs
 }
 
-/// One shell driver per provision: each tool installs under its own engine state so no install resolves a version a sibling left behind, tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpath>` marker; any failure names its tool with `LNS_FAIL` and stops.
+/// One shell driver per provision: each tool installs under its own engine state so no install resolves a version a sibling left behind, tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpaths>` marker whose bin dirs are colon-joined and relative to the tree root; any failure names its tool with `LNS_FAIL` and stops.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
     let mut script = String::from(
         "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
@@ -75,7 +75,9 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
              if ! mise install '{spec}' >&2; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              path=\"$(mise where '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              resolved=\"$(basename \"$path\")\"\n\
-             if [ -d \"$path/bin\" ]; then bp=bin; else bp=.; fi\n\
+             bp=\"$(mise bin-paths \"{name}@$resolved\" 2>/dev/null | while IFS= read -r d; do case \"$d\" in (\"$path\") printf '.:' ;; (\"$path\"/*) printf '%s:' \"${{d#\"$path\"/}}\" ;; esac; done)\"\n\
+             bp=\"${{bp%:}}\"\n\
+             if [ -z \"$bp\" ]; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              tar -cf '{STAGING}/{name}.tar' -C \"$path\" . >&2 || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              echo \"LNS_TOOL {name} $resolved $bp\"\n"
         ));
@@ -88,7 +90,7 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
 pub(crate) struct DriverResult {
     pub name: String,
     pub resolved: SafeVersion,
-    pub bin_path: String,
+    pub bin_paths: Vec<String>,
 }
 
 /// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the engine's diagnostics as the cause; anything else is an engine fault. Markers are only ever read from stdout, which the driver redirects everything else away from — a partial write from a tool's own install code would otherwise prefix the next marker and lose it.
@@ -105,17 +107,20 @@ pub(crate) fn parse_driver_output(
         };
         let mut parts = marker.split_whitespace();
         // Exactly three fields: a driver whose `basename` came back empty would otherwise shift the bin path into the version slot and cache the tree under it.
-        let (Some(name), Some(resolved), Some(bin_path), None) =
+        let (Some(name), Some(resolved), Some(bin_field), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
+        let bin_paths: Vec<&str> = bin_field.split(':').collect();
         let (Ok(resolved), true) = (
             resolved.parse::<SafeVersion>(),
-            lns_artifact::tools::is_safe_bin_path(bin_path),
+            bin_paths
+                .iter()
+                .all(|bin_path| lns_artifact::tools::is_safe_bin_path(bin_path)),
         ) else {
             return Err(ProvisionError::Engine(format!(
-                "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_path:?}"
+                "the provisioner driver reported an unusable location for {name}: {resolved:?} {bin_field:?}"
             )));
         };
         if results.iter().any(|result| result.name == name) {
@@ -126,7 +131,7 @@ pub(crate) fn parse_driver_output(
         results.push(DriverResult {
             name: name.to_string(),
             resolved,
-            bin_path: bin_path.to_string(),
+            bin_paths: bin_paths.into_iter().map(str::to_string).collect(),
         });
     }
     if exit_code == 0 && stdout.lines().any(|line| line.trim() == "LNS_DONE") {
@@ -356,7 +361,7 @@ pub(crate) fn staged_tools_from_results(
                     .map(ToolRef::to_string)
                     .collect(),
                 tar: StagedTar::File(staging.join(format!("{}.tar", request.name))),
-                bin_paths: vec![result.bin_path.clone()],
+                bin_paths: result.bin_paths.clone(),
             })
         })
         .collect()
@@ -512,12 +517,12 @@ mod tests {
                 DriverResult {
                     name: "node".into(),
                     resolved: version("22.11.0"),
-                    bin_path: "bin".into(),
+                    bin_paths: vec!["bin".into()],
                 },
                 DriverResult {
                     name: "jq".into(),
                     resolved: version("1.7.1"),
-                    bin_path: ".".into(),
+                    bin_paths: vec![".".into()],
                 },
             ]
         );
@@ -624,7 +629,78 @@ mod tests {
             &[tool("node@22")],
         )
         .unwrap();
-        assert_eq!(results[0].bin_path, "libexec/bin");
+        assert_eq!(results[0].bin_paths, vec!["libexec/bin".to_string()]);
+    }
+
+    #[test]
+    fn the_driver_asks_the_engine_where_a_tool_s_bin_dirs_are() {
+        // `mise where` is the tree root, and gh's upstream archive nests its bin dir one level below it; probing the root for `bin/` therefore puts a directory holding no executables on the workload PATH, and the tool installs but never resolves.
+        let script = render_driver(&[tool("gh@2")]);
+        assert!(
+            script.contains("mise bin-paths \"gh@$resolved\""),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn the_bin_dirs_are_asked_for_by_resolved_version_not_by_the_request() {
+        // The engine answers `bin-paths` under the version component it was asked with, so a fuzzy `gh@2` reports `installs/gh/2/...` while `where` reports `installs/gh/2.97.0` — the two never share a prefix and every bin dir is discarded.
+        let script = render_driver(&[tool("gh@2")]);
+        assert!(!script.contains("mise bin-paths 'gh@2'"), "got: {script}");
+    }
+
+    #[test]
+    fn a_tool_whose_bin_dirs_the_engine_cannot_place_fails_its_provision() {
+        // Guessing a bin dir is what put a directory holding no executables on the PATH; a tool we cannot locate must name itself in the failure instead of installing into an unusable PATH entry.
+        let script = render_driver(&[tool("gh@2")]);
+        assert!(
+            script.contains("if [ -z \"$bp\" ]; then echo \"LNS_FAIL gh\"; exit 3; fi"),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn the_bin_dir_case_patterns_are_parenthesized_so_bash_as_bin_sh_still_parses_the_marker() {
+        // The driver runs under whatever `/bin/sh` the provisioner base image ships; bash misparses an unparenthesized `case` pattern inside `$(...)` and emits its own source as the bin dir instead of failing.
+        let script = render_driver(&[tool("gh@2")]);
+        assert!(
+            script.contains("case \"$d\" in (\"$path\") ") && script.contains(" (\"$path\"/*) "),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn every_bin_dir_the_engine_reports_reaches_the_path() {
+        let results = parse_driver_output(
+            "LNS_TOOL gh 2.97.0 gh_2.97.0_linux_arm64/bin:libexec\nLNS_DONE\n",
+            "",
+            0,
+            &[tool("gh@2")],
+        )
+        .unwrap();
+        assert_eq!(
+            results[0].bin_paths,
+            vec![
+                "gh_2.97.0_linux_arm64/bin".to_string(),
+                "libexec".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blank_bin_dir_segment_fails_the_provision() {
+        // An empty PATH entry is the current directory to execvp, so a marker that would produce one is refused before it can be cached.
+        let err = parse_driver_output(
+            "LNS_TOOL gh 2.97.0 bin::x\nLNS_DONE\n",
+            "",
+            0,
+            &[tool("gh@2")],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unusable location for gh"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -749,12 +825,12 @@ mod tests {
             DriverResult {
                 name: "jq".into(),
                 resolved: version("1.7.1"),
-                bin_path: ".".into(),
+                bin_paths: vec![".".into()],
             },
             DriverResult {
                 name: "node".into(),
                 resolved: version("22.11.0"),
-                bin_path: "bin".into(),
+                bin_paths: vec!["bin".into()],
             },
         ];
         let staged = staged_tools_from_results(&requests, &results, Path::new("/staging")).unwrap();
