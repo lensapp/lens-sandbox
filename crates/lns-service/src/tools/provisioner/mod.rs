@@ -75,7 +75,7 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
              if ! mise install '{spec}' >&2; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              path=\"$(mise where '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
              resolved=\"$(basename \"$path\")\"\n\
-             bp=\"$(mise bin-paths \"{name}@$resolved\" 2>/dev/null | while IFS= read -r d; do case \"$d\" in (\"$path\") printf '.:' ;; (\"$path\"/*) printf '%s:' \"${{d#\"$path\"/}}\" ;; esac; done)\"\n\
+             bp=\"$(mise bin-paths \"{name}@$resolved\" | while IFS= read -r d; do case \"$d\" in (\"$path\") printf '.:' ;; (\"$path\"/*) printf '%s:' \"${{d#\"$path\"/}}\" ;; esac; done)\"\n\
              bp=\"${{bp%:}}\"\n\
              if [ -z \"$bp\" ]; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
              tar -cf '{STAGING}/{name}.tar' -C \"$path\" . >&2 || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
@@ -647,6 +647,16 @@ mod tests {
         // The engine answers `bin-paths` under the version component it was asked with, so a fuzzy `gh@2` reports `installs/gh/2/...` while `where` reports `installs/gh/2.97.0` — the two never share a prefix and every bin dir is discarded.
         let script = render_driver(&[tool("gh@2")]);
         assert!(!script.contains("mise bin-paths 'gh@2'"), "got: {script}");
+    }
+
+    #[test]
+    fn the_bin_dir_query_keeps_its_diagnostics_for_the_failure_cause() {
+        // `LNS_FAIL` on an unplaceable bin dir reports the tool but not the reason; the engine's own complaint is the only thing that names it, so it has to reach the stderr `failure_cause` reads.
+        let script = render_driver(&[tool("gh@2")]);
+        assert!(
+            !script.contains("mise bin-paths \"gh@$resolved\" 2>/dev/null"),
+            "got: {script}"
+        );
     }
 
     #[test]
