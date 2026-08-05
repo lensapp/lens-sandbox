@@ -233,8 +233,8 @@ fn run_lns_microvm_as(world: &mut E2eWorld, verb: &[&str], tail: Vec<String>) {
         args.push(policy.to_string_lossy().into_owned());
     }
     args.extend(tail);
-    let result =
-        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
+    let result = run_cli_with_timeout_in_dir(&project, args, socket_env(world), budget);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
 }
@@ -355,8 +355,8 @@ fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) 
     let project = write_declarative_definition(world);
     let mut args = vec!["run".to_string(), "--".to_string()];
     args.extend(split_args(&cmd_line));
-    let result =
-        run_cli_with_timeout_in_dir(&project, args, socket_env(world), MICROVM_RUN_TIMEOUT);
+    let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
+    let result = run_cli_with_timeout_in_dir(&project, args, socket_env(world), budget);
     world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
     world.result = Some(result);
 }
@@ -778,6 +778,7 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
 }
 
 const NODE20_IMAGE: &str = "public.ecr.aws/docker/library/node:20-bookworm-slim";
+const DEBIAN12_IMAGE: &str = "public.ecr.aws/docker/library/debian:12-slim";
 
 fn parse_tools_list(entries: &str) -> Vec<String> {
     entries
@@ -789,6 +790,17 @@ fn parse_tools_list(entries: &str) -> Vec<String> {
 #[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over the pinned base image$"#)]
 fn tools_over_pinned_base(world: &mut E2eWorld, entries: String) {
     world.project_tools = parse_tools_list(&entries);
+}
+
+#[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over a glibc base image$"#)]
+fn tools_over_glibc_base(world: &mut E2eWorld, entries: String) {
+    world.project_image = Some(DEBIAN12_IMAGE.to_string());
+    world.project_tools = parse_tools_list(&entries);
+}
+
+#[given(regex = r#"^a provisioning budget of (\d+) minutes$"#)]
+fn a_provisioning_budget(world: &mut E2eWorld, minutes: u64) {
+    world.run_budget = Some(Duration::from_secs(minutes * 60));
 }
 
 #[given(regex = r#"^a lns\.yaml declaring tools \[([^\]]*)\]$"#)]
@@ -905,6 +917,22 @@ fn prints_a_gh_version(world: &mut E2eWorld) {
     assert!(
         result.stdout.contains("gh version 2."),
         "expected a gh 2 version, got:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
+}
+
+#[then("it prints a rustc 1.95.0 version")]
+fn prints_a_rustc_version(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "run failed:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    assert!(
+        result.stdout.contains("rustc 1.95.0"),
+        "expected rustc 1.95.0, got:\n{}\n{}",
         result.stdout,
         result.stderr
     );

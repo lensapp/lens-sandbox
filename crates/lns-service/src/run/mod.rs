@@ -62,7 +62,7 @@ pub(super) struct EnvInputs<'a> {
     pub user_env: &'a [String],
     pub extra_managed: &'a [String],
     pub workdir: Option<&'a str>,
-    pub tool_bin_paths: &'a [String],
+    pub tools: &'a crate::workload_env::ToolRuntime,
 }
 
 pub(super) fn exec_env_strings(
@@ -87,7 +87,7 @@ pub(super) fn exec_env_strings(
         agent_command.as_deref(),
         inputs.workdir,
         inputs.extra_managed,
-        inputs.tool_bin_paths,
+        inputs.tools,
     )
 }
 
@@ -442,7 +442,7 @@ mod tests {
                 user_env: &[],
                 extra_managed: &[],
                 workdir: None,
-                tool_bin_paths: &[],
+                tools: &Default::default(),
             },
         );
         assert!(
@@ -466,7 +466,7 @@ mod tests {
                 user_env: &[],
                 extra_managed: &[],
                 workdir: None,
-                tool_bin_paths: &[],
+                tools: &Default::default(),
             },
         );
         let agent = env
@@ -491,7 +491,7 @@ mod tests {
                 user_env: &["FOO=bar".into()],
                 extra_managed: &[],
                 workdir: None,
-                tool_bin_paths: &[],
+                tools: &Default::default(),
             },
         );
         assert_eq!(
@@ -540,7 +540,7 @@ mod tests {
                 user_env: &[],
                 extra_managed: &[],
                 workdir: None,
-                tool_bin_paths: &[],
+                tools: &Default::default(),
             },
         );
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
@@ -566,7 +566,7 @@ mod tests {
                 user_env: &["PORT=4000".into()],
                 extra_managed: &[],
                 workdir: None,
-                tool_bin_paths: &[],
+                tools: &Default::default(),
             },
         );
         assert!(

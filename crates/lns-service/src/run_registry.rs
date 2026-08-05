@@ -30,8 +30,8 @@ pub struct RunHandle {
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
     pub config: lns_ipc::RunConfig,
-    /// Where this run's declared tools landed in its guest, so `lns exec` into the same guest sees the same PATH the workload does.
-    pub tool_bin_paths: Vec<String>,
+    /// What this run's declared tools contribute to its guest environment, so `lns exec` into the same guest resolves them the way the workload does.
+    pub tools: crate::workload_env::ToolRuntime,
 }
 
 pub fn allocate_run_id() -> String {
@@ -198,11 +198,11 @@ pub fn connector(run_id: &str) -> Option<std::sync::Arc<dyn GuestTransport>> {
         .and_then(|h| h.connector.clone())
 }
 
-pub fn tool_bin_paths(run_id: &str) -> Vec<String> {
+pub fn tools(run_id: &str) -> crate::workload_env::ToolRuntime {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
-        .map(|h| h.tool_bin_paths.clone())
+        .map(|h| h.tools.clone())
         .unwrap_or_default()
 }
 
@@ -213,15 +213,15 @@ pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>
     }
 }
 
-/// The connector is what makes a run exec-able, so a run that has tool paths publishes both in one mutation — an exec that saw the gate open but not the paths would run with the tool dirs missing from its PATH and no error.
-pub fn set_connector_with_tool_bin_paths(
+/// The connector is what makes a run exec-able, so a run that has declared tools publishes both in one mutation — an exec that saw the gate open but not the tools would run without them and with no error.
+pub fn set_connector_with_tools(
     run_id: &str,
     connector: std::sync::Arc<dyn GuestTransport>,
-    paths: Vec<String>,
+    tools: crate::workload_env::ToolRuntime,
 ) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
-        h.tool_bin_paths = paths;
+        h.tools = tools;
         h.connector = Some(connector);
     }
 }
@@ -410,7 +410,7 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
             status: std::sync::Mutex::new(RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tool_bin_paths: Vec::new(),
+            tools: Default::default(),
         },
         cancel_rx,
     )
@@ -647,29 +647,38 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
-    async fn a_runs_tool_paths_are_readable_for_the_life_of_the_run() {
-        // `lns exec` enters the same guest later and has to compose the same PATH.
+    async fn a_runs_tool_environment_is_readable_for_the_life_of_the_run() {
+        // `lns exec` enters the same guest later and has to compose the same PATH and the same tool vars.
         let id = allocate_run_id();
         let (mut h, _rx) = make_handle();
-        h.tool_bin_paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        h.tools = tool_runtime();
         register_named(id.clone(), None, h).unwrap();
-        assert_eq!(tool_bin_paths(&id), vec!["/.lens/tools/node/22.11.0/bin"]);
-        assert!(tool_bin_paths("ghost").is_empty());
+        assert_eq!(tools(&id), tool_runtime());
+        assert_eq!(tools("ghost"), Default::default());
         deregister(&id);
-        assert!(tool_bin_paths(&id).is_empty());
+        assert_eq!(tools(&id), Default::default());
+    }
+
+    fn tool_runtime() -> crate::workload_env::ToolRuntime {
+        crate::workload_env::ToolRuntime {
+            bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".to_string()],
+            env: vec![(
+                "SOME_TOOL_HOME".to_string(),
+                "/.lens/tools/some-tool/1.2.3/home".to_string(),
+            )],
+        }
     }
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
-    async fn a_run_never_becomes_exec_able_before_its_tool_paths_are_readable() {
-        // The connector is the gate `lns exec` passes; publishing it a moment before the PATH would let an exec in that window run with no tool dirs and no error.
+    async fn a_run_never_becomes_exec_able_before_its_tool_environment_is_readable() {
+        // The connector is the gate `lns exec` passes; publishing it a moment before the tools would let an exec in that window run without them and with no error.
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
         register_named(id.clone(), None, h).unwrap();
-        let paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
-        set_connector_with_tool_bin_paths(&id, std::sync::Arc::new(StubTransport), paths.clone());
+        set_connector_with_tools(&id, std::sync::Arc::new(StubTransport), tool_runtime());
         assert!(connector(&id).is_some());
-        assert_eq!(tool_bin_paths(&id), paths);
+        assert_eq!(tools(&id), tool_runtime());
         deregister(&id);
     }
 

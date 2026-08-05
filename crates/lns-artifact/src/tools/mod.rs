@@ -20,6 +20,18 @@ pub fn is_safe_bin_path(bin_path: &str) -> bool {
     bin_path == "." || bin_path.split('/').all(is_safe_version)
 }
 
+/// Whether a name the engine reports for a tool's environment is one we may hand a workload. `PATH` and `HOME` are the workload's own to compose; the loader and shell hooks (`LD_*`, `BASH_ENV`, `ENV`, `IFS`) would reach every process in the workload rather than only the tool's own binaries; and anything outside the POSIX name shape would arrive from a source that is not the engine.
+pub fn is_safe_env_name(name: &str) -> bool {
+    const WORKLOAD_OWNED: &[&str] = &["PATH", "HOME", "BASH_ENV", "ENV", "IFS"];
+    !name.is_empty()
+        && !WORKLOAD_OWNED.contains(&name)
+        && !name.starts_with("LD_")
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// A version that has passed [`is_safe_version`], so no source of one — index, driver output, or a file on disk a later process could edit — can reach a path component or the shell driver unchecked.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -192,6 +204,30 @@ pub fn parse_all(entries: &[String]) -> Result<Vec<ToolRef>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_may_set_its_own_vars_but_never_the_workloads_own() {
+        // A tool's env is composed into the workload and into every later `lns exec`; PATH is the bin dirs' job and HOME belongs to the workload, so neither may arrive this way.
+        assert!(is_safe_env_name("RUSTUP_HOME"));
+        assert!(is_safe_env_name("SOME_TOOL_2"));
+        // The loader and shell hooks reach every process in the workload, not just the tool's own binaries.
+        for refused in [
+            "PATH",
+            "HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "IFS",
+            "",
+            "2BAD",
+            "lowercase",
+            "HAS SPACE",
+            "A=B",
+        ] {
+            assert!(!is_safe_env_name(refused), "{refused:?} must be refused");
+        }
+    }
 
     #[test]
     #[serial_test::serial(env)]

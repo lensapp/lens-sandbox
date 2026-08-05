@@ -5,7 +5,12 @@ Feature: declared developer tools reach a real guest
   of the base image's own copies, and a pulled sandbox's pinned tools are
   pre-provisioned at pull time, so its first run fetches nothing — which is
   what "starts offline" means here, since tool bodies come from upstream hosts
-  rather than from the registry the harness can take down.
+  rather than from the registry the harness can take down. A tool the engine
+  installs outside its own install dir (rust, through rustup) is covered here
+  too: only a real guest proves the tree carries its payload and the env that
+  finds it. That one declares a glibc base image, because rustup publishes no
+  musl host toolchain, and a longer budget, because its payload is a whole
+  compiler rather than a single binary.
 
   Scenario: A declared tool is available to the workload
     Given the Lens Sandbox service is running
@@ -36,6 +41,13 @@ Feature: declared developer tools reach a real guest
     And a lns.yaml declaring tools ["gh@2"] over the pinned base image
     When the sandbox runs "gh --version"
     Then it prints a gh version
+
+  Scenario: A tool the engine installs outside its own install dir still runs
+    Given the Lens Sandbox service is running
+    And a lns.yaml declaring tools ["rust@1.95.0"] over a glibc base image
+    And a provisioning budget of 15 minutes
+    When the sandbox runs "rustc --version"
+    Then it prints a rustc 1.95.0 version
 
   Scenario: A declared tool wins over the base image's copy
     Given the Lens Sandbox service is running

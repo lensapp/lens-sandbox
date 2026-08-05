@@ -422,6 +422,13 @@ async fn orchestrate(
         args.workdir.as_deref(),
         crate::workload_cwd::image_workdir(image.config.as_ref()).as_deref(),
     );
+    let tool_runtime = ensured_tools
+        .as_ref()
+        .map(|ensured| crate::workload_env::ToolRuntime {
+            bin_paths: ensured.bin_paths.clone(),
+            env: ensured.env.clone(),
+        })
+        .unwrap_or_default();
     let composed = exec_env_strings(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
@@ -434,10 +441,7 @@ async fn orchestrate(
                 .map(|s| s.managed_env_vars.as_slice())
                 .unwrap_or(&[]),
             workdir: workdir.as_deref(),
-            tool_bin_paths: ensured_tools
-                .as_ref()
-                .map(|ensured| ensured.bin_paths.as_slice())
-                .unwrap_or_default(),
+            tools: &tool_runtime,
         },
     );
     for refused in &composed.refused {
@@ -496,14 +500,7 @@ async fn orchestrate(
         "microVM   ({:.2}s)",
         boot_start.elapsed().as_secs_f64()
     );
-    crate::run_registry::set_connector_with_tool_bin_paths(
-        &run_id,
-        connector.clone(),
-        ensured_tools
-            .as_ref()
-            .map(|ensured| ensured.bin_paths.clone())
-            .unwrap_or_default(),
-    );
+    crate::run_registry::set_connector_with_tools(&run_id, connector.clone(), tool_runtime.clone());
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
     log::progress("Connecting", "session", 0, 0);

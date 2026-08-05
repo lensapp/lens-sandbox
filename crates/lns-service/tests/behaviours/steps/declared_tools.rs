@@ -125,6 +125,68 @@ fn tool_download_cannot_complete(w: &mut BehaviourWorld) {
         Some("fetching https://nodejs.org/dist/: connection timed out".into());
 }
 
+const TOOL_VAR: &str = "SOME_TOOL_HOME";
+
+#[given("a lns.yaml declaring a tool whose binaries resolve through an env var")]
+fn tool_resolving_through_an_env_var(w: &mut BehaviourWorld) {
+    let rig = w.tools.get_or_insert_with(Default::default);
+    rig.definition = Some(definition_with_tools(r#""node@22""#));
+    *rig.provisioner.tool_env.lock().unwrap() = vec![lns_service::tools::cache::ToolEnvVar {
+        name: TOOL_VAR.to_string(),
+        value: lns_service::tools::cache::ToolEnvValue::Tree {
+            path: "home".to_string(),
+        },
+    }];
+}
+
+#[given("the sandbox sets that var itself")]
+fn the_sandbox_sets_that_var_itself(w: &mut BehaviourWorld) {
+    let rig = w.tools.get_or_insert_with(Default::default);
+    rig.sandbox_env = vec![format!("{TOOL_VAR}=/workspace/mine")];
+}
+
+fn composed_workload_env(w: &BehaviourWorld) -> Result<Vec<String>, String> {
+    let rig = w.tools.as_ref().ok_or("no launch happened")?;
+    if let Some(error) = &rig.error {
+        return Err(format!("the launch failed: {error}"));
+    }
+    let ensured = rig.ensured.as_ref().ok_or("no tools were composed")?;
+    Ok(lns_service::workload_env::run_workload_env(
+        None,
+        &rig.sandbox_env,
+        None,
+        None,
+        &[],
+        &lns_service::workload_env::ToolRuntime {
+            bin_paths: ensured.bin_paths.clone(),
+            env: ensured.env.clone(),
+        },
+    )
+    .env)
+}
+
+#[then("the workload environment carries that var pointing inside the tool tree")]
+fn workload_carries_the_tool_var(w: &mut BehaviourWorld) -> Result<(), String> {
+    let env = composed_workload_env(w)?;
+    let want = format!("{TOOL_VAR}=/.lens/tools/node/22.11.0/home");
+    if env.contains(&want) {
+        Ok(())
+    } else {
+        Err(format!("expected {want:?} in: {env:?}"))
+    }
+}
+
+#[then("the workload keeps the sandbox's value")]
+fn workload_keeps_its_own_value(w: &mut BehaviourWorld) -> Result<(), String> {
+    let env = composed_workload_env(w)?;
+    let want = format!("{TOOL_VAR}=/workspace/mine");
+    if env.contains(&want) {
+        Ok(())
+    } else {
+        Err(format!("expected {want:?} in: {env:?}"))
+    }
+}
+
 #[when("I run the sandbox")]
 async fn run_the_sandbox(w: &mut BehaviourWorld) {
     launch(w).await;

@@ -9,7 +9,9 @@ Feature: declared developer tools are provisioned once per machine, outside work
   this feature pins is that the policy does not *refuse* the install.
   Provisioned tool sets are cached per machine and reused without network; the
   workload receives them read-only, and its own traffic stays inside the normal
-  policy cage (covered against a live guest by the @microvm suite).
+  policy cage (covered against a live guest by the @microvm suite). A tool whose
+  binaries are launchers rather than the payload itself resolves the rest through
+  its own environment, so the workload gets those vars too — unless it sets them.
 
   Scenario: The strictest policy does not gate provisioning
     Given a lns.yaml declaring tools ["node@22"] that denies every destination
@@ -37,6 +39,17 @@ Feature: declared developer tools are provisioned once per machine, outside work
     When I run the sandbox for the first time
     Then the resolved exact version is recorded on this machine
     And later runs here use the recorded version even after upstream releases a newer 22.x
+
+  Scenario: A tool whose binaries resolve through an env var gets it in the workload
+    Given a lns.yaml declaring a tool whose binaries resolve through an env var
+    When I run the sandbox
+    Then the workload environment carries that var pointing inside the tool tree
+
+  Scenario: The sandbox's own value for a tool's env var wins
+    Given a lns.yaml declaring a tool whose binaries resolve through an env var
+    And the sandbox sets that var itself
+    When I run the sandbox
+    Then the workload keeps the sandbox's value
 
   Scenario: Tool provisioning is audited
     When tools are provisioned for a run

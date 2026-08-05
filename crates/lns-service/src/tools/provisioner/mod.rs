@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::cache::{ToolEnvValue, ToolEnvVar};
 use super::{
     Libc, ProvisionError, ProvisionTarget, SafeVersion, StagedTar, StagedTool, ToolRef, mise,
 };
@@ -59,8 +60,9 @@ pub(crate) fn provisioner_runtime_specs(
     specs
 }
 
-/// One shell driver per provision: each tool installs under its own engine state so no install resolves a version a sibling left behind, tars its tree into the staging share, and emits one `LNS_TOOL <name> <resolved> <binpaths>` marker whose bin dirs are colon-joined and relative to the tree root; any failure names its tool with `LNS_FAIL` and stops.
+/// One shell driver per provision: each tool resolves its version, installs into a prefix of its own at the path the workload will read it from, tars that whole prefix into the staging share, and emits an `LNS_TOOL <name> <resolved> <binpaths>` marker plus the `LNS_ENV <name> <json>` the engine reports for it; any failure names its tool with `LNS_FAIL` and stops.
 pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
+    let root = crate::tools::cache::TOOLS_ROOT;
     let mut script = String::from(
         "#!/bin/sh\nset -u\nexport PATH=/.lens/tools-engine/bin:$PATH\nmkdir -p /tmp/mise/home\n",
     );
@@ -68,18 +70,28 @@ pub(crate) fn render_driver(requests: &[ToolRef]) -> String {
         let spec = request.to_string();
         let name = &request.name;
         script.push_str(&format!(
-            "mkdir -p '{ENGINE_STATE}/{name}/data' '{ENGINE_STATE}/{name}/cache'\n\
-             MISE_DATA_DIR='{ENGINE_STATE}/{name}/data'\n\
+            "mkdir -p '{ENGINE_STATE}/{name}/home' '{ENGINE_STATE}/{name}/cache'\n\
+             HOME='{ENGINE_STATE}/{name}/home'\n\
              MISE_CACHE_DIR='{ENGINE_STATE}/{name}/cache'\n\
-             export MISE_DATA_DIR MISE_CACHE_DIR\n\
-             if ! mise install '{spec}' >&2; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
-             path=\"$(mise where '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
-             resolved=\"$(basename \"$path\")\"\n\
-             bp=\"$(mise bin-paths \"{name}@$resolved\" | while IFS= read -r d; do case \"$d\" in (\"$path\") printf '.:' ;; (\"$path\"/*) printf '%s:' \"${{d#\"$path\"/}}\" ;; esac; done)\"\n\
+             MISE_DATA_DIR='{ENGINE_STATE}/{name}/data'\n\
+             export HOME MISE_CACHE_DIR MISE_DATA_DIR\n\
+             resolved=\"$(mise latest '{spec}')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
+             if [ -z \"$resolved\" ]; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
+             root='{root}/{name}'/\"$resolved\"\n\
+             mkdir -p \"$root/home\" \"$root/data\"\n\
+             HOME=\"$root/home\"\n\
+             MISE_DATA_DIR=\"$root/data\"\n\
+             export HOME MISE_DATA_DIR\n\
+             if ! mise install \"{name}@$resolved\" >&2; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
+             bp=\"$(mise bin-paths \"{name}@$resolved\" | while IFS= read -r d; do case \"$d\" in (\"$root\") printf '.:' ;; (\"$root\"/*) printf '%s:' \"${{d#\"$root\"/}}\" ;; esac; done)\"\n\
              bp=\"${{bp%:}}\"\n\
              if [ -z \"$bp\" ]; then echo \"LNS_FAIL {name}\"; exit 3; fi\n\
-             tar -cf '{STAGING}/{name}.tar' -C \"$path\" . >&2 || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
-             echo \"LNS_TOOL {name} $resolved $bp\"\n"
+             toolenv=\"$(mise env --json \"{name}@$resolved\" | tr -d '\\n')\" || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
+             case \":$bp:\" in (*:data/shims*) echo \"LNS_FAIL {name}\"; exit 3 ;; esac\n\
+             rm -rf \"$root/data/downloads\" \"$root/data/shims\"\n\
+             tar -cf '{STAGING}/{name}.tar' -C \"$root\" . >&2 || {{ echo \"LNS_FAIL {name}\"; exit 3; }}\n\
+             echo \"LNS_TOOL {name} $resolved $bp\"\n\
+             printf 'LNS_ENV %s %s\\n' '{name}' \"$toolenv\"\n"
         ));
     }
     script.push_str("echo LNS_DONE\n");
@@ -91,6 +103,58 @@ pub(crate) struct DriverResult {
     pub name: String,
     pub resolved: SafeVersion,
     pub bin_paths: Vec<String>,
+    pub env: Vec<ToolEnvVar>,
+}
+
+/// The engine reports a tool's env as absolute paths in the guest it installed in. Keep only what the tree carries: `PATH` is the bin dirs' job, a value inside the tree travels tree-relative, and a value naming anything else would send the workload to a path only the disposable guest had.
+fn tool_env_from_engine(
+    name: &str,
+    root: &str,
+    json: &str,
+) -> Result<Vec<ToolEnvVar>, ProvisionError> {
+    let reported: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(json).map_err(|e| {
+            ProvisionError::Engine(format!(
+                "the provisioner driver reported an unreadable env for {name}: {e}"
+            ))
+        })?;
+    let mut env = Vec::new();
+    for (var, value) in reported {
+        if var == "PATH" {
+            continue;
+        }
+        if !lns_artifact::tools::is_safe_env_name(&var) {
+            return Err(ProvisionError::Engine(format!(
+                "the provisioner driver reported an unusable env var for {name}: {var:?}"
+            )));
+        }
+        // A sibling prefix (`<root>-evil/bin`) shares the root's spelling without being inside it, so only the root itself or a path below it counts as in-tree.
+        let inside = value
+            .strip_prefix(root)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+        let value = match inside {
+            Some("") => ToolEnvValue::Tree { path: ".".into() },
+            Some(rest) => {
+                let path = rest.trim_start_matches('/');
+                if !lns_artifact::tools::is_safe_bin_path(path) {
+                    return Err(ProvisionError::Engine(format!(
+                        "the provisioner driver reported an unusable env value for {name}: {var}={value:?}"
+                    )));
+                }
+                ToolEnvValue::Tree {
+                    path: path.to_string(),
+                }
+            }
+            None if value.starts_with('/') => {
+                return Err(ProvisionError::Engine(format!(
+                    "the env var {var} the engine reports for {name} points outside the tool tree: {value:?}"
+                )));
+            }
+            None => ToolEnvValue::Literal { value },
+        };
+        env.push(ToolEnvVar { name: var, value });
+    }
+    Ok(env)
 }
 
 /// Map the driver's stdout back to per-tool outcomes: a complete run yields one result per request; `LNS_FAIL` attributes the failure to its tool with the engine's diagnostics as the cause; anything else is an engine fault. Markers are only ever read from stdout, which the driver redirects everything else away from — a partial write from a tool's own install code would otherwise prefix the next marker and lose it.
@@ -128,10 +192,35 @@ pub(crate) fn parse_driver_output(
                 "the provisioner driver reported {name} twice"
             )));
         }
+        let root = crate::tools::cache::guest_root(name, &resolved);
+        // One marker per tool, as with LNS_TOOL: a sibling's install code can forge a marker but not suppress the genuine one, so a second one is the tell rather than something to pick a winner from.
+        let reported: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("LNS_ENV ")
+                    .and_then(|marker| marker.split_once(' '))
+                    .filter(|(tool, _)| *tool == name)
+                    .map(|(_, json)| json)
+            })
+            .collect();
+        let env = match reported.as_slice() {
+            [json] => tool_env_from_engine(name, &root, json)?,
+            [] => {
+                return Err(ProvisionError::Engine(format!(
+                    "the provisioner driver reported no env for {name}"
+                )));
+            }
+            _ => {
+                return Err(ProvisionError::Engine(format!(
+                    "the provisioner driver reported the env for {name} twice"
+                )));
+            }
+        };
         results.push(DriverResult {
             name: name.to_string(),
             resolved,
             bin_paths: bin_paths.into_iter().map(str::to_string).collect(),
+            env,
         });
     }
     if exit_code == 0 && stdout.lines().any(|line| line.trim() == "LNS_DONE") {
@@ -362,6 +451,7 @@ pub(crate) fn staged_tools_from_results(
                     .collect(),
                 tar: StagedTar::File(staging.join(format!("{}.tar", request.name))),
                 bin_paths: result.bin_paths.clone(),
+                env: result.env.clone(),
             })
         })
         .collect()
@@ -437,18 +527,18 @@ mod tests {
         // Separate state per tool, so no install resolves a version a sibling's install left behind; a tool that deliberately writes a sibling's dir still can, since they share the guest as root.
         let script = render_driver(&[tool("node@22"), tool("jq@latest")]);
         assert!(
-            script.contains("MISE_DATA_DIR='/tmp/mise/tools/node/data'")
+            script.contains("root='/.lens/tools/node'/\"$resolved\"")
                 && script.contains("MISE_CACHE_DIR='/tmp/mise/tools/node/cache'"),
             "got: {script}"
         );
         assert!(
-            script.contains("MISE_DATA_DIR='/tmp/mise/tools/jq/data'")
+            script.contains("root='/.lens/tools/jq'/\"$resolved\"")
                 && script.contains("MISE_CACHE_DIR='/tmp/mise/tools/jq/cache'"),
             "got: {script}"
         );
-        let node_install = script.find("mise install 'node@22'").unwrap();
+        let node_install = script.find("mise install \"node@$resolved\"").unwrap();
         let jq_state = script
-            .find("MISE_DATA_DIR='/tmp/mise/tools/jq/data'")
+            .find("MISE_CACHE_DIR='/tmp/mise/tools/jq/cache'")
             .unwrap();
         assert!(
             jq_state > node_install,
@@ -466,9 +556,9 @@ mod tests {
     fn the_driver_installs_tars_and_marks_each_request_in_order() {
         let script = render_driver(&[tool("node@22"), tool("jq@latest")]);
         assert!(script.starts_with("#!/bin/sh\nset -u\n"), "got: {script}");
-        assert!(script.contains("mise install 'node@22'"));
+        assert!(script.contains("mise install \"node@$resolved\""));
         assert!(script.contains("tar -cf '/staging/node.tar'"));
-        assert!(script.contains("mise install 'jq@latest'"));
+        assert!(script.contains("mise latest 'jq@latest'"));
         assert!(
             script.find("node@22").unwrap() < script.find("jq@latest").unwrap(),
             "declaration order is preserved"
@@ -508,18 +598,20 @@ mod tests {
 
     #[test]
     fn a_complete_driver_run_parses_into_per_tool_results() {
-        let stdout = "fetching...\nLNS_TOOL node 22.11.0 bin\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
+        let stdout = "fetching...\nLNS_TOOL node 22.11.0 bin\nLNS_ENV node {}\nLNS_TOOL jq 1.7.1 .\nLNS_ENV jq {}\nLNS_DONE\n";
         let results =
             parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap();
         assert_eq!(
             results,
             vec![
                 DriverResult {
+                    env: Vec::new(),
                     name: "node".into(),
                     resolved: version("22.11.0"),
                     bin_paths: vec!["bin".into()],
                 },
                 DriverResult {
+                    env: Vec::new(),
                     name: "jq".into(),
                     resolved: version("1.7.1"),
                     bin_paths: vec![".".into()],
@@ -567,7 +659,7 @@ mod tests {
         // Merged into one buffer, a partial stderr line splices onto the next marker and a good install reads as an engine fault.
         let noisy = "downloading node 50%\rmise WARN something\n";
         let results = parse_driver_output(
-            "LNS_TOOL node 22.11.0 bin\nLNS_DONE\n",
+            "LNS_TOOL node 22.11.0 bin\nLNS_ENV node {}\nLNS_DONE\n",
             noisy,
             0,
             &[tool("node@22")],
@@ -613,8 +705,7 @@ mod tests {
     #[test]
     fn a_second_marker_for_one_tool_fails_the_whole_provision() {
         // A tool's own install code runs in this guest, so it can forge a sibling's marker — but it cannot suppress the genuine one, and two markers is the tell.
-        let stdout =
-            "LNS_TOOL jq 6.6.6 bin\nLNS_TOOL node 22.11.0 bin\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
+        let stdout = "LNS_TOOL jq 6.6.6 bin\nLNS_ENV jq {}\nLNS_TOOL node 22.11.0 bin\nLNS_ENV node {}\nLNS_TOOL jq 1.7.1 .\nLNS_DONE\n";
         let err =
             parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
         assert!(err.to_string().contains("reported jq twice"), "got: {err}");
@@ -623,13 +714,204 @@ mod tests {
     #[test]
     fn a_nested_bin_dir_is_still_accepted() {
         let results = parse_driver_output(
-            "LNS_TOOL node 22.11.0 libexec/bin\nLNS_DONE\n",
+            "LNS_TOOL node 22.11.0 libexec/bin\nLNS_ENV node {}\nLNS_DONE\n",
             "",
             0,
             &[tool("node@22")],
         )
         .unwrap();
         assert_eq!(results[0].bin_paths, vec!["libexec/bin".to_string()]);
+    }
+
+    #[test]
+    fn a_tool_installs_at_the_path_it_will_occupy_in_the_workload() {
+        // An install may bake its own absolute paths (rustup writes them into its toolchain state), so the tree is built where the workload will read it rather than moved there afterwards.
+        let script = render_driver(&[tool("rust@1.95.0")]);
+        assert!(
+            script.contains("root='/.lens/tools/rust'/\"$resolved\""),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("HOME=\"$root/home\"")
+                && script.contains("MISE_DATA_DIR=\"$root/data\""),
+            "everything the install writes lands inside the tree: {script}"
+        );
+    }
+
+    #[test]
+    fn the_version_resolves_before_the_install_under_this_tools_own_engine_state() {
+        let script = render_driver(&[tool("jq@latest")]);
+        let state = script
+            .find("MISE_CACHE_DIR='/tmp/mise/tools/jq/cache'")
+            .expect("the resolve step gets this tool's own cache");
+        assert!(
+            state
+                < script
+                    .find("mise latest 'jq@latest'")
+                    .expect("a resolve step"),
+            "the resolve must not run under a sibling's state: {script}"
+        );
+        let resolve = script
+            .find("mise latest 'jq@latest'")
+            .expect("a resolve step");
+        let install = script
+            .find("mise install \"jq@$resolved\"")
+            .expect("install");
+        assert!(resolve < install, "got: {script}");
+    }
+
+    #[test]
+    fn the_engine_state_the_workload_cannot_use_is_dropped_before_the_tar() {
+        // The whole prefix is tarred, so the engine's download cache would double every tree's size for bytes no workload reads, and its shims are absolute links to the engine binary — which no workload guest has, and which the tree guard refuses outright.
+        let script = render_driver(&[tool("jq@1")]);
+        let drop = script
+            .find("rm -rf \"$root/data/downloads\" \"$root/data/shims\"")
+            .expect("the drop step");
+        assert!(
+            drop < script.find("tar -cf").expect("the tar"),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn a_bin_dir_under_dropped_engine_state_fails_the_provision() {
+        // The bin dirs are read before the drop, so an engine that ever answered with one would otherwise put a directory the tar does not carry on the workload's PATH, with no error.
+        let script = render_driver(&[tool("jq@1")]);
+        assert!(
+            script
+                .contains("case \":$bp:\" in (*:data/shims*) echo \"LNS_FAIL jq\"; exit 3 ;; esac"),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn the_whole_prefix_is_tarred_rather_than_one_install_dir() {
+        let script = render_driver(&[tool("rust@1.95.0")]);
+        assert!(
+            script.contains("tar -cf '/staging/rust.tar' -C \"$root\" ."),
+            "got: {script}"
+        );
+        assert!(!script.contains("mise where"), "got: {script}");
+    }
+
+    #[test]
+    fn the_driver_asks_the_engine_which_env_vars_a_tool_needs() {
+        // A tool whose binaries are launchers (rustup's proxies) resolves its real payload through env vars; the engine is the only thing that knows which.
+        let script = render_driver(&[tool("rust@1.95.0")]);
+        assert!(
+            script.contains("mise env --json \"rust@$resolved\""),
+            "got: {script}"
+        );
+        assert!(script.contains("LNS_ENV"), "got: {script}");
+    }
+
+    #[test]
+    fn a_tool_s_env_arrives_tree_relative_and_the_engine_s_path_is_dropped() {
+        let root = "/.lens/tools/rust/1.95.0";
+        let stdout = format!(
+            "LNS_TOOL rust 1.95.0 home/.cargo/bin\nLNS_ENV rust {{\"PATH\": \"{root}/home/.cargo/bin:/usr/bin\", \"RUSTUP_HOME\": \"{root}/home/.rustup\", \"RUSTUP_TOOLCHAIN\": \"1.95.0\"}}\nLNS_DONE\n"
+        );
+        let results = parse_driver_output(&stdout, "", 0, &[tool("rust@1.95.0")]).unwrap();
+        assert_eq!(
+            results[0].env,
+            vec![
+                ToolEnvVar {
+                    name: "RUSTUP_HOME".into(),
+                    value: ToolEnvValue::Tree {
+                        path: "home/.rustup".into()
+                    },
+                },
+                ToolEnvVar {
+                    name: "RUSTUP_TOOLCHAIN".into(),
+                    value: ToolEnvValue::Literal {
+                        value: "1.95.0".into()
+                    },
+                },
+            ],
+            "PATH is the bin dirs' job, and a path inside the tree travels with it"
+        );
+    }
+
+    #[test]
+    fn a_tool_reporting_no_env_beyond_path_needs_none() {
+        let stdout = "LNS_TOOL jq 1.8.2 bin\nLNS_ENV jq {\"PATH\": \"/usr/bin\"}\nLNS_DONE\n";
+        let results = parse_driver_output(stdout, "", 0, &[tool("jq@1")]).unwrap();
+        assert!(results[0].env.is_empty());
+    }
+
+    #[test]
+    fn an_env_value_pointing_outside_the_tree_fails_the_provision() {
+        // It would name a path in the disposable guest, so the workload would read whatever the image happens to have there — or nothing.
+        let stdout = "LNS_TOOL rust 1.95.0 bin\nLNS_ENV rust {\"RUSTUP_HOME\": \"/tmp/mise/home/.rustup\"}\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("rust@1.95.0")]).unwrap_err();
+        assert!(
+            err.to_string().contains("RUSTUP_HOME") && err.to_string().contains("outside"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_env_var_the_workload_owns_is_refused() {
+        for var in ["HOME", "not lowercase", "2BAD"] {
+            let stdout =
+                format!("LNS_TOOL jq 1.8.2 bin\nLNS_ENV jq {{\"{var}\": \"x\"}}\nLNS_DONE\n");
+            let err = parse_driver_output(&stdout, "", 0, &[tool("jq@1")]).unwrap_err();
+            assert!(
+                err.to_string().contains("unusable env"),
+                "{var}: got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_env_value_that_climbs_out_of_the_tree_fails_the_provision() {
+        // The value is put in the workload's environment verbatim, so a path spelled through the tree but landing outside it must never be composed.
+        let stdout = "LNS_TOOL rust 1.95.0 bin\nLNS_ENV rust {\"RUSTUP_HOME\": \"/.lens/tools/rust/1.95.0/../../../etc\"}\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("rust@1.95.0")]).unwrap_err();
+        assert!(
+            err.to_string().contains("unusable env value for rust"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_second_env_marker_for_one_tool_fails_the_whole_provision() {
+        // Every tool's install code runs as root in the one guest, so it can forge a sibling's marker but not suppress the genuine one. A forged env would otherwise plant vars in the workload — and in every later `lns exec` — under that sibling's name.
+        let stdout = "LNS_TOOL jq 1.8.2 bin\nLNS_ENV jq {\"SOME_VAR\": \"forged\"}\nLNS_ENV jq {}\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("jq@1")]).unwrap_err();
+        assert!(
+            err.to_string().contains("reported the env for jq twice"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_env_marker_is_printed_rather_than_echoed() {
+        // `$toolenv` is raw JSON, and dash and busybox `echo` expand backslash escapes in it: a value carrying a newline would split the marker line and truncate the JSON, failing a legitimate tool and putting a forged second line on the marker channel. `printf` with the value outside the format string cannot.
+        let script = render_driver(&[tool("rust@1.95.0")]);
+        assert!(
+            script.contains("printf 'LNS_ENV %s %s\\n' 'rust' \"$toolenv\""),
+            "got: {script}"
+        );
+        assert!(
+            !script.contains("echo \"LNS_ENV"),
+            "no echo may carry the engine's JSON: {script}"
+        );
+    }
+
+    #[test]
+    fn an_env_marker_that_is_not_the_engine_s_json_is_an_engine_fault() {
+        let stdout = "LNS_TOOL jq 1.8.2 bin\nLNS_ENV jq not-json\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("jq@1")]).unwrap_err();
+        assert!(err.to_string().contains("env"), "got: {err}");
+    }
+
+    #[test]
+    fn a_tool_with_no_env_marker_at_all_is_an_engine_fault() {
+        // The driver emits one per tool, so a missing marker means the output was truncated or forged rather than "this tool needs nothing".
+        let stdout = "LNS_TOOL jq 1.8.2 bin\nLNS_DONE\n";
+        let err = parse_driver_output(stdout, "", 0, &[tool("jq@1")]).unwrap_err();
+        assert!(err.to_string().contains("no env"), "got: {err}");
     }
 
     #[test]
@@ -674,7 +956,7 @@ mod tests {
         // The driver runs under whatever `/bin/sh` the provisioner base image ships; bash misparses an unparenthesized `case` pattern inside `$(...)` and emits its own source as the bin dir instead of failing.
         let script = render_driver(&[tool("gh@2")]);
         assert!(
-            script.contains("case \"$d\" in (\"$path\") ") && script.contains(" (\"$path\"/*) "),
+            script.contains("case \"$d\" in (\"$root\") ") && script.contains(" (\"$root\"/*) "),
             "got: {script}"
         );
     }
@@ -682,7 +964,7 @@ mod tests {
     #[test]
     fn every_bin_dir_the_engine_reports_reaches_the_path() {
         let results = parse_driver_output(
-            "LNS_TOOL gh 2.97.0 gh_2.97.0_linux_arm64/bin:libexec\nLNS_DONE\n",
+            "LNS_TOOL gh 2.97.0 gh_2.97.0_linux_arm64/bin:libexec\nLNS_ENV gh {}\nLNS_DONE\n",
             "",
             0,
             &[tool("gh@2")],
@@ -725,7 +1007,7 @@ mod tests {
 
     #[test]
     fn a_complete_run_missing_a_request_is_an_engine_fault() {
-        let stdout = "LNS_TOOL node 22.11.0 bin\nLNS_DONE\n";
+        let stdout = "LNS_TOOL node 22.11.0 bin\nLNS_ENV node {}\nLNS_DONE\n";
         let err =
             parse_driver_output(stdout, "", 0, &[tool("node@22"), tool("jq@latest")]).unwrap_err();
         assert!(
@@ -833,11 +1115,13 @@ mod tests {
         let requests = [tool("node@22"), tool("jq@latest")];
         let results = vec![
             DriverResult {
+                env: Vec::new(),
                 name: "jq".into(),
                 resolved: version("1.7.1"),
                 bin_paths: vec![".".into()],
             },
             DriverResult {
+                env: Vec::new(),
                 name: "node".into(),
                 resolved: version("22.11.0"),
                 bin_paths: vec!["bin".into()],

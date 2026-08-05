@@ -479,7 +479,7 @@ pub(super) fn build_session_params(
 ) -> crate::vm::session_client::SessionParams {
     let mut env = args.env;
     // The run's declared tools reach exec through the same rule the workload's PATH was built with; the image's own PATH additions are not part of an exec session, which inherits the guest default.
-    crate::workload_env::compose_guest_path(&mut env, &crate::run_registry::tool_bin_paths(run_id));
+    crate::workload_env::compose_guest_tool_env(&mut env, &crate::run_registry::tools(run_id));
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env,
@@ -930,7 +930,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tool_bin_paths: Vec::new(),
+                tools: Default::default(),
             },
         );
 
@@ -1290,7 +1290,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tool_bin_paths: Vec::new(),
+            tools: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
         let resp = handle_request(
@@ -1325,7 +1325,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tool_bin_paths: Vec::new(),
+            tools: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1381,7 +1381,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tool_bin_paths: Vec::new(),
+            tools: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1470,7 +1470,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tool_bin_paths: Vec::new(),
+                tools: Default::default(),
             },
         );
     }
@@ -1818,7 +1818,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tool_bin_paths: Vec::new(),
+                tools: Default::default(),
             },
         );
 
@@ -1919,7 +1919,13 @@ mod tests {
     #[serial_test::serial(global_runs)]
     async fn exec_and_the_workload_compose_the_same_path_for_the_same_tools() {
         // Two copies of the PATH rule drift into "run finds node, exec does not"; this fails the moment they disagree.
-        let tools = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        let tools = crate::workload_env::ToolRuntime {
+            bin_paths: vec!["/.lens/tools/node/22.11.0/bin".to_string()],
+            env: vec![(
+                "SOME_TOOL_HOME".to_string(),
+                "/.lens/tools/node/22.11.0/home".to_string(),
+            )],
+        };
         let workload = crate::workload_env::run_workload_env(
             Some(&["PATH=/usr/bin".into()]),
             &[],
@@ -1933,10 +1939,15 @@ mod tests {
             .iter()
             .find(|kv| kv.starts_with("PATH="))
             .expect("the workload gets a PATH");
+        let workload_tool_var = workload
+            .env
+            .iter()
+            .find(|kv| kv.starts_with("SOME_TOOL_HOME="))
+            .expect("the workload gets the tool's own var");
 
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tool_bin_paths = tools.clone();
+        handle.tools = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
         let mut args = exec_args(vec!["node".into()], false, false);
         args.env = vec!["PATH=/usr/bin".into()];
@@ -1948,16 +1959,27 @@ mod tests {
             Some(workload_path),
             "exec must reach the PATH the workload got"
         );
+        assert_eq!(
+            params
+                .env
+                .iter()
+                .find(|kv| kv.starts_with("SOME_TOOL_HOME=")),
+            Some(workload_tool_var),
+            "and the vars the tools need to find their own payload"
+        );
     }
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
     async fn an_exec_carrying_no_env_still_puts_the_runs_tool_dirs_first() {
         // What `lns exec` actually sends is an empty env, so the composed PATH has to hold up on that input and not just on a hand-supplied one.
-        let tools = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        let tools = crate::workload_env::ToolRuntime {
+            bin_paths: vec!["/.lens/tools/node/22.11.0/bin".to_string()],
+            env: Vec::new(),
+        };
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tool_bin_paths = tools.clone();
+        handle.tools = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
         let args = exec_args(vec!["node".into()], false, false);
         assert!(args.env.is_empty(), "the CLI sends no env for exec");
@@ -1981,7 +2003,10 @@ mod tests {
         // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tool_bin_paths = vec!["/.lens/tools/node/22.11.0/bin".to_string()];
+        handle.tools = crate::workload_env::ToolRuntime {
+            bin_paths: vec!["/.lens/tools/node/22.11.0/bin".to_string()],
+            env: Vec::new(),
+        };
         crate::run_registry::register_named(run_id.clone(), Some("calm-finch".into()), handle)
             .expect("register the run");
 

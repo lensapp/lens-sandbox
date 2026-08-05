@@ -79,6 +79,8 @@ pub struct StagedTool {
     pub source_host: Option<String>,
     pub tar: StagedTar,
     pub bin_paths: Vec<String>,
+    /// What the tool needs in the workload's environment to find its own payload, as the engine reported it.
+    pub env: Vec<cache::ToolEnvVar>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +113,8 @@ pub struct ProvisionOutcome {
 pub struct EnsuredTools {
     pub specs: Vec<crate::runtime_layer::RuntimeFileSpec>,
     pub bin_paths: Vec<String>,
+    /// What the declared tools need in the workload's environment beyond `PATH`.
+    pub env: Vec<(String, String)>,
     /// Only newly-fetched tools — empty on a warm run, so audit events match actual acquisition.
     pub provisioned: Vec<ProvisionOutcome>,
 }
@@ -352,6 +356,7 @@ fn compose(
 ) -> Result<EnsuredTools, ProvisionError> {
     let mut specs = Vec::new();
     let mut bin_paths = Vec::new();
+    let mut env = Vec::new();
     for request in requests {
         let manifest = hits
             .get(&request.name)
@@ -362,10 +367,12 @@ fn compose(
                 .map_err(|e| ProvisionError::Engine(format!("composing {request}: {e:#}")))?,
         );
         bin_paths.extend(manifest.guest_bin_paths());
+        env.extend(manifest.guest_env());
     }
     Ok(EnsuredTools {
         specs,
         bin_paths,
+        env,
         provisioned,
     })
 }
@@ -640,6 +647,7 @@ mod tests {
                 *remaining -= 1;
             }
             let manifest = cache::ToolManifest {
+                env: Vec::new(),
                 schema_version: cache::MANIFEST_SCHEMA_VERSION,
                 tool: staged.name.clone(),
                 resolved: staged.resolved.clone(),
@@ -773,6 +781,7 @@ mod tests {
                 requests
                     .iter()
                     .map(|request| StagedTool {
+                        env: Vec::new(),
                         name: request.name.clone(),
                         co_installed: requests
                             .iter()
@@ -1671,6 +1680,7 @@ mod tests {
                     libc: Libc::Gnu,
                 },
                 &StagedTool {
+                    env: Vec::new(),
                     name: "some-tool".into(),
                     co_installed: Vec::new(),
                     resolved: version("1"),
