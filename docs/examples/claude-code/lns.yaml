@@ -33,7 +33,7 @@ spec:
         - match: downloads.claude.ai
           verdict: allow
   connectors:
-    - claude-code-subscription
+    - anthropic
   volumes:
     - type: bind
       source: .

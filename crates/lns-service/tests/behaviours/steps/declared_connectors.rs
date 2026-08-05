@@ -1,6 +1,6 @@
 use cucumber::{given, then, when};
 use lns_policy::connectors::{
-    AuthKind, Connector, ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow,
+    Connector, ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow, SignInMethod,
 };
 use lns_policy::grants::{GrantRecord, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::{InjectionDef, InjectionKind};
@@ -25,7 +25,6 @@ fn credential_connector(id: &str, env_var: &str, route: Option<&str>) -> Connect
     Connector {
         id: id.into(),
         name: None,
-        auth_kind: AuthKind::Credential,
         routes: route
             .map(|host| {
                 vec![ConnectorRoute {
@@ -37,17 +36,18 @@ fn credential_connector(id: &str, env_var: &str, route: Option<&str>) -> Connect
                 }]
             })
             .unwrap_or_default(),
-        credential: Some(CredentialAuth {
-            env_var: env_var.into(),
-            placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-            injections: vec![InjectionDef {
-                kind: InjectionKind::BearerHeader,
-                domain: domain.into(),
-                header: None,
-            }],
-        }),
-        oauth: None,
-        token_fallback: None,
+        methods: vec![SignInMethod::credential(
+            "token",
+            CredentialAuth {
+                env_var: env_var.into(),
+                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: domain.into(),
+                    header: None,
+                }],
+            },
+        )],
     }
 }
 
@@ -247,28 +247,28 @@ fn oauth_connector(id: &str) -> Connector {
     Connector {
         id: id.into(),
         name: None,
-        auth_kind: AuthKind::Oauth,
         routes: Vec::new(),
-        credential: None,
-        oauth: Some(OauthAuth {
-            flow: OauthFlow::Device,
-            client_id: Some("some-client".into()),
-            client_secret: None,
-            scopes: Vec::new(),
-            device_authorization_endpoint: Some("https://api.some-oauth.example/device".into()),
-            authorization_endpoint: None,
-            token_endpoint: "https://api.some-oauth.example/token".into(),
-            userinfo_endpoint: None,
-            account_field: None,
-            env_var: "SOME_OAUTH_TOKEN".into(),
-            placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-            injections: vec![InjectionDef {
-                kind: InjectionKind::BearerHeader,
-                domain: "api.some-oauth.example".into(),
-                header: None,
-            }],
-        }),
-        token_fallback: None,
+        methods: vec![SignInMethod::oauth(
+            "device",
+            OauthAuth {
+                flow: OauthFlow::Device,
+                client_id: Some("some-client".into()),
+                client_secret: None,
+                scopes: Vec::new(),
+                device_authorization_endpoint: Some("https://api.some-oauth.example/device".into()),
+                authorization_endpoint: None,
+                token_endpoint: "https://api.some-oauth.example/token".into(),
+                userinfo_endpoint: None,
+                account_field: None,
+                env_var: "SOME_OAUTH_TOKEN".into(),
+                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: "api.some-oauth.example".into(),
+                    header: None,
+                }],
+            },
+        )],
     }
 }
 

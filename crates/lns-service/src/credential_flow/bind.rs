@@ -10,16 +10,17 @@ use crate::credential_flow::store::CredentialEntry;
 
 /// The connect-time value-decision card for a credential connector; an oauth id signs in instead, and a blockless entry has nothing to bind.
 pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
-    if integ.auth_kind != AuthKind::Credential {
+    let method = integ.default_method()?;
+    if method.kind != AuthKind::Credential {
         return None;
     }
-    let cred = integ.credential.as_ref()?;
+    let cred = method.credential.as_ref()?;
     Some(CredentialPendingPrompt {
         id: format!("bind-{}", integ.id),
         credential_id: integ.id.clone(),
         action: format!("bind a value for \"{}\" on this machine", integ.id),
         oauth_display_name: None,
-        token_fallback: integ.token_fallback.clone(),
+        token_fallback: method.token_fallback.clone(),
         env_var: Some(cred.env_var.clone()),
         injection_domains: cred.injections.iter().map(|i| i.domain.clone()).collect(),
         is_project_defined: false,
@@ -32,12 +33,14 @@ pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
 
 /// The provider the bind card detects a host value through — the same wiring a run would seed.
 pub fn bind_provider(integ: &Connector) -> Option<DefProvider> {
-    let cred = integ.credential.as_ref()?;
+    let method = integ
+        .default_method()
+        .filter(|m| m.kind == AuthKind::Credential)?;
     Some(DefProvider::new(ProviderDef {
         id: integ.id.clone(),
-        env_var: cred.env_var.clone(),
-        placeholder: cred.placeholder.clone(),
-        injections: cred.injections.clone(),
+        env_var: method.env_var().to_string(),
+        placeholder: method.placeholder().to_string(),
+        injections: method.injections().to_vec(),
     }))
 }
 
@@ -83,26 +86,26 @@ pub fn resolve_bind_decision(request: CredentialDecisionRequest) -> BindResoluti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::connectors::CredentialAuth;
+    use lns_policy::connectors::{CredentialAuth, SignInMethod};
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
     fn credential_connector(id: &str, env: &str) -> Connector {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: Vec::new(),
-            credential: Some(CredentialAuth {
-                env_var: env.into(),
-                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: "api.example.test".into(),
-                    header: None,
-                }],
-            }),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "token",
+                CredentialAuth {
+                    env_var: env.into(),
+                    placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: "api.example.test".into(),
+                        header: None,
+                    }],
+                },
+            )],
         }
     }
 
@@ -110,11 +113,15 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: Vec::new(),
-            credential: None,
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod {
+                id: "device".into(),
+                name: None,
+                kind: AuthKind::Oauth,
+                credential: None,
+                oauth: None,
+                token_fallback: None,
+            }],
         }
     }
 
@@ -134,10 +141,8 @@ mod tests {
     #[test]
     fn bind_prompt_refuses_an_oauth_or_blockless_connector() {
         assert_eq!(bind_prompt(&oauth_connector("some-oauth")), None);
-        let blockless = Connector {
-            credential: None,
-            ..credential_connector("some-blockless", "SOME_TOKEN")
-        };
+        let mut blockless = credential_connector("some-blockless", "SOME_TOKEN");
+        blockless.methods[0].credential = None;
         assert_eq!(bind_prompt(&blockless), None);
     }
 

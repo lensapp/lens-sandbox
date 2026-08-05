@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
+use lns_policy::connectors::{Connector, OauthAuth, OauthFlow};
 use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule};
@@ -27,21 +27,12 @@ pub struct ConnectableConnectors {
 
 /// The env/placeholder/injection wiring a connector seeds, taken from whichever block its authKind carries.
 fn wire_provider_def(integ: &Connector) -> Option<ProviderDef> {
-    let (env_var, placeholder, injections) = match integ.auth_kind {
-        AuthKind::Credential => {
-            let c = integ.credential.as_ref()?;
-            (&c.env_var, &c.placeholder, &c.injections)
-        }
-        AuthKind::Oauth => {
-            let o = integ.oauth.as_ref()?;
-            (&o.env_var, &o.placeholder, &o.injections)
-        }
-    };
+    let method = integ.default_method()?;
     Some(ProviderDef {
         id: integ.id.clone(),
-        env_var: env_var.clone(),
-        placeholder: placeholder.clone(),
-        injections: injections.clone(),
+        env_var: method.env_var().to_string(),
+        placeholder: method.placeholder().to_string(),
+        injections: method.injections().to_vec(),
     })
 }
 
@@ -51,7 +42,7 @@ fn wire_provider(integ: &Connector) -> Option<DefProvider> {
 
 /// The oauth block usable for a device sign-in: the device flow with a client_id baked in (community builds ship none, so they fall back to the token paste).
 fn signin_oauth(integ: &Connector) -> Option<&OauthAuth> {
-    integ.oauth.as_ref().filter(|o| {
+    integ.default_method()?.oauth.as_ref().filter(|o| {
         o.flow == OauthFlow::Device && o.client_id.as_deref().is_some_and(|c| !c.is_empty())
     })
 }
@@ -59,6 +50,7 @@ fn signin_oauth(integ: &Connector) -> Option<&OauthAuth> {
 /// The oauth block usable for a pkce browser sign-in: the pkce flow with an authorization endpoint to redirect through.
 fn signin_pkce(integ: &Connector) -> Option<&OauthAuth> {
     integ
+        .default_method()?
         .oauth
         .as_ref()
         .filter(|o| o.flow == OauthFlow::Pkce && o.authorization_endpoint.is_some())
@@ -126,7 +118,9 @@ pub fn offerable_connectors(
                     .map(|i| i.display_name().to_string())
                     .unwrap_or_else(|| id.clone()),
                 patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
-                token_fallback: entry.and_then(|i| i.token_fallback.clone()),
+                token_fallback: entry
+                    .and_then(|i| i.default_method())
+                    .and_then(|m| m.token_fallback.clone()),
             }
         })
         .collect()
@@ -318,24 +312,14 @@ fn domains_overlap(a: &str, b: &str) -> bool {
     domain_matches(a, b) || domain_matches(b, a)
 }
 
-/// Every domain a connector claims: its route patterns plus the domains its credential/oauth injections actually write a token onto (a custom catalog may inject on a domain it doesn't route).
+/// Every domain a connector claims: its route patterns plus the domains any of its sign-in methods actually write a token onto (a custom catalog may inject on a domain it doesn't route).
 fn claimed_domains(integ: &Connector) -> impl Iterator<Item = &str> {
-    integ
-        .routes
-        .iter()
-        .map(|r| r.match_pattern.as_str())
-        .chain(
-            integ
-                .credential
-                .iter()
-                .flat_map(|c| c.injections.iter().map(|i| i.domain.as_str())),
-        )
-        .chain(
-            integ
-                .oauth
-                .iter()
-                .flat_map(|o| o.injections.iter().map(|i| i.domain.as_str())),
-        )
+    integ.routes.iter().map(|r| r.match_pattern.as_str()).chain(
+        integ
+            .methods
+            .iter()
+            .flat_map(|m| m.injections().iter().map(|i| i.domain.as_str())),
+    )
 }
 
 /// The catalog connectors a run can offer to connect: every entry (credential or oauth) not already applied and not colliding with an applied connector's domain.
@@ -346,7 +330,7 @@ pub fn resolve_connectable_connectors(
     resolve_connectable_with_declared(policy, &[], catalog)
 }
 
-/// Connectables minus any colliding with a domain already spoken for — by an applied credential (`policy.connectors`) or by an artifact-declared, offered-not-armed connector (`declared`) — so a colliding entry's machine-global stored value can never inject over the credential that owns that domain (e.g. a leftover `anthropic` value clobbering a declared `claude-code-subscription` on api.anthropic.com, even when that domain is an injection target rather than a declared route).
+/// Connectables minus any colliding with a domain already spoken for — by an applied credential (`policy.connectors`) or by an artifact-declared, offered-not-armed connector (`declared`) — so a colliding entry's machine-global stored value can never inject over the credential that owns that domain, even where that domain is an injection target rather than a declared route. Two *bundled* entries can no longer collide (one connector owns a domain, its alternatives are its sign-in methods); this still guards a user catalog entry that claims a bundled connector's domain.
 fn resolve_connectable_with_declared(
     policy: &Policy,
     declared: &[String],
@@ -400,7 +384,9 @@ fn resolve_connectable_with_declared(
 mod tests {
     use super::*;
     use crate::credential_flow::providers::Provider;
-    use lns_policy::connectors::{ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow};
+    use lns_policy::connectors::{
+        ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow, SignInMethod,
+    };
     use lns_policy::grants::GrantRecord;
     use lns_policy::providers::{InjectionDef, InjectionKind};
 
@@ -408,7 +394,6 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
@@ -416,17 +401,18 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: Some(CredentialAuth {
-                env_var: env_var.into(),
-                placeholder: format!("lns-{id}-placeholder"),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: domain.into(),
-                    header: None,
-                }],
-            }),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "token",
+                CredentialAuth {
+                    env_var: env_var.into(),
+                    placeholder: format!("lns-{id}-placeholder"),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: domain.into(),
+                        header: None,
+                    }],
+                },
+            )],
         }
     }
 
@@ -780,7 +766,6 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
@@ -788,26 +773,29 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                userinfo_endpoint: None,
-                account_field: None,
-                flow: OauthFlow::Device,
-                client_id: Some(format!("Iv1.{id}")),
-                client_secret: None,
-                scopes: vec!["repo".into()],
-                device_authorization_endpoint: Some(format!("https://{domain}/login/device/code")),
-                authorization_endpoint: None,
-                token_endpoint: format!("https://{domain}/login/oauth/access_token"),
-                env_var: env_var.into(),
-                placeholder: format!("lns-{id}-placeholder"),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: domain.into(),
-                    header: None,
-                }],
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                OauthAuth {
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    flow: OauthFlow::Device,
+                    client_id: Some(format!("Iv1.{id}")),
+                    client_secret: None,
+                    scopes: vec!["repo".into()],
+                    device_authorization_endpoint: Some(format!(
+                        "https://{domain}/login/device/code"
+                    )),
+                    authorization_endpoint: None,
+                    token_endpoint: format!("https://{domain}/login/oauth/access_token"),
+                    env_var: env_var.into(),
+                    placeholder: format!("lns-{id}-placeholder"),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: domain.into(),
+                        header: None,
+                    }],
+                },
+            )],
         }
     }
 
@@ -815,7 +803,6 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: domain.into(),
                 transport: None,
@@ -823,26 +810,27 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                userinfo_endpoint: None,
-                account_field: None,
-                flow: OauthFlow::Pkce,
-                client_id: None,
-                client_secret: None,
-                scopes: Vec::new(),
-                device_authorization_endpoint: None,
-                authorization_endpoint: Some(format!("https://{domain}/auth")),
-                token_endpoint: format!("https://{domain}/api/v1/auth/keys"),
-                env_var: env_var.into(),
-                placeholder: format!("lns-{id}-placeholder"),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: domain.into(),
-                    header: None,
-                }],
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                OauthAuth {
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    flow: OauthFlow::Pkce,
+                    client_id: None,
+                    client_secret: None,
+                    scopes: Vec::new(),
+                    device_authorization_endpoint: None,
+                    authorization_endpoint: Some(format!("https://{domain}/auth")),
+                    token_endpoint: format!("https://{domain}/api/v1/auth/keys"),
+                    env_var: env_var.into(),
+                    placeholder: format!("lns-{id}-placeholder"),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: domain.into(),
+                        header: None,
+                    }],
+                },
+            )],
         }
     }
 
@@ -1011,7 +999,7 @@ mod tests {
             "PRIMARY_TOKEN",
             "login.some-primary.example",
         );
-        applied.credential.as_mut().unwrap().injections[0].domain =
+        applied.methods[0].credential.as_mut().unwrap().injections[0].domain =
             "api.some-provider.example".into();
         let catalog = vec![
             applied,
@@ -1143,7 +1131,7 @@ mod tests {
 
     fn oauth_connector_without_client_id(id: &str, env_var: &str, domain: &str) -> Connector {
         let mut i = oauth_connector(id, env_var, domain);
-        i.oauth.as_mut().unwrap().client_id = None;
+        i.methods[0].oauth.as_mut().unwrap().client_id = None;
         i
     }
 

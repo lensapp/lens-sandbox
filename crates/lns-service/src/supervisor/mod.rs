@@ -600,30 +600,30 @@ mod tests {
             connectors: vec![lns_policy::connectors::Connector {
                 id: "some-oauth".into(),
                 name: None,
-                auth_kind: lns_policy::connectors::AuthKind::Oauth,
                 routes: Vec::new(),
-                credential: None,
-                oauth: Some(lns_policy::connectors::OauthAuth {
-                    flow: lns_policy::connectors::OauthFlow::Device,
-                    client_id: Some("some-client".into()),
-                    client_secret: None,
-                    scopes: Vec::new(),
-                    device_authorization_endpoint: Some(
-                        "https://api.some-oauth.example/device".into(),
-                    ),
-                    authorization_endpoint: None,
-                    token_endpoint: "https://api.some-oauth.example/token".into(),
-                    userinfo_endpoint: None,
-                    account_field: None,
-                    env_var: "CATALOG_DEFAULT_TOKEN".into(),
-                    placeholder: "some-oauth-LNSPLACEHOLDER0000".into(),
-                    injections: vec![lns_policy::providers::InjectionDef {
-                        kind: lns_policy::providers::InjectionKind::BearerHeader,
-                        domain: "api.some-oauth.example".into(),
-                        header: None,
-                    }],
-                }),
-                token_fallback: None,
+                methods: vec![lns_policy::connectors::SignInMethod::oauth(
+                    "device",
+                    lns_policy::connectors::OauthAuth {
+                        flow: lns_policy::connectors::OauthFlow::Device,
+                        client_id: Some("some-client".into()),
+                        client_secret: None,
+                        scopes: Vec::new(),
+                        device_authorization_endpoint: Some(
+                            "https://api.some-oauth.example/device".into(),
+                        ),
+                        authorization_endpoint: None,
+                        token_endpoint: "https://api.some-oauth.example/token".into(),
+                        userinfo_endpoint: None,
+                        account_field: None,
+                        env_var: "CATALOG_DEFAULT_TOKEN".into(),
+                        placeholder: "some-oauth-LNSPLACEHOLDER0000".into(),
+                        injections: vec![lns_policy::providers::InjectionDef {
+                            kind: lns_policy::providers::InjectionKind::BearerHeader,
+                            domain: "api.some-oauth.example".into(),
+                            header: None,
+                        }],
+                    },
+                )],
             }],
         }
         .save_atomic(&dir.path().join(".lns-connectors.yaml"))

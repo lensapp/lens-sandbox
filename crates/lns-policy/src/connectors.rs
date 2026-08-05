@@ -109,15 +109,14 @@ pub struct TokenFallback {
     pub command: Option<String>,
 }
 
+/// One way to sign in to a connector. A connector owns a domain; its methods are the alternative ways to obtain a credential for it, each with its own env var because that is what a tool branches on to decide it is signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Connector {
+pub struct SignInMethod {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub auth_kind: AuthKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<ConnectorRoute>,
+    pub kind: AuthKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialAuth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,42 +125,143 @@ pub struct Connector {
     pub token_fallback: Option<TokenFallback>,
 }
 
+impl SignInMethod {
+    pub fn credential(id: impl Into<String>, credential: CredentialAuth) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            kind: AuthKind::Credential,
+            credential: Some(credential),
+            oauth: None,
+            token_fallback: None,
+        }
+    }
+
+    pub fn oauth(id: impl Into<String>, oauth: OauthAuth) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            kind: AuthKind::Oauth,
+            credential: None,
+            oauth: Some(oauth),
+            token_fallback: None,
+        }
+    }
+
+    pub fn with_token_fallback(mut self, fallback: TokenFallback) -> Self {
+        self.token_fallback = Some(fallback);
+        self
+    }
+
+    pub fn env_var(&self) -> &str {
+        match self.kind {
+            AuthKind::Credential => self.credential.as_ref().map(|c| c.env_var.as_str()),
+            AuthKind::Oauth => self.oauth.as_ref().map(|o| o.env_var.as_str()),
+        }
+        .unwrap_or_default()
+    }
+
+    pub fn placeholder(&self) -> &str {
+        match self.kind {
+            AuthKind::Credential => self.credential.as_ref().map(|c| c.placeholder.as_str()),
+            AuthKind::Oauth => self.oauth.as_ref().map(|o| o.placeholder.as_str()),
+        }
+        .unwrap_or_default()
+    }
+
+    pub fn injections(&self) -> &[InjectionDef] {
+        match self.kind {
+            AuthKind::Credential => self.credential.as_ref().map(|c| c.injections.as_slice()),
+            AuthKind::Oauth => self.oauth.as_ref().map(|o| o.injections.as_slice()),
+        }
+        .unwrap_or_default()
+    }
+
+    /// Each kind must carry its matching block, and an oauth block must carry the endpoint its `flow` needs.
+    fn validate(&self, connector_id: &str) -> Result<(), String> {
+        match self.kind {
+            AuthKind::Credential if self.credential.is_none() => Err(format!(
+                "connector {connector_id:?} method {:?} is kind credential but has no `credential:` block",
+                self.id
+            )),
+            AuthKind::Oauth => self.validate_oauth(connector_id),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_oauth(&self, connector_id: &str) -> Result<(), String> {
+        let Some(oauth) = self.oauth.as_ref() else {
+            return Err(format!(
+                "connector {connector_id:?} method {:?} is kind oauth but has no `oauth:` block",
+                self.id
+            ));
+        };
+        match oauth.flow {
+            OauthFlow::Device if oauth.device_authorization_endpoint.is_none() => Err(format!(
+                "connector {connector_id:?} method {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
+                self.id
+            )),
+            OauthFlow::Pkce if oauth.authorization_endpoint.is_none() => Err(format!(
+                "connector {connector_id:?} method {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
+                self.id
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connector {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<ConnectorRoute>,
+    pub methods: Vec<SignInMethod>,
+}
+
 impl Connector {
     /// The user-facing label for cards and prompts; falls back to the id when no `name` is set.
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
     }
 
-    /// Each authKind must carry its matching block, and an oauth block must carry the endpoint its `flow` needs.
-    pub fn validate(&self) -> Result<(), String> {
-        match self.auth_kind {
-            AuthKind::Credential if self.credential.is_none() => Err(format!(
-                "connector {:?} declares authKind credential but has no `credential:` block",
-                self.id
-            )),
-            AuthKind::Oauth => self.validate_oauth(),
-            _ => Ok(()),
+    /// The method a single-method connector signs in with; `None` once the user must choose between several.
+    pub fn sole_method(&self) -> Option<&SignInMethod> {
+        match self.methods.as_slice() {
+            [only] => Some(only),
+            _ => None,
         }
     }
 
-    fn validate_oauth(&self) -> Result<(), String> {
-        let Some(oauth) = self.oauth.as_ref() else {
+    /// The method to act on where no choice has been made — the first listed. A connector orders its methods most-expected first.
+    pub fn default_method(&self) -> Option<&SignInMethod> {
+        self.methods.first()
+    }
+
+    /// A connector needs at least one way in, every method must be well-formed, and no two methods may write one env var — a tool reading that variable could not tell which sign-in it got.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.methods.is_empty() {
             return Err(format!(
-                "connector {:?} declares authKind oauth but has no `oauth:` block",
+                "connector {:?} declares no sign-in method, so it could never be connected",
                 self.id
             ));
-        };
-        match oauth.flow {
-            OauthFlow::Device if oauth.device_authorization_endpoint.is_none() => Err(format!(
-                "connector {:?} uses the oauth device flow but has no `deviceAuthorizationEndpoint`",
-                self.id
-            )),
-            OauthFlow::Pkce if oauth.authorization_endpoint.is_none() => Err(format!(
-                "connector {:?} uses the oauth pkce flow but has no `authorizationEndpoint`",
-                self.id
-            )),
-            _ => Ok(()),
         }
+        for method in &self.methods {
+            method.validate(&self.id)?;
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for method in &self.methods {
+            if !seen.insert(method.env_var()) {
+                return Err(format!(
+                    "connector {:?} has two sign-in methods writing {:?}, which a workload could not tell apart",
+                    self.id,
+                    method.env_var()
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -356,15 +456,15 @@ mod tests {
         Connector {
             id: "examplepkce".into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![route("api.examplepkce.com")],
-            credential: None,
-            oauth: Some(pkce_oauth_auth(
-                "EXAMPLEPKCE_TOKEN",
-                "examplepkce_LNSPLACEHOLDER0000",
-                "api.examplepkce.com",
-            )),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "pkce",
+                pkce_oauth_auth(
+                    "EXAMPLEPKCE_TOKEN",
+                    "examplepkce_LNSPLACEHOLDER0000",
+                    "api.examplepkce.com",
+                ),
+            )],
         }
     }
 
@@ -378,19 +478,108 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_connector_may_carry_several_sign_in_methods() {
+        let yaml = r#"
+connectors:
+  - id: some-multi
+    name: Some Multi
+    routes:
+      - match: api.some-multi.example
+    methods:
+      - id: api-key
+        name: API key
+        kind: credential
+        credential:
+          envVar: SOME_TOKEN
+          placeholder: some-LNSPLACEHOLDER0000
+          injections:
+            - kind: bearer_header
+              domain: api.some-multi.example
+      - id: subscription
+        name: Subscription
+        kind: credential
+        credential:
+          envVar: SOME_OTHER_TOKEN
+          placeholder: some-other-LNSPLACEHOLDER0000
+          injections:
+            - kind: bearer_header
+              domain: api.some-multi.example
+"#;
+        let catalog: Catalog = serde_yaml::from_str(yaml).expect("a methods list parses");
+        catalog.validate().expect("two methods is consistent");
+        let methods = &catalog.connectors[0].methods;
+        assert_eq!(
+            methods.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["api-key", "subscription"],
+            "one connector owns the domain and offers the ways to sign in to it"
+        );
+        assert_eq!(
+            methods.iter().map(|m| m.env_var()).collect::<Vec<_>>(),
+            ["SOME_TOKEN", "SOME_OTHER_TOKEN"],
+            "each method carries its own env var, which is what a tool branches on"
+        );
+    }
+
+    #[test]
+    fn a_connector_with_no_sign_in_method_is_rejected() {
+        let yaml = r#"
+connectors:
+  - id: some-empty
+    routes:
+      - match: api.some-empty.example
+    methods: []
+"#;
+        let catalog: Catalog = serde_yaml::from_str(yaml).expect("an empty methods list parses");
+        let err = catalog
+            .validate()
+            .expect_err("a connector with no way to sign in can never be connected");
+        assert!(
+            err.contains("some-empty"),
+            "the refusal must name the connector: {err}"
+        );
+    }
+
+    #[test]
+    fn two_methods_sharing_one_env_var_are_rejected() {
+        let yaml = r#"
+connectors:
+  - id: some-clash
+    routes:
+      - match: api.some-clash.example
+    methods:
+      - id: first
+        kind: credential
+        credential:
+          envVar: SOME_TOKEN
+          placeholder: first-LNSPLACEHOLDER0000
+          injections: []
+      - id: second
+        kind: credential
+        credential:
+          envVar: SOME_TOKEN
+          placeholder: second-LNSPLACEHOLDER0000
+          injections: []
+"#;
+        let catalog: Catalog = serde_yaml::from_str(yaml).expect("the clash parses");
+        let err = catalog
+            .validate()
+            .expect_err("two methods writing one env var could never be told apart");
+        assert!(
+            err.contains("SOME_TOKEN"),
+            "the refusal must name the variable: {err}"
+        );
+    }
+
     fn sample_connector() -> Connector {
         Connector {
             id: "acme".into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: vec![route("api.acme.corp")],
-            credential: Some(credential(
-                "ACME_API_KEY",
-                "acme_LNSPLACEHOLDER0000",
-                "api.acme.corp",
-            )),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "api-key",
+                credential("ACME_API_KEY", "acme_LNSPLACEHOLDER0000", "api.acme.corp"),
+            )],
         }
     }
 
@@ -398,15 +587,15 @@ mod tests {
         Connector {
             id: "examplehub".into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![route("api.examplehub.com")],
-            credential: None,
-            oauth: Some(oauth_auth(
-                "EXAMPLEHUB_TOKEN",
-                "examplehub_LNSPLACEHOLDER0000",
-                "api.examplehub.com",
-            )),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                oauth_auth(
+                    "EXAMPLEHUB_TOKEN",
+                    "examplehub_LNSPLACEHOLDER0000",
+                    "api.examplehub.com",
+                ),
+            )],
         }
     }
 
@@ -510,7 +699,7 @@ mod tests {
     fn credential_connector_round_trips_with_a_named_credential_block() {
         let i = sample_connector();
         let yaml = serde_yaml::to_string(&i).unwrap();
-        assert!(yaml.contains("authKind: credential"), "got: {yaml}");
+        assert!(yaml.contains("kind: credential"), "got: {yaml}");
         assert!(yaml.contains("credential:"), "got: {yaml}");
         assert!(yaml.contains("envVar: ACME_API_KEY"), "got: {yaml}");
         let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
@@ -521,7 +710,7 @@ mod tests {
     fn an_oauth_connector_round_trips_with_an_oauth_block_and_no_credential_block() {
         let i = oauth_connector();
         let yaml = serde_yaml::to_string(&i).unwrap();
-        assert!(yaml.contains("authKind: oauth"), "got: {yaml}");
+        assert!(yaml.contains("kind: oauth"), "got: {yaml}");
         assert!(yaml.contains("oauth:"), "got: {yaml}");
         assert!(yaml.contains("clientId:"), "got: {yaml}");
         assert!(yaml.contains("deviceAuthorizationEndpoint:"), "got: {yaml}");
@@ -536,7 +725,7 @@ mod tests {
     #[test]
     fn an_oauth_connector_round_trips_an_optional_client_secret() {
         let mut i = oauth_connector();
-        i.oauth.as_mut().unwrap().client_secret = Some("some-client-secret".into());
+        i.methods[0].oauth.as_mut().unwrap().client_secret = Some("some-client-secret".into());
         let yaml = serde_yaml::to_string(&i).unwrap();
         assert!(
             yaml.contains("clientSecret: some-client-secret"),
@@ -589,7 +778,7 @@ mod tests {
     #[test]
     fn an_connector_round_trips_its_optional_token_fallback_with_a_help_url() {
         let mut i = oauth_connector();
-        i.token_fallback = Some(TokenFallback {
+        i.methods[0].token_fallback = Some(TokenFallback {
             help: Some("https://example.com/tokens/new".into()),
             command: None,
         });
@@ -606,7 +795,7 @@ mod tests {
     #[test]
     fn a_token_fallback_round_trips_with_no_help() {
         let mut i = oauth_connector();
-        i.token_fallback = Some(TokenFallback {
+        i.methods[0].token_fallback = Some(TokenFallback {
             help: None,
             command: None,
         });
@@ -634,11 +823,15 @@ mod tests {
         let bad = Connector {
             id: "x".into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: Vec::new(),
-            credential: None,
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod {
+                id: "api-key".into(),
+                name: None,
+                kind: AuthKind::Credential,
+                credential: None,
+                oauth: None,
+                token_fallback: None,
+            }],
         };
         let err = bad.validate().unwrap_err();
         assert!(err.contains("credential"), "got: {err}");
@@ -654,11 +847,15 @@ mod tests {
         let bad = Connector {
             id: "x".into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: Vec::new(),
-            credential: None,
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod {
+                id: "device".into(),
+                name: None,
+                kind: AuthKind::Oauth,
+                credential: None,
+                oauth: None,
+                token_fallback: None,
+            }],
         };
         let err = bad.validate().unwrap_err();
         assert!(err.contains("oauth"), "got: {err}");
@@ -677,7 +874,10 @@ mod tests {
             "the default device flow must not serialize: {yaml}"
         );
         let parsed: Connector = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.oauth.unwrap().flow, OauthFlow::Device);
+        assert_eq!(
+            parsed.methods[0].oauth.as_ref().unwrap().flow,
+            OauthFlow::Device
+        );
     }
 
     #[test]
@@ -710,7 +910,7 @@ mod tests {
     #[test]
     fn validate_rejects_a_pkce_oauth_connector_missing_its_authorization_endpoint() {
         let mut i = pkce_connector();
-        i.oauth.as_mut().unwrap().authorization_endpoint = None;
+        i.methods[0].oauth.as_mut().unwrap().authorization_endpoint = None;
         let err = i.validate().unwrap_err();
         assert!(err.contains("authorizationEndpoint"), "got: {err}");
     }
@@ -718,7 +918,11 @@ mod tests {
     #[test]
     fn validate_rejects_a_device_oauth_connector_missing_its_device_authorization_endpoint() {
         let mut i = oauth_connector();
-        i.oauth.as_mut().unwrap().device_authorization_endpoint = None;
+        i.methods[0]
+            .oauth
+            .as_mut()
+            .unwrap()
+            .device_authorization_endpoint = None;
         let err = i.validate().unwrap_err();
         assert!(err.contains("deviceAuthorizationEndpoint"), "got: {err}");
     }
@@ -749,7 +953,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "openai")
             .expect("openai is bundled");
-        let cred = openai.credential.as_ref().unwrap();
+        let cred = openai.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "OPENAI_API_KEY");
         assert!(
             cred.injections
@@ -766,7 +970,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "anthropic")
             .expect("anthropic is bundled");
-        let cred = anthropic.credential.as_ref().unwrap();
+        let cred = anthropic.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "ANTHROPIC_API_KEY");
         assert!(
             cred.injections
@@ -787,13 +991,18 @@ mod tests {
     }
 
     #[test]
-    fn bundled_claude_code_subscription_bearer_injects_an_oat01_token_on_the_anthropic_api() {
+    fn bundled_anthropic_offers_a_subscription_method_injecting_an_oat01_token() {
         let integ = bundled_connectors()
             .iter()
-            .find(|i| i.id == "claude-code-subscription")
-            .expect("claude-code-subscription is bundled");
-        assert_eq!(integ.auth_kind, AuthKind::Credential);
-        let cred = integ.credential.as_ref().unwrap();
+            .find(|i| i.id == "anthropic")
+            .expect("anthropic is bundled");
+        let method = integ
+            .methods
+            .iter()
+            .find(|m| m.id == "claude-code-subscription")
+            .expect("the subscription is a sign-in method of anthropic, not its own connector");
+        assert_eq!(method.kind, AuthKind::Credential);
+        let cred = method.credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "CLAUDE_CODE_OAUTH_TOKEN");
         assert!(
             cred.placeholder.starts_with("sk-ant-oat01-"),
@@ -808,7 +1017,7 @@ mod tests {
             cred.injections
         );
         assert_eq!(
-            integ
+            method
                 .token_fallback
                 .as_ref()
                 .and_then(|f| f.command.as_deref()),
@@ -823,8 +1032,8 @@ mod tests {
             .iter()
             .find(|i| i.id == "bedrock")
             .expect("bedrock is bundled");
-        assert_eq!(bedrock.auth_kind, AuthKind::Credential);
-        let cred = bedrock.credential.as_ref().unwrap();
+        assert_eq!(bedrock.methods[0].kind, AuthKind::Credential);
+        let cred = bedrock.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "AWS_BEARER_TOKEN_BEDROCK");
         for domain in ["bedrock-runtime.*.amazonaws.com", "bedrock.*.amazonaws.com"] {
             assert!(
@@ -843,7 +1052,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "linear")
             .expect("linear is bundled");
-        let cred = linear.credential.as_ref().unwrap();
+        let cred = linear.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "LINEAR_API_KEY");
         assert!(
             cred.injections
@@ -860,7 +1069,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "telegram")
             .expect("telegram is bundled");
-        let cred = telegram.credential.as_ref().unwrap();
+        let cred = telegram.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "TELEGRAM_BOT_TOKEN");
         assert!(
             cred.injections
@@ -884,7 +1093,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "gitlab")
             .expect("gitlab is bundled");
-        let injections = &gitlab.credential.as_ref().unwrap().injections;
+        let injections = &gitlab.methods[0].credential.as_ref().unwrap().injections;
         assert!(
             injections
                 .iter()
@@ -905,20 +1114,15 @@ mod tests {
     fn every_bundled_connector_is_valid_with_a_self_identifying_placeholder_and_routes() {
         for i in bundled_connectors() {
             assert!(i.validate().is_ok(), "{} is inconsistent", i.id);
-            let placeholder = match i.auth_kind {
-                AuthKind::Credential => {
-                    &i.credential
-                        .as_ref()
-                        .expect("credential block present")
-                        .placeholder
-                }
-                AuthKind::Oauth => &i.oauth.as_ref().expect("oauth block present").placeholder,
-            };
-            assert!(
-                crate::providers::is_self_identifying(placeholder),
-                "{} placeholder must self-identify: {placeholder}",
-                i.id,
-            );
+            for method in &i.methods {
+                let placeholder = method.placeholder();
+                assert!(
+                    crate::providers::is_self_identifying(placeholder),
+                    "{} method {} placeholder must self-identify: {placeholder}",
+                    i.id,
+                    method.id,
+                );
+            }
             assert!(
                 !i.routes.is_empty(),
                 "{} must declare the routes it needs",
@@ -933,8 +1137,8 @@ mod tests {
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
-        assert_eq!(gh.auth_kind, AuthKind::Oauth);
-        let oauth = gh.oauth.as_ref().expect("oauth block present");
+        assert_eq!(gh.methods[0].kind, AuthKind::Oauth);
+        let oauth = gh.methods[0].oauth.as_ref().expect("oauth block present");
         assert_eq!(oauth.env_var, "GH_TOKEN");
         assert!(
             oauth
@@ -960,7 +1164,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
-        let oauth = gh.oauth.as_ref().expect("oauth block present");
+        let oauth = gh.methods[0].oauth.as_ref().expect("oauth block present");
         assert_eq!(
             oauth.userinfo_endpoint.as_deref(),
             Some("https://api.github.com/user")
@@ -978,7 +1182,7 @@ mod tests {
             .iter()
             .find(|i| i.id == "github")
             .expect("github is bundled");
-        let fallback = gh
+        let fallback = gh.methods[0]
             .token_fallback
             .as_ref()
             .expect("github must offer a token fallback for SSO/approval-gated orgs");
@@ -998,8 +1202,8 @@ mod tests {
             .iter()
             .find(|i| i.id == "openrouter")
             .expect("openrouter is bundled");
-        assert_eq!(or.auth_kind, AuthKind::Oauth);
-        let oauth = or.oauth.as_ref().expect("oauth block present");
+        assert_eq!(or.methods[0].kind, AuthKind::Oauth);
+        let oauth = or.methods[0].oauth.as_ref().expect("oauth block present");
         assert_eq!(
             oauth.flow,
             OauthFlow::Pkce,
@@ -1035,8 +1239,11 @@ mod tests {
             .iter()
             .find(|i| i.id == "google")
             .expect("google is bundled");
-        assert_eq!(google.auth_kind, AuthKind::Oauth);
-        let oauth = google.oauth.as_ref().expect("oauth block present");
+        assert_eq!(google.methods[0].kind, AuthKind::Oauth);
+        let oauth = google.methods[0]
+            .oauth
+            .as_ref()
+            .expect("oauth block present");
         assert_eq!(oauth.flow, OauthFlow::Device);
         assert_eq!(oauth.env_var, "GOOGLE_OAUTH_ACCESS_TOKEN");
         assert_eq!(
@@ -1056,14 +1263,12 @@ mod tests {
             "Google APIs take Authorization: Bearer, got: {:?}",
             oauth.injections
         );
+        let fallback = google.methods[0].token_fallback.as_ref();
         assert!(
-            google
-                .token_fallback
-                .as_ref()
+            fallback
                 .and_then(|f| f.help.as_deref())
                 .is_some_and(|h| h.starts_with("https://")),
-            "an unconfigured build must let the user pivot to a pasted token, got: {:?}",
-            google.token_fallback
+            "an unconfigured build must let the user pivot to a pasted token, got: {fallback:?}"
         );
     }
 
@@ -1113,7 +1318,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "bundled connector catalog must be internally consistent")]
     fn parse_catalog_panics_on_a_credential_entry_missing_its_block() {
-        parse_catalog("connectors:\n  - id: x\n    authKind: credential\n");
+        parse_catalog(
+            "connectors:\n  - id: x\n    methods:\n      - id: api-key\n        kind: credential\n",
+        );
     }
 
     #[test]
@@ -1250,7 +1457,10 @@ mod tests {
     fn effective_connectors_drops_a_user_entry_that_shadows_a_bundled_id() {
         let mut shadow = sample_connector();
         shadow.id = "gitlab".into();
-        shadow.credential = Some(credential("EVIL", "lns-evil", "gitlab.com"));
+        shadow.methods = vec![SignInMethod::credential(
+            "api-key",
+            credential("EVIL", "lns-evil", "gitlab.com"),
+        )];
         let user = Catalog {
             connectors: vec![shadow],
         };
@@ -1262,7 +1472,7 @@ mod tests {
         );
         let gitlab = eff.iter().find(|i| i.id == "gitlab").unwrap();
         assert_ne!(
-            gitlab.credential.as_ref().unwrap().env_var,
+            gitlab.methods[0].credential.as_ref().unwrap().env_var,
             "EVIL",
             "the bundled gitlab definition must win over a user shadow"
         );

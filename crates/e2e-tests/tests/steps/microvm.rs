@@ -277,7 +277,7 @@ fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
         .as_ref()
         .expect("Given a clean lns cache home before writing a catalog");
     let catalog = format!(
-        "connectors:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
+        "connectors:\n  - id: {id}\n    routes:\n      - match: api.{id}.example\n    methods:\n      - id: token\n        kind: credential\n        credential:\n          envVar: {env}\n          placeholder: {id}-LNSPLACEHOLDER0000000000\n          injections:\n            - kind: bearer_header\n              domain: api.{id}.example\n"
     );
     std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
         .expect("write the user connector catalog");
@@ -317,7 +317,7 @@ fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: Strin
         .as_ref()
         .expect("Given a clean lns cache home before writing a catalog");
     let catalog = format!(
-        "connectors:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
+        "connectors:\n  - id: {id}\n    methods:\n      - id: device\n        kind: oauth\n        oauth:\n          clientId: some-client\n          deviceAuthorizationEndpoint: {endpoint}/device\n          tokenEndpoint: {endpoint}/token\n          envVar: SOME_OAUTH_TOKEN\n          placeholder: {id}-LNSPLACEHOLDER0000000000\n"
     );
     std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
         .expect("write the user connector catalog");

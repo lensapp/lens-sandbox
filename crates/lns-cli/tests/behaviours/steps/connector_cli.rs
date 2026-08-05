@@ -105,7 +105,7 @@ async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
 #[given(regex = r#"^a user catalog declares the "([^"]+)" oauth connector$"#)]
 fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
     use lns_policy::connectors::{
-        AuthKind, Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow,
+        Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow, SignInMethod,
     };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let dir = cwd(world);
@@ -113,7 +113,6 @@ fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
         connectors: vec![Connector {
             id,
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
@@ -121,26 +120,27 @@ fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                flow: OauthFlow::Device,
-                client_id: Some("Iv1.some-oauth".into()),
-                client_secret: None,
-                scopes: vec!["repo".into()],
-                device_authorization_endpoint: Some("https://example.com/device/code".into()),
-                authorization_endpoint: None,
-                token_endpoint: "https://example.com/oauth/token".into(),
-                userinfo_endpoint: None,
-                account_field: None,
-                env_var: "SOME_OAUTH_TOKEN".into(),
-                placeholder: "some-oauth-placeholder-0000000000000000".into(),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: "api.some-oauth.example".into(),
-                    header: None,
-                }],
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                OauthAuth {
+                    flow: OauthFlow::Device,
+                    client_id: Some("Iv1.some-oauth".into()),
+                    client_secret: None,
+                    scopes: vec!["repo".into()],
+                    device_authorization_endpoint: Some("https://example.com/device/code".into()),
+                    authorization_endpoint: None,
+                    token_endpoint: "https://example.com/oauth/token".into(),
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    env_var: "SOME_OAUTH_TOKEN".into(),
+                    placeholder: "some-oauth-placeholder-0000000000000000".into(),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: "api.some-oauth.example".into(),
+                        header: None,
+                    }],
+                },
+            )],
         }],
     }
     .save_atomic(&dir.join(".lns-connectors.yaml"))
@@ -150,7 +150,7 @@ fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
 #[given(regex = r#"^a user catalog declares the "([^"]+)" pkce connector$"#)]
 fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
     use lns_policy::connectors::{
-        AuthKind, Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow,
+        Catalog, Connector, ConnectorRoute, OauthAuth, OauthFlow, SignInMethod,
     };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     world.signin_is_pkce = true;
@@ -159,7 +159,6 @@ fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
         connectors: vec![Connector {
             id,
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.some-pkce.example".into(),
                 transport: None,
@@ -167,26 +166,27 @@ fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                flow: OauthFlow::Pkce,
-                client_id: None,
-                client_secret: None,
-                scopes: Vec::new(),
-                device_authorization_endpoint: None,
-                authorization_endpoint: Some("https://api.some-pkce.example/auth".into()),
-                token_endpoint: "https://api.some-pkce.example/api/v1/auth/keys".into(),
-                userinfo_endpoint: None,
-                account_field: None,
-                env_var: "SOME_PKCE_TOKEN".into(),
-                placeholder: "some-pkce-LNSPLACEHOLDER0000000000000000".into(),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: "api.some-pkce.example".into(),
-                    header: None,
-                }],
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                OauthAuth {
+                    flow: OauthFlow::Pkce,
+                    client_id: None,
+                    client_secret: None,
+                    scopes: Vec::new(),
+                    device_authorization_endpoint: None,
+                    authorization_endpoint: Some("https://api.some-pkce.example/auth".into()),
+                    token_endpoint: "https://api.some-pkce.example/api/v1/auth/keys".into(),
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    env_var: "SOME_PKCE_TOKEN".into(),
+                    placeholder: "some-pkce-LNSPLACEHOLDER0000000000000000".into(),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: "api.some-pkce.example".into(),
+                        header: None,
+                    }],
+                },
+            )],
         }],
     }
     .save_atomic(&dir.join(".lns-connectors.yaml"))
@@ -194,14 +194,15 @@ fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
 }
 
 fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
-    use lns_policy::connectors::{AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth};
+    use lns_policy::connectors::{
+        Catalog, Connector, ConnectorRoute, CredentialAuth, SignInMethod,
+    };
     use lns_policy::providers::{InjectionDef, InjectionKind};
     let dir = cwd(world);
     Catalog {
         connectors: vec![Connector {
             id: id.clone(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: vec![ConnectorRoute {
                 match_pattern: format!("api.{id}.example"),
                 transport: None,
@@ -209,17 +210,18 @@ fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: Some(CredentialAuth {
-                env_var: "SOME_TOKEN".into(),
-                placeholder: format!("{id}-LNSPLACEHOLDER0000000000"),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: format!("api.{id}.example"),
-                    header: None,
-                }],
-            }),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "token",
+                CredentialAuth {
+                    env_var: "SOME_TOKEN".into(),
+                    placeholder: format!("{id}-LNSPLACEHOLDER0000000000"),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: format!("api.{id}.example"),
+                        header: None,
+                    }],
+                },
+            )],
         }],
     }
     .save_atomic(&dir.join(".lns-connectors.yaml"))

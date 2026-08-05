@@ -50,12 +50,13 @@ pub fn plan_declared_connectors(
         .iter()
         .filter_map(|id| catalog.iter().find(|integ| &integ.id == id))
         .map(|integ| {
-            let (env, placeholder) = match (&integ.oauth, &integ.credential) {
-                (Some(o), _) => (o.env_var.clone(), o.placeholder.clone()),
-                (None, Some(c)) => (c.env_var.clone(), c.placeholder.clone()),
-                (None, None) => (String::new(), String::new()),
-            };
-            if integ.auth_kind == AuthKind::Oauth && !has_armed_entry(state, &integ.id) {
+            let method = integ.default_method();
+            let env = method.map(|m| m.env_var().to_string()).unwrap_or_default();
+            let placeholder = method
+                .map(|m| m.placeholder().to_string())
+                .unwrap_or_default();
+            let signs_in = method.is_some_and(|m| m.kind == AuthKind::Oauth);
+            if signs_in && !has_armed_entry(state, &integ.id) {
                 SlotPlan::Connect(ConnectPrompt {
                     connector: integ.id.clone(),
                     env,
@@ -155,7 +156,10 @@ pub fn gate_required_slots(
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
             continue;
         };
-        if integ.auth_kind == AuthKind::Oauth {
+        if integ
+            .default_method()
+            .is_some_and(|m| m.kind == AuthKind::Oauth)
+        {
             continue;
         }
         if binds_for_launch(state, &slot.name) {
@@ -179,6 +183,7 @@ pub fn gate_required_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::connectors::SignInMethod;
 
     fn slot(required: bool) -> CredentialSlot {
         CredentialSlot {
@@ -192,24 +197,26 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: Vec::new(),
-            credential: None,
-            oauth: Some(lns_policy::connectors::OauthAuth {
-                flow: lns_policy::connectors::OauthFlow::Device,
-                client_id: Some("some-client".into()),
-                client_secret: None,
-                scopes: Vec::new(),
-                device_authorization_endpoint: Some("https://api.some-oauth.example/device".into()),
-                authorization_endpoint: None,
-                token_endpoint: "https://api.some-oauth.example/token".into(),
-                userinfo_endpoint: None,
-                account_field: None,
-                env_var: env.into(),
-                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-                injections: Vec::new(),
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                lns_policy::connectors::OauthAuth {
+                    flow: lns_policy::connectors::OauthFlow::Device,
+                    client_id: Some("some-client".into()),
+                    client_secret: None,
+                    scopes: Vec::new(),
+                    device_authorization_endpoint: Some(
+                        "https://api.some-oauth.example/device".into(),
+                    ),
+                    authorization_endpoint: None,
+                    token_endpoint: "https://api.some-oauth.example/token".into(),
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    env_var: env.into(),
+                    placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                    injections: Vec::new(),
+                },
+            )],
         }
     }
 
@@ -217,15 +224,15 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: Vec::new(),
-            credential: Some(lns_policy::connectors::CredentialAuth {
-                env_var: env.into(),
-                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-                injections: Vec::new(),
-            }),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "token",
+                lns_policy::connectors::CredentialAuth {
+                    env_var: env.into(),
+                    placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                    injections: Vec::new(),
+                },
+            )],
         }
     }
 
@@ -289,11 +296,15 @@ mod tests {
         let catalog = vec![Connector {
             id: "some-blockless".into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: Vec::new(),
-            credential: None,
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod {
+                id: "token".into(),
+                name: None,
+                kind: AuthKind::Credential,
+                credential: None,
+                oauth: None,
+                token_fallback: None,
+            }],
         }];
         let plans = plan_declared_connectors(
             &["some-blockless".to_string()],

@@ -147,32 +147,50 @@ The bundled and user catalogs share one schema, so an entry is portable between 
 ```yaml
 connectors:
   - id: gitlab
-    authKind: credential
     routes:
       - match: gitlab.com
-    credential:
-      envVar: GITLAB_TOKEN
-      placeholder: glpat-LNSPLACEHOLDER0000000000000000
-      injections:
-        - kind: api_key_header
-          domain: gitlab.com
-          header: PRIVATE-TOKEN
-        - kind: bearer_header
-          domain: gitlab.com
+    methods:
+      - id: token
+        kind: credential
+        credential:
+          envVar: GITLAB_TOKEN
+          placeholder: glpat-LNSPLACEHOLDER0000000000000000
+          injections:
+            - kind: api_key_header
+              domain: gitlab.com
+              header: PRIVATE-TOKEN
+            - kind: bearer_header
+              domain: gitlab.com
 ```
 
-An entry may list several injections so one credential reaches a service however its
+A connector owns its domain and lists under `methods:` the ways to sign in to it. A
+method may list several injections so one credential reaches a service however its
 clients send it — here both the `PRIVATE-TOKEN` header `glab` uses and the
 `Authorization: Bearer` form OAuth-style clients send.
 
 A route may carry the same detail a [policy rule](policy.md#rules) can — a `scheme`
 and HTTP method/path `rules` for least-privilege access — beyond the bare `match`.
 
-`authKind` is `credential` or `oauth`. An `oauth` connector authenticates by an
+### Sign-in methods
+
+Most connectors have one method. Some services accept more than one kind of
+credential, and then the connector carries one method per kind. The bundled
+`anthropic` connector is the example: an API key on `ANTHROPIC_API_KEY`, or a Claude
+Code subscription token on `CLAUDE_CODE_OAUTH_TOKEN`. Both reach the same
+`api.anthropic.com`, so both belong to the same connector rather than competing for
+the domain.
+
+Two rules keep a connector honest, and the catalog refuses to load if either breaks:
+
+- A connector must declare at least one method, or nothing could ever connect it.
+- No two methods may write the same environment variable, because a workload reading
+  that variable could not tell which sign-in it got.
+
+Each method's `kind` is `credential` or `oauth`. An `oauth` method authenticates by an
 interactive **sign-in** the background service drives for you — `lns connector
 connect <id>` walks you through it and records the connector only once it completes,
 and the obtained credential is injected at the boundary like any other, stored per
-machine and never in `lns-policy.yaml`. An `oauth` entry carries an `oauth:` block (in
+machine and never in `lns-policy.yaml`. An `oauth` method carries an `oauth:` block (in
 place of `credential:`) whose `flow` selects one of two shapes:
 
 - **`flow: device`** (RFC 8628, the default) — `connect` prints a verification URL and

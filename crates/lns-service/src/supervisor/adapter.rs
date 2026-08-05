@@ -740,12 +740,16 @@ pub(super) async fn start(
         .collect();
     let oauth_display_names: HashMap<String, String> = catalog
         .iter()
-        .filter(|i| i.oauth.is_some())
+        .filter(|i| i.default_method().is_some_and(|m| m.oauth.is_some()))
         .map(|i| (i.id.clone(), i.display_name().to_string()))
         .collect();
     let token_fallbacks: HashMap<String, lns_policy::connectors::TokenFallback> = catalog
         .iter()
-        .filter_map(|i| i.token_fallback.clone().map(|tf| (i.id.clone(), tf)))
+        .filter_map(|i| {
+            i.default_method()
+                .and_then(|m| m.token_fallback.clone())
+                .map(|tf| (i.id.clone(), tf))
+        })
         .collect();
     let (credential_session, credential_watcher) = start_credential_subsystem(
         session.clone(),
@@ -1565,22 +1569,22 @@ mod tests {
 
     #[test]
     fn load_user_catalog_or_warn_reads_an_existing_user_catalog() {
-        use lns_policy::connectors::{AuthKind, Catalog, Connector, CredentialAuth};
+        use lns_policy::connectors::{Catalog, Connector, CredentialAuth, SignInMethod};
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join(".lns-connectors.yaml");
         Catalog {
             connectors: vec![Connector {
                 id: "acme".into(),
                 name: None,
-                auth_kind: AuthKind::Credential,
                 routes: Vec::new(),
-                credential: Some(CredentialAuth {
-                    env_var: "ACME_API_KEY".into(),
-                    placeholder: "acme_LNSPLACEHOLDER".into(),
-                    injections: Vec::new(),
-                }),
-                oauth: None,
-                token_fallback: None,
+                methods: vec![SignInMethod::credential(
+                    "token",
+                    CredentialAuth {
+                        env_var: "ACME_API_KEY".into(),
+                        placeholder: "acme_LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    },
+                )],
             }],
         }
         .save_atomic(&path)
@@ -1935,11 +1939,10 @@ mod tests {
 
     #[test]
     fn make_connector_route_deriver_maps_connected_ids_to_catalog_routes() {
-        use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute};
+        use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute, SignInMethod};
         let catalog = vec![Connector {
             id: "some-oauth".into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
@@ -1947,9 +1950,14 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod {
+                id: "device".into(),
+                name: None,
+                kind: AuthKind::Oauth,
+                credential: None,
+                oauth: None,
+                token_fallback: None,
+            }],
         }];
         let derive = make_connector_route_deriver(catalog);
         let routes = derive(&["some-oauth".to_string()]);
@@ -1964,12 +1972,11 @@ mod tests {
     #[test]
     fn build_offerable_pairs_id_display_name_route_patterns_and_token_fallback() {
         use lns_policy::connectors::{
-            AuthKind, Connector, ConnectorRoute, OauthAuth, TokenFallback,
+            Connector, ConnectorRoute, OauthAuth, SignInMethod, TokenFallback,
         };
         let catalog = vec![Connector {
             id: "some-oauth".into(),
             name: Some("GitHub".into()),
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.some-oauth.example".into(),
                 transport: None,
@@ -1977,25 +1984,31 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                userinfo_endpoint: None,
-                account_field: None,
-                flow: lns_policy::connectors::OauthFlow::Device,
-                client_id: Some("Iv1.x".into()),
-                client_secret: None,
-                scopes: vec![],
-                device_authorization_endpoint: Some("https://example.com/device/code".into()),
-                authorization_endpoint: None,
-                token_endpoint: "https://example.com/oauth/token".into(),
-                env_var: "SOME_OAUTH_TOKEN".into(),
-                placeholder: "some-oauth-placeholder".into(),
-                injections: Vec::new(),
-            }),
-            token_fallback: Some(TokenFallback {
-                help: Some("https://example.com/pat".into()),
-                command: None,
-            }),
+            methods: vec![
+                SignInMethod::oauth(
+                    "device",
+                    OauthAuth {
+                        userinfo_endpoint: None,
+                        account_field: None,
+                        flow: lns_policy::connectors::OauthFlow::Device,
+                        client_id: Some("Iv1.x".into()),
+                        client_secret: None,
+                        scopes: vec![],
+                        device_authorization_endpoint: Some(
+                            "https://example.com/device/code".into(),
+                        ),
+                        authorization_endpoint: None,
+                        token_endpoint: "https://example.com/oauth/token".into(),
+                        env_var: "SOME_OAUTH_TOKEN".into(),
+                        placeholder: "some-oauth-placeholder".into(),
+                        injections: Vec::new(),
+                    },
+                )
+                .with_token_fallback(TokenFallback {
+                    help: Some("https://example.com/pat".into()),
+                    command: None,
+                }),
+            ],
         }];
         let connectable = crate::credential_flow::connectors::resolve_connectable_connectors(
             &Policy::default(),
@@ -2117,7 +2130,7 @@ mod tests {
 
     #[test]
     fn the_policy_withholder_re_reads_the_sidecar_so_an_in_run_decline_frees_the_rule() {
-        use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute, CredentialAuth};
+        use lns_policy::connectors::{Connector, ConnectorRoute, CredentialAuth, SignInMethod};
         use lns_policy::providers::{InjectionDef, InjectionKind};
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("grants.json");
@@ -2128,7 +2141,6 @@ mod tests {
         let connector = Connector {
             id: "acme".into(),
             name: None,
-            auth_kind: AuthKind::Credential,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.acme.corp".into(),
                 transport: None,
@@ -2136,17 +2148,18 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: Some(CredentialAuth {
-                env_var: "ACME_API_KEY".into(),
-                placeholder: "acme_LNSPLACEHOLDER".into(),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: "api.acme.corp".into(),
-                    header: None,
-                }],
-            }),
-            oauth: None,
-            token_fallback: None,
+            methods: vec![SignInMethod::credential(
+                "token",
+                CredentialAuth {
+                    env_var: "ACME_API_KEY".into(),
+                    placeholder: "acme_LNSPLACEHOLDER".into(),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: "api.acme.corp".into(),
+                        header: None,
+                    }],
+                },
+            )],
         };
         let withhold = make_policy_withholder(
             vec![connector.clone()],

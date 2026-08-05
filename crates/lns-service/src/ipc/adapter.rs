@@ -346,7 +346,8 @@ pub(crate) async fn run_connector_sign_in(
     let Some(oauth) = catalog
         .iter()
         .find(|i| i.id == id)
-        .and_then(|i| i.oauth.as_ref())
+        .and_then(|i| i.default_method())
+        .and_then(|m| m.oauth.as_ref())
     else {
         return Response::OauthSignInFailed {
             reason: format!("{id:?} is not an oauth connector"),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
-use lns_policy::connectors::{AuthKind, Connector, ConnectorRoute, CredentialAuth};
+use lns_policy::connectors::{Connector, ConnectorRoute, CredentialAuth, SignInMethod};
 use lns_policy::grants::{GrantRecord, WorkloadIdentity};
 use lns_policy::matching::domain_matches;
 use lns_policy::providers::{InjectionDef, InjectionKind};
@@ -41,7 +41,6 @@ fn catalog_claims(w: &mut BehaviourWorld, host: String, id: String, env: String)
     rig(w).catalog.push(Connector {
         id: id.clone(),
         name: None,
-        auth_kind: AuthKind::Credential,
         routes: vec![ConnectorRoute {
             match_pattern: host.clone(),
             transport: None,
@@ -49,17 +48,18 @@ fn catalog_claims(w: &mut BehaviourWorld, host: String, id: String, env: String)
             tls_terminate: false,
             rules: Vec::new(),
         }],
-        credential: Some(CredentialAuth {
-            env_var: env,
-            placeholder: format!("{id}-LNSPLACEHOLDER0000"),
-            injections: vec![InjectionDef {
-                kind: InjectionKind::BearerHeader,
-                domain: host,
-                header: None,
-            }],
-        }),
-        oauth: None,
-        token_fallback: None,
+        methods: vec![SignInMethod::credential(
+            "token",
+            CredentialAuth {
+                env_var: env,
+                placeholder: format!("{id}-LNSPLACEHOLDER0000"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: host,
+                    header: None,
+                }],
+            },
+        )],
     });
 }
 

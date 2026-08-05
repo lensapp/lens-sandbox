@@ -10,7 +10,7 @@ hosts you allow.
 - **`lns.yaml`** — the sandbox definition: a slim Debian base with node declared
   under `spec.tools` (provisioned once per machine by the service, outside the
   policy cage), a first-boot install of Claude Code itself, the network
-  allowlist, the `claude-code-subscription` connector, and inline seed state
+  allowlist, the `anthropic` connector, and inline seed state
   mounted at the workload's home (`/home/sandbox`). The inline `.claude.json` skips onboarding
   and pre-accepts the `/workspace` trust dialog. The inline
   `.claude/settings.json` runs Claude in `bypassPermissions` and turns **off

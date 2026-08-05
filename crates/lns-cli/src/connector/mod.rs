@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use lns_policy::Policy;
 use lns_policy::connectors::{
-    AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, bundled_connectors,
+    AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, SignInMethod, bundled_connectors,
     effective_connectors,
 };
 use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, JsonFileGrantStore, project_key};
@@ -270,15 +270,15 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     catalog.connectors.push(Connector {
         id: args.id.clone(),
         name: None,
-        auth_kind: AuthKind::Credential,
         routes,
-        credential: Some(CredentialAuth {
-            env_var: args.env_var.clone(),
-            placeholder,
-            injections: args.inject.clone(),
-        }),
-        oauth: None,
-        token_fallback: None,
+        methods: vec![SignInMethod::credential(
+            "token",
+            CredentialAuth {
+                env_var: args.env_var.clone(),
+                placeholder,
+                injections: args.inject.clone(),
+            },
+        )],
     });
     catalog
         .save_atomic(catalog_path)
@@ -322,7 +322,10 @@ impl ConnectorRow {
         Self {
             id: connector.id.clone(),
             source,
-            auth_kind: kind_word(connector.auth_kind),
+            auth_kind: connector
+                .sole_method()
+                .map(|m| kind_word(m.kind))
+                .unwrap_or("multiple"),
         }
     }
 }
@@ -370,7 +373,10 @@ pub async fn connect(
         bail!("unknown connector {:?}; see `lns connector list`", args.id);
     };
     // An oauth connector authenticates by an interactive sign-in; a credential connector binds its per-machine value decision through the approval-window card. Either way the id is recorded only on success.
-    let closing = if integ.auth_kind == AuthKind::Oauth {
+    let signs_in_interactively = integ
+        .sole_method()
+        .is_some_and(|m| m.kind == AuthKind::Oauth);
+    let closing = if signs_in_interactively {
         match signin.sign_in(&args.id, writer).await? {
             SignInOutcome::ServiceUnavailable => bail!(
                 "the background service must be running to sign in to {:?}; start it with `lns service start`",
@@ -714,7 +720,6 @@ mod tests {
         Connector {
             id: id.into(),
             name: None,
-            auth_kind: AuthKind::Oauth,
             routes: vec![ConnectorRoute {
                 match_pattern: "api.somesaas.com".into(),
                 transport: None,
@@ -722,28 +727,29 @@ mod tests {
                 tls_terminate: false,
                 rules: Vec::new(),
             }],
-            credential: None,
-            oauth: Some(OauthAuth {
-                flow: OauthFlow::Device,
-                client_id: Some("Iv1.somesaas".into()),
-                client_secret: None,
-                scopes: vec!["repo".into()],
-                device_authorization_endpoint: Some(
-                    "https://api.somesaas.com/login/device/code".into(),
-                ),
-                authorization_endpoint: None,
-                token_endpoint: "https://api.somesaas.com/login/oauth/access_token".into(),
-                userinfo_endpoint: None,
-                account_field: None,
-                env_var: "SOMESAAS_TOKEN".into(),
-                placeholder: "lns-somesaas-placeholder".into(),
-                injections: vec![InjectionDef {
-                    kind: InjectionKind::BearerHeader,
-                    domain: "api.somesaas.com".into(),
-                    header: None,
-                }],
-            }),
-            token_fallback: None,
+            methods: vec![SignInMethod::oauth(
+                "device",
+                OauthAuth {
+                    flow: OauthFlow::Device,
+                    client_id: Some("Iv1.somesaas".into()),
+                    client_secret: None,
+                    scopes: vec!["repo".into()],
+                    device_authorization_endpoint: Some(
+                        "https://api.somesaas.com/login/device/code".into(),
+                    ),
+                    authorization_endpoint: None,
+                    token_endpoint: "https://api.somesaas.com/login/oauth/access_token".into(),
+                    userinfo_endpoint: None,
+                    account_field: None,
+                    env_var: "SOMESAAS_TOKEN".into(),
+                    placeholder: "lns-somesaas-placeholder".into(),
+                    injections: vec![InjectionDef {
+                        kind: InjectionKind::BearerHeader,
+                        domain: "api.somesaas.com".into(),
+                        header: None,
+                    }],
+                },
+            )],
         }
     }
 
@@ -757,9 +763,9 @@ mod tests {
         assert_eq!(catalog.connectors.len(), 1);
         let acme = &catalog.connectors[0];
         assert_eq!(acme.id, "acme");
-        assert_eq!(acme.auth_kind, AuthKind::Credential);
+        assert_eq!(acme.methods[0].kind, AuthKind::Credential);
         assert_eq!(acme.routes[0].match_pattern, "api.acme.corp");
-        let cred = acme.credential.as_ref().unwrap();
+        let cred = acme.methods[0].credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "ACME_API_KEY");
         assert!(is_self_identifying(&cred.placeholder));
     }
@@ -772,7 +778,7 @@ mod tests {
         args.placeholder = Some("acme_LNSPLACEHOLDER".into());
         add(&args, &path, &mut Vec::new()).unwrap();
         assert_eq!(
-            load(&path).connectors[0]
+            load(&path).connectors[0].methods[0]
                 .credential
                 .as_ref()
                 .unwrap()
@@ -852,15 +858,15 @@ mod tests {
             vec![Connector {
                 id: "gitlab".into(),
                 name: None,
-                auth_kind: AuthKind::Credential,
                 routes: Vec::new(),
-                credential: Some(CredentialAuth {
-                    env_var: "EVIL".into(),
-                    placeholder: "lns-evil".into(),
-                    injections: Vec::new(),
-                }),
-                oauth: None,
-                token_fallback: None,
+                methods: vec![SignInMethod::credential(
+                    "token",
+                    CredentialAuth {
+                        env_var: "EVIL".into(),
+                        placeholder: "lns-evil".into(),
+                        injections: Vec::new(),
+                    },
+                )],
             }],
         );
         let mut out = Vec::new();
