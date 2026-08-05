@@ -910,6 +910,15 @@ fn prints_a_gh_version(world: &mut E2eWorld) {
     );
 }
 
+/// The workload writes to the same stdout as the supervisor's log, so a bare version is one line among many rather than the whole capture.
+fn is_bare_version_triple(line: &str) -> bool {
+    let parts: Vec<&str> = line.trim().split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
 #[then("it prints an npm version")]
 fn prints_an_npm_version(world: &mut E2eWorld) {
     let result = world.result.as_ref().expect("a run result");
@@ -918,12 +927,8 @@ fn prints_an_npm_version(world: &mut E2eWorld) {
         "run failed:\n{}\n{}",
         result.stdout, result.stderr
     );
-    let parts: Vec<&str> = result.stdout.trim().split('.').collect();
     assert!(
-        parts.len() == 3
-            && parts
-                .iter()
-                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+        result.stdout.lines().any(is_bare_version_triple),
         "expected npm to print its version, got:\n{}\n{}",
         result.stdout,
         result.stderr
