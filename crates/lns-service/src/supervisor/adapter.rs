@@ -421,6 +421,27 @@ fn make_policy_emitter(
     })
 }
 
+/// The policy the launch enforces, withheld against the sign-in state the launch itself holds rather than a re-read of disk — a boot sign-in whose grant could not be persisted still decides this run.
+#[allow(clippy::too_many_arguments)] // the launch's whole withholding input, threaded once so a test can compose it without booting
+fn boot_running_policy(
+    base: &Policy,
+    connector_routes: Vec<RouteRule>,
+    catalog: &[lns_policy::connectors::Connector],
+    offerable: &HashSet<String>,
+    project: &str,
+    workload: &WorkloadIdentity,
+    grants: &WorkloadGrantFile,
+    state: &CredentialStateFile,
+) -> Policy {
+    let chosen =
+        crate::credential_flow::connectors::machine_holds_sign_in(state, grants, project, workload);
+    crate::artifact::policy::compose_running_policy(base, connector_routes, &|policy| {
+        crate::credential_flow::connectors::withhold_undecided_connector_allows(
+            policy, catalog, offerable, project, workload, grants, &chosen,
+        )
+    })
+}
+
 /// The per-machine sign-in state a reload-time decision reads: both the credential values and the grant sidecar, re-read each call so a decision landed earlier in this run takes effect immediately. An unreadable file reads as "nothing held", which can only over-ask, never over-allow.
 fn sign_in_state_now(
     credential_store: &dyn CredentialStore,
@@ -713,7 +734,7 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let sandbox_credentials = consent.credentials;
     let workload = consent.workload;
-    let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
+    let policy = effective_running_policy(policy_path, sandbox_policy)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
@@ -747,10 +768,7 @@ pub(super) async fn start(
         &declared_connectors,
         &catalog,
     );
-    crate::artifact::policy::splice_connector_routes(
-        &mut policy.network.egress.http,
-        applied.routes,
-    );
+    let applied_routes = applied.routes;
     let offerable =
         crate::credential_flow::connectors::offerable_connectors(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
@@ -795,19 +813,15 @@ pub(super) async fn start(
 
     // An allow the user wrote for a connector's domain would let the first request past before the connector was ever offered, so it waits until this workload connects or declines.
     let offerable_ids: HashSet<String> = offerable.iter().map(|o| o.id.clone()).collect();
-    let policy = crate::credential_flow::connectors::withhold_undecided_connector_allows(
+    let policy = boot_running_policy(
         &policy,
+        applied_routes,
         &catalog,
         &offerable_ids,
         &project,
         &workload,
         &grants,
-        &crate::credential_flow::connectors::machine_holds_sign_in(
-            &credential_state,
-            &grants,
-            &project,
-            &workload,
-        ),
+        &credential_state,
     );
 
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
@@ -2005,6 +2019,56 @@ mod tests {
         let mut policy = Policy::default();
         policy.connect("acme");
         policy
+    }
+
+    #[test]
+    fn a_boot_sign_in_whose_grant_could_not_be_persisted_still_keeps_its_domains_allow() {
+        let workload = acme_workload();
+        let mut catalog = two_method_catalog();
+        catalog[0].routes = vec![lns_policy::connectors::ConnectorRoute {
+            match_pattern: "api.acme.corp".into(),
+            transport: None,
+            scheme: None,
+            tls_terminate: false,
+            rules: Vec::new(),
+        }];
+        // The sign-in connected it, so the policy lists it.
+        let mut policy = Policy::default();
+        policy.connect("acme");
+        policy.add_rule(RouteRule::allow_host("api.acme.corp"));
+        // The sidecar write failed, so the grant the sign-in earned lives only in this launch's snapshot.
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            &workload,
+            "acme:api-key",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+
+        let composed = boot_running_policy(
+            &policy,
+            Vec::new(),
+            &catalog,
+            &HashSet::from(["acme".to_string()]),
+            "proj",
+            &workload,
+            &grants,
+            &CredentialStateFile::new(),
+        );
+
+        let survivors: Vec<&str> = composed
+            .network
+            .egress
+            .http
+            .iter()
+            .map(|r| r.match_pattern.as_str())
+            .collect();
+        assert_eq!(
+            survivors,
+            vec!["api.acme.corp"],
+            "the developer just completed this sign-in, so withholding its domain would raise a card for the credential they already granted — a failed sidecar write must not decide the run"
+        );
     }
 
     #[test]

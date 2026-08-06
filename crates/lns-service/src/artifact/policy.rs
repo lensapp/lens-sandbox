@@ -186,6 +186,17 @@ fn merge_rule_table<R: Clone + PartialEq>(
     merged
 }
 
+/// One function, because a boot that composed this differently from a reload once handed back an allow the launch had withheld.
+pub fn compose_running_policy(
+    base: &Policy,
+    connector_routes: Vec<RouteRule>,
+    withhold: &dyn Fn(&Policy) -> Policy,
+) -> Policy {
+    let mut spliced = base.clone();
+    splice_connector_routes(&mut spliced.network.egress.http, connector_routes);
+    withhold(&spliced)
+}
+
 /// Adds a connector's derived rules ahead of any catch-all, since appended behind one they would never fire and a closed policy raises no card to say why.
 pub fn splice_connector_routes(
     table: &mut Vec<RouteRule>,
@@ -245,6 +256,37 @@ mod tests {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host(host));
         p
+    }
+
+    #[test]
+    fn compose_running_policy_withholds_from_the_spliced_policy_not_the_bare_base() {
+        let base = Policy::default();
+        let routes = vec![RouteRule::allow_host("api.some-provider.example")];
+        let seen = std::sync::Mutex::new(Vec::new());
+
+        let composed = compose_running_policy(&base, routes, &|policy| {
+            seen.lock().expect("seen mutex poisoned").extend(
+                policy
+                    .network
+                    .egress
+                    .http
+                    .iter()
+                    .map(|r| r.match_pattern.clone()),
+            );
+            let mut out = policy.clone();
+            out.network.egress.http.clear();
+            out
+        });
+
+        assert_eq!(
+            seen.into_inner().expect("seen mutex poisoned"),
+            vec!["api.some-provider.example".to_string()],
+            "the withholder must receive the spliced policy, not the bare base"
+        );
+        assert!(
+            composed.network.egress.http.is_empty(),
+            "the withholder's verdict is what the run enforces"
+        );
     }
 
     #[test]

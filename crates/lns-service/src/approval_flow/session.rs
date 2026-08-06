@@ -621,16 +621,23 @@ impl ApprovalSession {
         if let Some(floor) = self.policy_floor.get() {
             new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
         }
-        if let Some(derive) = self.connector_routes.get() {
-            let routes = derive(&new_policy.connectors);
-            crate::artifact::policy::splice_connector_routes(
-                &mut new_policy.network.egress.http,
-                routes,
-            );
-        }
-        if let Some(withhold) = self.policy_withholder.get() {
-            new_policy = withhold(&new_policy);
-        }
+        let routes = self
+            .connector_routes
+            .get()
+            .map(|derive| derive(&new_policy.connectors))
+            .unwrap_or_default();
+        new_policy = match self.policy_withholder.get() {
+            Some(withhold) => {
+                crate::artifact::policy::compose_running_policy(&new_policy, routes, withhold)
+            }
+            None => {
+                crate::artifact::policy::splice_connector_routes(
+                    &mut new_policy.network.egress.http,
+                    routes,
+                );
+                new_policy
+            }
+        };
         if let Some(reconcile) = self.armed_reconciler.get() {
             reconcile(&new_policy.connectors);
         }
