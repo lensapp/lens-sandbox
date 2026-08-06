@@ -226,7 +226,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             upper_disk: &upper_disk,
             volumes: &volumes,
             binds: &binds,
-            vsock: vsock.as_ref(),
+            vsock: &vsock,
             console_fd,
             cmdline: &cmdline,
             cpus,
@@ -265,7 +265,7 @@ struct BuildInputs<'a> {
     upper_disk: &'a Path,
     volumes: &'a [crate::vm::VolumeAttachment],
     binds: &'a [crate::vm::BindAttachment],
-    vsock: Option<&'a crate::vm::VsockChannel>,
+    vsock: &'a [crate::vm::VsockChannel],
     console_fd: std::os::fd::RawFd,
     cmdline: &'a str,
     cpus: u8,
@@ -311,7 +311,7 @@ fn build_and_start(
         let mut listeners_for_leak: Vec<Retained<VZVirtioSocketListener>> = Vec::new();
         let mut delegates_for_leak: Vec<Retained<LnsVsockListenerDelegate>> = Vec::new();
 
-        if let Some(channel) = inputs.vsock {
+        for channel in inputs.vsock {
             install_vsock_listener(
                 &virtio_dev,
                 channel,

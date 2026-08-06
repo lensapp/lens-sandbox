@@ -18,13 +18,17 @@ struct ScriptedHost {
     git_config: Option<String>,
     openpgp_socket: Option<String>,
     ssh_socket: Option<String>,
+    gnupg_home: Option<String>,
+    keyring: Option<Vec<u8>>,
+    trustdb: Option<Vec<u8>>,
 }
 
 impl HostFacts for ScriptedHost {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<HostCommandOutput> {
         let answer = match (program, args.first().map(String::as_str)) {
             ("git", Some("config")) => self.git_config.clone(),
-            ("gpgconf", _) => self.openpgp_socket.clone(),
+            ("gpgconf", Some("--list-dir")) => self.openpgp_socket.clone(),
+            ("gpgconf", Some("--list-dirs")) => self.gnupg_home.clone(),
             _ => None,
         };
         Ok(match answer {
@@ -41,6 +45,16 @@ impl HostFacts for ScriptedHost {
             "SSH_AUTH_SOCK" => self.ssh_socket.clone(),
             _ => None,
         }
+    }
+
+    fn read(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let home = self.gnupg_home.as_deref().unwrap_or("");
+        let answer = match path.strip_prefix(&format!("{home}/")) {
+            Some("pubring.kbx") => self.keyring.clone(),
+            Some("trustdb.gpg") => self.trustdb.clone(),
+            _ => None,
+        };
+        answer.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
     }
 }
 
@@ -98,6 +112,9 @@ fn drive(world: &mut BehaviourWorld, interactive: bool) {
         git_config: git_config_stdout(world),
         openpgp_socket: world.host_access.openpgp_socket.clone(),
         ssh_socket: world.host_access.ssh_socket.clone(),
+        gnupg_home: world.host_access.gnupg_home.clone(),
+        keyring: world.host_access.keyring.clone(),
+        trustdb: world.host_access.trustdb.clone(),
     };
     let secrets = FakeSecrets(Mutex::new(
         world
@@ -606,4 +623,77 @@ fn no_standing_decline(world: &mut BehaviourWorld, id: String) -> Result<(), Str
         ));
     }
     Ok(())
+}
+
+#[given(regex = r#"^the host GnuPG home is at "([^"]+)" with a public keyring$"#)]
+fn host_gnupg_home(world: &mut BehaviourWorld, home: String) {
+    world.host_access.gnupg_home = Some(home);
+    world.host_access.keyring = Some(b"\x99\x01\x0dpublic-key-block".to_vec());
+    world.host_access.trustdb = Some(b"\x01gpg trust db".to_vec());
+}
+
+fn grants(world: &BehaviourWorld) -> Result<Vec<lns_ipc::HostAccessGrant>, String> {
+    let outcomes = outcome(world)?
+        .result
+        .as_ref()
+        .map_err(|e| format!("resolution failed: {e}"))?;
+    Ok(lns_cli::run::host_access::to_wire_grants(outcomes))
+}
+
+fn projected(world: &BehaviourWorld, suffix: &str) -> Result<Option<Vec<u8>>, String> {
+    Ok(grants(world)?
+        .into_iter()
+        .flat_map(|g| g.files)
+        .find(|f| f.target.ends_with(suffix))
+        .map(|f| f.contents))
+}
+
+#[then(regex = r"^the projected files include the public keyring$")]
+fn includes_keyring(world: &mut BehaviourWorld) -> Result<(), String> {
+    match projected(world, "pubring.kbx")? {
+        Some(bytes) if !bytes.is_empty() => Ok(()),
+        other => Err(format!("expected a projected keyring, got {other:?}")),
+    }
+}
+
+#[then(regex = r"^the projected files include the trust database$")]
+fn includes_trustdb(world: &mut BehaviourWorld) -> Result<(), String> {
+    match projected(world, "trustdb.gpg")? {
+        Some(bytes) if !bytes.is_empty() => Ok(()),
+        other => Err(format!(
+            "expected a projected trust database, got {other:?}"
+        )),
+    }
+}
+
+#[then(regex = r"^the projected files include no public keyring$")]
+fn excludes_keyring(world: &mut BehaviourWorld) -> Result<(), String> {
+    match projected(world, "pubring.kbx")? {
+        None => Ok(()),
+        Some(_) => Err("a keyring was projected from a host that has none".into()),
+    }
+}
+
+#[then(regex = r"^the projected files include no private key material$")]
+fn excludes_private_keys(world: &mut BehaviourWorld) -> Result<(), String> {
+    for file in grants(world)?.into_iter().flat_map(|g| g.files) {
+        if file.target.contains("private-keys") || file.target.contains("secring") {
+            return Err(format!(
+                "private key material was projected: {}",
+                file.target
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[then(regex = r"^the projected GnuPG home is writable by the workload$")]
+fn gnupg_home_writable(world: &mut BehaviourWorld) -> Result<(), String> {
+    let dirs: Vec<lns_ipc::HostAccessDir> =
+        grants(world)?.into_iter().flat_map(|g| g.dirs).collect();
+    match dirs.iter().find(|d| d.target.ends_with(".gnupg")) {
+        // gpg writes its own trustdb here on first use, so a read-only home breaks signing.
+        Some(dir) if dir.mode == 0o700 => Ok(()),
+        other => Err(format!("expected a 0700 GnuPG home, got {other:?}")),
+    }
 }

@@ -158,7 +158,7 @@ mod tests {
             workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
-            vsock: None,
+            vsock: Vec::new(),
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

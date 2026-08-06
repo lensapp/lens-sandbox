@@ -398,6 +398,8 @@ pub async fn run_image(
         published_ports: args.publish,
         volumes,
         binds,
+        socket_forwards: crate::run::host_access::to_wire(&host_access),
+        host_access: crate::run::host_access::to_wire_grants(&host_access),
         auto_remove: args.auto_remove,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),

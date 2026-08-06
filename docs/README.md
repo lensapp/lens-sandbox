@@ -27,6 +27,8 @@ You drive everything through one binary: the `lns` CLI.
   rules with `lns policy`.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of
   the workload, and the per-machine value decisions that bind the real value.
+- **[Host access](running-workloads.md#host-access)** — let a sandbox use your own
+  signing identity without the key ever entering the workload.
 - **[Connectors](connectors.md)** — connect workloads to external services
   (credential injection + the routes they need) with `lns connector connect`.
 - **[Audit](audit.md)** — the per-run audit chain and verifying it with

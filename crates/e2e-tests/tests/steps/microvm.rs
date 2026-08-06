@@ -120,6 +120,12 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n    - {id}"));
         }
     }
+    if !world.project_host_access.is_empty() {
+        spec_tail.push_str("\n  hostAccess:");
+        for id in &world.project_host_access {
+            spec_tail.push_str(&format!("\n    - {id}"));
+        }
+    }
     if !world.project_egress.is_empty() {
         spec_tail.push_str("\n  policy:\n    egress:\n      http:");
         for host in &world.project_egress {
@@ -187,12 +193,32 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             .unwrap_or_else(pinned_microvm_image)
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
-    std::fs::write(
-        root.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http: []\n",
-    )
-    .expect("write the project policy");
+    let mut policy = String::from("network:\n  egress:\n    http: []\n");
+    if !world.project_host_access.is_empty() {
+        policy.push_str("hostAccess:\n");
+        for id in &world.project_host_access {
+            policy.push_str(&format!("  - {id}\n"));
+        }
+    }
+    std::fs::write(root.join("lns-policy.yaml"), policy).expect("write the project policy");
     root
+}
+
+/// The scenario's own HOME, created on demand. Host access resolves the operator's git config and GnuPG home beneath it, so a scenario must never fall back to the developer's real home.
+pub(crate) fn ensure_home(world: &mut E2eWorld) -> std::path::PathBuf {
+    world
+        .home
+        .get_or_insert_with(|| tempfile::TempDir::new().expect("home tempdir"))
+        .path()
+        .to_path_buf()
+}
+
+pub(crate) fn run_microvm_public(world: &mut E2eWorld, run_args: Vec<String>, cmd_line: &str) {
+    run_microvm(world, run_args, cmd_line);
+}
+
+pub(crate) fn exec_in_last_run(world: &mut E2eWorld, cmd_line: &str) {
+    let _ = exec_in_that_run(world, &["exec"], cmd_line);
 }
 
 fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
@@ -202,6 +228,8 @@ fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
         envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
         envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
         envs.push(("XDG_DATA_HOME", home.path().join(".local/share").into()));
+        // gpgconf and gpg read GNUPGHOME, so the scenario's throwaway keyring is what host access locates.
+        envs.push(("GNUPGHOME", home.path().join(".gnupg").into()));
     }
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH", socket.clone().into()));

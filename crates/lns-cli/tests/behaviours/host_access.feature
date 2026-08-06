@@ -32,6 +32,26 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the forwarded agent socket is "/run/user/501/gnupg/S.gpg-agent.extra"
     And the host-access summary shows a line "git-signing → identity + agent"
 
+  Scenario: The public keyring and trust database are projected, never the private keys
+    Given the sandbox definition declares host access "git-signing"
+    And the host git config enables commit.gpgsign
+    And the host GnuPG home is at "/Users/me/.gnupg" with a public keyring
+    And the host agent socket is located at "/run/user/501/gnupg/S.gpg-agent.extra"
+    And the operator will answer the host-access card with "grant"
+    When the host access is resolved for `lns run alpine` interactively
+    Then the projected files include the public keyring
+    And the projected files include the trust database
+    And the projected files include no private key material
+    And the projected GnuPG home is writable by the workload
+
+  Scenario: A host with no GnuPG home projects the config alone
+    Given the sandbox definition declares host access "git-signing"
+    And the host git config enables commit.gpgsign
+    And the host agent socket is located at "/run/user/501/gnupg/S.gpg-agent.extra"
+    And the operator will answer the host-access card with "grant"
+    When the host access is resolved for `lns run alpine` interactively
+    Then the projected files include no public keyring
+
   Scenario: The host requires signing but no agent can be located
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign

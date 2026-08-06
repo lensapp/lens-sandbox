@@ -1,4 +1,4 @@
-@microvm @todo
+@microvm
 Feature: host access forwards the host's signing agent into the guest
   A signature is the only proof the forward works: the guest must hold the public
   key as a stub, reach the host agent over vsock, and produce a signature that

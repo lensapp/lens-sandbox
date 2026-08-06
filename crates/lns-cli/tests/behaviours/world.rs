@@ -67,6 +67,9 @@ pub struct HostAccessRig {
     /// True when the host has no git at all, so the config command fails.
     pub no_git: bool,
     pub openpgp_socket: Option<String>,
+    pub gnupg_home: Option<String>,
+    pub keyring: Option<Vec<u8>>,
+    pub trustdb: Option<Vec<u8>>,
     pub ssh_socket: Option<String>,
     pub declared: Vec<String>,
     pub granted: Vec<String>,

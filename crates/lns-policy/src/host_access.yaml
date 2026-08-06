@@ -10,3 +10,4 @@ hostAccess:
       target: ~/.ssh/lns-agent.sock
     gnupgHome: ~/.gnupg
     gitConfig: ~/.gitconfig
+    hostGnupgHome: !command [gpgconf, --list-dirs, homedir]

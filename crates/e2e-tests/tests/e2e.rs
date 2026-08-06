@@ -27,6 +27,9 @@ pub struct E2eWorld {
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,
     pub project_connectors: Vec<String>,
+    pub project_host_access: Vec<String>,
+    /// A scenario-spawned gpg-agent standing in for the operator's own, killed by Drop.
+    pub host_agent: Option<std::process::Child>,
     pub project_command: Option<String>,
     pub project_env: Vec<(String, String)>,
     /// Credential slots the project definition declares, as (connector id, env target, required).
@@ -86,6 +89,10 @@ impl E2eWorld {
 
 impl Drop for E2eWorld {
     fn drop(&mut self) {
+        if let Some(agent) = &mut self.host_agent {
+            let _ = agent.kill();
+            let _ = agent.wait();
+        }
         self.kill_detached_runs();
         self.remove_created_volumes();
         self.shutdown_service();

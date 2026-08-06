@@ -31,7 +31,8 @@ pub struct VmSpec {
     pub binds: Vec<BindAttachment>,
     pub workload_uid: Option<u32>,
     pub workload_gid: Option<u32>,
-    pub vsock: Option<VsockChannel>,
+    /// Every vsock port the guest may dial out on: the supervisor relay, plus one per host-socket forward.
+    pub vsock: Vec<VsockChannel>,
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
@@ -981,7 +982,7 @@ mod tests {
             binds: vec![],
             workload_uid: None,
             workload_gid: None,
-            vsock: None,
+            vsock: Vec::new(),
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

@@ -16,4 +16,8 @@ impl HostFacts for RealHostFacts {
     fn env(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
     }
+
+    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
 }

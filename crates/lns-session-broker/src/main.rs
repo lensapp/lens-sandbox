@@ -1,6 +1,7 @@
 mod exit;
 mod forker;
 mod forward;
+mod host_access;
 mod network;
 mod pty;
 mod session;
@@ -61,6 +62,7 @@ fn run() -> Result<i32, String> {
     }
 
     forward::spawn_listener();
+    host_access::apply();
 
     let listen_fd = vsock::listen(BROKER_PORT).map_err(|e| format!("listen: {e}"))?;
 

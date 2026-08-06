@@ -34,6 +34,8 @@ pub struct HostAccess {
     pub ssh_socket: SocketSpec,
     pub gnupg_home: String,
     pub git_config: String,
+    /// Locates the host's own GnuPG home, whose public keyring is projected. Its `private-keys-v1.d` is never read, which is what makes the projection public-only by construction.
+    pub host_gnupg_home: Locate,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,19 +68,21 @@ fn valid_target(target: &str) -> bool {
         && !rest.chars().any(char::is_control)
 }
 
+fn validate_locate(locate: &Locate, id: &str, which: &str) -> Result<(), String> {
+    match locate {
+        Locate::Command(argv) if argv.is_empty() => Err(format!(
+            "host access {id:?}: {which} locate command is empty"
+        )),
+        Locate::Env(name) if name.is_empty() => {
+            Err(format!("host access {id:?}: {which} locate env is empty"))
+        }
+        _ => Ok(()),
+    }
+}
+
 impl SocketSpec {
     fn validate(&self, id: &str, which: &str) -> Result<(), String> {
-        match &self.locate {
-            Locate::Command(argv) if argv.is_empty() => {
-                return Err(format!(
-                    "host access {id:?}: {which} locate command is empty"
-                ));
-            }
-            Locate::Env(name) if name.is_empty() => {
-                return Err(format!("host access {id:?}: {which} locate env is empty"));
-            }
-            _ => {}
-        }
+        validate_locate(&self.locate, id, which)?;
         if !valid_target(&self.target) {
             return Err(format!(
                 "host access {id:?}: {which} target {:?} must be absolute or start with ~/, contain no .. segment, and carry no control character",
@@ -99,6 +103,7 @@ impl HostAccess {
         }
         self.openpgp_socket.validate(&self.id, "openpgpSocket")?;
         self.ssh_socket.validate(&self.id, "sshSocket")?;
+        validate_locate(&self.host_gnupg_home, &self.id, "hostGnupgHome")?;
         for (field, value) in [
             ("gnupgHome", &self.gnupg_home),
             ("gitConfig", &self.git_config),
@@ -164,6 +169,7 @@ mod tests {
             },
             gnupg_home: "~/.gnupg".into(),
             git_config: "~/.gitconfig".into(),
+            host_gnupg_home: Locate::Command(vec!["some-locate".into(), "homedir".into()]),
         }
     }
 
@@ -222,6 +228,7 @@ mod tests {
         home.gnupg_home = "relative/gnupg".into();
         let err = home.validate().unwrap_err();
         assert!(err.contains("gnupgHome"), "got: {err}");
+        assert!(err.contains("relative/gnupg"), "got: {err}");
 
         let mut config = entry();
         config.git_config = "~/../escape".into();
@@ -241,6 +248,14 @@ mod tests {
         let mut e = entry();
         e.openpgp_socket.locate = Locate::Command(Vec::new());
         assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn an_empty_locate_for_the_host_gnupg_home_is_refused_and_names_the_field() {
+        let mut home = entry();
+        home.host_gnupg_home = Locate::Command(Vec::new());
+        let err = home.validate().unwrap_err();
+        assert!(err.contains("hostGnupgHome"), "got: {err}");
     }
 
     #[test]
@@ -294,5 +309,13 @@ mod tests {
         assert_eq!(e.ssh_socket.locate, Locate::Env("SSH_AUTH_SOCK".into()));
         assert_eq!(e.gnupg_home, "~/.gnupg");
         assert_eq!(e.git_config, "~/.gitconfig");
+        assert_eq!(
+            e.host_gnupg_home,
+            Locate::Command(vec![
+                "gpgconf".into(),
+                "--list-dirs".into(),
+                "homedir".into()
+            ])
+        );
     }
 }

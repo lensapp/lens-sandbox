@@ -117,6 +117,7 @@ the `./lns.yaml` definition with its command overridden.
 | `--sandbox-uid <UID>`        | image `USER` uid | UID the workload runs as inside the guest. |
 | `--entrypoint <COMMAND>`     | image `ENTRYPOINT` | Override the image `ENTRYPOINT`; the `COMMAND` after the reference is kept as its arguments. Pass `--entrypoint ""` to clear the image entrypoint. |
 | `-h`, `--hostname <NAME>`    |                  | Set the guest hostname for this run.                                    |
+| `--host-access <ID>`         |                  | Ask for a host capability by id for this run only (repeatable), e.g. `git-signing`. Combines with the ids the definition declares and this directory's policy grants. |
 | `-q`, `--quiet`              | `false`          | Suppress the launch banner and `✓` status lines; warnings, errors, and the workload's own output still print. |
 | `[COMMAND...]`               |                  | Override the image command (and, with `--entrypoint`, its arguments). Accepted after the reference directly or after a `--` separator. |
 
@@ -374,6 +375,30 @@ name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
 connected connector are made interactively in the approval window; grants are
 recorded per project and workload in `~/.lns-workload-grants.json`. See
 [Credentials](credentials.md) and [Connectors](connectors.md).
+
+## `lns host-access`
+
+Manage the host capabilities a sandbox in this directory may use. A capability is
+a named bundle lns resolves per host — `git-signing` supplies your git identity,
+your public keyring, and your signing agent's socket — so a published definition
+can ask for it by id and still work for a colleague with their own key.
+
+```bash
+lns host-access list
+lns host-access grant <ID>
+lns host-access revoke <ID>
+```
+
+| Subcommand | Meaning                                                                     |
+| ---------- | --------------------------------------------------------------------------- |
+| `list`     | List the capabilities this machine can resolve, and whether this directory has granted each. |
+| `grant`    | Record the id under `hostAccess:` in this directory's `lns-policy.yaml`, so runs arm it without raising the launch card. Also clears a standing per-machine decline. |
+| `revoke`   | Remove the id from this directory's policy; exits `1` when it was not granted. |
+
+A capability a definition declares is never armed by declaring it. The launch
+raises a card naming the host socket and the guest path; accepting records the
+grant, declining refuses the launch and is remembered per machine. See
+[Host access](running-workloads.md#host-access).
 
 ## `lns config`
 

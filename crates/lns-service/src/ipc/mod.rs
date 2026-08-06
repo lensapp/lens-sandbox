@@ -472,6 +472,17 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
     Ok(())
 }
 
+/// The IPC socket is a trust boundary, so every guest-bound path from a run request is re-validated here rather than trusted because the shipped CLI happens to produce sound ones.
+pub(super) fn validate_host_access(args: &lns_ipc::RunImageArgs) -> Result<(), String> {
+    for forward in &args.socket_forwards {
+        forward.validate()?;
+    }
+    for grant in &args.host_access {
+        grant.validate()?;
+    }
+    Ok(())
+}
+
 /// `run_id` is the *resolved* id: `args.run` may be a name or an id prefix, and the registry keys tool paths by id alone.
 pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
@@ -544,6 +555,8 @@ mod tests {
     async fn run_image_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
+                host_access: Vec::new(),
+                socket_forwards: Vec::new(),
                 image: None,
                 resolved_image: None,
                 name: None,
@@ -1854,6 +1867,77 @@ mod tests {
             stdin,
             initial_winsize: None,
         }
+    }
+
+    /// Built through the wire codec so every serde default applies, exactly as a real client's frame would arrive.
+    fn run_args() -> lns_ipc::RunImageArgs {
+        serde_json::from_str(
+            r#"{"image":"some-image:1","cpus":2,"mem":512,"policy_path":null,"cmd":[],"debug":false}"#,
+        )
+        .expect("minimal run frame")
+    }
+
+    fn run_args_with_forward(host_source: &str, guest_target: &str) -> lns_ipc::RunImageArgs {
+        let mut args = run_args();
+        args.socket_forwards = vec![lns_ipc::SocketForward {
+            id: "some-access".into(),
+            host_source: host_source.into(),
+            guest_target: guest_target.into(),
+        }];
+        args
+    }
+
+    #[test]
+    fn validate_host_access_accepts_a_sound_request() {
+        validate_host_access(&run_args_with_forward(
+            "/run/agent.sock",
+            "~/.gnupg/S.gpg-agent",
+        ))
+        .expect("a sound forward must pass");
+    }
+
+    #[test]
+    fn validate_host_access_refuses_a_forward_target_that_escapes_the_home() {
+        let err = validate_host_access(&run_args_with_forward("/run/agent.sock", "~/../escape"))
+            .expect_err("a client is not trusted to send a sound path");
+        assert!(err.contains("socket forward target"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_host_access_refuses_a_relative_forward_source() {
+        let err = validate_host_access(&run_args_with_forward("relative.sock", "~/x"))
+            .expect_err("the host source must be absolute");
+        assert!(err.contains("socket forward source"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_host_access_refuses_a_projected_file_whose_target_escapes_the_home() {
+        let mut args = run_args();
+        args.host_access = vec![lns_ipc::HostAccessGrant {
+            id: "some-access".into(),
+            socket_target: None,
+            dirs: Vec::new(),
+            files: vec![lns_ipc::HostAccessFile {
+                target: "~/../../etc/passwd".into(),
+                mode: 0o600,
+                contents: b"x".to_vec(),
+            }],
+        }];
+        let err = validate_host_access(&args).expect_err("a projected file must stay in the home");
+        assert!(err.contains("host access target"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_host_access_refuses_a_newline_in_a_target_that_would_forge_a_manifest_line() {
+        let mut args = run_args();
+        args.host_access = vec![lns_ipc::HostAccessGrant {
+            id: "some-access".into(),
+            socket_target: Some("~/ok\nsocket\t1040\t~/evil".into()),
+            dirs: Vec::new(),
+            files: Vec::new(),
+        }];
+        let err = validate_host_access(&args).expect_err("a newline would forge a manifest line");
+        assert!(err.contains("host access target"), "got: {err}");
     }
 
     #[test]

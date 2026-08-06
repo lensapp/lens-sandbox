@@ -15,6 +15,7 @@ pub struct HostCommandOutput {
 pub trait HostFacts: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> io::Result<HostCommandOutput>;
     fn env(&self, name: &str) -> Option<String>;
+    fn read(&self, path: &str) -> io::Result<Vec<u8>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,8 +148,9 @@ fn escape_value(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-pub fn locate_socket(facts: &dyn HostFacts, spec: &SocketSpec) -> Option<String> {
-    let raw = match &spec.locate {
+/// Runs a locator and returns what it produced, or nothing when the tool is absent, fails, or prints nothing — all of which mean the host cannot supply this part.
+pub fn locate_output(facts: &dyn HostFacts, locate: &Locate) -> Option<String> {
+    let raw = match locate {
         Locate::Command(argv) => {
             let (program, args) = argv.split_first()?;
             let output = facts.run(program, args).ok()?;
@@ -159,11 +161,19 @@ pub fn locate_socket(facts: &dyn HostFacts, spec: &SocketSpec) -> Option<String>
         }
         Locate::Env(name) => facts.env(name)?,
     };
-    let path = raw.trim();
-    if path.is_empty() {
-        return None;
-    }
-    Some(path.to_string())
+    (!raw.trim().is_empty()).then(|| raw.clone())
+}
+
+pub fn locate_socket(facts: &dyn HostFacts, spec: &SocketSpec) -> Option<String> {
+    locate_output(facts, &spec.locate).map(|raw| raw.trim().to_string())
+}
+
+/// The first of `names` the host home actually holds. `pubring.kbx` is the modern keyring; a homedir written by an older GnuPG has `pubring.gpg` instead, and gpg still reads it.
+fn read_from_home(facts: &dyn HostFacts, home: &str, names: &[&str]) -> Option<Vec<u8>> {
+    names
+        .iter()
+        .find_map(|name| facts.read(&format!("{home}/{name}")).ok())
+        .filter(|bytes| !bytes.is_empty())
 }
 
 pub fn socket_spec_for(entry: &HostAccess, need: SigningNeed) -> Option<&SocketSpec> {
@@ -187,6 +197,10 @@ pub struct ArmedHostAccess {
     pub git_config: String,
     pub git_config_target: String,
     pub gnupg_home: String,
+    /// The host's public keyring, projected so gpg can build a signature and show the key as a stub. Public by construction: the private halves live in `private-keys-v1.d`, which is never read.
+    pub keyring: Option<Vec<u8>>,
+    /// The host's trust database. gpg reads `trustdb.gpg` directly; without it the projected key has unknown validity, so `git log --format=%G?` reports `U` rather than `G`. It holds trust assignments only, never key material.
+    pub trustdb: Option<Vec<u8>>,
     pub dropped_keys: Vec<String>,
 }
 
@@ -397,6 +411,14 @@ fn resolve_one(
         console,
     )?;
     let projected = project_config(&settings, ports, interactive, console)?;
+    let host_home = locate_output(ports.facts, &entry.host_gnupg_home)
+        .map(|home| home.trim().trim_end_matches('/').to_string());
+    let keyring = host_home
+        .as_deref()
+        .and_then(|home| read_from_home(ports.facts, home, &["pubring.kbx", "pubring.gpg"]));
+    let trustdb = host_home
+        .as_deref()
+        .and_then(|home| read_from_home(ports.facts, home, &["trustdb.gpg"]));
     Ok((
         HostAccessOutcome::Armed(ArmedHostAccess {
             id: id.to_string(),
@@ -405,6 +427,8 @@ fn resolve_one(
             git_config: projected.rendered,
             git_config_target: entry.git_config.clone(),
             gnupg_home: entry.gnupg_home.clone(),
+            keyring,
+            trustdb,
             dropped_keys: projected.dropped,
         }),
         newly_granted,
@@ -434,6 +458,60 @@ pub fn resolve(
         outcomes,
         newly_granted,
     })
+}
+
+/// The wire form of every armed capability: the guest is told where to create the socket, the service which host socket to proxy it to.
+pub fn to_wire(outcomes: &[HostAccessOutcome]) -> Vec<lns_ipc::SocketForward> {
+    armed_only(outcomes)
+        .map(|armed| lns_ipc::SocketForward {
+            id: armed.id.clone(),
+            host_source: armed.socket_source.clone(),
+            guest_target: armed.socket_target.clone(),
+        })
+        .collect()
+}
+
+fn armed_only(outcomes: &[HostAccessOutcome]) -> impl Iterator<Item = &ArmedHostAccess> {
+    outcomes.iter().filter_map(|outcome| match outcome {
+        HostAccessOutcome::Absent { .. } => None,
+        HostAccessOutcome::Armed(armed) => Some(armed),
+    })
+}
+
+/// What each armed capability puts in the guest. The GnuPG home comes first as a directory so the keyring lands inside it, and gpg needs it writable at 0700 because it creates its own trustdb there on first use.
+pub fn to_wire_grants(outcomes: &[HostAccessOutcome]) -> Vec<lns_ipc::HostAccessGrant> {
+    armed_only(outcomes)
+        .map(|armed| {
+            let mut files = vec![lns_ipc::HostAccessFile {
+                target: armed.git_config_target.clone(),
+                mode: 0o600,
+                contents: armed.git_config.clone().into_bytes(),
+            }];
+            if let Some(keyring) = &armed.keyring {
+                files.push(lns_ipc::HostAccessFile {
+                    target: format!("{}/pubring.kbx", armed.gnupg_home.trim_end_matches('/')),
+                    mode: 0o600,
+                    contents: keyring.clone(),
+                });
+            }
+            if let Some(trustdb) = &armed.trustdb {
+                files.push(lns_ipc::HostAccessFile {
+                    target: format!("{}/trustdb.gpg", armed.gnupg_home.trim_end_matches('/')),
+                    mode: 0o600,
+                    contents: trustdb.clone(),
+                });
+            }
+            lns_ipc::HostAccessGrant {
+                id: armed.id.clone(),
+                socket_target: Some(armed.socket_target.clone()),
+                dirs: vec![lns_ipc::HostAccessDir {
+                    target: armed.gnupg_home.clone(),
+                    mode: 0o700,
+                }],
+                files,
+            }
+        })
+        .collect()
 }
 
 /// Records the ids the operator granted on this run into the directory's shareable policy, so the next run arms without a card.
@@ -671,6 +749,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeFacts {
+        files: std::collections::HashMap<String, Vec<u8>>,
         stdout: String,
         status: i32,
         fail: bool,
@@ -695,6 +774,13 @@ mod tests {
 
         fn env(&self, _name: &str) -> Option<String> {
             self.env.clone()
+        }
+
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, path.to_string()))
         }
     }
 
@@ -765,6 +851,102 @@ mod tests {
             target: "~/x".into(),
         };
         assert!(locate_socket(&FakeFacts::default(), &spec).is_none());
+    }
+
+    fn armed_fixture() -> HostAccessOutcome {
+        HostAccessOutcome::Armed(ArmedHostAccess {
+            id: "some-access".into(),
+            socket_source: "/run/user/501/agent.sock".into(),
+            socket_target: "~/.gnupg/S.gpg-agent".into(),
+            git_config: "[user]\n\temail = \"me@example.test\"\n".into(),
+            git_config_target: "~/.gitconfig".into(),
+            gnupg_home: "~/.gnupg".into(),
+            keyring: Some(b"keyring".to_vec()),
+            trustdb: Some(b"trustdb".to_vec()),
+            dropped_keys: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn the_wire_carries_one_forward_per_armed_capability_and_none_for_an_absent_one() {
+        let outcomes = [
+            HostAccessOutcome::Absent {
+                id: "other-access".into(),
+            },
+            armed_fixture(),
+        ];
+        let forwards = to_wire(&outcomes);
+        assert_eq!(forwards.len(), 1, "an absent capability forwards nothing");
+        assert_eq!(forwards[0].id, "some-access");
+        assert_eq!(forwards[0].host_source, "/run/user/501/agent.sock");
+        assert_eq!(forwards[0].guest_target, "~/.gnupg/S.gpg-agent");
+    }
+
+    #[test]
+    fn the_wire_grant_projects_the_config_keyring_and_trustdb_into_the_gnupg_home() {
+        let grants = to_wire_grants(&[armed_fixture()]);
+        assert_eq!(grants.len(), 1);
+        let targets: Vec<&str> = grants[0].files.iter().map(|f| f.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                "~/.gitconfig",
+                "~/.gnupg/pubring.kbx",
+                "~/.gnupg/trustdb.gpg"
+            ]
+        );
+        assert!(grants[0].files.iter().all(|f| f.mode == 0o600));
+        assert_eq!(grants[0].dirs[0].target, "~/.gnupg");
+        assert_eq!(
+            grants[0].dirs[0].mode, 0o700,
+            "gpg writes its own trustdb into this home, so it cannot be read-only"
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_keyring_projects_the_config_alone() {
+        let mut outcome = armed_fixture();
+        if let HostAccessOutcome::Armed(armed) = &mut outcome {
+            armed.keyring = None;
+            armed.trustdb = None;
+        }
+        let grants = to_wire_grants(&[outcome]);
+        let targets: Vec<&str> = grants[0].files.iter().map(|f| f.target.as_str()).collect();
+        assert_eq!(targets, ["~/.gitconfig"]);
+    }
+
+    fn facts_with(files: &[(&str, &[u8])]) -> FakeFacts {
+        FakeFacts {
+            files: files
+                .iter()
+                .map(|(p, b)| ((*p).to_string(), b.to_vec()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_modern_keyring_is_preferred_and_an_older_home_falls_back_to_the_legacy_name() {
+        let both = facts_with(&[("/h/pubring.kbx", b"kbx"), ("/h/pubring.gpg", b"legacy")]);
+        assert_eq!(
+            read_from_home(&both, "/h", &["pubring.kbx", "pubring.gpg"]),
+            Some(b"kbx".to_vec())
+        );
+        let legacy_only = facts_with(&[("/h/pubring.gpg", b"legacy")]);
+        assert_eq!(
+            read_from_home(&legacy_only, "/h", &["pubring.kbx", "pubring.gpg"]),
+            Some(b"legacy".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_file_yields_none_rather_than_an_empty_projection() {
+        assert_eq!(
+            read_from_home(&FakeFacts::default(), "/h", &["trustdb.gpg"]),
+            None
+        );
+        let empty = facts_with(&[("/h/trustdb.gpg", b"")]);
+        assert_eq!(read_from_home(&empty, "/h", &["trustdb.gpg"]), None);
     }
 
     #[test]
