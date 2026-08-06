@@ -142,6 +142,8 @@ pub fn provision_env() -> Vec<(String, String)> {
         ("MISE_PYTHON_COMPILE", "0"),
         ("MISE_NODE_COMPILE", "0"),
         ("MISE_YES", "1"),
+        // The engine's own `bin/npm` replaces node's launcher with a script that reshims through mise under bash, and a workload guest has neither; off, the tree keeps the symlink the upstream tarball ships.
+        ("MISE_NODE_NPM_SHIM", "0"),
         // Every backend that is not download-only: the snapshot records the download backend a tool is gated and audited against, so mise must not silently pick a different one (oxlint via npm, tokei via cargo, imagemagick via conda).
         (
             "MISE_DISABLE_BACKENDS",
@@ -304,6 +306,8 @@ mod tests {
         };
         assert_eq!(get("MISE_PYTHON_COMPILE"), "0");
         assert_eq!(get("MISE_NODE_COMPILE"), "0");
+        // With the shim on, the tree ships an `npm` that launches mise under bash — neither of which a workload guest has — so the tool installs and never runs.
+        assert_eq!(get("MISE_NODE_NPM_SHIM"), "0");
         let disabled = get("MISE_DISABLE_BACKENDS");
         for backend in [
             "asdf", "vfox", "npm", "cargo", "pipx", "gem", "go", "dotnet", "conda", "spm",
