@@ -12,7 +12,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
   faked host-command runner; the signature itself is guest-observable and lives
   in the @microvm e2e contract.
 
-  @todo
   Scenario: A host that does not sign runs unsigned
     Given the sandbox definition declares host access "git-signing"
     And the host git config leaves commit.gpgsign off
@@ -22,7 +21,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And no git config is projected
     And the host-access summary shows "git-signing: absent (host does not sign)"
 
-  @todo
   Scenario: A host that signs projects its identity and forwards its agent
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -34,7 +32,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the forwarded agent socket is "/run/user/501/gnupg/S.gpg-agent.extra"
     And the host-access summary shows a line "git-signing → identity + agent"
 
-  @todo
   Scenario: The host requires signing but no agent can be located
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -42,9 +39,8 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     When the host access is resolved for `lns run alpine` interactively
     Then the host-access resolution fails with "no signing agent"
     And the failure names "commit.gpgsign" as the setting that required it
-    And no run is started
+    And the sandbox is not launched
 
-  @todo
   Scenario: A host with no GnuPG at all runs the definition with the capability absent
     Given the sandbox definition declares host access "git-signing"
     And the host has no git config and no agent
@@ -52,7 +48,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     Then the host-access resolution succeeds
     And the host-access summary shows "git-signing: absent (host does not sign)"
 
-  @todo
   Scenario: The repository's own setting wins over the global one
     Given the sandbox definition declares host access "git-signing"
     And the host git config disables commit.gpgsign globally
@@ -62,7 +57,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     When the host access is resolved for `lns run alpine` interactively
     Then the forwarded agent socket is "/run/user/501/gnupg/S.gpg-agent.extra"
 
-  @todo
   Scenario: Granting the card records the grant in this directory's policy
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -71,7 +65,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     When the host access is resolved for `lns run alpine` interactively
     Then the directory's policy records host access "git-signing"
 
-  @todo
   Scenario: A recorded grant arms without a card
     Given the sandbox definition declares host access "git-signing"
     And the directory's policy already records host access "git-signing"
@@ -81,7 +74,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     Then no host-access card is shown
     And the forwarded agent socket is "/run/user/501/gnupg/S.gpg-agent.extra"
 
-  @todo
   Scenario: A directory with no definition can grant host access
     Given the directory has no sandbox definition
     And the directory's policy already records host access "git-signing"
@@ -90,7 +82,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     When the host access is resolved for `lns run alpine` interactively
     Then the forwarded agent socket is "/run/user/501/gnupg/S.gpg-agent.extra"
 
-  @todo
   Scenario: Declining the card refuses the launch when the host requires signing
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -98,10 +89,10 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the operator will answer the host-access card with "decline"
     When the host access is resolved for `lns run alpine` interactively
     Then the host-access resolution fails with "host access declined"
-    And no run is started
+    And the sandbox is not launched
     And the directory's policy records no host access
+    And a per-machine decline is now recorded for host access "git-signing"
 
-  @todo
   Scenario: A remembered decline refuses the next run without asking again
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -110,7 +101,16 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     Then no host-access card is shown
     And the host-access resolution fails with "host access declined"
 
-  @todo
+  Scenario: A standing decline outranks a policy grant that arrived with a clone
+    Given the sandbox definition declares host access "git-signing"
+    And the directory's policy already records host access "git-signing"
+    And a per-machine decline is recorded for host access "git-signing"
+    And the host git config enables commit.gpgsign
+    And the host agent socket is located at "/run/user/501/gnupg/S.gpg-agent.extra"
+    When the host access is resolved for `lns run alpine` interactively
+    Then the host-access resolution fails with "standing decline"
+    And no agent socket is forwarded
+
   Scenario: A non-interactive run with no grant refuses rather than asking
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -121,7 +121,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the failure names "lns host-access grant" as the fix
     And no host-access card is shown
 
-  @todo
   Scenario: A secret-shaped setting is dropped from the projected config
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -135,7 +134,17 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the host-access summary shows "http.https://git.example.test/.extraheader: dropped"
     And a later run with the same host config shows no config secret prompt
 
-  @todo
+  Scenario: Keeping a secret-shaped setting projects it after all
+    Given the sandbox definition declares host access "git-signing"
+    And the host git config enables commit.gpgsign
+    And the host git config sets "sendemail.smtppass"
+    And the host agent socket is located at "/run/user/501/gnupg/S.gpg-agent.extra"
+    And the operator will answer the host-access card with "grant"
+    And the operator will answer the config secret prompt with "keep"
+    When the host access is resolved for `lns run alpine` interactively
+    Then the projected git config carries "sendemail.smtppass=some-host-secret"
+    And a per-machine KEEP decision is recorded for the config key "sendemail.smtppass"
+
   Scenario: A non-interactive run drops an undecided secret-shaped setting
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -147,7 +156,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the dropped config key "sendemail.smtppass" is reported on stderr
     And no config secret prompt is shown
 
-  @todo
   Scenario: Includes are resolved on the host so the guest sees one flat config
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -158,7 +166,6 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     Then the projected git config carries "user.email=work@example.test"
     And the projected git config names no host include path
 
-  @todo
   Scenario: An ssh-format signing host locates the ssh agent instead
     Given the sandbox definition declares host access "git-signing"
     And the host git config enables commit.gpgsign
@@ -168,9 +175,8 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     When the host access is resolved for `lns run alpine` interactively
     Then the forwarded agent socket is "/run/user/501/ssh-agent.sock"
 
-  @todo
   Scenario: An unknown host-access id refuses the launch
     Given the sandbox definition declares host access "not-in-catalog"
     When the host access is resolved for `lns run alpine` interactively
     Then the host-access resolution fails with "unknown host access"
-    And no run is started
+    And the sandbox is not launched

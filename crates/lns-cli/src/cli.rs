@@ -216,6 +216,16 @@ pub struct RunArgs {
     #[arg(skip)]
     pub tools: Vec<String>,
 
+    /// Ids the definition declares; combined with the ids this directory's policy grants.
+    #[arg(skip)]
+    pub declared_host_access: Vec<String>,
+
+    #[arg(
+        long = "host-access",
+        help = "Ask for a host capability by id for this run only, e.g. `git-signing`. Combines with the ids the definition declares and this directory's policy grants; see `lns host-access list`."
+    )]
+    pub host_access: Vec<String>,
+
     #[arg(
         short = 'v',
         long = "volume",

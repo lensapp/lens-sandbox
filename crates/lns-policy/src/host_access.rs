@@ -217,6 +217,19 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_gnupg_home_or_git_config_target_is_refused_and_the_field_is_named() {
+        let mut home = entry();
+        home.gnupg_home = "relative/gnupg".into();
+        let err = home.validate().unwrap_err();
+        assert!(err.contains("gnupgHome"), "got: {err}");
+
+        let mut config = entry();
+        config.git_config = "~/../escape".into();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("gitConfig"), "got: {err}");
+    }
+
+    #[test]
     fn an_absolute_guest_target_is_accepted() {
         let mut e = entry();
         e.openpgp_socket.target = "/run/lns/agent.sock".into();

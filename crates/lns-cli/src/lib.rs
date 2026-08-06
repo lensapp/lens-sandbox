@@ -5,6 +5,7 @@ pub mod cli;
 pub mod command;
 pub mod config;
 pub mod connector;
+pub mod host_access;
 pub mod log;
 pub mod login;
 pub mod output;
