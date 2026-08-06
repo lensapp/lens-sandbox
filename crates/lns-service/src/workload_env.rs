@@ -72,6 +72,25 @@ pub struct ToolRuntime {
     pub env: Vec<(String, String)>,
 }
 
+impl ToolRuntime {
+    /// The contribution that actually took effect on a composed workload env. `lns exec` composes against its own env — nearly always empty — so a var the image or `-e` already owns has to be dropped here or the exec session gets the tool's value where the workload got the definition's.
+    pub fn as_applied(&self, composed_env: &[String]) -> ToolRuntime {
+        ToolRuntime {
+            bin_paths: self.bin_paths.clone(),
+            env: self
+                .env
+                .iter()
+                .filter(|(name, value)| {
+                    composed_env
+                        .iter()
+                        .any(|kv| kv == &format!("{name}={value}"))
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 /// Everything the declared tools add to a guest's environment. `lns exec` into the same guest applies this same function, so what an exec session resolves matches the workload's.
 pub fn compose_guest_tool_env(env: &mut Vec<String>, tools: &ToolRuntime) {
     compose_guest_path(env, &tools.bin_paths);
@@ -393,6 +412,52 @@ mod tests {
             c.env.is_empty(),
             "an unsupervised run's cwd travels via the session, not env: {:?}",
             c.env
+        );
+    }
+
+    #[test]
+    fn only_the_tool_vars_that_took_effect_travel_to_an_exec_session() {
+        // `lns exec` composes against its own (usually empty) env, so a var the definition already set would come back as the tool's value there — one sandbox, two CARGO_HOMEs, no warning.
+        let tools = ToolRuntime {
+            bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
+            env: vec![
+                (
+                    "SOME_TOOL_CACHE".to_string(),
+                    "/.lens/tools/some-tool/1.2.3/home/.cache".to_string(),
+                ),
+                (
+                    "SOME_TOOL_HOME".to_string(),
+                    "/.lens/tools/some-tool/1.2.3/home".to_string(),
+                ),
+            ],
+        };
+        let composed = run_workload_env(
+            Some(&["SOME_TOOL_CACHE=/workspace/mine".into()]),
+            &[],
+            None,
+            None,
+            &[],
+            &tools,
+        );
+        let applied = tools.as_applied(&composed.env);
+        assert_eq!(
+            applied.env,
+            vec![(
+                "SOME_TOOL_HOME".to_string(),
+                "/.lens/tools/some-tool/1.2.3/home".to_string()
+            )],
+            "the var the definition owns must not reach exec as the tool's"
+        );
+        assert_eq!(
+            applied.bin_paths, tools.bin_paths,
+            "the PATH rule is unchanged"
+        );
+
+        let mut exec_env = Vec::new();
+        compose_guest_tool_env(&mut exec_env, &applied);
+        assert!(
+            !exec_env.iter().any(|kv| kv.starts_with("SOME_TOOL_CACHE=")),
+            "got: {exec_env:?}"
         );
     }
 

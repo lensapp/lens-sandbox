@@ -120,6 +120,14 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n    - {id}"));
         }
     }
+    if !world.project_egress.is_empty() {
+        spec_tail.push_str("\n  policy:\n    egress:\n      http:");
+        for host in &world.project_egress {
+            spec_tail.push_str(&format!(
+                "\n        - match: {host}\n          verdict: allow"
+            ));
+        }
+    }
     if !world.project_tools.is_empty() {
         spec_tail.push_str("\n  tools:");
         for tool in &world.project_tools {
@@ -778,7 +786,16 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
 }
 
 const NODE20_IMAGE: &str = "public.ecr.aws/docker/library/node:20-bookworm-slim";
-const DEBIAN12_IMAGE: &str = "public.ecr.aws/docker/library/debian:12-slim";
+/// The glibc base for a tool with no musl build: the provisioner's own digest-pinned gnu rootfs, which every tools run already fetches, so this scenario adds no registry traffic to be rate-limited.
+fn glibc_base_image() -> String {
+    lns_service::tools::mise::manifest()
+        .rootfs_reference(
+            lns_service::tools::Libc::Gnu,
+            lns_service::tools::host_arch(),
+        )
+        .expect("the engine manifest pins a gnu rootfs for this arch")
+        .to_string()
+}
 
 fn parse_tools_list(entries: &str) -> Vec<String> {
     entries
@@ -794,8 +811,53 @@ fn tools_over_pinned_base(world: &mut E2eWorld, entries: String) {
 
 #[given(regex = r#"^a lns\.yaml declaring tools \[(.*)\] over a glibc base image$"#)]
 fn tools_over_glibc_base(world: &mut E2eWorld, entries: String) {
-    world.project_image = Some(DEBIAN12_IMAGE.to_string());
+    world.project_image = Some(glibc_base_image());
     world.project_tools = parse_tools_list(&entries);
+}
+
+#[given("the sandbox may reach the crates.io hosts")]
+fn sandbox_may_reach_crates_io(world: &mut E2eWorld) {
+    world.project_egress = ["crates.io", "index.crates.io", "static.crates.io"]
+        .iter()
+        .map(|host| host.to_string())
+        .collect();
+}
+
+/// A library target with one dependency: cargo must write the registry into the `CARGO_HOME` the engine put inside the tool tree, and an rlib needs no linker the slim base image lacks.
+#[when("the sandbox builds a rust library that has one dependency")]
+fn sandbox_builds_a_rust_library(world: &mut E2eWorld) {
+    let script = concat!(
+        "set -e; d=/tmp/p; mkdir -p $d/src; ",
+        "printf '[package]\\nname=\"p\"\\nversion=\"0.1.0\"\\nedition=\"2021\"\\n",
+        "[dependencies]\\nunicode-ident=\"1\"\\n' > $d/Cargo.toml; ",
+        "printf 'pub fn f() {}\\n' > $d/src/lib.rs; ",
+        // The marker is assembled at run time: the run summary echoes the command it launches, so a literal here would match itself in the captured output.
+        "cd $d; cargo build --quiet && printf 'CARGO_BUILD_%s\\n' OK"
+    );
+    run_lns_microvm(
+        world,
+        vec![
+            "--".to_string(),
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+        ],
+    );
+}
+
+#[then("the build succeeds")]
+fn the_build_succeeds(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    let output = format!("{}\n{}", result.stdout, result.stderr);
+    assert_eq!(result.exit_code, 0, "the build failed:\n{output}");
+    assert!(
+        !output.contains("Permission denied"),
+        "the workload could not write inside its own tool tree:\n{output}"
+    );
+    assert!(
+        result.stdout.contains("CARGO_BUILD_OK"),
+        "cargo never reported a finished build:\n{output}"
+    );
 }
 
 #[given(regex = r#"^a provisioning budget of (\d+) minutes$"#)]

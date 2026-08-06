@@ -302,6 +302,34 @@ fn group_gid(newroot: &str, name: &str) -> Option<u32> {
 
 const FILESET_OWNED_MANIFEST: &str = "/.lens/fileset-owned";
 
+/// Where the service injects a run's declared tool trees; PID 1 stays dependency-free, so this is spelled here as well as in lns-service's tool cache.
+const TOOLS_ROOT: &str = "/.lens/tools";
+
+/// A tool writes inside its own prefix (the engine puts cargo's `CARGO_HOME` there) but every injected entry lands uid 0, so the resolved workload gets the directories — never the files — and its writes go to the overlay's upper layer and vanish at teardown.
+fn chown_tool_dirs(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, u32)>) {
+    let Some((uid, gid)) = run_ids else {
+        return;
+    };
+    let root = format!("{newroot}{TOOLS_ROOT}");
+    if !std::path::Path::new(&root).is_dir() {
+        return;
+    }
+    let mut pending = vec![std::path::PathBuf::from(&root)];
+    while let Some(dir) = pending.pop() {
+        lchown_logged(sys, &dir.to_string_lossy(), uid, gid);
+        // A directory the walk cannot read costs its subtree, not the rest of the trees.
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            // Symlinks are not followed: a link's own target is already an entry of this tree, and following one could walk out of it.
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            }
+        }
+    }
+}
+
 /// Transfer the fileset paths the definition marked `owner: workload` to the run-as ids; the host ships the list inside the runtime layer because only the guest can resolve a named image user.
 fn chown_fileset_owned(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, u32)>) {
     let Some((uid, gid)) = run_ids else {
@@ -317,17 +345,19 @@ fn chown_fileset_owned(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, 
             );
             continue;
         }
-        let full = format!("{newroot}{path}");
-        match CString::new(full.as_str()) {
-            Ok(full_c) => {
-                if let Err(err) = sys.lchown(&full_c, uid, gid) {
-                    eprintln!("lns-init: lchown({full:?}, {uid}, {gid}) failed: {err}");
-                }
-            }
-            Err(_) => {
-                eprintln!("lns-init: skipping fileset-owned entry {path:?} — interior NUL");
+        lchown_logged(sys, &format!("{newroot}{path}"), uid, gid);
+    }
+}
+
+/// One place converts a path for `lchown` and logs what went wrong, so a path the syscall cannot take or a failure on one entry never abandons the rest of the walk.
+fn lchown_logged(sys: &dyn Syscalls, path: &str, uid: u32, gid: u32) {
+    match CString::new(path) {
+        Ok(c_path) => {
+            if let Err(err) = sys.lchown(&c_path, uid, gid) {
+                eprintln!("lns-init: lchown({path:?}, {uid}, {gid}) failed: {err}");
             }
         }
+        Err(_) => eprintln!("lns-init: skipping {path:?} — interior NUL"),
     }
 }
 
@@ -777,6 +807,8 @@ fn mount_composefs_and_exec_broker_inner(
     }
 
     chown_fileset_owned(sys, newroot, run_ids);
+
+    chown_tool_dirs(sys, newroot, run_ids);
 
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
@@ -2017,6 +2049,118 @@ mod tests {
         std::fs::create_dir_all(format!("{newroot}/.lens")).unwrap();
         std::fs::write(format!("{newroot}{FILESET_OWNED_MANIFEST}"), listing).unwrap();
         newroot
+    }
+
+    #[test]
+    fn the_workload_owns_the_directories_of_its_tool_trees_but_not_their_files() {
+        // A tool writes into its own prefix — cargo's package-cache lock and registry live under a CARGO_HOME the engine put inside the tree — and every injected entry lands uid 0, so a non-root workload could not write there. Directories only: the binaries stay owned by root.
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        for sub in ["rust/1.95.0/home/.cargo", "rust/1.95.0/data/installs"] {
+            std::fs::create_dir_all(format!("{newroot}{TOOLS_ROOT}/{sub}")).unwrap();
+        }
+        std::fs::write(
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0/home/.cargo/env"),
+            "x",
+        )
+        .unwrap();
+        let sys = FakeSyscalls::new();
+        chown_tool_dirs(&sys, &newroot, Some((65534, 65534)));
+
+        let owned = sys.calls.borrow().clone();
+        for dir in [
+            format!("{newroot}{TOOLS_ROOT}"),
+            format!("{newroot}{TOOLS_ROOT}/rust"),
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0"),
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0/home"),
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0/home/.cargo"),
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0/data"),
+            format!("{newroot}{TOOLS_ROOT}/rust/1.95.0/data/installs"),
+        ] {
+            assert!(
+                owned.contains(&handed_over(&dir)),
+                "{dir} was not handed to the workload"
+            );
+        }
+        assert!(
+            !owned.iter().any(
+                |call| matches!(call, Call::Lchown { path, .. } if path.ends_with("/home/.cargo/env"))
+            ),
+            "a tool's files stay root-owned: {owned:?}"
+        );
+    }
+
+    /// What the walk is expected to have done to one directory: hand it to the resolved workload ids.
+    fn handed_over(path: &str) -> Call {
+        Call::Lchown {
+            path: path.to_string(),
+            uid: 65534,
+            gid: 65534,
+        }
+    }
+
+    #[test]
+    fn an_unreadable_tool_directory_costs_its_subtree_and_not_the_rest() {
+        // One tool tree the walk cannot descend must not leave every other tool's dirs root-owned.
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        let closed = format!("{newroot}{TOOLS_ROOT}/closed/1.0.0");
+        std::fs::create_dir_all(format!("{closed}/inner")).unwrap();
+        std::fs::create_dir_all(format!("{newroot}{TOOLS_ROOT}/open/1.0.0")).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let sys = FakeSyscalls::new();
+        chown_tool_dirs(&sys, &newroot, Some((65534, 65534)));
+        let owned = sys.calls.borrow().clone();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(owned.contains(&handed_over(&format!("{newroot}{TOOLS_ROOT}/open/1.0.0"))));
+        assert!(
+            owned.contains(&handed_over(&closed)),
+            "the dir itself is still handed over"
+        );
+        assert!(
+            !owned.contains(&handed_over(&format!("{closed}/inner"))),
+            "its unreadable subtree is skipped: {owned:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_chown_does_not_abandon_the_remaining_tool_dirs() {
+        // The tool trees come from one cache; a single entry the guest cannot take must not silently stop the walk.
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        for tool in ["jq/1.8.2", "node/22.23.2"] {
+            std::fs::create_dir_all(format!("{newroot}{TOOLS_ROOT}/{tool}")).unwrap();
+        }
+        let sys = FakeSyscalls::new().fail_when(|call| {
+            matches!(call, Call::Lchown { .. }).then_some(std::io::ErrorKind::PermissionDenied)
+        });
+        chown_tool_dirs(&sys, &newroot, Some((65534, 65534)));
+        assert_eq!(
+            sys.calls.borrow().len(),
+            5,
+            "every dir is attempted: the root, both tools, and both versions"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_tool_trees_or_no_resolved_user_chowns_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        let sys = FakeSyscalls::new();
+        chown_tool_dirs(&sys, &newroot, Some((65534, 65534)));
+        assert!(
+            sys.calls.borrow().is_empty(),
+            "no tool trees, nothing to do"
+        );
+
+        std::fs::create_dir_all(format!("{newroot}{TOOLS_ROOT}/jq/1.8.2")).unwrap();
+        chown_tool_dirs(&sys, &newroot, None);
+        assert!(
+            sys.calls.borrow().is_empty(),
+            "a root workload already writes its own trees"
+        );
     }
 
     #[test]
