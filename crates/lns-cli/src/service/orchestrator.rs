@@ -381,6 +381,7 @@ pub async fn run_image(
         detach_chord,
         DetachBehaviour::DetachRun,
         quiet,
+        StdinForwarding::of(stdin),
     )
     .await
 }
@@ -437,8 +438,26 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         detach_chord,
         DetachBehaviour::SignalAndDrain,
         args.quiet,
+        StdinForwarding::of(stdin),
     )
     .await
+}
+
+/// Whether host stdin reaches the session's workload; a session opened without `-i` still watches for the detach chord but hands the run nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdinForwarding {
+    ToRun,
+    Withheld,
+}
+
+impl StdinForwarding {
+    fn of(interactive: bool) -> Self {
+        if interactive {
+            Self::ToRun
+        } else {
+            Self::Withheld
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +467,7 @@ pub enum DetachBehaviour {
     DetachRun,
 }
 
+#[allow(clippy::too_many_arguments)] // one session-shape argument per wire field; the writer seam lives in the _with_writers twin
 pub(crate) async fn drive_attached_session<S>(
     stream: S,
     aux_socket: Option<PathBuf>,
@@ -456,6 +476,7 @@ pub(crate) async fn drive_attached_session<S>(
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
     quiet: bool,
+    stdin: StdinForwarding,
 ) -> Result<i32>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
@@ -473,6 +494,7 @@ where
         &mut stdout,
         &mut stderr,
         quiet,
+        stdin,
     )
     .await
 }
@@ -489,6 +511,7 @@ pub async fn drive_attached_session_with_writers<S, O, E>(
     stdout: &mut O,
     stderr: &mut E,
     quiet: bool,
+    stdin: StdinForwarding,
 ) -> Result<i32>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
@@ -518,14 +541,14 @@ where
             });
             let pump_chord = detach_chord;
             let pump_early_exit = early_exit_tx.clone();
-            let stdin = tokio::spawn(async move {
-                let r = run_stdin_pump(socket, run_id, pump_chord, detach).await;
+            let stdin_task = tokio::spawn(async move {
+                let r = run_stdin_pump(socket, run_id, pump_chord, detach, stdin).await;
                 if matches!(&r, Ok(true)) {
                     let _ = pump_early_exit.send(());
                 }
                 r
             });
-            (Some(cancel), winsize, Some(stdin))
+            (Some(cancel), winsize, Some(stdin_task))
         }
         None => (None, None, None),
     };
@@ -738,6 +761,7 @@ async fn run_stdin_pump(
     run_id: String,
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
+    stdin: StdinForwarding,
 ) -> Result<bool> {
     let mut input = tokio::io::stdin();
     let mut buf = [0u8; 4096];
@@ -747,7 +771,7 @@ async fn run_stdin_pump(
             Ok(0) => {
                 if let Some(d) = detector.as_mut() {
                     let held = d.drain_for_eof();
-                    if !held.is_empty() {
+                    if !held.is_empty() && stdin == StdinForwarding::ToRun {
                         let _ = send_one_shot(
                             &socket,
                             &Request::RunStdin {
@@ -769,19 +793,21 @@ async fn run_stdin_pump(
         let chunk = &buf[..n];
         match detector.as_mut() {
             Some(d) => {
-                if !pump_with_detector(&socket, &run_id, chunk, d, detach).await? {
+                if !pump_with_detector(&socket, &run_id, chunk, d, detach, stdin).await? {
                     return Ok(true);
                 }
             }
             None => {
-                send_one_shot(
-                    &socket,
-                    &Request::RunStdin {
-                        run_id: run_id.clone(),
-                        bytes: chunk.to_vec(),
-                    },
-                )
-                .await?;
+                if stdin == StdinForwarding::ToRun {
+                    send_one_shot(
+                        &socket,
+                        &Request::RunStdin {
+                            run_id: run_id.clone(),
+                            bytes: chunk.to_vec(),
+                        },
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -793,10 +819,11 @@ async fn pump_with_detector(
     bytes: &[u8],
     detector: &mut DetachChordDetector,
     detach: DetachBehaviour,
+    stdin: StdinForwarding,
 ) -> Result<bool> {
     let mut pending: Vec<u8> = Vec::new();
     for &b in bytes {
-        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending, detach);
+        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending, detach, stdin);
         for request in &requests {
             send_one_shot(socket, request).await?;
         }
@@ -804,7 +831,9 @@ async fn pump_with_detector(
             return Ok(false);
         }
     }
-    if let Some(request) = drain_pending(run_id, &mut pending) {
+    if stdin == StdinForwarding::ToRun
+        && let Some(request) = drain_pending(run_id, &mut pending)
+    {
         send_one_shot(socket, &request).await?;
     }
     Ok(true)
@@ -831,36 +860,42 @@ fn plan_feed(
     run_id: &str,
     pending: &mut Vec<u8>,
     detach: DetachBehaviour,
+    stdin: StdinForwarding,
 ) -> (Vec<Request>, PumpControl) {
+    let stdin_requests = |bytes: Vec<u8>| match stdin {
+        StdinForwarding::ToRun => vec![Request::RunStdin {
+            run_id: run_id.to_string(),
+            bytes,
+        }],
+        StdinForwarding::Withheld => Vec::new(),
+    };
+    let drained = |pending: &mut Vec<u8>| match stdin {
+        StdinForwarding::ToRun => drain_pending(run_id, pending).into_iter().collect(),
+        StdinForwarding::Withheld => {
+            pending.clear();
+            Vec::<Request>::new()
+        }
+    };
     match action {
         FeedAction::Forward(byte) => {
             pending.push(byte);
             (Vec::new(), PumpControl::Continue)
         }
-        FeedAction::Hold => (
-            drain_pending(run_id, pending).into_iter().collect(),
-            PumpControl::Continue,
-        ),
+        FeedAction::Hold => (drained(pending), PumpControl::Continue),
         FeedAction::Flush(held) => {
-            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
-            requests.push(Request::RunStdin {
-                run_id: run_id.to_string(),
-                bytes: held,
-            });
+            let mut requests = drained(pending);
+            requests.extend(stdin_requests(held));
             (requests, PumpControl::Continue)
         }
         FeedAction::FlushAndForward(held, current) => {
-            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
+            let mut requests = drained(pending);
             let mut combined = held;
             combined.push(current);
-            requests.push(Request::RunStdin {
-                run_id: run_id.to_string(),
-                bytes: combined,
-            });
+            requests.extend(stdin_requests(combined));
             (requests, PumpControl::Continue)
         }
         FeedAction::Trigger => {
-            let mut requests: Vec<Request> = drain_pending(run_id, pending).into_iter().collect();
+            let mut requests = drained(pending);
             match detach {
                 DetachBehaviour::SignalAndDrain => requests.push(Request::RunSignal {
                     run_id: run_id.to_string(),
@@ -1202,6 +1237,7 @@ mod tests {
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("drive_attached_session");
@@ -1523,6 +1559,7 @@ mod tests {
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("a stray progress frame must not kill an attached session");
@@ -1547,6 +1584,7 @@ mod tests {
             Vec::new(),
             DetachBehaviour::SignalAndDrain,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect_err("daemon Error must surface as anyhow::Error");
@@ -1765,6 +1803,7 @@ mod tests {
             &mut captured,
             &mut status,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("drive");
@@ -1885,6 +1924,7 @@ mod tests {
             &mut captured,
             &mut status,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("drive");
@@ -1915,6 +1955,7 @@ mod tests {
             &mut captured,
             &mut status,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("drive");
@@ -1947,6 +1988,7 @@ mod tests {
             &mut captured,
             &mut status,
             false,
+            StdinForwarding::ToRun,
         )
         .await
         .expect("drive");
@@ -1963,6 +2005,50 @@ mod tests {
     }
 
     #[test]
+    fn a_session_opened_without_stdin_hands_the_run_nothing_it_typed() {
+        for action in [
+            FeedAction::Flush(b"echo pwned\n".to_vec()),
+            FeedAction::FlushAndForward(b"echo pwned".to_vec(), b'\n'),
+            FeedAction::Hold,
+        ] {
+            let mut pending = b"already typed".to_vec();
+            let (requests, control) = plan_feed(
+                action,
+                "1",
+                &mut pending,
+                DetachBehaviour::SignalAndDrain,
+                StdinForwarding::Withheld,
+            );
+            assert!(
+                requests.is_empty(),
+                "a non-interactive exec must not feed the run's own shell: {requests:?}"
+            );
+            assert!(matches!(control, PumpControl::Continue));
+        }
+    }
+
+    #[test]
+    fn a_session_opened_without_stdin_still_honours_the_detach_chord() {
+        let mut pending = b"already typed".to_vec();
+        let (requests, control) = plan_feed(
+            FeedAction::Trigger,
+            "9",
+            &mut pending,
+            DetachBehaviour::SignalAndDrain,
+            StdinForwarding::Withheld,
+        );
+        assert_eq!(
+            requests,
+            vec![Request::RunSignal {
+                run_id: "9".to_string(),
+                signal: SignalKind::Hup
+            }],
+            "the chord must still detach, and must not flush the withheld bytes on its way out"
+        );
+        assert!(matches!(control, PumpControl::Detach));
+    }
+
+    #[test]
     fn plan_feed_forward_accumulates_without_sending() {
         let mut pending = Vec::new();
         let (requests, control) = plan_feed(
@@ -1970,6 +2056,7 @@ mod tests {
             "1",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert!(requests.is_empty());
         assert!(matches!(control, PumpControl::Continue));
@@ -1984,6 +2071,7 @@ mod tests {
             "7",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,
@@ -2003,6 +2091,7 @@ mod tests {
             "7",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert!(requests.is_empty());
     }
@@ -2015,6 +2104,7 @@ mod tests {
             "3",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,
@@ -2040,6 +2130,7 @@ mod tests {
             "3",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,
@@ -2058,6 +2149,7 @@ mod tests {
             "9",
             &mut pending,
             DetachBehaviour::SignalAndDrain,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,
@@ -2084,6 +2176,7 @@ mod tests {
             "9",
             &mut pending,
             DetachBehaviour::LeaveRunning,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,
@@ -2105,6 +2198,7 @@ mod tests {
             "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
             &mut pending,
             DetachBehaviour::DetachRun,
+            StdinForwarding::ToRun,
         );
         assert_eq!(
             requests,

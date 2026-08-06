@@ -297,9 +297,10 @@ pub struct ExecArgs {
         action = clap::ArgAction::Set,
         num_args = 0..=1,
         require_equals = true,
-        default_value_t = true,
+        default_value_t = false,
         default_missing_value = "true",
-        help = "`-i` — keep stdin open. Mirrors `docker exec -i`. Pass `--interactive=false` (or `-i=false`) for a non-interactive exec."
+        value_parser = refuse_exec_session,
+        hide = true
     )]
     pub interactive: bool,
 
@@ -309,9 +310,10 @@ pub struct ExecArgs {
         action = clap::ArgAction::Set,
         num_args = 0..=1,
         require_equals = true,
-        default_value_t = true,
+        default_value_t = false,
         default_missing_value = "true",
-        help = "Allocate a PTY for the exec session. Pass `--tty=false` (or `-t=false`) for a non-interactive exec."
+        value_parser = refuse_exec_session,
+        hide = true
     )]
     pub tty: bool,
 
@@ -490,6 +492,18 @@ fn user_spec_uid(spec: &str) -> Option<u32> {
         .map_or(spec, |(user, _)| user)
         .parse::<u32>()
         .ok()
+}
+
+fn refuse_exec_session(s: &str) -> Result<bool, String> {
+    match s {
+        "false" => Ok(false),
+        _ => Err(
+            "an interactive exec is not yet supported: input routing for exec sessions \
+                  awaits an IPC discriminator. Drop -i/-t and pass the command after `--`; \
+                  `lns attach` reaches the run's own terminal"
+                .to_string(),
+        ),
+    }
 }
 
 pub(crate) fn parse_mem_arg(s: &str) -> Result<usize, String> {
@@ -776,10 +790,28 @@ mod tests {
     }
 
     #[test]
-    fn exec_interactive_and_tty_default_to_true() {
+    fn exec_interactive_and_tty_default_to_false() {
         let args = parse_exec(&["demo", "--", "echo", "hi"]).expect("defaults parse");
-        assert!(args.interactive);
-        assert!(args.tty);
+        assert!(!args.interactive);
+        assert!(!args.tty);
+    }
+
+    #[test]
+    fn exec_refuses_a_session_it_cannot_route_input_to() {
+        for flag in ["-i", "-t", "--interactive=true", "--tty=true"] {
+            let err = parse_exec(&[flag, "demo", "--", "sh"])
+                .err()
+                .unwrap_or_else(|| panic!("{flag} must be refused at parse time"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "flag {flag}: {err}"
+            );
+            assert!(
+                err.to_string().contains("not yet supported"),
+                "flag {flag}: {err}"
+            );
+        }
     }
 
     #[test]
