@@ -385,8 +385,8 @@ fn is_valid_env_key(key: &str) -> bool {
             .any(|c| c == '=' || c.is_control() || c.is_whitespace())
 }
 
-/// A cpu/memory request is a positive count or size — a bare integer ≥ 1 or a digits-then-unit string like `500m`/`2Gi` whose numeric part is non-zero — while the service's unit-aware resolver keeps ownership of the host ceiling and the fallback for anything else.
-fn quantity_is_positive(quantity: &spec::Quantity) -> bool {
+/// A cpu request is a positive count — a bare integer ≥ 1 or a millicore string like `500m` — while the service's resolver keeps ownership of the host ceiling and the fallback for anything else.
+fn cpu_is_positive(quantity: &spec::Quantity) -> bool {
     match quantity {
         spec::Quantity::Int(n) => *n >= 1,
         spec::Quantity::Text(text) => {
@@ -401,12 +401,19 @@ fn quantity_is_positive(quantity: &spec::Quantity) -> bool {
 }
 
 fn validate_resources(resources: &Resources) -> Result<()> {
-    for (field, quantity) in [("cpu", &resources.cpu), ("memory", &resources.memory)] {
-        if let Some(quantity) = quantity
-            && !quantity_is_positive(quantity)
-        {
-            bail!("resources.{field} {quantity:?} must be a positive count or size");
+    if let Some(cpu) = &resources.cpu
+        && !cpu_is_positive(cpu)
+    {
+        bail!("resources.cpu {cpu:?} must be a positive count or size");
+    }
+    match &resources.memory {
+        Some(memory @ spec::Quantity::Int(n)) if *n < 1 => {
+            bail!("resources.memory {memory:?} must be a positive count or size")
         }
+        Some(spec::Quantity::Text(text)) => {
+            crate::memory::parse_mib(text).context("resources.memory")?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -809,13 +816,40 @@ mod tests {
             r#"{"image":"x:1","resources":{"cpu":0}}"#,
             r#"{"image":"x:1","resources":{"cpu":-2}}"#,
             r#"{"image":"x:1","resources":{"memory":0}}"#,
-            r#"{"image":"x:1","resources":{"memory":"lots"}}"#,
-            r#"{"image":"x:1","resources":{"memory":"0Gi"}}"#,
         ] {
             let err = parse(&def_json(spec)).unwrap_err();
             assert!(
                 format!("{err:#}").contains("must be a positive count or size"),
                 "spec {spec}: got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_memory_size_the_flag_would_also_reject() {
+        for (spec, expected) in [
+            (
+                r#"{"image":"x:1","resources":{"memory":"38gg"}}"#,
+                "unknown unit `gg`",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"memory":"12parsecs"}}"#,
+                "unknown unit `parsecs`",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"memory":"lots"}}"#,
+                "expected MiB",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"memory":"0Gi"}}"#,
+                "at least 1 MiB",
+            ),
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("resources.memory") && rendered.contains(expected),
+                "spec {spec}: got: {rendered}"
             );
         }
     }
@@ -831,6 +865,10 @@ mod tests {
         ))
         .unwrap();
         parse(&def_json(r#"{"image":"x:1","resources":{"memory":"640"}}"#)).unwrap();
+        parse(&def_json(r#"{"image":"x:1","resources":{"memory":"2gi"}}"#)).unwrap();
+        parse(&def_json(r#"{"image":"x:1","resources":{"memory":"2g"}}"#)).unwrap();
+        parse(&def_json(r#"{"image":"x:1","resources":{"memory":512}}"#)).unwrap();
+        parse(&def_json(r#"{"image":"x:1","resources":{"cpu":4}}"#)).unwrap();
     }
 
     #[test]

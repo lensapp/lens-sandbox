@@ -1,4 +1,5 @@
 pub mod build;
+pub mod memory;
 pub mod registry;
 pub mod sandbox;
 pub mod spec;

@@ -214,12 +214,16 @@ lns run -u 1000:1000 -h build-box ghcr.io/acme/agent:1.0.0
 | `-m`, `--mem`, `--memory <SIZE>` | `512` | RAM in mebibytes, or with a unit suffix. |
 
 Memory accepts Docker-style unit suffixes (`b`, `k`, `m`, `g`, plus `kb`/`kib`
-and friends), rounded up to a whole MiB:
+and friends), rounded up to a whole MiB. The flag reads the same sizes that
+`spec.resources.memory` writes, so `512Mi` and `38Gi` work in both places:
 
 ```bash
 lns run --cpus 4 -m 2g ghcr.io/acme/builder
 lns run --mem 2048 ghcr.io/acme/builder        # same thing, in MiB
+lns run -m 38Gi ghcr.io/acme/builder           # the unit a definition uses
 ```
+
+Every suffix is binary: `2g`, `2gb`, `2Gi` and `2GiB` all mean 2048 MiB.
 
 ### Working directory
 

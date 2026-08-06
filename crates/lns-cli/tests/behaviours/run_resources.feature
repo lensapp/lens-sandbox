@@ -14,6 +14,11 @@ Feature: lns run resource limits — vCPU count and memory size flags
     When the summary is printed
     Then the summary shows `Resources: 1 vCPU · 2048 MiB`
 
+  Scenario: The flag accepts the same unit a definition writes
+    Given the command is `lns run -m 38Gi someimage`
+    When the summary is printed
+    Then the summary shows `Resources: 1 vCPU · 38912 MiB`
+
   Scenario: --memory works as an alias of --mem
     Given the command is `lns run --memory 1g someimage`
     When the summary is printed
