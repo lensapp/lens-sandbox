@@ -72,6 +72,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             ports: Vec::new(),
             filesets: Vec::new(),
             connectors: Vec::new(),
+            host_access: Vec::new(),
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),

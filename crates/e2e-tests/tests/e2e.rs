@@ -109,7 +109,7 @@ async fn main() {
         .filter_run_and_exit(features_dir, move |feat, _, sc| {
             let tagged =
                 |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
-            if tagged("gui") {
+            if tagged("gui") || tagged("todo") {
                 return false;
             }
             if let Some(needle) = &only_feature

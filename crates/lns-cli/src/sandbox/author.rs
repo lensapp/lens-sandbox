@@ -239,6 +239,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     if !def.spec.connectors.is_empty() {
         writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;
     }
+    if !def.spec.host_access.is_empty() {
+        writeln!(out, "  host access: {}", def.spec.host_access.join(", "))?;
+    }
     for credential in &def.spec.credentials {
         let required = if credential.required {
             " (required)"
@@ -279,7 +282,7 @@ mod tests {
     }
 
     fn valid_yaml() -> &'static str {
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n"
+        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n  hostAccess: [some-access]\n"
     }
 
     fn inspect_cmd(target: Option<&str>) -> SandboxCommand {
@@ -437,6 +440,7 @@ mod tests {
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
+        assert!(text.contains("host access: some-access"), "got: {text}");
     }
 
     #[test]

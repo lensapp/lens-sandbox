@@ -285,6 +285,8 @@ pub struct SandboxView {
     #[serde(default)]
     pub connectors: Vec<String>,
     #[serde(default)]
+    pub host_access: Vec<String>,
+    #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
     pub credentials: Vec<SandboxCredential>,
@@ -1398,6 +1400,7 @@ mod tests {
                 owner: SandboxFilesetOwner::Workload,
             }],
             connectors: Vec::new(),
+            host_access: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
             credentials: vec![SandboxCredential {
                 name: "some-provider".into(),

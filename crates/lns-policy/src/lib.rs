@@ -10,6 +10,7 @@ pub mod connectors;
 pub mod credentials;
 mod env_subst;
 pub mod grants;
+pub mod host_access;
 pub mod host_bind_decisions;
 pub mod matching;
 pub mod providers;
@@ -25,6 +26,8 @@ pub struct Policy {
     pub network: NetworkPolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connectors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_access: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +430,19 @@ impl Policy {
         let before = self.connectors.len();
         self.connectors.retain(|i| i != id);
         self.connectors.len() != before
+    }
+
+    pub fn grant_host_access(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if !self.host_access.contains(&id) {
+            self.host_access.push(id);
+        }
+    }
+
+    pub fn revoke_host_access(&mut self, id: &str) -> bool {
+        let before = self.host_access.len();
+        self.host_access.retain(|i| i != id);
+        self.host_access.len() != before
     }
 }
 
@@ -1753,5 +1769,53 @@ credentials:
         p.connect("gitlab");
         assert!(!p.disconnect("github"));
         assert_eq!(p.connectors, ["gitlab"]);
+    }
+
+    #[test]
+    fn grant_host_access_adds_an_id_and_is_idempotent() {
+        let mut p = Policy::default();
+        p.grant_host_access("some-access");
+        p.grant_host_access("some-access");
+        assert_eq!(p.host_access, ["some-access"]);
+    }
+
+    #[test]
+    fn revoke_host_access_removes_a_granted_id_and_reports_true() {
+        let mut p = Policy::default();
+        p.grant_host_access("some-access");
+        p.grant_host_access("other-access");
+        assert!(p.revoke_host_access("some-access"));
+        assert_eq!(p.host_access, ["other-access"]);
+    }
+
+    #[test]
+    fn revoke_host_access_reports_false_when_the_id_is_not_granted() {
+        let mut p = Policy::default();
+        assert!(!p.revoke_host_access("some-access"));
+    }
+
+    #[test]
+    fn an_empty_host_access_list_stays_out_of_the_shareable_file() {
+        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
+        assert!(
+            !yaml.contains("hostAccess"),
+            "an empty grant list must not clutter the shareable file:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn a_granted_host_access_id_round_trips_through_the_shareable_file() {
+        let mut p = Policy::default();
+        p.grant_host_access("some-access");
+        let yaml = serde_yaml::to_string(&p).unwrap();
+        assert!(yaml.contains("hostAccess"), "got:\n{yaml}");
+        let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.host_access, ["some-access"]);
+    }
+
+    #[test]
+    fn a_policy_written_before_host_access_existed_still_parses() {
+        let parsed: Policy = serde_yaml::from_str("network:\n  egress:\n    http: []\n").unwrap();
+        assert!(parsed.host_access.is_empty());
     }
 }
